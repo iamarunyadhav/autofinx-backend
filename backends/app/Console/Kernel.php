@@ -27,6 +27,8 @@ use App\Console\Commands\ReconcileWalletCommand;
 use App\Console\Commands\MetalsPricePollerCommand;
 use App\Console\Commands\BinanceUserStreamCommand;
 use App\Console\Commands\TradingHealthCheckCommand;
+use App\Console\Commands\RatioBotsEvaluateCommand;
+use App\Console\Commands\Fast2XRunCommand;
 use App\Jobs\DetectStaleFeedsJob;
 use App\Jobs\DispatchAiDecisionCycleJob;
 use App\Jobs\ExpireAiDecisionsJob;
@@ -88,6 +90,18 @@ class Kernel extends ConsoleKernel
             ->withoutOverlapping()
             ->runInBackground()
             ->description('Evaluate running bots and emit executable trade signals');
+
+        $schedule->command('ratio-bots:evaluate')
+            ->everySecond()
+            ->withoutOverlapping()
+            ->runInBackground()
+            ->description('Evaluate stateful anchor-based ratio bots');
+
+        $schedule->command('ratio-bots:reconcile')
+            ->everyMinute()
+            ->withoutOverlapping()
+            ->runInBackground()
+            ->description('Reconcile ratio bot orders and positions against exchange state');
 
         $schedule->job(new SyncOrderStatusJob(100))
             ->everyTenSeconds()
@@ -163,6 +177,8 @@ class Kernel extends ConsoleKernel
         MetalsPricePollerCommand::class,
         BinanceUserStreamCommand::class,
         TradingHealthCheckCommand::class,
+        RatioBotsEvaluateCommand::class,
+        Fast2XRunCommand::class,
     ];
 
     private function markRunStart(string $command): void

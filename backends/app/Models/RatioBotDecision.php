@@ -8,6 +8,7 @@ class RatioBotDecision extends BaseModel
 {
     protected $casts = [
         'evaluated_price'       => 'decimal:8',
+        'price_timestamp'       => 'datetime',
         'anchor_price'          => 'decimal:8',
         'computed_ratio'        => 'decimal:6',
         'threshold_used'        => 'decimal:6',
@@ -20,6 +21,10 @@ class RatioBotDecision extends BaseModel
 
     public const DECISION_BUY      = 'BUY';
     public const DECISION_SELL     = 'SELL';
+    public const DECISION_LONG     = 'LONG';
+    public const DECISION_SHORT    = 'SHORT';
+    public const DECISION_EXIT_LONG = 'EXIT_LONG';
+    public const DECISION_EXIT_SHORT = 'EXIT_SHORT';
     public const DECISION_HOLD     = 'HOLD';
     public const DECISION_PAUSE    = 'PAUSE';
     public const DECISION_BLOCK    = 'BLOCK';
@@ -40,6 +45,13 @@ class RatioBotDecision extends BaseModel
 
     public function isTrade(): bool
     {
-        return in_array($this->decision, [self::DECISION_BUY, self::DECISION_SELL], true);
+        return in_array($this->decision, [
+            self::DECISION_BUY,
+            self::DECISION_SELL,
+            self::DECISION_LONG,
+            self::DECISION_SHORT,
+            self::DECISION_EXIT_LONG,
+            self::DECISION_EXIT_SHORT,
+        ], true);
     }
 }

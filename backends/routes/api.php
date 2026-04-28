@@ -51,6 +51,7 @@ use App\Http\Controllers\Api\ProviderController;
 use App\Http\Controllers\Api\QuickTradeController;
 use App\Http\Controllers\Api\RobotSessionController;
 use App\Http\Controllers\Api\RatioBotController;
+use App\Http\Controllers\Api\Fast2XController;
 use App\Http\Controllers\Api\FuturesController;
 use App\Http\Controllers\Api\SweepController;
 use App\Http\Controllers\Api\StrategySchemaController;
@@ -402,11 +403,35 @@ Route::prefix('v1')->group(function () {
         Route::post('ratio-bots/{ratioBot}/resume', [RatioBotController::class, 'resume'])->middleware('require.2fa');
         Route::post('ratio-bots/{ratioBot}/stop', [RatioBotController::class, 'stop'])->middleware('require.2fa');
         Route::post('ratio-bots/{ratioBot}/anchor-buy', [RatioBotController::class, 'anchorBuy'])->middleware('require.2fa');
+        Route::post('ratio-bots/{ratioBot}/anchor-sell', [RatioBotController::class, 'anchorSell'])->middleware('require.2fa');
         Route::get('ratio-bots/{ratioBot}/state', [RatioBotController::class, 'state']);
+        Route::get('ratio-bots/{ratioBot}/status', [RatioBotController::class, 'status']);
         Route::get('ratio-bots/{ratioBot}/ratio', [RatioBotController::class, 'currentRatio']);
         Route::post('ratio-bots/{ratioBot}/evaluate', [RatioBotController::class, 'evaluate'])->middleware('require.2fa');
+        Route::post('ratio-bots/{ratioBot}/kill-switch', [RatioBotController::class, 'killSwitch'])->middleware('require.2fa');
         Route::get('ratio-bots/{ratioBot}/decisions', [RatioBotController::class, 'decisions']);
         Route::get('ratio-bots/{ratioBot}/events', [RatioBotController::class, 'events']);
+        Route::get('ratio-bots/{ratioBot}/last-signal', [RatioBotController::class, 'lastSignal']);
+        Route::get('ratio-bots/{ratioBot}/last-order', [RatioBotController::class, 'lastOrder']);
+        Route::get('ratio-bots/{ratioBot}/position', [RatioBotController::class, 'currentPosition']);
+        Route::get('ratio-bots/{ratioBot}/pnl-summary', [RatioBotController::class, 'pnlSummary']);
+        Route::get('ratio-bots/{ratioBot}/feed-health', [RatioBotController::class, 'feedHealth']);
+        Route::get('ratio-bots/{ratioBot}/candles', [RatioBotController::class, 'candles']);
+        Route::get('ratio-bots/{ratioBot}/snapshot', [RatioBotController::class, 'snapshot']);
+
+        // ---- Fast2X ---------------------------------------------------------
+        Route::get('workspaces/{workspace}/fast2x/status', [Fast2XController::class, 'status']);
+        Route::post('workspaces/{workspace}/fast2x/start', [Fast2XController::class, 'start'])->middleware('require.2fa');
+        Route::post('workspaces/{workspace}/fast2x/pause', [Fast2XController::class, 'pause'])->middleware('require.2fa');
+        Route::post('workspaces/{workspace}/fast2x/stop', [Fast2XController::class, 'stop'])->middleware('require.2fa');
+        Route::post('workspaces/{workspace}/fast2x/emergency-stop', [Fast2XController::class, 'emergencyStop'])->middleware('require.2fa');
+        Route::post('workspaces/{workspace}/fast2x/reset-paper', [Fast2XController::class, 'resetPaper'])->middleware('require.2fa');
+        Route::get('workspaces/{workspace}/fast2x/config', [Fast2XController::class, 'config']);
+        Route::put('workspaces/{workspace}/fast2x/config', [Fast2XController::class, 'updateConfig'])->middleware('require.2fa');
+        Route::get('workspaces/{workspace}/fast2x/trades', [Fast2XController::class, 'trades']);
+        Route::get('workspaces/{workspace}/fast2x/logs', [Fast2XController::class, 'logs']);
+        Route::get('workspaces/{workspace}/fast2x/live-price', [Fast2XController::class, 'livePrice']);
+        Route::get('workspaces/{workspace}/fast2x/pnl', [Fast2XController::class, 'pnl']);
 
         Route::match(['get', 'post', 'put', 'patch', 'delete'], 'table/{table}', [TableController::class, 'handle']);
     });

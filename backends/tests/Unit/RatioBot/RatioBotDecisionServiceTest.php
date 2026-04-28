@@ -152,6 +152,18 @@ class RatioBotDecisionServiceTest extends TestCase
     }
 
     /** @test */
+    public function active_cooldown_returns_cooldown_decision_even_when_state_is_holding(): void
+    {
+        [$config, $state] = $this->makeHoldingConfig(buyPrice: 60_000, sellThreshold: 0.01);
+        $state->update(['cooldown_until' => now()->addMinute()]);
+        $config->refresh();
+
+        $result = $this->service->evaluate($config, 90_000.0);
+
+        $this->assertSame(RatioBotDecision::DECISION_COOLDOWN, $result['decision']);
+    }
+
+    /** @test */
     public function paused_state_returns_pause_decision(): void
     {
         [$config, $state] = $this->makeHoldingConfig(buyPrice: 60_000, sellThreshold: 0.01);
@@ -177,6 +189,165 @@ class RatioBotDecisionServiceTest extends TestCase
         $result = $this->service->evaluate($config, 90_000.0);
 
         $this->assertSame(RatioBotDecision::DECISION_PAUSE, $result['decision']);
+    }
+
+    /** @test */
+    public function fee_and_slippage_cost_can_prevent_threshold_trigger(): void
+    {
+        [$config] = $this->makeHoldingConfig(buyPrice: 100.0, sellThreshold: 0.01);
+        $config->update([
+            'fee_bps' => 10,
+            'max_slippage_bps' => 100,
+            'min_net_profit_bps' => 50,
+        ]);
+        $config->refresh();
+
+        $result = $this->service->evaluate($config, 101.0);
+
+        $this->assertSame(RatioBotDecision::DECISION_HOLD, $result['decision']);
+        $this->assertEqualsWithDelta(0.01, $result['ratio'], 0.000001);
+        $this->assertSame('sell_threshold', $result['decision_record']->metadata['trigger']);
+    }
+
+    /** @test */
+    public function trailing_sell_only_executes_when_reversal_stays_above_sell_threshold(): void
+    {
+        [$config] = $this->makeHoldingConfig(buyPrice: 100.0, sellThreshold: 0.5);
+        $config->update([
+            'trigger_mode' => 'trailing_ratio',
+            'selling_loss_ratio' => 0.2,
+        ]);
+
+        $result = $this->service->evaluate($config->fresh('state'), 150.0);
+        $this->assertSame(RatioBotDecision::DECISION_HOLD, $result['decision']);
+
+        $result = $this->service->evaluate($config->fresh('state'), 185.0);
+        $this->assertSame(RatioBotDecision::DECISION_HOLD, $result['decision']);
+
+        $result = $this->service->evaluate($config->fresh('state'), 140.0);
+        $this->assertSame(RatioBotDecision::DECISION_HOLD, $result['decision']);
+        $this->assertStringContainsString('blocked by boundary', $result['reason']);
+
+        $result = $this->service->evaluate($config->fresh('state'), 165.0);
+        $this->assertSame(RatioBotDecision::DECISION_SELL, $result['decision']);
+        $this->assertEqualsWithDelta(0.65, $result['ratio'], 0.000001);
+    }
+
+    /** @test */
+    public function trailing_buy_only_executes_when_rebound_stays_below_buy_threshold(): void
+    {
+        [$config] = $this->makeFlatConfig(sellPrice: 100.0, buyThreshold: -0.5);
+        $config->update([
+            'trigger_mode' => 'trailing_ratio',
+            'buying_loss_ratio' => 0.2,
+        ]);
+
+        $result = $this->service->evaluate($config->fresh('state'), 50.0);
+        $this->assertSame(RatioBotDecision::DECISION_HOLD, $result['decision']);
+
+        $result = $this->service->evaluate($config->fresh('state'), 20.0);
+        $this->assertSame(RatioBotDecision::DECISION_HOLD, $result['decision']);
+
+        $result = $this->service->evaluate($config->fresh('state'), 70.0);
+        $this->assertSame(RatioBotDecision::DECISION_HOLD, $result['decision']);
+        $this->assertStringContainsString('blocked by boundary', $result['reason']);
+
+        $result = $this->service->evaluate($config->fresh('state'), 40.0);
+        $this->assertSame(RatioBotDecision::DECISION_BUY, $result['decision']);
+        $this->assertEqualsWithDelta(-0.6, $result['ratio'], 0.000001);
+    }
+
+    /** @test */
+    public function trailing_signal_waits_for_required_confirmation_updates(): void
+    {
+        [$config] = $this->makeHoldingConfig(buyPrice: 100.0, sellThreshold: 0.5);
+        $config->update([
+            'trigger_mode' => 'trailing_ratio',
+            'selling_loss_ratio' => 0.2,
+            'trigger_confirm_updates' => 2,
+        ]);
+
+        $this->service->evaluate($config->fresh('state'), 150.0);
+        $this->service->evaluate($config->fresh('state'), 185.0);
+
+        $firstTrigger = $this->service->evaluate($config->fresh('state'), 165.0);
+        $this->assertSame(RatioBotDecision::DECISION_HOLD, $firstTrigger['decision']);
+        $this->assertTrue((bool) $firstTrigger['decision_record']->metadata['confirmation_pending']);
+        $this->assertSame(1, (int) $config->fresh('state')->state->pending_trigger_updates);
+
+        $secondTrigger = $this->service->evaluate($config->fresh('state'), 165.0);
+        $this->assertSame(RatioBotDecision::DECISION_SELL, $secondTrigger['decision']);
+    }
+
+    /** @test */
+    public function max_allowed_slippage_guard_blocks_trade_signal(): void
+    {
+        [$config] = $this->makeHoldingConfig(buyPrice: 100.0, sellThreshold: 0.01);
+        $config->update([
+            'max_slippage_bps' => 100,
+            'max_allowed_slippage_bps' => 50,
+        ]);
+
+        $result = $this->service->evaluate($config->fresh('state'), 103.0);
+
+        $this->assertSame(RatioBotDecision::DECISION_HOLD, $result['decision']);
+        $this->assertStringContainsString('slippage guard', $result['reason']);
+        $this->assertSame('max_allowed_slippage', $result['decision_record']->metadata['guard']);
+    }
+
+    /** @test */
+    public function hourly_trade_limit_blocks_new_trade_signal(): void
+    {
+        [$config] = $this->makeHoldingConfig(buyPrice: 100.0, sellThreshold: 0.01);
+        $config->update(['max_trades_per_hour' => 1]);
+        RatioBotDecision::create([
+            'ratio_bot_config_id' => $config->id,
+            'decision' => RatioBotDecision::DECISION_SELL,
+            'execution_status' => RatioBotDecision::EXEC_FILLED,
+            'executed_at' => now(),
+            'decided_at' => now(),
+        ]);
+
+        $result = $this->service->evaluate($config->fresh('state'), 103.0);
+
+        $this->assertSame(RatioBotDecision::DECISION_HOLD, $result['decision']);
+        $this->assertStringContainsString('hourly limit', $result['reason']);
+        $this->assertSame('trade_rate_limit', $result['decision_record']->metadata['guard']);
+    }
+
+    /** @test */
+    public function dynamic_threshold_context_can_delay_trade_signal(): void
+    {
+        [$config] = $this->makeHoldingConfig(buyPrice: 100.0, sellThreshold: 0.01);
+
+        $result = $this->service->evaluate($config->fresh('state'), 103.0, [
+            'dynamic_thresholds' => [
+                'enabled' => true,
+                'sell_threshold_ratio' => 0.05,
+                'buy_threshold_ratio' => 0.03,
+                'minimum_profit_ratio' => 0.005,
+            ],
+        ]);
+
+        $this->assertSame(RatioBotDecision::DECISION_HOLD, $result['decision']);
+        $this->assertEqualsWithDelta(0.05, (float) $result['decision_record']->threshold_used, 0.000001);
+        $this->assertTrue((bool) $result['decision_record']->metadata['dynamic_threshold_enabled']);
+        $this->assertSame(0.05, (float) $result['decision_record']->metadata['dynamic_thresholds']['sell_threshold_ratio']);
+    }
+
+    /** @test */
+    public function single_tick_spike_is_rejected_without_poisoning_last_seen_price(): void
+    {
+        [$config, $state] = $this->makeHoldingConfig(buyPrice: 100.0, sellThreshold: 0.01);
+        $state->update(['last_seen_price' => 100.0]);
+        $config->update(['max_spike_deviation_bps' => 500]);
+
+        $result = $this->service->evaluate($config->fresh('state'), 120.0);
+        $state->refresh();
+
+        $this->assertSame(RatioBotDecision::DECISION_HOLD, $result['decision']);
+        $this->assertStringContainsString('spike filter', $result['reason']);
+        $this->assertEqualsWithDelta(100.0, (float) $state->last_seen_price, 0.000001);
     }
 
     // -----------------------------------------------------------------------

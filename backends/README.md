@@ -73,6 +73,18 @@ For a fuller operator-facing deployment and Binance live setup guide, see [`../d
 - `POST /api/v1/wallet/payhere/webhook`
 - `POST /api/v1/wallet/withdrawals`
 
+## Realtime Ratio Bot Upgrade
+
+The ratio-bot module now supports:
+
+- true Binance market websocket ingestion for selected symbols
+- selected-symbol spot bots with realtime feed health and snapshot endpoints
+- pluggable ratio / trailing / MA crossover / RSI / breakout strategies
+- Binance USD-M futures testnet execution with long/short side modes
+- futures user-stream and periodic reconciliation support
+
+Setup, commands, API payloads, and test flows are documented in [`docs/realtime_selected_symbol_ratio_bot.md`](./docs/realtime_selected_symbol_ratio_bot.md).
+
 ## About Laravel
 
 Laravel is a web application framework with expressive, elegant syntax. We believe development must be an enjoyable and creative experience to be truly fulfilling. Laravel takes the pain out of development by easing common tasks used in many web projects, such as:

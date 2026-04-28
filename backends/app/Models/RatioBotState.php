@@ -18,7 +18,32 @@ class RatioBotState extends BaseModel
         'last_trade_time'       => 'datetime',
         'paused_at'             => 'datetime',
         'cooldown_until'        => 'datetime',
+        'awaiting_since'        => 'datetime',
+        'recovery_action_required' => 'boolean',
+        'sell_armed'            => 'boolean',
+        'sell_peak_ratio'       => 'decimal:6',
+        'sell_peak_price'       => 'decimal:8',
+        'buy_armed'             => 'boolean',
+        'buy_trough_ratio'      => 'decimal:6',
+        'buy_trough_price'      => 'decimal:8',
+        'pending_trigger_started_at' => 'datetime',
+        'pending_trigger_updates' => 'integer',
+        'pending_trigger_ratio' => 'decimal:6',
+        'pending_trigger_price' => 'decimal:8',
         'last_evaluated_at'     => 'datetime',
+        'last_price_timestamp'  => 'datetime',
+        'feed_status_updated_at' => 'datetime',
+        'last_signal_at'        => 'datetime',
+        'last_fill_price'       => 'decimal:8',
+        'last_position_qty'     => 'decimal:8',
+        'entry_price'           => 'decimal:8',
+        'unrealized_pnl'        => 'decimal:8',
+        'last_candle_close_at'  => 'datetime',
+        'runtime_meta'          => 'array',
+        'trade_day'             => 'date',
+        'daily_trade_count'     => 'integer',
+        'daily_loss_total'      => 'decimal:8',
+        'consecutive_losses'    => 'integer',
     ];
 
     // Valid position states
@@ -68,8 +93,24 @@ class RatioBotState extends BaseModel
 
     public function inCooldown(): bool
     {
-        return $this->position_state === self::STATE_COOLDOWN
-            && $this->cooldown_until !== null
-            && $this->cooldown_until->isFuture();
+        return $this->cooldown_until !== null && $this->cooldown_until->isFuture();
+    }
+
+    public function resumableTradingState(): string
+    {
+        if ($this->last_trade_side === 'SELL') {
+            return self::STATE_FLAT;
+        }
+
+        if ((float) ($this->last_buy_price ?? 0) > 0) {
+            return self::STATE_HOLDING;
+        }
+
+        return self::STATE_IDLE;
+    }
+
+    public function hasOpenPosition(): bool
+    {
+        return ((float) ($this->last_position_qty ?? 0)) > 0;
     }
 }

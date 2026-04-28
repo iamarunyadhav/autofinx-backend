@@ -24,6 +24,12 @@ class RatioBotEvent extends BaseModel
     public const EVENT_RECONCILIATION_MISMATCH = 'reconciliation_mismatch';
     public const EVENT_FEED_STALE             = 'feed_stale';
     public const EVENT_MANUAL_BUY_ANCHORED    = 'manual_buy_anchored';
+    public const EVENT_MANUAL_SELL_ANCHORED   = 'manual_sell_anchored';
+    public const EVENT_ERROR_REVIEW_REQUIRED  = 'error_review_required';
+    public const EVENT_ORDER_FILLED           = 'order_filled';
+    public const EVENT_FEED_HEALTH_CHANGED    = 'feed_health_changed';
+    public const EVENT_SIGNAL_EMITTED         = 'signal_emitted';
+    public const EVENT_RECONCILIATION_RUN     = 'reconciliation_run';
 
     public function config(): BelongsTo
     {

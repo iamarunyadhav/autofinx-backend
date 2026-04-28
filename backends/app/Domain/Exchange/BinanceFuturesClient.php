@@ -87,6 +87,27 @@ class BinanceFuturesClient
         return (array) $response->json();
     }
 
+    public function createListenKey(): string
+    {
+        $response = $this->keyedRequest('POST', '/fapi/v1/listenKey');
+        $listenKey = (string) ($response->json('listenKey') ?? '');
+        if ($listenKey === '') {
+            throw new RuntimeException('Failed to create Binance futures listenKey.');
+        }
+
+        return $listenKey;
+    }
+
+    public function keepAliveListenKey(string $listenKey): void
+    {
+        $this->keyedRequest('PUT', '/fapi/v1/listenKey', ['listenKey' => $listenKey]);
+    }
+
+    public function closeListenKey(string $listenKey): void
+    {
+        $this->keyedRequest('DELETE', '/fapi/v1/listenKey', ['listenKey' => $listenKey], false);
+    }
+
     public function setLeverage(string $symbol, int|float $leverage): array
     {
         $response = $this->signedRequest('POST', '/fapi/v1/leverage', [
@@ -152,6 +173,22 @@ class BinanceFuturesClient
 
         if ($throw) {
             $this->assertSuccess($response, 'Binance futures signed request failed.');
+        }
+
+        return $response;
+    }
+
+    private function keyedRequest(string $method, string $path, array $params = [], bool $throw = true): Response
+    {
+        $response = match (strtoupper($method)) {
+            'GET' => Http::withHeaders($this->apiHeaders())->get($this->url($path), $params),
+            'PUT' => Http::withHeaders($this->apiHeaders())->asForm()->put($this->url($path), $params),
+            'DELETE' => Http::withHeaders($this->apiHeaders())->delete($this->url($path), $params),
+            default => Http::withHeaders($this->apiHeaders())->asForm()->post($this->url($path), $params),
+        };
+
+        if ($throw) {
+            $this->assertSuccess($response, 'Binance futures keyed request failed.');
         }
 
         return $response;

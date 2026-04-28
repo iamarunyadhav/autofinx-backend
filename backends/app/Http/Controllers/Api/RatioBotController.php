@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Domain\RatioBot\RatioBotDecisionService;
+use App\Domain\RatioBot\RatioBotRuntimeQueryService;
 use App\Domain\RatioBot\RatioBotStateService;
 use App\Http\Controllers\Controller;
 use App\Jobs\RunRatioBotEvaluationJob;
@@ -19,6 +20,7 @@ class RatioBotController extends Controller
     public function __construct(
         private readonly RatioBotStateService    $stateService,
         private readonly RatioBotDecisionService $decisionService,
+        private readonly RatioBotRuntimeQueryService $runtime,
     ) {
     }
 
@@ -44,34 +46,9 @@ class RatioBotController extends Controller
      */
     public function store(Request $request, string $workspaceId): JsonResponse
     {
-        $data = $request->validate([
-            'name'                         => 'nullable|string|max:120',
-            'symbol'                       => 'required|string|max:32',
-            'exchange'                     => 'nullable|string|max:32',
-            'market_type'                  => 'nullable|string|in:spot',
-            'mode'                         => 'nullable|string|in:advisor,manual_approval,restricted_auto',
-            'execution_mode'               => 'nullable|string|in:sandbox,live',
-            'base_quote_amount'            => 'nullable|numeric|min:0',
-            'order_size_mode'              => 'nullable|string|in:fixed_quote,fixed_base,percent_of_balance',
-            'sell_threshold_ratio'         => 'nullable|numeric|min:0.001|max:100',
-            'buy_threshold_ratio'          => 'nullable|numeric|min:0.001|max:100',
-            'evaluation_mode'              => 'nullable|string|in:polling,websocket,hybrid',
-            'poll_interval_seconds'        => 'nullable|integer|min:60|max:86400',
-            'cooldown_seconds_after_trade' => 'nullable|integer|min:0|max:86400',
-            'daily_loss_limit_pct'         => 'nullable|numeric|min:0|max:1',
-            'max_drawdown_pct'             => 'nullable|numeric|min:0|max:1',
-            'max_open_orders'              => 'nullable|integer|min:1|max:10',
-            'pause_on_order_failure_streak'=> 'nullable|integer|min:1|max:20',
-            'require_stop_loss'            => 'nullable|boolean',
-            'stop_loss_pct'                => 'nullable|numeric|min:0.001|max:1',
-            'require_take_profit'          => 'nullable|boolean',
-            'take_profit_pct'              => 'nullable|numeric|min:0.001|max:100',
-            'require_time_stop'            => 'nullable|boolean',
-            'time_stop_minutes'            => 'nullable|integer|min:1',
-            'connection_id'                => 'nullable|uuid',
-        ]);
+        $data = $this->validatedPayload($request);
 
-        $config = RatioBotConfig::create(array_merge($data, [
+        $config = RatioBotConfig::create(array_merge($this->normalizePayload($data), [
             'workspace_id' => $workspaceId,
             'enabled'      => false,
         ]));
@@ -87,7 +64,11 @@ class RatioBotController extends Controller
      */
     public function show(RatioBotConfig $ratioBot): JsonResponse
     {
-        return response()->json($ratioBot->load('state'));
+        $config = $ratioBot->load('state');
+
+        return response()->json($config->toArray() + [
+            'snapshot' => $this->runtime->snapshot($config),
+        ]);
     }
 
     /**
@@ -95,34 +76,15 @@ class RatioBotController extends Controller
      */
     public function update(Request $request, RatioBotConfig $ratioBot): JsonResponse
     {
-        $data = $request->validate([
-            'name'                         => 'sometimes|string|max:120',
-            'symbol'                       => 'sometimes|string|max:32',
-            'mode'                         => 'sometimes|string|in:advisor,manual_approval,restricted_auto',
-            'execution_mode'               => 'sometimes|string|in:sandbox,live',
-            'base_quote_amount'            => 'sometimes|numeric|min:0',
-            'order_size_mode'              => 'sometimes|string|in:fixed_quote,fixed_base,percent_of_balance',
-            'sell_threshold_ratio'         => 'sometimes|numeric|min:0.001|max:100',
-            'buy_threshold_ratio'          => 'sometimes|numeric|min:0.001|max:100',
-            'evaluation_mode'              => 'sometimes|string|in:polling,websocket,hybrid',
-            'poll_interval_seconds'        => 'sometimes|integer|min:60|max:86400',
-            'cooldown_seconds_after_trade' => 'sometimes|integer|min:0|max:86400',
-            'daily_loss_limit_pct'         => 'nullable|numeric|min:0|max:1',
-            'max_drawdown_pct'             => 'nullable|numeric|min:0|max:1',
-            'max_open_orders'              => 'sometimes|integer|min:1|max:10',
-            'pause_on_order_failure_streak'=> 'sometimes|integer|min:1|max:20',
-            'require_stop_loss'            => 'sometimes|boolean',
-            'stop_loss_pct'                => 'nullable|numeric|min:0.001|max:1',
-            'require_take_profit'          => 'sometimes|boolean',
-            'take_profit_pct'              => 'nullable|numeric|min:0.001|max:100',
-            'require_time_stop'            => 'sometimes|boolean',
-            'time_stop_minutes'            => 'nullable|integer|min:1',
-            'connection_id'                => 'nullable|uuid',
+        $data = $this->validatedPayload($request, true);
+
+        $ratioBot->update($this->normalizePayload($data));
+
+        $fresh = $ratioBot->fresh('state');
+
+        return response()->json($fresh->toArray() + [
+            'snapshot' => $this->runtime->snapshot($fresh),
         ]);
-
-        $ratioBot->update($data);
-
-        return response()->json($ratioBot->load('state'));
     }
 
     /**
@@ -208,6 +170,34 @@ class RatioBotController extends Controller
         ]);
     }
 
+    /**
+     * POST /ratio-bots/{config}/anchor-sell
+     *
+     * Operator manually records a sell anchor. The bot becomes FLAT and the
+     * next automatic action can only be BUY.
+     */
+    public function anchorSell(Request $request, RatioBotConfig $ratioBot): JsonResponse
+    {
+        $data = $request->validate([
+            'sell_price' => 'required|numeric|min:0.000001',
+            'quantity'   => 'required|numeric|min:0.000001',
+            'order_id'   => 'nullable|string|max:64',
+        ]);
+
+        $state = $this->stateService->anchorManualSell(
+            config:    $ratioBot,
+            sellPrice: (float) $data['sell_price'],
+            quantity:  (float) $data['quantity'],
+            orderId:   $data['order_id'] ?? null,
+            userId:    $request->user()?->id,
+        );
+
+        return response()->json([
+            'message' => 'Sell anchor set. Bot is now in FLAT state and watching for buy trigger.',
+            'state'   => $state,
+        ]);
+    }
+
     // -----------------------------------------------------------------------
     // State / monitoring
     // -----------------------------------------------------------------------
@@ -219,6 +209,28 @@ class RatioBotController extends Controller
     {
         $state = $this->stateService->getOrCreate($ratioBot);
         return response()->json($state);
+    }
+
+    public function status(RatioBotConfig $ratioBot): JsonResponse
+    {
+        return response()->json([
+            'symbol' => $ratioBot->normalizedSymbol(),
+            'market_type' => $ratioBot->marketType(),
+            'timeframe' => $ratioBot->timeFrame(),
+            'algorithm' => $ratioBot->algorithmKey(),
+            'bot_status' => $ratioBot->state?->position_state,
+            'feed_status' => $ratioBot->state?->feed_status,
+            'last_signal' => $ratioBot->state?->last_signal,
+            'last_signal_at' => optional($ratioBot->state?->last_signal_at)->toIso8601String(),
+            'last_order_status' => $ratioBot->state?->last_order_status,
+            'last_fill_price' => $ratioBot->state?->last_fill_price,
+            'current_position_side' => $ratioBot->state?->last_position_side,
+            'current_position_qty' => $ratioBot->state?->last_position_qty,
+            'unrealized_pnl' => $ratioBot->state?->unrealized_pnl,
+            'cooldown_until' => optional($ratioBot->state?->cooldown_until)->toIso8601String(),
+            'kill_switch' => (bool) $ratioBot->kill_switch,
+            'error_state' => $ratioBot->state?->last_runtime_error,
+        ]);
     }
 
     /**
@@ -233,9 +245,15 @@ class RatioBotController extends Controller
         if ($price === null) {
             // Fetch live price
             try {
-                $baseUrl  = config('services.binance.base_url', 'https://api.binance.com');
-                $response = Http::get($baseUrl . '/api/v3/ticker/price', ['symbol' => strtoupper($ratioBot->symbol)]);
-                $price    = $response->successful() ? (float) $response->json('price') : null;
+                if ($ratioBot->marketType() === 'futures') {
+                    $baseUrl = config('services.binance.futures_testnet_api_url', 'https://testnet.binancefuture.com');
+                    $response = Http::get(rtrim((string) $baseUrl, '/') . '/fapi/v1/premiumIndex', ['symbol' => $ratioBot->normalizedSymbol()]);
+                    $price = $response->successful() ? (float) ($response->json('markPrice') ?? $response->json('price')) : null;
+                } else {
+                    $baseUrl = config('services.binance.api_url', 'https://api.binance.com');
+                    $response = Http::get(rtrim((string) $baseUrl, '/') . '/api/v3/ticker/price', ['symbol' => $ratioBot->normalizedSymbol()]);
+                    $price = $response->successful() ? (float) $response->json('price') : null;
+                }
             } catch (Throwable) {
                 $price = null;
             }
@@ -261,8 +279,28 @@ class RatioBotController extends Controller
      */
     public function evaluate(RatioBotConfig $ratioBot): JsonResponse
     {
-        RunRatioBotEvaluationJob::dispatch($ratioBot->id, true);
+        RunRatioBotEvaluationJob::dispatch($ratioBot->id, false);
         return response()->json(['message' => 'Evaluation job dispatched.', 'config_id' => $ratioBot->id]);
+    }
+
+    public function killSwitch(Request $request, RatioBotConfig $ratioBot): JsonResponse
+    {
+        $data = $request->validate([
+            'kill_switch' => 'required|boolean',
+            'reason' => 'nullable|string|max:255',
+        ]);
+
+        $ratioBot->update(['kill_switch' => (bool) $data['kill_switch']]);
+        if ((bool) $data['kill_switch']) {
+            $this->stateService->block($ratioBot, 'kill_switch', (string) ($data['reason'] ?? 'operator_kill_switch'));
+        } else {
+            $this->stateService->start($ratioBot, $request->user()?->id);
+        }
+
+        return response()->json([
+            'kill_switch' => (bool) $ratioBot->fresh()->kill_switch,
+            'state' => $ratioBot->fresh('state')->state,
+        ]);
     }
 
     // -----------------------------------------------------------------------
@@ -294,5 +332,141 @@ class RatioBotController extends Controller
             ->get();
 
         return response()->json($events);
+    }
+
+    public function lastSignal(RatioBotConfig $ratioBot): JsonResponse
+    {
+        return response()->json($this->runtime->lastSignal($ratioBot));
+    }
+
+    public function lastOrder(RatioBotConfig $ratioBot): JsonResponse
+    {
+        return response()->json($this->runtime->lastOrder($ratioBot));
+    }
+
+    public function currentPosition(RatioBotConfig $ratioBot): JsonResponse
+    {
+        return response()->json($this->runtime->currentPosition($ratioBot));
+    }
+
+    public function pnlSummary(RatioBotConfig $ratioBot): JsonResponse
+    {
+        return response()->json($this->runtime->pnlSummary($ratioBot));
+    }
+
+    public function feedHealth(RatioBotConfig $ratioBot): JsonResponse
+    {
+        return response()->json($this->runtime->feedHealth($ratioBot));
+    }
+
+    public function candles(Request $request, RatioBotConfig $ratioBot): JsonResponse
+    {
+        $limit = max(10, min(500, (int) $request->integer('limit', 200)));
+
+        return response()->json($this->runtime->recentCandles($ratioBot, $limit));
+    }
+
+    public function snapshot(RatioBotConfig $ratioBot): JsonResponse
+    {
+        return response()->json($this->runtime->snapshot($ratioBot));
+    }
+
+    private function validatedPayload(Request $request, bool $partial = false): array
+    {
+        $required = $partial ? 'sometimes' : 'required';
+        $optional = $partial ? 'sometimes' : 'nullable';
+
+        return $request->validate([
+            'name'                         => $optional . '|string|max:120',
+            'symbol'                       => "{$required}|string|max:32",
+            'exchange'                     => 'nullable|string|max:32',
+            'market_type'                  => $optional . '|string|in:spot,futures',
+            'algorithm'                    => $optional . '|string|in:ratio_threshold,trailing_ratio,ma_crossover,ma,rsi,breakout',
+            'timeframe'                    => $optional . '|string|in:1m,3m,5m,15m',
+            'side_mode'                    => $optional . '|string|in:buy_sell,long_only,short_only,both',
+            'mode'                         => $optional . '|string|in:advisor,manual_approval,restricted_auto',
+            'execution_mode'               => $optional . '|string|in:sandbox,live',
+            'base_quote_amount'            => $optional . '|numeric|min:0',
+            'base_asset_budget'            => 'nullable|numeric|min:0',
+            'quote_asset_budget'           => 'nullable|numeric|min:0',
+            'order_size_mode'              => 'nullable|string|in:fixed_quote,fixed_base,percent_of_balance',
+            'sell_threshold_ratio'         => 'nullable|numeric|min:0.001|max:100',
+            'buy_threshold_ratio'          => 'nullable|numeric|min:-100|max:100|not_in:0',
+            'allow_partial_sell'           => 'nullable|boolean',
+            'allow_partial_buy'            => 'nullable|boolean',
+            'partial_sell_pct'             => 'nullable|numeric|min:0.001|max:1',
+            'partial_buy_pct'              => 'nullable|numeric|min:0.001|max:1',
+            'evaluation_mode'              => 'nullable|string|in:polling,websocket,hybrid,tick,candle_close',
+            'poll_interval_seconds'        => 'nullable|integer|min:1|max:86400',
+            'cooldown_seconds_after_trade' => 'nullable|integer|min:0|max:86400',
+            'fee_bps'                      => 'nullable|numeric|min:0|max:10000',
+            'max_slippage_bps'             => 'nullable|numeric|min:0|max:10000',
+            'max_allowed_slippage_bps'     => 'nullable|numeric|min:0|max:10000',
+            'min_net_profit_bps'           => 'nullable|numeric|min:0|max:10000',
+            'max_trades_per_hour'          => 'nullable|integer|min:1|max:1000',
+            'max_trades_per_day'           => 'nullable|integer|min:1|max:10000',
+            'stale_feed_max_age_seconds'   => 'nullable|integer|min:1|max:86400',
+            'stale_feed_timeout_seconds'   => 'nullable|integer|min:1|max:86400',
+            'min_seconds_between_evaluations' => 'nullable|integer|min:1|max:3600',
+            'use_advisory_filter'          => 'nullable|boolean',
+            'advisory_mode'                => 'nullable|string|max:32',
+            'trigger_mode'                 => 'nullable|string|in:threshold,trailing_ratio',
+            'selling_loss_ratio'           => 'nullable|numeric|min:0|max:100',
+            'buying_loss_ratio'            => 'nullable|numeric|min:0|max:100',
+            'trigger_confirm_seconds'      => 'nullable|integer|min:0|max:86400',
+            'trigger_confirm_updates'      => 'nullable|integer|min:1|max:100',
+            'use_candle_close_confirmation'=> 'nullable|boolean',
+            'min_price_stability_seconds'  => 'nullable|integer|min:0|max:86400',
+            'max_spike_deviation_bps'      => 'nullable|numeric|min:0|max:10000',
+            'daily_loss_limit_pct'         => 'nullable|numeric|min:0|max:1',
+            'max_drawdown_pct'             => 'nullable|numeric|min:0|max:1',
+            'max_open_orders'              => 'nullable|integer|min:1|max:10',
+            'max_position_pct'             => 'nullable|numeric|min:0|max:1',
+            'kill_switch_enabled'          => 'nullable|boolean',
+            'kill_switch'                  => 'nullable|boolean',
+            'pause_on_order_failure_streak'=> 'nullable|integer|min:1|max:20',
+            'pause_on_slippage_spike'      => 'nullable|boolean',
+            'pause_on_exchange_unhealthy'  => 'nullable|boolean',
+            'pause_on_stale_feed'          => 'nullable|boolean',
+            'require_stop_loss'            => 'nullable|boolean',
+            'stop_loss_pct'                => 'nullable|numeric|min:0.001|max:1',
+            'require_take_profit'          => 'nullable|boolean',
+            'take_profit_pct'              => 'nullable|numeric|min:0.001|max:100',
+            'require_time_stop'            => 'nullable|boolean',
+            'time_stop_minutes'            => 'nullable|integer|min:1',
+            'connection_id'                => 'nullable|uuid',
+            'integration_id'               => 'nullable|uuid',
+            'strategy_params'              => 'nullable|array',
+            'leverage'                     => 'nullable|numeric|min:1|max:125',
+            'margin_type'                  => 'nullable|string|in:isolated,cross',
+            'position_mode'                => 'nullable|string|in:one_way,hedge',
+            'reduce_only_exit_orders'      => 'nullable|boolean',
+            'max_open_position_per_symbol' => 'nullable|numeric|min:0.00000001',
+            'allow_reverse_signal'         => 'nullable|boolean',
+            'close_on_opposite_signal'     => 'nullable|boolean',
+            'risk_per_trade'               => 'nullable|numeric|min:0|max:100',
+            'max_daily_loss'               => 'nullable|numeric|min:0',
+            'max_consecutive_losses'       => 'nullable|integer|min:1|max:1000',
+            'is_active'                    => 'nullable|boolean',
+        ]);
+    }
+
+    private function normalizePayload(array $data): array
+    {
+        if (array_key_exists('symbol', $data)) {
+            $data['symbol'] = strtoupper(trim((string) $data['symbol']));
+        }
+        if (array_key_exists('is_active', $data)) {
+            $data['enabled'] = (bool) $data['is_active'];
+            unset($data['is_active']);
+        }
+        if (! array_key_exists('algorithm', $data) && (($data['trigger_mode'] ?? null) === 'trailing_ratio')) {
+            $data['algorithm'] = 'trailing_ratio';
+        }
+        if (($data['market_type'] ?? null) === 'futures' && ! array_key_exists('side_mode', $data)) {
+            $data['side_mode'] = 'both';
+        }
+
+        return $data;
     }
 }

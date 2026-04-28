@@ -13,7 +13,6 @@ use App\Models\Bot;
 use App\Models\ExchangeConnection;
 use App\Models\ExecutionAttempt;
 use App\Models\Integration;
-use App\Models\ModuleSetting;
 use App\Models\Order;
 use App\Models\Symbol;
 use Illuminate\Support\Str;
@@ -273,14 +272,6 @@ class LiveOrderIntentService
 
     private function resolveExecutionTarget(string $workspaceId, array $payload): array
     {
-        $setting = ModuleSetting::where('workspace_id', $workspaceId)
-            ->where('module_key', 'trading')
-            ->first();
-
-        if (($setting?->mode ?? 'off') !== 'live') {
-            throw new RuntimeException('Live trading not enabled for this workspace.');
-        }
-
         $integrationId = trim((string) ($payload['integration_id'] ?? ''));
         if ($integrationId !== '') {
             $integration = $this->resolveActiveIntegration($workspaceId, $integrationId);

@@ -4,6 +4,7 @@ namespace App\Domain\Trading;
 
 use App\Domain\Market\FxRateService;
 use App\Domain\Risk\BotRiskEngine;
+use App\Domain\RatioBot\RatioBotOrderUpdateService;
 use App\Jobs\SweepProviderBalanceJob;
 use App\Models\Bot;
 use App\Models\Order;
@@ -26,6 +27,7 @@ class ReconciliationService
         private readonly ExecutionQualityService $quality,
         private readonly LiveExecutionEventService $events,
         private readonly PositionExitStateService $exitStates,
+        private readonly RatioBotOrderUpdateService $ratioBots,
     ) {
     }
 
@@ -125,6 +127,8 @@ class ReconciliationService
             ) {
                 SweepProviderBalanceJob::dispatch($order->id, $traceId);
             }
+
+            $this->ratioBots->syncFromOrder($order->fresh());
 
             return $order->refresh();
         });

@@ -68,6 +68,21 @@ class FuturesOrderIntentService
         ]);
 
         $traceId = (string) Str::uuid();
+        $meta = array_merge([
+            'mode' => 'futures_testnet',
+            'market_type' => 'futures',
+            'environment' => 'testnet',
+            'margin_mode' => $proposal['margin_mode'],
+            'position_mode' => $proposal['position_mode'],
+            'position_side' => $proposal['position_side'] ?? null,
+            'leverage' => $proposal['leverage'],
+            'reduce_only' => $proposal['reduce_only'],
+            'protective_exit' => $proposal['protective_exit'],
+            'source' => $proposal['source'],
+            'guard' => $evaluation,
+            'client_order_id' => $clientOrderId,
+        ], (array) ($payload['meta'] ?? []));
+
         $order = Order::create([
             'id' => (string) Str::uuid(),
             'workspace_id' => $workspaceId,
@@ -92,19 +107,7 @@ class FuturesOrderIntentService
             'trace_id' => $traceId,
             'placed_ts' => now(),
             'reconciliation_state' => Order::RECONCILIATION_PENDING,
-            'meta' => [
-                'mode' => 'futures_testnet',
-                'market_type' => 'futures',
-                'environment' => 'testnet',
-                'margin_mode' => $proposal['margin_mode'],
-                'position_mode' => $proposal['position_mode'],
-                'position_side' => $proposal['position_side'] ?? null,
-                'leverage' => $proposal['leverage'],
-                'reduce_only' => $proposal['reduce_only'],
-                'protective_exit' => $proposal['protective_exit'],
-                'source' => $proposal['source'],
-                'guard' => $evaluation,
-            ],
+            'meta' => $meta,
         ]);
 
         ExecutionAttempt::create([

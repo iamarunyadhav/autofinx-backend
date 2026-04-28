@@ -41,7 +41,9 @@ return [
         'testnet_api_url' => env('BINANCE_TESTNET_API_URL', 'https://testnet.binance.vision'),
         'testnet_ws_url' => env('BINANCE_TESTNET_WS_URL', 'wss://testnet.binance.vision'),
         'futures_api_url' => env('BINANCE_FUTURES_API_URL', 'https://fapi.binance.com'),
+        'futures_ws_url' => env('BINANCE_FUTURES_WS_URL', 'wss://fstream.binance.com'),
         'futures_testnet_api_url' => env('BINANCE_FUTURES_TESTNET_API_URL', 'https://testnet.binancefuture.com'),
+        'futures_testnet_ws_url' => env('BINANCE_FUTURES_TESTNET_WS_URL', 'wss://stream.binancefuture.com'),
     ],
 
     'metal_broker' => [

@@ -23,9 +23,7 @@ class RatioBotApiTest extends TestCase
         $this->user = User::factory()->create([
             'two_factor_confirmed_at' => now(),
         ]);
-        $this->workspace = Workspace::factory()->create([
-            'user_id' => $this->user->id,
-        ]);
+        $this->workspace = Workspace::factory()->create();
     }
 
     // -----------------------------------------------------------------------
@@ -85,6 +83,54 @@ class RatioBotApiTest extends TestCase
         $this->assertDatabaseHas('ratio_bot_configs', [
             'id' => $config->id,
         ]);
+    }
+
+    /** @test */
+    public function can_create_trailing_ratio_bot_with_negative_buy_threshold(): void
+    {
+        $response = $this->actingAs($this->user)
+            ->postJson("/api/v1/workspaces/{$this->workspace->id}/ratio-bots", [
+                'symbol' => 'BTCUSDT',
+                'trigger_mode' => 'trailing_ratio',
+                'sell_threshold_ratio' => 0.50,
+                'buy_threshold_ratio' => -0.50,
+                'selling_loss_ratio' => 0.20,
+                'buying_loss_ratio' => 0.20,
+                'base_quote_amount' => 100.0,
+                'execution_mode' => 'sandbox',
+            ]);
+
+        $response->assertStatus(201)
+            ->assertJsonPath('trigger_mode', 'trailing_ratio')
+            ->assertJsonPath('buy_threshold_ratio', '-0.500000');
+    }
+
+    /** @test */
+    public function can_create_ratio_bot_with_live_hardening_guards(): void
+    {
+        $response = $this->actingAs($this->user)
+            ->postJson("/api/v1/workspaces/{$this->workspace->id}/ratio-bots", [
+                'symbol' => 'BTCUSDT',
+                'trigger_mode' => 'trailing_ratio',
+                'sell_threshold_ratio' => 0.50,
+                'buy_threshold_ratio' => -0.50,
+                'selling_loss_ratio' => 0.20,
+                'buying_loss_ratio' => 0.20,
+                'max_allowed_slippage_bps' => 50,
+                'max_trades_per_hour' => 4,
+                'max_trades_per_day' => 12,
+                'trigger_confirm_seconds' => 3,
+                'trigger_confirm_updates' => 2,
+                'use_candle_close_confirmation' => false,
+                'min_price_stability_seconds' => 2,
+                'max_spike_deviation_bps' => 500,
+                'base_quote_amount' => 100.0,
+                'execution_mode' => 'sandbox',
+            ]);
+
+        $response->assertStatus(201)
+            ->assertJsonPath('max_allowed_slippage_bps', '50.0000')
+            ->assertJsonPath('trigger_confirm_updates', 2);
     }
 
     /** @test */
@@ -200,6 +246,28 @@ class RatioBotApiTest extends TestCase
         $this->assertDatabaseHas('ratio_bot_events', [
             'ratio_bot_config_id' => $config->id,
             'event_type'          => 'manual_buy_anchored',
+        ]);
+    }
+
+    /** @test */
+    public function anchor_sell_transitions_bot_to_flat(): void
+    {
+        $config = $this->createConfig();
+
+        $response = $this->actingAs($this->user)
+            ->postJson("/api/v1/ratio-bots/{$config->id}/anchor-sell", [
+                'sell_price' => 90000.0,
+                'quantity'   => 0.001,
+            ]);
+
+        $response->assertOk();
+        $this->assertDatabaseHas('ratio_bot_states', [
+            'ratio_bot_config_id' => $config->id,
+            'position_state'      => 'flat',
+        ]);
+        $this->assertDatabaseHas('ratio_bot_events', [
+            'ratio_bot_config_id' => $config->id,
+            'event_type'          => 'manual_sell_anchored',
         ]);
     }
 

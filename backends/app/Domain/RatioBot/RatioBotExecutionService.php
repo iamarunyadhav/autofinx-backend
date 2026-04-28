@@ -2,169 +2,330 @@
 
 namespace App\Domain\RatioBot;
 
-use App\Domain\Exchange\BinanceSpotClient;
-use App\Domain\Exchange\DTO\ExchangeOrder;
-use App\Domain\Ops\LiveExecutionGuard;
-use App\Models\ExchangeConnection;
+use App\Domain\Trading\LiveOrderIntentService;
+use App\Domain\Trading\FuturesConfigService;
+use App\Domain\Trading\FuturesOrderIntentService;
+use App\Domain\Trading\UncertainLiveOrderException;
+use App\Models\Integration;
+use App\Models\Order;
 use App\Models\RatioBotConfig;
 use App\Models\RatioBotDecision;
+use App\Models\RatioBotState;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use RuntimeException;
 use Throwable;
 
 /**
- * Executes ratio-bot BUY / SELL orders safely.
- *
- * Rules enforced here:
- * - All orders pass through LiveExecutionGuard (kill-switch, risk gate)
- * - Every order has a unique, stable clientOrderId derived from decision ID
- * - Binance -2010 duplicate responses → EXEC_DUPLICATE_BLOCKED (not an error, not re-submitted)
- * - Sandbox mode → simulated execution (no real orders)
- * - On uncertainty, marks decision as awaiting reconciliation
+ * Executes ratio-bot BUY / SELL decisions through the shared live execution path.
  */
 class RatioBotExecutionService
 {
     public function __construct(
-        private readonly LiveExecutionGuard $guard,
+        private readonly LiveOrderIntentService $orders,
         private readonly RatioBotStateService $stateService,
+        private readonly FuturesOrderIntentService $futuresOrders,
+        private readonly FuturesConfigService $futuresConfigs,
     ) {
     }
 
-    /**
-     * Submit the order for an evaluated decision (BUY or SELL).
-     * Updates state and decision record based on outcome.
-     */
     public function execute(RatioBotConfig $config, RatioBotDecision $decision): void
     {
-        if (! in_array($decision->decision, [RatioBotDecision::DECISION_BUY, RatioBotDecision::DECISION_SELL], true)) {
-            Log::debug('[RatioBotExec] Non-trade decision — skip execution', ['decision' => $decision->decision]);
+        if (! $decision->isTrade()) {
+            Log::debug('[RatioBotExec] Non-trade decision skipped', ['decision_id' => $decision->id]);
             return;
         }
 
-        $side     = $decision->decision; // BUY or SELL
-        $symbol   = $config->symbol;
-        $qty      = $this->resolveQuantity($config, $decision, $side);
-        $notional = ($decision->evaluated_price ?? 0) * $qty;
+        if ($decision->execution_status !== RatioBotDecision::EXEC_PENDING) {
+            Log::warning('[RatioBotExec] Decision is not pending; execution skipped', [
+                'decision_id' => $decision->id,
+                'status' => $decision->execution_status,
+            ]);
+            return;
+        }
 
-        // --- stable idempotency key from decision ID ---
-        $clientOrderId = 'rb-' . substr(str_replace('-', '', $decision->id), 0, 28);
+        $state = $this->stateService->getOrCreate($config);
+        if ($state->position_state === RatioBotState::STATE_AWAITING_EXECUTION || $this->hasSubmittedTrade($config, $decision)) {
+            $decision->update([
+                'execution_status' => RatioBotDecision::EXEC_DUPLICATE_BLOCKED,
+                'reason' => 'duplicate_prevented: another ratio-bot order is pending or awaiting execution result',
+            ]);
+            Log::warning('[RatioBotExec] Duplicate execution blocked', [
+                'config_id' => $config->id,
+                'decision_id' => $decision->id,
+            ]);
+            return;
+        }
 
-        Log::info('[RatioBotExec] Submitting order', [
-            'config_id'       => $config->id,
-            'symbol'          => $symbol,
-            'side'            => $side,
-            'qty'             => $qty,
-            'notional'        => $notional,
+        $side = $decision->decision;
+        $symbol = $config->normalizedSymbol();
+        $clientOrderId = substr('rb-' . str_replace('-', '', (string) $decision->id), 0, 36);
+
+        try {
+            $qty = $this->resolveQuantity($config, $decision, $side);
+        } catch (Throwable $e) {
+            $this->stateService->onOrderFailed($config, $decision, $e->getMessage());
+            return;
+        }
+
+        if ($qty <= 0) {
+            $this->stateService->onOrderFailed($config, $decision, 'resolved_order_quantity_is_zero');
+            return;
+        }
+
+        Log::info('[RatioBotExec] Preparing order', [
+            'config_id' => $config->id,
+            'decision_id' => $decision->id,
+            'symbol' => $symbol,
+            'side' => $side,
+            'qty' => $qty,
             'client_order_id' => $clientOrderId,
-            'exec_mode'       => $config->execution_mode,
+            'execution_mode' => $config->execution_mode,
         ]);
 
-        // --- Sandbox simulation ---
         if ($config->isSandbox()) {
             $this->simulateSandboxExecution($config, $decision, $side, (float) $decision->evaluated_price, $qty, $clientOrderId);
             return;
         }
 
-        // --- Live execution ---
+        if ($this->hasSameSideOpenLiveOrder($config, $side, $clientOrderId)) {
+            $decision->update([
+                'execution_status' => RatioBotDecision::EXEC_DUPLICATE_BLOCKED,
+                'reason' => "duplicate_prevented: same-side {$side} live order is still open or uncertain",
+                'client_order_id' => $clientOrderId,
+            ]);
+            Log::warning('[RatioBotExec] Same-side open live order blocked execution', [
+                'config_id' => $config->id,
+                'side' => $side,
+                'client_order_id' => $clientOrderId,
+            ]);
+            return;
+        }
+
+        $this->stateService->onAwaitingExecution($config, $decision, $clientOrderId);
+
         try {
-            // 1. Check all safety guards
-            $this->guard->assertWorkspaceCanSubmit(
-                workspaceId: (string) $config->workspace_id,
-                symbol:      $symbol,
-                notional:    $notional,
-                provider:    $config->exchange,
-                side:        strtolower($side),
-                idempotencyKey: $clientOrderId,
+            if ($config->marketType() === 'futures') {
+                $order = $this->executeFutures($config, $decision, $qty, $clientOrderId);
+                $this->handleFuturesOrderResult($config, $decision, $order, $side, $qty, $clientOrderId);
+            } else {
+                if (! $config->connection_id) {
+                    $this->stateService->onOrderFailed($config, $decision, 'live_execution_requires_connection_id');
+                    return;
+                }
+
+                $order = $this->orders->place([
+                    'workspace_id' => (string) $config->workspace_id,
+                    'connection_id' => (string) $config->connection_id,
+                    'symbol' => $symbol,
+                    'side' => strtolower($side),
+                    'type' => 'market',
+                    'qty' => $qty,
+                    'idempotency_key' => $clientOrderId,
+                    'meta' => $this->orderMeta($config, $decision),
+                ]);
+
+                $this->handleOrderResult($config, $decision, $order, $side, $clientOrderId);
+            }
+        } catch (UncertainLiveOrderException $e) {
+            $this->stateService->errorReviewRequired(
+                $config,
+                $decision,
+                'execution_uncertain',
+                $e->getMessage(),
+                [
+                    'order_id' => $e->order->id,
+                    'exchange_order_id' => $e->order->exchange_order_id,
+                    'client_order_id' => $clientOrderId,
+                ],
             );
-        } catch (Throwable $e) {
-            Log::warning('[RatioBotExec] Guard rejected order', ['reason' => $e->getMessage(), 'config_id' => $config->id]);
-            $this->stateService->onOrderFailed($config, $decision, 'guard_rejection: ' . $e->getMessage());
-            return;
-        }
-
-        // 2. Build Binance client
-        $client = $this->buildClient($config);
-        if (! $client) {
-            $this->stateService->onOrderFailed($config, $decision, 'no_exchange_connection');
-            return;
-        }
-
-        // 3. Mark awaiting before submitting (so polling won't double-fire)
-        $this->stateService->onAwaitingExecution($config, $decision);
-
-        try {
-            $order = $client->placeMarketOrder($symbol, $side, $qty, $clientOrderId);
-            $this->handleFill($config, $decision, $order, $side, $clientOrderId);
         } catch (Throwable $e) {
             $this->handleOrderException($config, $decision, $e, $clientOrderId);
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Private helpers
-    // -----------------------------------------------------------------------
-
-    private function handleFill(
+    private function executeFutures(
         RatioBotConfig $config,
         RatioBotDecision $decision,
-        ExchangeOrder $order,
+        float $qty,
+        string $clientOrderId,
+    ): Order {
+        $integration = $this->resolveFuturesIntegration($config);
+        $workspaceConfig = $this->futuresConfigs->effective((string) $config->workspace_id);
+        $positionMode = strtolower((string) ($config->position_mode ?: ($workspaceConfig['allowed_position_modes'][0] ?? 'one_way')));
+        $decisionSide = strtoupper((string) $decision->decision);
+        $reduceOnly = in_array($decisionSide, [RatioBotDecision::DECISION_EXIT_LONG, RatioBotDecision::DECISION_EXIT_SHORT], true);
+
+        return $this->futuresOrders->place((string) $config->workspace_id, [
+            'integration_id' => (string) $integration->id,
+            'symbol' => $config->normalizedSymbol(),
+            'side' => $this->futuresOrderSide($decisionSide),
+            'type' => 'market',
+            'qty' => $qty,
+            'leverage' => (float) ($config->leverage ?: ($workspaceConfig['max_leverage'] ?? 3)),
+            'margin_mode' => strtolower((string) ($config->margin_type ?: ($workspaceConfig['allowed_margin_modes'][0] ?? 'isolated'))),
+            'position_mode' => $positionMode,
+            'position_side' => $this->futuresPositionSide($decisionSide, $positionMode),
+            'reduce_only' => $reduceOnly && (bool) ($config->reduce_only_exit_orders ?? true),
+            'protective_exit' => $reduceOnly,
+            'idempotency_key' => $clientOrderId,
+            'source' => 'ratio_bot',
+            'entry_price' => (float) ($decision->evaluated_price ?? 0),
+            'confidence' => data_get($decision->metadata, 'confidence'),
+            'meta' => $this->orderMeta($config, $decision),
+        ], $integration, $workspaceConfig);
+    }
+
+    private function handleOrderResult(
+        RatioBotConfig $config,
+        RatioBotDecision $decision,
+        Order $order,
         string $side,
-        string $clientOrderId
+        string $clientOrderId,
     ): void {
-        $status = strtoupper($order->status);
+        $status = strtoupper((string) $order->status);
+        if (in_array($status, ['FILLED', 'PARTIAL'], true)) {
+            $executedPrice = $this->avgFillPrice($order, (float) $decision->evaluated_price);
+            $executedQty = (float) ($order->filled_qty ?: $order->qty ?: $order->quantity);
+            $orderId = (string) ($order->exchange_order_id ?: $order->id);
 
-        if (in_array($status, ['FILLED', 'PARTIALLY_FILLED'], true)) {
-            $executedPrice = $this->avgFillPrice($order);
-            $executedQty   = $order->executedQty;
+            if ($executedPrice <= 0 || $executedQty <= 0) {
+                $this->stateService->errorReviewRequired(
+                    $config,
+                    $decision,
+                    'invalid_fill_payload',
+                    'Exchange order was filled but fill price or quantity is missing.',
+                    ['order_id' => $order->id, 'status' => $order->status],
+                );
+                return;
+            }
 
-            if ($side === 'BUY') {
-                $this->stateService->onBuyFilled($config, $decision, $executedPrice, $executedQty, $order->orderId, $clientOrderId);
+            if ($side === RatioBotDecision::DECISION_BUY) {
+                $this->stateService->onBuyFilled($config, $decision, $executedPrice, $executedQty, $orderId, $clientOrderId);
             } else {
-                $this->stateService->onSellFilled($config, $decision, $executedPrice, $executedQty, $order->orderId, $clientOrderId);
+                $this->stateService->onSellFilled($config, $decision, $executedPrice, $executedQty, $orderId, $clientOrderId);
             }
 
             Log::info('[RatioBotExec] Order filled', [
                 'config_id' => $config->id,
-                'order_id'  => $order->orderId,
-                'side'      => $side,
-                'price'     => $executedPrice,
-                'qty'       => $executedQty,
+                'decision_id' => $decision->id,
+                'order_id' => $orderId,
+                'side' => $side,
+                'price' => $executedPrice,
+                'qty' => $executedQty,
             ]);
             return;
         }
 
-        // Any other status — mark as error requiring review
-        $this->stateService->block($config, 'unexpected_order_status', "Order {$order->orderId} returned status {$status}");
-        Log::error('[RatioBotExec] Unexpected order status', ['status' => $status, 'config_id' => $config->id]);
+        $this->stateService->errorReviewRequired(
+            $config,
+            $decision,
+            'execution_not_final',
+            "Market order returned non-final status {$order->status}. Manual reconciliation is required before retry.",
+            [
+                'order_id' => $order->id,
+                'exchange_order_id' => $order->exchange_order_id,
+                'provider_status' => $order->provider_status,
+                'client_order_id' => $clientOrderId,
+            ],
+        );
+    }
+
+    private function handleFuturesOrderResult(
+        RatioBotConfig $config,
+        RatioBotDecision $decision,
+        Order $order,
+        string $side,
+        float $qty,
+        string $clientOrderId,
+    ): void {
+        $status = strtoupper((string) $order->status);
+        $executedPrice = $this->avgFillPrice($order, (float) $decision->evaluated_price);
+        $executedQty = (float) ($order->filled_qty ?: $order->qty ?: $qty);
+        $orderId = (string) ($order->exchange_order_id ?: $order->id);
+
+        $decision->update([
+            'client_order_id' => $clientOrderId,
+            'order_id' => $orderId,
+            'execution_status' => in_array($status, ['FILLED', 'PARTIAL'], true)
+                ? ($status === 'FILLED' ? RatioBotDecision::EXEC_FILLED : RatioBotDecision::EXEC_PARTIAL)
+                : RatioBotDecision::EXEC_SUBMITTED,
+            'executed_price' => $executedPrice > 0 ? $executedPrice : null,
+            'executed_qty' => $executedQty > 0 ? $executedQty : null,
+            'executed_at' => in_array($status, ['FILLED', 'PARTIAL'], true) ? now() : null,
+        ]);
+
+        $config->state?->update([
+            'last_order_status' => $order->status,
+            'last_fill_price' => $executedPrice > 0 ? $executedPrice : $config->state?->last_fill_price,
+        ]);
+
+        $this->stateService->rememberSignal($config, $decision->decision, (string) $decision->reason, (string) data_get($decision->metadata, 'signal_hash', ''), [
+            'order_id' => $orderId,
+            'last_order_status' => $order->status,
+        ]);
+        $this->stateService->markMarketSnapshot(
+            $config,
+            (float) ($decision->evaluated_price ?? 0),
+            $decision->price_source,
+            $decision->price_timestamp,
+            ['last_order_status' => $order->status]
+        );
+
+        if (in_array($decision->decision, [RatioBotDecision::DECISION_LONG, RatioBotDecision::DECISION_SHORT], true)
+            && in_array($status, ['FILLED', 'PARTIAL'], true)
+        ) {
+            $this->stateService->syncPositionSnapshot(
+                $config,
+                $decision->decision === RatioBotDecision::DECISION_SHORT ? 'short' : 'long',
+                $executedQty,
+                $executedPrice > 0 ? $executedPrice : (float) $decision->evaluated_price,
+                0
+            );
+        }
+
+        if (in_array($decision->decision, [RatioBotDecision::DECISION_EXIT_LONG, RatioBotDecision::DECISION_EXIT_SHORT], true)
+            && in_array($status, ['FILLED', 'PARTIAL'], true)
+        ) {
+            $this->stateService->syncPositionSnapshot($config, 'flat', 0, null, 0);
+        }
     }
 
     private function handleOrderException(
         RatioBotConfig $config,
         RatioBotDecision $decision,
         Throwable $e,
-        string $clientOrderId
+        string $clientOrderId,
     ): void {
         $message = $e->getMessage();
 
-        // Binance -2010: duplicate order — idempotency already covered, do NOT retry
         if ($this->isDuplicateOrderError($message)) {
             $decision->update([
                 'execution_status' => RatioBotDecision::EXEC_DUPLICATE_BLOCKED,
-                'reason'           => 'duplicate_order_blocked: ' . $message,
+                'reason' => 'duplicate_order_blocked: ' . $message,
+                'client_order_id' => $clientOrderId,
             ]);
-            Log::warning('[RatioBotExec] Duplicate order blocked safely', ['config_id' => $config->id, 'client_order_id' => $clientOrderId]);
 
-            // Restore state to pre-await (keep the last known state)
             $state = $this->stateService->getOrCreate($config);
-            $resumeState = $state->last_trade_side === 'SELL'
-                ? \App\Models\RatioBotState::STATE_FLAT
-                : \App\Models\RatioBotState::STATE_HOLDING;
-            $state->update(['position_state' => $resumeState]);
+            $state->update([
+                'position_state' => $state->resumableTradingState(),
+                'awaiting_since' => null,
+                'block_reason_code' => 'duplicate_order_blocked',
+                'block_reason_detail' => $message,
+            ]);
+
+            Log::warning('[RatioBotExec] Duplicate order blocked safely', [
+                'config_id' => $config->id,
+                'client_order_id' => $clientOrderId,
+            ]);
             return;
         }
 
-        Log::error('[RatioBotExec] Order submission failed', ['error' => $message, 'config_id' => $config->id]);
+        Log::error('[RatioBotExec] Order submission failed', [
+            'config_id' => $config->id,
+            'decision_id' => $decision->id,
+            'error' => $message,
+        ]);
         $this->stateService->onOrderFailed($config, $decision, $message);
     }
 
@@ -174,108 +335,251 @@ class RatioBotExecutionService
         string $side,
         float $price,
         float $qty,
-        string $clientOrderId
+        string $clientOrderId,
     ): void {
         $fakeOrderId = 'SANDBOX-' . strtoupper(Str::random(12));
 
-        Log::info('[RatioBotExec] Sandbox simulation', [
-            'config_id' => $config->id,
-            'side'      => $side,
-            'price'     => $price,
-            'qty'       => $qty,
-        ]);
-
-        if ($side === 'BUY') {
+        if ($side === RatioBotDecision::DECISION_BUY) {
             $this->stateService->onBuyFilled($config, $decision, $price, $qty, $fakeOrderId, $clientOrderId);
-        } else {
-            $this->stateService->onSellFilled($config, $decision, $price, $qty, $fakeOrderId, $clientOrderId);
+            return;
         }
+
+        if ($side === RatioBotDecision::DECISION_SELL) {
+            $this->stateService->onSellFilled($config, $decision, $price, $qty, $fakeOrderId, $clientOrderId);
+            return;
+        }
+
+        $this->handleFuturesSandboxExecution($config, $decision, $side, $price, $qty, $fakeOrderId, $clientOrderId);
     }
 
     private function resolveQuantity(RatioBotConfig $config, RatioBotDecision $decision, string $side): float
     {
-        if ($side === 'SELL') {
-            // Sell the quantity we're holding
+        if ($config->marketType() === 'futures') {
+            return $this->resolveFuturesQuantity($config, $decision, $side);
+        }
+
+        if ($side === RatioBotDecision::DECISION_SELL) {
             $state = $this->stateService->getOrCreate($config);
-            $qty   = (float) ($state->last_buy_quantity ?? 0);
+            $qty = (float) ($state->last_buy_quantity ?? 0);
+            if ($config->allow_partial_sell && (float) ($config->partial_sell_pct ?? 0) > 0) {
+                $qty *= min(1.0, max(0.0, (float) $config->partial_sell_pct));
+            }
             if ($qty <= 0) {
                 throw new RuntimeException('Cannot sell: last_buy_quantity is zero');
             }
-            return $qty;
+
+            return round($qty, 8);
         }
 
-        // BUY: use base_quote_amount / evaluated_price
-        $quoteAmount = (float) $config->base_quote_amount;
-        $price       = (float) ($decision->evaluated_price ?? 0);
-        if ($price <= 0 || $quoteAmount <= 0) {
-            throw new RuntimeException("Cannot buy: invalid price ({$price}) or quote amount ({$quoteAmount})");
+        $price = (float) ($decision->evaluated_price ?? 0);
+        if ($price <= 0) {
+            throw new RuntimeException("Cannot buy: invalid evaluated price {$price}");
         }
 
-        return round($quoteAmount / $price, 8);
+        $amount = (float) $config->base_quote_amount;
+        if ($amount <= 0) {
+            throw new RuntimeException('Cannot buy: base_quote_amount is zero');
+        }
+
+        $qty = match ((string) $config->order_size_mode) {
+            'fixed_base' => $amount,
+            'percent_of_balance' => $amount / $price,
+            default => $amount / $price,
+        };
+
+        if ($config->allow_partial_buy && (float) ($config->partial_buy_pct ?? 0) > 0) {
+            $qty *= min(1.0, max(0.0, (float) $config->partial_buy_pct));
+        }
+
+        return round($qty, 8);
     }
 
-    private function avgFillPrice(ExchangeOrder $order): float
+    private function resolveFuturesQuantity(RatioBotConfig $config, RatioBotDecision $decision, string $side): float
     {
-        // Use fills from raw response if available
-        $fills = $order->raw['fills'] ?? [];
-        if (! empty($fills)) {
-            $totalQty   = 0.0;
-            $totalQuote = 0.0;
-            foreach ($fills as $fill) {
-                $q = (float) ($fill['qty'] ?? 0);
-                $p = (float) ($fill['price'] ?? 0);
-                $totalQty   += $q;
-                $totalQuote += $q * $p;
+        $state = $this->stateService->getOrCreate($config);
+        if (in_array($side, [RatioBotDecision::DECISION_EXIT_LONG, RatioBotDecision::DECISION_EXIT_SHORT], true)) {
+            $qty = (float) ($state->last_position_qty ?? 0);
+            if ($qty <= 0) {
+                throw new RuntimeException('Cannot close futures position: last_position_qty is zero');
             }
-            if ($totalQty > 0) {
-                return $totalQuote / $totalQty;
-            }
+
+            return round($qty, 8);
         }
 
-        // Fallback: cummulativeQuoteQty / executedQty
-        $cumQuote  = (float) ($order->raw['cummulativeQuoteQty'] ?? 0);
-        $execQty   = $order->executedQty;
-        if ($execQty > 0 && $cumQuote > 0) {
-            return $cumQuote / $execQty;
+        $price = (float) ($decision->evaluated_price ?? 0);
+        if ($price <= 0) {
+            throw new RuntimeException('Cannot open futures position: invalid evaluated price');
         }
 
-        // Last resort: order price or evaluated price
-        return (float) ($order->price ?? 0);
+        $quoteBudget = (float) ($config->quote_asset_budget ?? $config->base_quote_amount ?? 0);
+        if ($quoteBudget <= 0) {
+            throw new RuntimeException('Cannot open futures position: quote_asset_budget is zero');
+        }
+
+        $leverage = max(1.0, (float) ($config->leverage ?? 1));
+        $qty = ($quoteBudget * $leverage) / $price;
+        $cap = (float) ($config->max_open_position_per_symbol ?? 0);
+        if ($cap > 0) {
+            $qty = min($qty, $cap);
+        }
+
+        return round($qty, 8);
+    }
+
+    private function avgFillPrice(Order $order, float $fallback): float
+    {
+        $price = (float) ($order->avg_fill_price ?: $order->price ?: $fallback);
+        if ($price > 0) {
+            return $price;
+        }
+
+        $rawFills = (array) data_get($order->raw_json, 'raw.fills', data_get($order->raw_json, 'fills', []));
+        $totalQty = 0.0;
+        $totalQuote = 0.0;
+        foreach ($rawFills as $fill) {
+            $qty = (float) ($fill['qty'] ?? 0);
+            $fillPrice = (float) ($fill['price'] ?? 0);
+            $totalQty += $qty;
+            $totalQuote += $qty * $fillPrice;
+        }
+
+        return $totalQty > 0 ? $totalQuote / $totalQty : $fallback;
+    }
+
+    private function hasSubmittedTrade(RatioBotConfig $config, RatioBotDecision $currentDecision): bool
+    {
+        return RatioBotDecision::query()
+            ->where('ratio_bot_config_id', $config->id)
+            ->whereKeyNot($currentDecision->id)
+            ->whereIn('decision', [
+                RatioBotDecision::DECISION_BUY,
+                RatioBotDecision::DECISION_SELL,
+                RatioBotDecision::DECISION_LONG,
+                RatioBotDecision::DECISION_SHORT,
+                RatioBotDecision::DECISION_EXIT_LONG,
+                RatioBotDecision::DECISION_EXIT_SHORT,
+            ])
+            ->whereIn('execution_status', [RatioBotDecision::EXEC_PENDING, RatioBotDecision::EXEC_SUBMITTED])
+            ->where('created_at', '>=', now()->subMinutes(30))
+            ->exists();
+    }
+
+    private function hasSameSideOpenLiveOrder(RatioBotConfig $config, string $side, string $clientOrderId): bool
+    {
+        return Order::query()
+            ->where('workspace_id', $config->workspace_id)
+            ->where('asset_code', $config->normalizedSymbol())
+            ->where('side', strtolower($this->orderSideForDecision($side)))
+            ->where('client_order_id', '!=', $clientOrderId)
+            ->where('meta->market_type', $config->marketType())
+            ->whereIn('status', [
+                Order::STATUS_PENDING_PROVIDER,
+                Order::STATUS_NEW,
+                Order::STATUS_PARTIAL,
+                Order::STATUS_UNCERTAIN,
+            ])
+            ->where('created_at', '>=', now()->subMinutes(30))
+            ->exists();
     }
 
     private function isDuplicateOrderError(string $message): bool
     {
-        // Binance error code -2010
-        return str_contains($message, '-2010') || str_contains($message, 'Duplicate order');
+        return str_contains($message, '-2010')
+            || str_contains(strtolower($message), 'duplicate order')
+            || str_contains(strtolower($message), 'duplicate client order id');
     }
 
-    private function buildClient(RatioBotConfig $config): ?BinanceSpotClient
+    private function orderMeta(RatioBotConfig $config, RatioBotDecision $decision): array
     {
-        $connectionId = $config->connection_id;
-        if (! $connectionId) {
-            Log::warning('[RatioBotExec] No connection_id on config', ['config_id' => $config->id]);
-            return null;
+        return [
+            'source' => 'ratio_bot',
+            'ratio_bot_config_id' => (string) $config->id,
+            'ratio_bot_decision_id' => (string) $decision->id,
+            'ratio_bot_signal' => $decision->decision,
+            'market_type' => $config->marketType(),
+            'evaluated_price' => (float) $decision->evaluated_price,
+            'price_source' => $decision->price_source,
+            'price_timestamp' => optional($decision->price_timestamp)->toIso8601String(),
+            'anchor_price' => $decision->anchor_price ? (float) $decision->anchor_price : null,
+            'computed_ratio' => $decision->computed_ratio ? (float) $decision->computed_ratio : null,
+            'threshold_used' => $decision->threshold_used ? (float) $decision->threshold_used : null,
+            'decision_metadata' => $decision->metadata,
+        ];
+    }
+
+    private function orderSideForDecision(string $decision): string
+    {
+        return in_array($decision, [
+            RatioBotDecision::DECISION_BUY,
+            RatioBotDecision::DECISION_LONG,
+            RatioBotDecision::DECISION_EXIT_SHORT,
+        ], true) ? 'buy' : 'sell';
+    }
+
+    private function futuresOrderSide(string $decision): string
+    {
+        return $this->orderSideForDecision($decision);
+    }
+
+    private function futuresPositionSide(string $decision, string $positionMode): string
+    {
+        if ($positionMode !== 'hedge') {
+            return 'BOTH';
         }
 
-        $conn = ExchangeConnection::find($connectionId);
-        if (! $conn || ! $conn->is_active) {
-            Log::warning('[RatioBotExec] Connection not found or inactive', ['connection_id' => $connectionId]);
-            return null;
+        return in_array($decision, [RatioBotDecision::DECISION_LONG, RatioBotDecision::DECISION_EXIT_LONG], true)
+            ? 'LONG'
+            : 'SHORT';
+    }
+
+    private function resolveFuturesIntegration(RatioBotConfig $config): Integration
+    {
+        $query = Integration::query()
+            ->where('workspace_id', $config->workspace_id)
+            ->where('provider_key', 'binance')
+            ->where('status', 'active');
+
+        if ($config->integration_id) {
+            $query->whereKey($config->integration_id);
         }
 
-        $baseUrl = config('services.binance.base_url', 'https://api.binance.com');
-        $wsUrl   = config('services.binance.ws_url', 'wss://stream.binance.com:9443');
+        $integration = $query->latest('updated_at')->first();
+        if (! $integration) {
+            throw new RuntimeException('Active Binance integration not found for futures ratio bot.');
+        }
 
-        try {
-            return new BinanceSpotClient(
-                apiKey:    decrypt($conn->api_key_encrypted ?? $conn->api_key),
-                apiSecret: decrypt($conn->api_secret_encrypted ?? $conn->api_secret),
-                baseUrl:   $baseUrl,
-                wsUrl:     $wsUrl,
+        return $integration;
+    }
+
+    private function handleFuturesSandboxExecution(
+        RatioBotConfig $config,
+        RatioBotDecision $decision,
+        string $side,
+        float $price,
+        float $qty,
+        string $orderId,
+        string $clientOrderId,
+    ): void {
+        $decision->update([
+            'execution_status' => RatioBotDecision::EXEC_FILLED,
+            'executed_price' => $price,
+            'executed_qty' => $qty,
+            'order_id' => $orderId,
+            'client_order_id' => $clientOrderId,
+            'executed_at' => now(),
+        ]);
+
+        if (in_array($side, [RatioBotDecision::DECISION_LONG, RatioBotDecision::DECISION_SHORT], true)) {
+            $this->stateService->syncPositionSnapshot(
+                $config,
+                $side === RatioBotDecision::DECISION_SHORT ? 'short' : 'long',
+                $qty,
+                $price,
+                0
             );
-        } catch (Throwable $e) {
-            Log::error('[RatioBotExec] Failed to build Binance client', ['error' => $e->getMessage()]);
-            return null;
+            return;
         }
+
+        $this->stateService->syncPositionSnapshot($config, 'flat', 0, null, 0);
     }
 }

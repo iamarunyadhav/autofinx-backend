@@ -108,6 +108,110 @@ class Indicators
         ];
     }
 
+    public static function atr(array $candles, int $period = 14): ?float
+    {
+        if ($period <= 0 || count($candles) < ($period + 1)) {
+            return null;
+        }
+
+        $trueRanges = [];
+        for ($i = 1; $i < count($candles); $i++) {
+            $high = (float) ($candles[$i]['high'] ?? 0);
+            $low = (float) ($candles[$i]['low'] ?? 0);
+            $previousClose = (float) ($candles[$i - 1]['close'] ?? 0);
+
+            $trueRanges[] = max(
+                $high - $low,
+                abs($high - $previousClose),
+                abs($low - $previousClose),
+            );
+        }
+
+        if (count($trueRanges) < $period) {
+            return null;
+        }
+
+        $atr = array_sum(array_slice($trueRanges, 0, $period)) / $period;
+        for ($i = $period; $i < count($trueRanges); $i++) {
+            $atr = (($atr * ($period - 1)) + $trueRanges[$i]) / $period;
+        }
+
+        return $atr;
+    }
+
+    public static function adx(array $candles, int $period = 14): ?float
+    {
+        if ($period <= 0 || count($candles) < ($period * 2)) {
+            return null;
+        }
+
+        $trs = [];
+        $plusDm = [];
+        $minusDm = [];
+
+        for ($i = 1; $i < count($candles); $i++) {
+            $current = $candles[$i];
+            $previous = $candles[$i - 1];
+
+            $high = (float) ($current['high'] ?? 0);
+            $low = (float) ($current['low'] ?? 0);
+            $prevHigh = (float) ($previous['high'] ?? 0);
+            $prevLow = (float) ($previous['low'] ?? 0);
+            $prevClose = (float) ($previous['close'] ?? 0);
+
+            $upMove = $high - $prevHigh;
+            $downMove = $prevLow - $low;
+
+            $plusDm[] = ($upMove > $downMove && $upMove > 0) ? $upMove : 0.0;
+            $minusDm[] = ($downMove > $upMove && $downMove > 0) ? $downMove : 0.0;
+            $trs[] = max(
+                $high - $low,
+                abs($high - $prevClose),
+                abs($low - $prevClose),
+            );
+        }
+
+        if (count($trs) < $period) {
+            return null;
+        }
+
+        $atr = array_sum(array_slice($trs, 0, $period));
+        $plusDmSmooth = array_sum(array_slice($plusDm, 0, $period));
+        $minusDmSmooth = array_sum(array_slice($minusDm, 0, $period));
+        $dxValues = [];
+
+        for ($i = $period; $i < count($trs); $i++) {
+            $atr = $atr - ($atr / $period) + $trs[$i];
+            $plusDmSmooth = $plusDmSmooth - ($plusDmSmooth / $period) + $plusDm[$i];
+            $minusDmSmooth = $minusDmSmooth - ($minusDmSmooth / $period) + $minusDm[$i];
+
+            if ($atr <= 0) {
+                continue;
+            }
+
+            $plusDi = ($plusDmSmooth / $atr) * 100;
+            $minusDi = ($minusDmSmooth / $atr) * 100;
+            $denominator = $plusDi + $minusDi;
+
+            if ($denominator <= 0) {
+                continue;
+            }
+
+            $dxValues[] = (abs($plusDi - $minusDi) / $denominator) * 100;
+        }
+
+        if (count($dxValues) < $period) {
+            return null;
+        }
+
+        $adx = array_sum(array_slice($dxValues, 0, $period)) / $period;
+        for ($i = $period; $i < count($dxValues); $i++) {
+            $adx = (($adx * ($period - 1)) + $dxValues[$i]) / $period;
+        }
+
+        return $adx;
+    }
+
     public static function cci(array $candles, int $period = 20): ?float
     {
         if ($period <= 0 || count($candles) < $period) {

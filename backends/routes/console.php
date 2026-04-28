@@ -41,6 +41,11 @@ Schedule::command('bots:evaluate')
     ->withoutOverlapping()
     ->runInBackground();
 
+Schedule::command('ratio-bots:evaluate')
+    ->everySecond()
+    ->withoutOverlapping()
+    ->runInBackground();
+
 Schedule::command('robot-sessions:evaluate')
     ->everyFiveSeconds()
     ->withoutOverlapping()
