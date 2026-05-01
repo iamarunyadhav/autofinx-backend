@@ -606,23 +606,18 @@ class FutureTradeBotService
     private function marketSnapshot(array $settings): array
     {
         $symbols = array_map('strtoupper', (array) ($settings['symbols'] ?? []));
+        $cacheKey = 'future_trade_market_snapshot_' . md5(implode(',', $symbols));
         try {
             $base = rtrim((string) env('BINANCE_FUTURES_API_URL', 'https://fapi.binance.com'), '/');
             $rows = Http::timeout(7)->get($base . '/fapi/v1/ticker/24hr')->throw()->json();
-            return collect($rows)->filter(fn ($row) => in_array((string) ($row['symbol'] ?? ''), $symbols, true))->values()->all();
+            $result = collect($rows)->filter(fn ($row) => in_array((string) ($row['symbol'] ?? ''), $symbols, true))->values()->all();
+            if (! empty($result)) {
+                \Illuminate\Support\Facades\Cache::put($cacheKey, $result, 60);
+            }
+            return $result;
         } catch (Throwable) {
-            return array_map(function (string $symbol, int $i): array {
-                $base = 100 + ($i * 7);
-                $change = (($i % 2 === 0) ? 1 : -1) * (0.8 + ($i * 0.35));
-                return [
-                    'symbol' => $symbol,
-                    'lastPrice' => $base,
-                    'priceChangePercent' => $change,
-                    'quoteVolume' => 1000000 + ($i * 250000),
-                    'highPrice' => $base * 1.02,
-                    'lowPrice' => $base * 0.98,
-                ];
-            }, $symbols, array_keys($symbols));
+            // Return last known good prices rather than fake mock data
+            return \Illuminate\Support\Facades\Cache::get($cacheKey, []);
         }
     }
 
