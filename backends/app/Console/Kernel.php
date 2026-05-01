@@ -29,6 +29,7 @@ use App\Console\Commands\BinanceUserStreamCommand;
 use App\Console\Commands\TradingHealthCheckCommand;
 use App\Console\Commands\RatioBotsEvaluateCommand;
 use App\Console\Commands\Fast2XRunCommand;
+use App\Console\Commands\FutureTradeBotRunCommand;
 use App\Jobs\DetectStaleFeedsJob;
 use App\Jobs\DispatchAiDecisionCycleJob;
 use App\Jobs\ExpireAiDecisionsJob;
@@ -179,6 +180,7 @@ class Kernel extends ConsoleKernel
         TradingHealthCheckCommand::class,
         RatioBotsEvaluateCommand::class,
         Fast2XRunCommand::class,
+        FutureTradeBotRunCommand::class,
     ];
 
     private function markRunStart(string $command): void

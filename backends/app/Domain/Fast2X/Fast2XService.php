@@ -280,6 +280,89 @@ class Fast2XService
         ];
     }
 
+    public function chartPayload(Fast2XConfig $config): array
+    {
+        $state = $this->states->getOrCreate($config);
+        $settings = $this->brainAdjustedSettings($config);
+        $ticks = array_values((array) ($state->runtime_meta['ticks'] ?? []));
+        $entry = (float) ($state->entry_price ?? 0);
+        $peak = (float) ($state->current_peak ?? 0);
+        $bottom = (float) ($state->current_bottom ?? 0);
+        $stop = $entry > 0 ? $entry * (1 - ((float) ($settings['stopLossPercent'] ?? 0.4) / 100)) : null;
+        $target = $entry > 0 ? $entry * (1 + ((float) ($settings['minProfitTargetPercent'] ?? 0.2) / 100)) : null;
+        $trailing = $peak > 0 ? $peak * (1 - ((float) ($settings['trailingTakeProfitPercent'] ?? 0.25) / 100)) : null;
+
+        $points = array_map(function (array $tick, int $index) use ($entry, $stop, $target, $trailing, $peak, $bottom): array {
+            $eventTime = (int) ($tick['eventTime'] ?? 0);
+            return [
+                'index' => $index,
+                'time' => $eventTime > 0 ? \Carbon\Carbon::createFromTimestampMs($eventTime)->format('H:i:s') : now()->format('H:i:s'),
+                'price' => (float) ($tick['price'] ?? 0),
+                'bid' => isset($tick['bid']) ? (float) $tick['bid'] : null,
+                'ask' => isset($tick['ask']) ? (float) $tick['ask'] : null,
+                'entry' => $entry ?: null,
+                'stopLoss' => $stop,
+                'profitTarget' => $target,
+                'trailingTakeProfit' => $trailing,
+                'peak' => $peak ?: null,
+                'bottom' => $bottom ?: null,
+            ];
+        }, $ticks, array_keys($ticks));
+
+        if ($points === [] && (float) ($state->current_price ?? 0) > 0) {
+            $points[] = [
+                'index' => 0,
+                'time' => now()->format('H:i:s'),
+                'price' => (float) $state->current_price,
+                'bid' => null,
+                'ask' => null,
+                'entry' => $entry ?: null,
+                'stopLoss' => $stop,
+                'profitTarget' => $target,
+                'trailingTakeProfit' => $trailing,
+                'peak' => $peak ?: null,
+                'bottom' => $bottom ?: null,
+            ];
+        }
+
+        $lastTrades = $config->trades()->orderByDesc('created_at')->limit(30)->get()->reverse()->values()->map(fn ($trade) => [
+            'time' => optional($trade->created_at)->format('H:i:s'),
+            'side' => $trade->side,
+            'price' => (float) ($trade->exit_price ?: $trade->entry_price ?: 0),
+            'netPnl' => (float) ($trade->net_pnl ?? 0),
+            'reason' => $trade->reason,
+        ]);
+
+        return [
+            'points' => $points,
+            'markers' => $lastTrades,
+            'levels' => [
+                'entry' => $entry ?: null,
+                'stopLoss' => $stop,
+                'profitTarget' => $target,
+                'trailingTakeProfit' => $trailing,
+                'peak' => $peak ?: null,
+                'bottom' => $bottom ?: null,
+            ],
+            'autoManagement' => [
+                'state' => $state->state,
+                'decision' => $state->decision,
+                'mode' => $config->paper_trading ? 'PAPER' : 'LIVE',
+                'aiBrainEnabled' => (bool) $config->ai_brain_enabled,
+                'dynamicThresholds' => $state->runtime_meta['dynamic_thresholds'] ?? null,
+                'indicatorConfirmation' => $state->runtime_meta['indicator_confirmation'] ?? null,
+                'riskControls' => [
+                    'rollbackLossPercent' => (float) ($settings['rollbackLossPercent'] ?? 0.15),
+                    'stopLossPercent' => (float) ($settings['stopLossPercent'] ?? 0.4),
+                    'trailingTakeProfitPercent' => (float) ($settings['trailingTakeProfitPercent'] ?? 0.25),
+                    'maxTradesPerMinute' => (int) ($settings['maxTradesPerMinute'] ?? 5),
+                    'maxTradesPerDay' => (int) ($settings['maxTradesPerDay'] ?? 50),
+                    'maxDailyLossPercent' => (float) ($settings['maxDailyLossPercent'] ?? 3),
+                ],
+            ],
+        ];
+    }
+
     private function brainAdjustedSettings(Fast2XConfig $config): array
     {
         $settings = $config->mergedSettings();

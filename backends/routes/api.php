@@ -52,6 +52,7 @@ use App\Http\Controllers\Api\QuickTradeController;
 use App\Http\Controllers\Api\RobotSessionController;
 use App\Http\Controllers\Api\RatioBotController;
 use App\Http\Controllers\Api\Fast2XController;
+use App\Http\Controllers\Api\FutureTradeBotController;
 use App\Http\Controllers\Api\FuturesController;
 use App\Http\Controllers\Api\SweepController;
 use App\Http\Controllers\Api\StrategySchemaController;
@@ -432,6 +433,19 @@ Route::prefix('v1')->group(function () {
         Route::get('workspaces/{workspace}/fast2x/logs', [Fast2XController::class, 'logs']);
         Route::get('workspaces/{workspace}/fast2x/live-price', [Fast2XController::class, 'livePrice']);
         Route::get('workspaces/{workspace}/fast2x/pnl', [Fast2XController::class, 'pnl']);
+        Route::get('workspaces/{workspace}/fast2x/chart', [Fast2XController::class, 'chart']);
+
+        // ---- Future Trade Bot ----------------------------------------------
+        Route::get('workspaces/{workspace}/future-trade/status', [FutureTradeBotController::class, 'status']);
+        Route::get('workspaces/{workspace}/future-trade/dashboard', [FutureTradeBotController::class, 'dashboard']);
+        Route::post('workspaces/{workspace}/future-trade/start', [FutureTradeBotController::class, 'start'])->middleware('require.2fa');
+        Route::post('workspaces/{workspace}/future-trade/stop', [FutureTradeBotController::class, 'stop'])->middleware('require.2fa');
+        Route::post('workspaces/{workspace}/future-trade/emergency-stop', [FutureTradeBotController::class, 'emergencyStop'])->middleware('require.2fa');
+        Route::post('workspaces/{workspace}/future-trade/reset-paper', [FutureTradeBotController::class, 'resetPaper'])->middleware('require.2fa');
+        Route::get('workspaces/{workspace}/future-trade/config', [FutureTradeBotController::class, 'config']);
+        Route::put('workspaces/{workspace}/future-trade/config', [FutureTradeBotController::class, 'updateConfig'])->middleware('require.2fa');
+        Route::get('workspaces/{workspace}/future-trade/trades', [FutureTradeBotController::class, 'trades']);
+        Route::get('workspaces/{workspace}/future-trade/logs', [FutureTradeBotController::class, 'logs']);
 
         Route::match(['get', 'post', 'put', 'patch', 'delete'], 'table/{table}', [TableController::class, 'handle']);
     });

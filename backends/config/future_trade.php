@@ -1,0 +1,32 @@
+<?php
+
+return [
+    'paper_trading' => env('FUTURE_TRADE_PAPER_TRADING', true),
+    'enable_live_trading' => env('FUTURE_TRADE_ENABLE_LIVE_TRADING', false),
+    'force_testnet' => env('FUTURE_TRADE_FORCE_TESTNET', true),
+    'defaults' => [
+        'symbols' => ['BTCUSDT', 'ETHUSDT', 'WOOUSDT', 'RSRUSDT', 'AERGOUSDT', '1000PEPEUSDT'],
+        'timeframe' => '5m',
+        'paperTrading' => true,
+        'liveTrading' => false,
+        'forceTestnet' => true,
+        'leverage' => 3,
+        'marginMode' => 'isolated',
+        'tradeAmountUsdt' => 25,
+        'minConfidence' => 0.68,
+        'takeProfitPercent' => 0.45,
+        'stopLossPercent' => 0.25,
+        'trailingTakeProfitPercent' => 0.18,
+        'rollbackLossPercent' => 0.18,
+        'maxDailyLossPercent' => 2,
+        'maxOpenPositions' => 1,
+        'maxTradesPerDay' => 25,
+        'maxLeverage' => 5,
+        'maxSpreadPercent' => 0.12,
+        'cooldownSeconds' => 10,
+        'scanIntervalSeconds' => 3,
+        'autoExecutePaperSignals' => true,
+        'avoidChoppyMarket' => true,
+        'emergencyStop' => false,
+    ],
+];

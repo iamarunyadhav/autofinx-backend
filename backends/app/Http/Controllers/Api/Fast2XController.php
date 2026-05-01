@@ -92,4 +92,9 @@ class Fast2XController extends Controller
     {
         return response()->json($this->fast2x->pnlPayload($this->fast2x->getOrCreateConfig($workspace)));
     }
+
+    public function chart(string $workspace): JsonResponse
+    {
+        return response()->json($this->fast2x->chartPayload($this->fast2x->getOrCreateConfig($workspace)));
+    }
 }
