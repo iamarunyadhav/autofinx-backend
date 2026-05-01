@@ -30,6 +30,7 @@ use App\Console\Commands\TradingHealthCheckCommand;
 use App\Console\Commands\RatioBotsEvaluateCommand;
 use App\Console\Commands\Fast2XRunCommand;
 use App\Console\Commands\FutureTradeBotRunCommand;
+use App\Console\Commands\FutureTradeScanAllCommand;
 use App\Jobs\DetectStaleFeedsJob;
 use App\Jobs\DispatchAiDecisionCycleJob;
 use App\Jobs\ExpireAiDecisionsJob;
@@ -97,6 +98,12 @@ class Kernel extends ConsoleKernel
             ->withoutOverlapping()
             ->runInBackground()
             ->description('Evaluate stateful anchor-based ratio bots');
+
+        $schedule->command('future-trade:scan-all')
+            ->everySecond()
+            ->withoutOverlapping()
+            ->runInBackground()
+            ->description('Scan all enabled FutureTrade bot workspaces');
 
         $schedule->command('ratio-bots:reconcile')
             ->everyMinute()
@@ -181,6 +188,7 @@ class Kernel extends ConsoleKernel
         RatioBotsEvaluateCommand::class,
         Fast2XRunCommand::class,
         FutureTradeBotRunCommand::class,
+        FutureTradeScanAllCommand::class,
     ];
 
     private function markRunStart(string $command): void
