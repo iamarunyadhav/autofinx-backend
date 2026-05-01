@@ -155,22 +155,42 @@ class FutureTradeBotService
             return ['signals' => [], 'bestSignal' => null];
         }
 
-        $chart = $this->appendChartPoint($state, $best['symbol'], (float) $best['price']);
-        $state->update([
-            'connection_status' => 'Connected',
-            'current_symbol' => $best['symbol'],
-            'current_signal' => $best['signal'],
-            'current_price' => $best['price'],
-            'confidence' => $best['confidence'],
-            'last_scan_at' => now(),
-            'scanner_snapshot' => array_slice($signals, 0, 12),
-            'chart_points' => $chart,
-        ]);
+        $state->refresh();
+        $inPosition = (float) $state->quantity > 0;
 
-        if ((float) $state->quantity > 0) {
-            $this->manageOpenPosition($config->fresh('state'), (float) $best['price']);
-        } elseif ($allowPaperExecution && $config->enabled && ($settings['autoExecutePaperSignals'] ?? true)) {
-            $this->maybeEnterPaperPosition($config->fresh('state'), $best);
+        if ($inPosition) {
+            // When holding a position, track the price of THAT symbol, not the best signal's symbol
+            $positionSymbol = (string) $state->current_symbol;
+            $positionTicker = collect($market)->first(fn ($row) => (string) ($row['symbol'] ?? '') === $positionSymbol);
+            $positionPrice = $positionTicker ? (float) ($positionTicker['lastPrice'] ?? $positionTicker['price'] ?? 0) : 0;
+
+            if ($positionPrice > 0) {
+                $chart = $this->appendChartPoint($state, $positionSymbol, $positionPrice);
+                $state->update([
+                    'connection_status' => 'Connected',
+                    'current_price' => $positionPrice,
+                    'last_scan_at' => now(),
+                    'scanner_snapshot' => array_slice($signals, 0, 12),
+                    'chart_points' => $chart,
+                ]);
+                $this->manageOpenPosition($config->fresh('state'), $positionPrice);
+            }
+        } else {
+            $chart = $this->appendChartPoint($state, $best['symbol'], (float) $best['price']);
+            $state->update([
+                'connection_status' => 'Connected',
+                'current_symbol' => $best['symbol'],
+                'current_signal' => $best['signal'],
+                'current_price' => $best['price'],
+                'confidence' => $best['confidence'],
+                'last_scan_at' => now(),
+                'scanner_snapshot' => array_slice($signals, 0, 12),
+                'chart_points' => $chart,
+            ]);
+
+            if ($allowPaperExecution && $config->enabled && ($settings['autoExecutePaperSignals'] ?? true)) {
+                $this->maybeEnterPaperPosition($config->fresh('state'), $best);
+            }
         }
 
         return ['signals' => array_slice($signals, 0, 20), 'bestSignal' => $best];
@@ -265,6 +285,9 @@ class FutureTradeBotService
     {
         $state = $this->state($config);
         $settings = $config->mergedSettings();
+        if ((string) $state->state === 'IN_POSITION' || (float) $state->quantity > 0) {
+            return;
+        }
         if (($settings['emergencyStop'] ?? false) || $signal['signal'] === 'WAIT') {
             return;
         }
