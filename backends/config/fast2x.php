@@ -5,6 +5,8 @@ return [
     'enable_live_trading' => env('ENABLE_LIVE_TRADING', env('LIVE_TRADING_ENABLED', false)),
     'default_symbol' => env('FAST2X_DEFAULT_SYMBOL', 'BTCUSDT'),
     'max_latency_ms' => (int) env('FAST2X_MAX_LATENCY_MS', 500),
+    'polling_interval_ms' => (int) env('FAST2X_POLLING_INTERVAL_MS', 1000),
+    'websocket_retry_seconds' => (int) env('FAST2X_WEBSOCKET_RETRY_SECONDS', 30),
     'max_trades_per_day' => (int) env('FAST2X_MAX_TRADES_PER_DAY', 50),
     'max_daily_loss_percent' => (float) env('FAST2X_MAX_DAILY_LOSS_PERCENT', 3),
     'defaults' => [

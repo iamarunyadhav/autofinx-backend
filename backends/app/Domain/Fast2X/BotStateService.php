@@ -2,12 +2,16 @@
 
 namespace App\Domain\Fast2X;
 
+use App\Domain\Portfolio\LivePortfolioGuardService;
 use App\Models\Fast2XConfig;
 use App\Models\Fast2XState;
 
 class BotStateService
 {
-    public function __construct(private readonly DecisionLogService $logs) {}
+    public function __construct(
+        private readonly DecisionLogService $logs,
+        private readonly LivePortfolioGuardService $liveGuard,
+    ) {}
 
     public function getOrCreate(Fast2XConfig $config): Fast2XState
     {
@@ -21,6 +25,20 @@ class BotStateService
 
     public function start(Fast2XConfig $config): Fast2XState
     {
+        if ($config->enable_live_trading) {
+            $guard = $this->liveGuard->canActivate($config->workspace_id, 'fast2x');
+            if (! $guard['allowed']) {
+                $settings = $config->mergedSettings();
+                $settings['paperTrading'] = true;
+                $config->update([
+                    'paper_trading' => true,
+                    'enable_live_trading' => false,
+                    'settings' => $settings,
+                ]);
+                $this->logs->log($config->fresh('state'), 'LIVE_GUARD_BLOCKED', ['reason' => $guard['reason']]);
+            }
+        }
+
         $state = $this->getOrCreate($config);
         $state->update([
             'state' => Fast2XState::WAITING_FOR_SIGNAL,

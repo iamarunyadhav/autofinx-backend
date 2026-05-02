@@ -2,6 +2,7 @@
 
 namespace App\Domain\Fast2X;
 
+use App\Domain\Portfolio\LivePortfolioGuardService;
 use App\Models\Fast2XConfig;
 use App\Models\Fast2XState;
 use Throwable;
@@ -20,6 +21,7 @@ class Fast2XService
         private readonly RiskGuardService $risk,
         private readonly OrderExecutionService $orders,
         private readonly DecisionLogService $logs,
+        private readonly LivePortfolioGuardService $liveGuard,
     ) {}
 
     public function getOrCreateConfig(string $workspaceId): Fast2XConfig
@@ -53,6 +55,14 @@ class Fast2XService
             $liveAllowed = false;
         }
 
+        if (! $paperTrading && $liveAllowed) {
+            $guard = $this->liveGuard->canActivate($config->workspace_id, 'fast2x');
+            if (! $guard['allowed']) {
+                $paperTrading = true;
+                $liveAllowed = false;
+            }
+        }
+
         $config->update([
             'symbol' => strtoupper((string) ($settings['symbol'] ?? $config->symbol)),
             'paper_trading' => $paperTrading,
@@ -61,6 +71,10 @@ class Fast2XService
             'algorithm_markdown' => $payload['algorithm_markdown'] ?? $config->algorithm_markdown,
             'settings' => array_merge($settings, ['paperTrading' => $paperTrading]),
         ]);
+
+        if (! $paperTrading && ! $liveAllowed) {
+            $this->logs->log($config->fresh('state'), 'LIVE_GUARD_BLOCKED', ['reason' => 'Another live bot is already active for this workspace/account.']);
+        }
 
         $this->logs->log($config->fresh('state'), 'CONFIG_UPDATED', ['reason' => 'Operator updated Fast2X configuration']);
         return $config->fresh('state');
@@ -253,6 +267,7 @@ class Fast2XService
             'dynamicThresholds' => $state->runtime_meta['dynamic_thresholds'] ?? null,
             'indicatorConfirmation' => $state->runtime_meta['indicator_confirmation'] ?? null,
             'warning' => $config->paper_trading ? null : 'Live trading is risky and requires explicit environment enablement.',
+            'liveGuard' => $this->liveGuard->canActivate($config->workspace_id, 'fast2x'),
             'settings' => $settings,
         ];
     }

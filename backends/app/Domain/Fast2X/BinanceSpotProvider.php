@@ -12,6 +12,8 @@ class BinanceSpotProvider implements ExchangeProviderInterface
     private ?SimpleWebSocketClient $client = null;
     private $callback = null;
     private bool $connected = false;
+    private string $feedMode = 'websocket';
+    private ?string $lastConnectionError = null;
 
     public function connectWebSocket(string $symbol): void
     {
@@ -20,6 +22,8 @@ class BinanceSpotProvider implements ExchangeProviderInterface
         $this->client = new SimpleWebSocketClient();
         $this->client->connect($base . '/ws/' . $stream);
         $this->connected = true;
+        $this->feedMode = 'websocket';
+        $this->lastConnectionError = null;
     }
 
     public function disconnectWebSocket(): void
@@ -67,6 +71,28 @@ class BinanceSpotProvider implements ExchangeProviderInterface
         }
 
         return $tick;
+    }
+
+    public function usePollingFallback(?string $reason = null): void
+    {
+        $this->disconnectWebSocket();
+        $this->feedMode = 'polling';
+        $this->lastConnectionError = $reason;
+    }
+
+    public function isWebSocketConnected(): bool
+    {
+        return $this->connected && $this->client !== null;
+    }
+
+    public function feedMode(): string
+    {
+        return $this->feedMode;
+    }
+
+    public function lastConnectionError(): ?string
+    {
+        return $this->lastConnectionError;
     }
 
     public function latestTicker(string $symbol): array

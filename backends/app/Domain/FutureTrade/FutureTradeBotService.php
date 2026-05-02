@@ -3,6 +3,7 @@
 namespace App\Domain\FutureTrade;
 
 use App\Domain\Exchange\BinanceFuturesClient;
+use App\Domain\Portfolio\LivePortfolioGuardService;
 use App\Models\FutureTradeBotConfig;
 use App\Models\FutureTradeBotState;
 use Illuminate\Support\Facades\Http;
@@ -11,6 +12,10 @@ use Throwable;
 
 class FutureTradeBotService
 {
+    public function __construct(
+        private readonly LivePortfolioGuardService $liveGuard,
+    ) {}
+
     public function getOrCreateConfig(string $workspaceId): FutureTradeBotConfig
     {
         $config = FutureTradeBotConfig::firstOrCreate(
@@ -39,6 +44,14 @@ class FutureTradeBotService
         $settings = array_merge($config->mergedSettings(), (array) ($payload['settings'] ?? []));
         $liveRequested = (bool) ($settings['liveTrading'] ?? false);
         $liveAllowed = $liveRequested && (bool) config('future_trade.enable_live_trading');
+
+        if ($liveAllowed) {
+            $guard = $this->liveGuard->canActivate($config->workspace_id, 'future_trade');
+            if (! $guard['allowed']) {
+                $liveAllowed = false;
+            }
+        }
+
         $settings['liveTrading'] = $liveAllowed;
         $settings['paperTrading'] = ! $liveAllowed;
         $settings['forceTestnet'] = array_key_exists('forceTestnet', $settings)
@@ -52,6 +65,10 @@ class FutureTradeBotService
             'algorithm_notes' => $payload['algorithm_notes'] ?? $config->algorithm_notes,
         ]);
 
+        if ($liveRequested && ! $liveAllowed) {
+            $this->log($config->fresh('state'), 'LIVE_GUARD_BLOCKED', null, null, 0, 'Another live bot is already active for this workspace/account. Future Trade stays in paper mode.');
+        }
+
         $this->log($config->fresh('state'), 'CONFIG_UPDATED', null, null, 0, $liveAllowed ? 'Future Trade Bot config saved. Live futures testnet enabled.' : 'Future Trade Bot config saved. Paper trading active.');
         return $config->fresh('state');
     }
@@ -60,7 +77,12 @@ class FutureTradeBotService
     {
         $config->update(['enabled' => true, 'paper_trading' => true, 'enable_live_trading' => false]);
         if ((bool) ($config->mergedSettings()['liveTrading'] ?? false) && (bool) config('future_trade.enable_live_trading')) {
-            $config->update(['paper_trading' => false, 'enable_live_trading' => true]);
+            $guard = $this->liveGuard->canActivate($config->workspace_id, 'future_trade');
+            if ($guard['allowed']) {
+                $config->update(['paper_trading' => false, 'enable_live_trading' => true]);
+            } else {
+                $this->log($config->fresh('state'), 'LIVE_GUARD_BLOCKED', null, null, 0, $guard['reason']);
+            }
         }
         $state = $this->state($config);
         $state->update([
@@ -235,6 +257,7 @@ class FutureTradeBotService
             'paperTrading' => ! $this->isLiveMode($config),
             'liveTrading' => $this->isLiveMode($config),
             'liveTradingEnvEnabled' => (bool) config('future_trade.enable_live_trading'),
+            'liveGuard' => $this->liveGuard->canActivate($config->workspace_id, 'future_trade'),
         ];
     }
 
@@ -392,6 +415,12 @@ class FutureTradeBotService
 
     private function openLivePosition(FutureTradeBotConfig $config, array $signal): void
     {
+        $guard = $this->liveGuard->canActivate($config->workspace_id, 'future_trade');
+        if (! $guard['allowed']) {
+            $this->log($config->fresh('state'), 'LIVE_GUARD_BLOCKED', (string) $signal['symbol'], (string) $signal['signal'], (float) $signal['confidence'], $guard['reason']);
+            return;
+        }
+
         $settings = $config->mergedSettings();
         $client = $this->liveClient($settings);
         $symbol = strtoupper((string) $signal['symbol']);
