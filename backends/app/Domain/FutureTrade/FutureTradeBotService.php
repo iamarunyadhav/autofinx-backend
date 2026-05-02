@@ -230,6 +230,7 @@ class FutureTradeBotService
         $wins = (int) $state->wins;
         $losses = (int) $state->losses;
         $total = max(1, $wins + $losses);
+        $accountSummary = $this->accountSummary($config);
 
         return [
             'botName' => 'Future Trade Bot',
@@ -258,6 +259,14 @@ class FutureTradeBotService
             'liveTrading' => $this->isLiveMode($config),
             'liveTradingEnvEnabled' => (bool) config('future_trade.enable_live_trading'),
             'liveGuard' => $this->liveGuard->canActivate($config->workspace_id, 'future_trade'),
+            'walletBalance' => $accountSummary['walletBalance'],
+            'availableBalance' => $accountSummary['availableBalance'],
+            'marginBalance' => $accountSummary['marginBalance'],
+            'botProfit' => $accountSummary['botProfit'],
+            'botLoss' => $accountSummary['botLoss'],
+            'totalProfit' => $accountSummary['totalProfit'],
+            'balanceSource' => $accountSummary['balanceSource'],
+            'accountAsset' => $accountSummary['accountAsset'],
         ];
     }
 
@@ -694,6 +703,48 @@ class FutureTradeBotService
     private function state(FutureTradeBotConfig $config): FutureTradeBotState
     {
         return $config->state ?: $config->state()->create();
+    }
+
+    private function accountSummary(FutureTradeBotConfig $config): array
+    {
+        $trades = $config->trades()
+            ->whereNotNull('net_pnl')
+            ->get(['net_pnl']);
+
+        $botProfit = (float) $trades
+            ->filter(fn ($trade) => (float) $trade->net_pnl > 0)
+            ->sum(fn ($trade) => (float) $trade->net_pnl);
+
+        $botLoss = (float) $trades
+            ->filter(fn ($trade) => (float) $trade->net_pnl < 0)
+            ->sum(fn ($trade) => abs((float) $trade->net_pnl));
+
+        $summary = [
+            'walletBalance' => null,
+            'availableBalance' => null,
+            'marginBalance' => null,
+            'botProfit' => $botProfit,
+            'botLoss' => $botLoss,
+            'totalProfit' => $botProfit - $botLoss,
+            'balanceSource' => $this->isLiveMode($config) ? 'BINANCE_FUTURES' : 'PAPER_LEDGER',
+            'accountAsset' => 'USDT',
+        ];
+
+        if (! $this->isLiveMode($config)) {
+            return $summary;
+        }
+
+        try {
+            $account = $this->liveClient($config->mergedSettings())->fetchAccountInfo();
+            $summary['walletBalance'] = isset($account['totalWalletBalance']) ? (float) $account['totalWalletBalance'] : null;
+            $summary['availableBalance'] = isset($account['availableBalance']) ? (float) $account['availableBalance'] : null;
+            $summary['marginBalance'] = isset($account['totalMarginBalance']) ? (float) $account['totalMarginBalance'] : null;
+        } catch (Throwable $e) {
+            $summary['balanceSource'] = 'BINANCE_UNAVAILABLE';
+            $this->log($config->fresh('state'), 'BALANCE_SYNC_FAILED', $config->state?->current_symbol, null, 0, $e->getMessage());
+        }
+
+        return $summary;
     }
 
     private function isLiveMode(FutureTradeBotConfig $config): bool
