@@ -854,8 +854,11 @@ class FutureTradeBotService
         $range = (float) ($best['rangePercent'] ?? 0);
         $choppy = ($range > 7.5 && abs($priceChangePct) < 0.35) || ($volatility > 0.18 && abs($priceChangePct) < 0.18);
         $trendStrength = $this->clamp((abs($priceChangePct) / 1.2) + ($agreement * 0.35) + min(0.25, $gap * 2), 0, 1);
-        $stateConfig = $state->config;
-        $lastTrade = $stateConfig ? $stateConfig->trades()->where('status', 'FILLED')->orderByDesc('created_at')->first() : null;
+        $stateSignal = (string) ($state->current_signal ?? '');
+        $stateExitReasons = ['TAKE_PROFIT_HIT', 'TRAILING_PROFIT_HIT', 'STOP_LOSS_HIT', 'LOSS_ROLLBACK_TRIGGERED'];
+        $stateReason = in_array($stateSignal, $stateExitReasons, true) ? $stateSignal : null;
+        $stateConfig = $state->relationLoaded('config') ? $state->getRelation('config') : null;
+        $lastTrade = (! $stateReason && $stateConfig) ? $stateConfig->trades()->where('status', 'FILLED')->orderByDesc('created_at')->first() : null;
         $wins = (int) $state->wins;
         $losses = (int) $state->losses;
         $winRate = ($wins + $losses) > 0 ? round(($wins / ($wins + $losses)) * 100, 2) : 0.0;
@@ -871,7 +874,7 @@ class FutureTradeBotService
             'trendStrength' => round($trendStrength, 4),
             'choppy' => $choppy,
             'bestConfidence' => round($bestConfidence, 4),
-            'lastTradeReason' => $lastTrade?->reason,
+            'lastTradeReason' => $stateReason ?: $lastTrade?->reason,
             'winRate' => $winRate,
         ];
     }
