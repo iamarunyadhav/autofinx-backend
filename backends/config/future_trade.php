@@ -41,6 +41,12 @@ return [
         // Longer cooldown prevents chasing failed trades
         'cooldownSeconds' => 60,
         'scanIntervalSeconds' => 3,
+        'confidenceMode' => 'fixed',
+        'dynamicLookbackMinutes' => 10,
+        'dynamicMinConfidenceFloor' => 0.68,
+        'dynamicMinConfidenceCeiling' => 0.88,
+        'dynamicReentryBuffer' => 0.02,
+        'dynamicSuggestionEnabled' => true,
         'autoExecutePaperSignals' => true,
         'avoidChoppyMarket' => true,
         'emergencyStop' => false,

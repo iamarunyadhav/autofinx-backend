@@ -112,7 +112,10 @@ class FutureTradeBotService
 
     public function emergencyStop(FutureTradeBotConfig $config): FutureTradeBotState
     {
+        $state = $this->state($config);
         $settings = $config->mergedSettings();
+        $dynamic = $this->dynamicDecision($config, $state, (array) ($state->scanner_snapshot ?? []), $signal, $settings);
+        $settings = $dynamic['settings'];
         $settings['emergencyStop'] = true;
         if ((float) ($this->state($config)->quantity ?? 0) > 0 && $config->enable_live_trading) {
             try {
@@ -122,7 +125,6 @@ class FutureTradeBotService
             }
         }
         $config->update(['enabled' => false, 'settings' => $settings]);
-        $state = $this->state($config);
         $state->update([
             'status' => 'Stopped',
             'state' => 'EMERGENCY_STOP',
@@ -177,6 +179,11 @@ class FutureTradeBotService
             return ['signals' => [], 'bestSignal' => null];
         }
 
+        $dynamic = $this->dynamicDecision($config, $state, $signals, $best, $settings);
+        $settings = $dynamic['settings'];
+        $best['effectiveMinConfidence'] = $dynamic['effectiveMinConfidence'];
+        $best['dynamicMode'] = $dynamic['mode'];
+
         $state->refresh();
         $inPosition = (float) $state->quantity > 0;
 
@@ -187,7 +194,7 @@ class FutureTradeBotService
             $positionPrice = $positionTicker ? (float) ($positionTicker['lastPrice'] ?? $positionTicker['price'] ?? 0) : 0;
 
             if ($positionPrice > 0) {
-                $chart = $this->appendChartPoint($state, $positionSymbol, $positionPrice);
+                $chart = $this->appendChartPoint($state, $positionSymbol, $positionPrice, $dynamic['effectiveMinConfidence'], (float) $state->confidence);
                 $state->update([
                     'connection_status' => 'Connected',
                     'current_price' => $positionPrice,
@@ -198,7 +205,7 @@ class FutureTradeBotService
                 $this->manageOpenPosition($config->fresh('state'), $positionPrice);
             }
         } else {
-            $chart = $this->appendChartPoint($state, $best['symbol'], (float) $best['price']);
+            $chart = $this->appendChartPoint($state, $best['symbol'], (float) $best['price'], $dynamic['effectiveMinConfidence'], (float) $best['confidence']);
             $state->update([
                 'connection_status' => 'Connected',
                 'current_symbol' => $best['symbol'],
@@ -227,6 +234,7 @@ class FutureTradeBotService
 
         $state = $this->state($config);
         $settings = $config->mergedSettings();
+        $dynamic = $this->dynamicDecision($config, $state, (array) ($state->scanner_snapshot ?? []), null, $settings);
         $wins = (int) $state->wins;
         $losses = (int) $state->losses;
         $total = max(1, $wins + $losses);
@@ -255,6 +263,7 @@ class FutureTradeBotService
             'tradeCountToday' => (int) $state->trade_count_today,
             'lastScanAt' => optional($state->last_scan_at)->toIso8601String(),
             'settings' => $settings,
+            'dynamic' => $dynamic['public'],
             'paperTrading' => ! $this->isLiveMode($config),
             'liveTrading' => $this->isLiveMode($config),
             'liveTradingEnvEnabled' => (bool) config('future_trade.enable_live_trading'),
@@ -276,6 +285,8 @@ class FutureTradeBotService
         $config = $config->fresh('state');
         $state = $this->state($config);
         $settings = $config->mergedSettings();
+        $dynamic = $this->dynamicDecision($config, $state, $scan['signals'], $scan['bestSignal'], $settings);
+        $effectiveSettings = $dynamic['settings'];
         $entry = (float) ($state->entry_price ?? 0);
         $peak = (float) ($state->peak_price ?? 0);
 
@@ -286,20 +297,22 @@ class FutureTradeBotService
             'chart' => $state->chart_points ?? [],
             'levels' => [
                 'entry' => $entry ?: null,
-                'stopLoss' => $entry ? $this->stopLossPrice($entry, (string) $state->position_side, $settings) : null,
-                'takeProfit' => $entry ? $this->takeProfitPrice($entry, (string) $state->position_side, $settings) : null,
-                'trailing' => $entry && $peak ? $this->trailingPrice($peak, (string) $state->position_side, $settings) : null,
-                'peak' => $peak ?: null,
-                'bottom' => (float) ($state->bottom_price ?? 0) ?: null,
-            ],
+	                'stopLoss' => $entry ? $this->stopLossPrice($entry, (string) $state->position_side, $effectiveSettings) : null,
+	                'takeProfit' => $entry ? $this->takeProfitPrice($entry, (string) $state->position_side, $effectiveSettings) : null,
+	                'trailing' => $entry && $peak ? $this->trailingPrice($peak, (string) $state->position_side, $effectiveSettings) : null,
+	                'peak' => $peak ?: null,
+	                'bottom' => (float) ($state->bottom_price ?? 0) ?: null,
+	                'effectiveMinConfidence' => $dynamic['effectiveMinConfidence'],
+	            ],
             'orderbook' => $this->syntheticOrderbook((float) ($state->current_price ?? 0)),
             'risk' => [
                 'lossPrevention' => 'Stop loss, rollback, trailing profit, cooldown, max daily loss and max trades are active in paper mode.',
                 'paperTrading' => ! $this->isLiveMode($config),
-                'liveTradingBlocked' => ! (bool) config('future_trade.enable_live_trading'),
-            ],
-        ];
-    }
+	                'liveTradingBlocked' => ! (bool) config('future_trade.enable_live_trading'),
+	            ],
+	            'dynamic' => $dynamic['public'],
+	        ];
+	    }
 
     public function configPayload(FutureTradeBotConfig $config): array
     {
@@ -318,6 +331,8 @@ class FutureTradeBotService
     {
         $state = $this->state($config);
         $settings = $config->mergedSettings();
+        $dynamic = $this->dynamicDecision($config, $state, (array) ($state->scanner_snapshot ?? []), $signal, $settings);
+        $settings = $dynamic['settings'];
         if ((string) $state->state === 'IN_POSITION' || (float) $state->quantity > 0) {
             return;
         }
@@ -325,7 +340,7 @@ class FutureTradeBotService
             return;
         }
         if ((float) $signal['confidence'] < (float) ($settings['minConfidence'] ?? 0.68)) {
-            $this->log($config, 'SIGNAL_SKIPPED', $signal['symbol'], $signal['signal'], $signal['confidence'], 'Confidence below threshold.');
+            $this->log($config, 'SIGNAL_SKIPPED', $signal['symbol'], $signal['signal'], $signal['confidence'], 'Confidence below dynamic threshold: needs ' . round((float) $settings['minConfidence'], 4));
             return;
         }
         if ($state->cooldown_until && $state->cooldown_until->isFuture()) {
@@ -370,7 +385,7 @@ class FutureTradeBotService
             'reason' => 'AUTO_' . $signal['signal'] . '_SIGNAL',
             'mode' => 'PAPER',
             'status' => 'OPEN',
-            'meta' => ['signal' => $signal, 'idempotency_key' => (string) Str::uuid()],
+            'meta' => ['signal' => $signal, 'dynamic' => $dynamic['public'], 'idempotency_key' => (string) Str::uuid()],
         ]);
         $this->log($config->fresh('state'), $signal['signal'] . '_EXECUTED', $signal['symbol'], $signal['signal'], $signal['confidence'], 'Paper futures position opened.');
     }
@@ -379,6 +394,8 @@ class FutureTradeBotService
     {
         $state = $this->state($config);
         $settings = $config->mergedSettings();
+        $dynamic = $this->dynamicDecision($config, $state, (array) ($state->scanner_snapshot ?? []), null, $settings);
+        $settings = $dynamic['settings'];
         $entry = (float) $state->entry_price;
         $qty = (float) $state->quantity;
         $side = (string) $state->position_side;
@@ -503,7 +520,7 @@ class FutureTradeBotService
             'reason' => 'LIVE_' . $signal['signal'] . '_SIGNAL',
             'mode' => $settings['forceTestnet'] ?? true ? 'LIVE_TESTNET' : 'LIVE',
             'status' => 'OPEN',
-            'meta' => ['entry_order' => $response, 'stop_order' => $stopResponse, 'take_profit_order' => $takeResponse, 'signal' => $signal],
+            'meta' => ['entry_order' => $response, 'stop_order' => $stopResponse, 'take_profit_order' => $takeResponse, 'signal' => $signal, 'dynamic' => $dynamic['public']],
         ]);
         $this->log($config->fresh('state'), 'LIVE_' . $signal['signal'] . '_EXECUTED', $symbol, $signal['signal'], (float) $signal['confidence'], 'Live futures entry submitted with protective reduce-only exits.');
     }
@@ -714,6 +731,173 @@ class FutureTradeBotService
         }
     }
 
+    private function dynamicDecision(FutureTradeBotConfig $config, FutureTradeBotState $state, array $signals, ?array $best, array $settings): array
+    {
+        $mode = strtolower((string) ($settings['confidenceMode'] ?? 'fixed'));
+        if (! in_array($mode, ['fixed', 'semi_dynamic', 'fully_dynamic'], true)) {
+            $mode = 'fixed';
+        }
+
+        $base = (float) ($settings['minConfidence'] ?? 0.72);
+        $floor = (float) ($settings['dynamicMinConfidenceFloor'] ?? 0.68);
+        $ceiling = (float) ($settings['dynamicMinConfidenceCeiling'] ?? 0.88);
+        if ($floor > $ceiling) {
+            [$floor, $ceiling] = [$ceiling, $floor];
+        }
+
+        $analysis = $this->trendAnalysis($state, $signals, $best, $settings);
+        $effective = $base;
+        $adjustments = [];
+        $next = $settings;
+
+        if ($mode !== 'fixed') {
+            if ($analysis['choppy']) {
+                $effective += $mode === 'fully_dynamic' ? 0.06 : 0.04;
+                $next['takeProfitPercent'] = max(0.05, (float) ($settings['takeProfitPercent'] ?? 0.45) * ($mode === 'fully_dynamic' ? 0.82 : 0.90));
+                $next['trailingTakeProfitPercent'] = max(0.03, (float) ($settings['trailingTakeProfitPercent'] ?? 0.18) * 0.85);
+                $adjustments[] = 'Choppy market: require stronger confidence and take faster profit.';
+            } elseif ($analysis['trendStrength'] >= 0.68 && $analysis['directionAgreement'] >= 0.58) {
+                $effective -= $mode === 'fully_dynamic' ? 0.035 : 0.02;
+                $next['takeProfitPercent'] = (float) ($settings['takeProfitPercent'] ?? 0.45) * ($mode === 'fully_dynamic' ? 1.20 : 1.10);
+                $next['trailingTakeProfitPercent'] = (float) ($settings['trailingTakeProfitPercent'] ?? 0.18) * ($mode === 'fully_dynamic' ? 1.08 : 1.03);
+                $adjustments[] = 'Strong aligned trend: allow earlier entry and let target breathe.';
+            } else {
+                $effective += $mode === 'fully_dynamic' ? 0.015 : 0.01;
+                $adjustments[] = 'Mixed signal: keep entry slightly stricter.';
+            }
+
+            if ($analysis['confidenceGap'] < 0.025) {
+                $effective += $mode === 'fully_dynamic' ? 0.025 : 0.015;
+                $adjustments[] = 'Top signals are close together: avoid weak ranking edge.';
+            }
+
+            if ($analysis['lastTradeReason'] && str_contains($analysis['lastTradeReason'], 'LOSS')) {
+                $effective += $mode === 'fully_dynamic' ? 0.045 : 0.03;
+                $next['cooldownSeconds'] = max((int) ($settings['cooldownSeconds'] ?? 60), $mode === 'fully_dynamic' ? 120 : 90);
+                $adjustments[] = 'Recent loss: raise threshold and extend cooldown.';
+            } elseif ($analysis['lastTradeReason'] && str_contains($analysis['lastTradeReason'], 'TAKE_PROFIT')) {
+                $effective += (float) ($settings['dynamicReentryBuffer'] ?? 0.02);
+                $adjustments[] = 'Recent take profit: require a re-entry buffer to avoid chasing.';
+            }
+
+            if ($mode === 'fully_dynamic') {
+                $winRate = $analysis['winRate'];
+                if ($winRate > 0 && $winRate < 45) {
+                    $effective += 0.03;
+                    $next['tradeAmountUsdt'] = max(5, (float) ($settings['tradeAmountUsdt'] ?? 25) * 0.75);
+                    $adjustments[] = 'Low current win rate: reduce size and demand cleaner entries.';
+                } elseif ($winRate >= 65 && $analysis['trendStrength'] >= 0.55) {
+                    $effective -= 0.015;
+                    $adjustments[] = 'Good win rate with trend support: modestly loosen entry.';
+                }
+            }
+        } else {
+            $adjustments[] = 'Fixed mode: using the manual minConfidence without automatic adjustment.';
+        }
+
+        $effective = $this->clamp($effective, $floor, $ceiling);
+        $next['minConfidence'] = $effective;
+        $next['takeProfitPercent'] = $this->clamp((float) ($next['takeProfitPercent'] ?? $settings['takeProfitPercent'] ?? 0.45), 0.05, max(0.06, (float) ($settings['takeProfitPercent'] ?? 0.45) * 1.6));
+        $next['stopLossPercent'] = $this->clamp((float) ($next['stopLossPercent'] ?? $settings['stopLossPercent'] ?? 0.25), 0.05, max(0.06, (float) ($settings['stopLossPercent'] ?? 0.25) * 1.35));
+        $next['trailingTakeProfitPercent'] = $this->clamp((float) ($next['trailingTakeProfitPercent'] ?? $settings['trailingTakeProfitPercent'] ?? 0.18), 0.03, max(0.04, (float) ($settings['trailingTakeProfitPercent'] ?? 0.18) * 1.4));
+
+        $suggestion = $this->dynamicSuggestionText($mode, $analysis, $base, $next, $adjustments);
+
+        return [
+            'mode' => $mode,
+            'settings' => $next,
+            'effectiveMinConfidence' => round($effective, 4),
+            'public' => [
+                'mode' => $mode,
+                'baseMinConfidence' => round($base, 4),
+                'effectiveMinConfidence' => round($effective, 4),
+                'recommended' => [
+                    'minConfidence' => round($effective, 4),
+                    'takeProfitPercent' => round((float) ($next['takeProfitPercent'] ?? 0), 4),
+                    'stopLossPercent' => round((float) ($next['stopLossPercent'] ?? 0), 4),
+                    'trailingTakeProfitPercent' => round((float) ($next['trailingTakeProfitPercent'] ?? 0), 4),
+                    'cooldownSeconds' => (int) ($next['cooldownSeconds'] ?? $settings['cooldownSeconds'] ?? 60),
+                    'tradeAmountUsdt' => round((float) ($next['tradeAmountUsdt'] ?? $settings['tradeAmountUsdt'] ?? 0), 4),
+                ],
+                'analysis' => $analysis,
+                'adjustments' => $adjustments,
+                'suggestion' => $suggestion,
+            ],
+        ];
+    }
+
+    private function trendAnalysis(FutureTradeBotState $state, array $signals, ?array $best, array $settings): array
+    {
+        $scanInterval = max(1, (int) ($settings['scanIntervalSeconds'] ?? 3));
+        $lookbackMinutes = max(1, min(10, (int) ($settings['dynamicLookbackMinutes'] ?? 10)));
+        $limit = max(8, min(120, (int) ceil(($lookbackMinutes * 60) / $scanInterval)));
+        $points = array_slice((array) ($state->chart_points ?? []), -$limit);
+        $prices = array_values(array_filter(array_map(fn ($row) => (float) ($row['price'] ?? 0), $points), fn ($value) => $value > 0));
+        $first = $prices[0] ?? 0;
+        $last = $prices[count($prices) - 1] ?? 0;
+        $priceChangePct = $first > 0 ? (($last - $first) / $first) * 100 : 0.0;
+        $moves = [];
+        for ($i = 1; $i < count($prices); $i++) {
+            if ($prices[$i - 1] > 0) {
+                $moves[] = abs((($prices[$i] - $prices[$i - 1]) / $prices[$i - 1]) * 100);
+            }
+        }
+        $volatility = count($moves) ? array_sum($moves) / count($moves) : 0.0;
+        $direction = $priceChangePct >= 0 ? 'BUY' : 'SELL';
+        $usableSignals = array_values(array_filter($signals, fn ($signal) => isset($signal['signal']) && $signal['signal'] !== 'WAIT'));
+        $agreement = count($usableSignals)
+            ? count(array_filter($usableSignals, fn ($signal) => ($signal['signal'] ?? '') === ($best['signal'] ?? $direction))) / count($usableSignals)
+            : 0.0;
+        $bestConfidence = (float) ($best['confidence'] ?? ($signals[0]['confidence'] ?? 0));
+        $secondConfidence = (float) ($signals[1]['confidence'] ?? 0);
+        $gap = max(0.0, $bestConfidence - $secondConfidence);
+        $range = (float) ($best['rangePercent'] ?? 0);
+        $choppy = ($range > 7.5 && abs($priceChangePct) < 0.35) || ($volatility > 0.18 && abs($priceChangePct) < 0.18);
+        $trendStrength = $this->clamp((abs($priceChangePct) / 1.2) + ($agreement * 0.35) + min(0.25, $gap * 2), 0, 1);
+        $stateConfig = $state->config;
+        $lastTrade = $stateConfig ? $stateConfig->trades()->where('status', 'FILLED')->orderByDesc('created_at')->first() : null;
+        $wins = (int) $state->wins;
+        $losses = (int) $state->losses;
+        $winRate = ($wins + $losses) > 0 ? round(($wins / ($wins + $losses)) * 100, 2) : 0.0;
+
+        return [
+            'lookbackMinutes' => $lookbackMinutes,
+            'sampleCount' => count($prices),
+            'priceChangePercent' => round($priceChangePct, 4),
+            'volatilityPercent' => round($volatility, 4),
+            'direction' => $direction,
+            'directionAgreement' => round($agreement, 4),
+            'confidenceGap' => round($gap, 4),
+            'trendStrength' => round($trendStrength, 4),
+            'choppy' => $choppy,
+            'bestConfidence' => round($bestConfidence, 4),
+            'lastTradeReason' => $lastTrade?->reason,
+            'winRate' => $winRate,
+        ];
+    }
+
+    private function dynamicSuggestionText(string $mode, array $analysis, float $base, array $settings, array $adjustments): string
+    {
+        $modeLabel = str_replace('_', ' ', $mode);
+        $bias = $analysis['choppy'] ? 'market is choppy' : 'market bias is ' . $analysis['direction'];
+        $lines = [
+            sprintf('%s mode: %s over the last %d minute window.', ucfirst($modeLabel), $bias, (int) $analysis['lookbackMinutes']),
+            sprintf('Base minConfidence %.2f, effective %.2f, trend strength %.0f%%, agreement %.0f%%.', $base, (float) ($settings['minConfidence'] ?? $base), $analysis['trendStrength'] * 100, $analysis['directionAgreement'] * 100),
+            sprintf('Recommended values: TP %.2f%%, SL %.2f%%, trailing %.2f%%, cooldown %ds.', (float) ($settings['takeProfitPercent'] ?? 0), (float) ($settings['stopLossPercent'] ?? 0), (float) ($settings['trailingTakeProfitPercent'] ?? 0), (int) ($settings['cooldownSeconds'] ?? 0)),
+        ];
+
+        if ($adjustments) {
+            $lines[] = implode(' ', array_slice($adjustments, 0, 3));
+        }
+
+        return implode(' ', $lines);
+    }
+
+    private function clamp(float $value, float $min, float $max): float
+    {
+        return max($min, min($max, $value));
+    }
+
     private function syntheticOrderbook(float $price): array
     {
         if ($price <= 0) {
@@ -730,10 +914,17 @@ class FutureTradeBotService
         return ['bids' => $bids, 'asks' => $asks];
     }
 
-    private function appendChartPoint(FutureTradeBotState $state, string $symbol, float $price): array
+    private function appendChartPoint(FutureTradeBotState $state, string $symbol, float $price, ?float $effectiveMinConfidence = null, ?float $confidence = null): array
     {
         $points = (array) ($state->chart_points ?? []);
-        $points[] = ['time' => now()->format('H:i:s'), 'symbol' => $symbol, 'price' => $price, 'pnl' => (float) $state->unrealized_pnl_percent];
+        $points[] = [
+            'time' => now()->format('H:i:s'),
+            'symbol' => $symbol,
+            'price' => $price,
+            'pnl' => (float) $state->unrealized_pnl_percent,
+            'confidence' => $confidence,
+            'effectiveMinConfidence' => $effectiveMinConfidence,
+        ];
         return array_slice($points, -120);
     }
 
