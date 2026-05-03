@@ -350,18 +350,42 @@ class FutureTradeBotService
             return;
         }
         if ((float) $signal['confidence'] < (float) ($settings['minConfidence'] ?? 0.68)) {
-            $this->log($config, 'SIGNAL_SKIPPED', $signal['symbol'], $signal['signal'], $signal['confidence'], 'Confidence below dynamic threshold: needs ' . round((float) $settings['minConfidence'], 4));
+            $this->log(
+                $config,
+                'SIGNAL_SKIPPED',
+                $signal['symbol'],
+                $signal['signal'],
+                $signal['confidence'],
+                'Confidence below dynamic threshold: needs ' . round((float) $settings['minConfidence'], 4),
+                $this->runtimeContext($dynamic, ['status' => 'SKIPPED'])
+            );
             return;
         }
         if ($state->cooldown_until && $state->cooldown_until->isFuture()) {
             return;
         }
         if ((int) $state->trade_count_today >= (int) ($settings['maxTradesPerDay'] ?? 25)) {
-            $this->log($config, 'TRADE_BLOCKED', $signal['symbol'], $signal['signal'], $signal['confidence'], 'Max trades per day reached.');
+            $this->log(
+                $config,
+                'TRADE_BLOCKED',
+                $signal['symbol'],
+                $signal['signal'],
+                $signal['confidence'],
+                'Max trades per day reached.',
+                $this->runtimeContext($dynamic, ['status' => 'BLOCKED'])
+            );
             return;
         }
         if ((float) $state->daily_loss >= (float) ($settings['maxDailyLossPercent'] ?? 2)) {
-            $this->log($config, 'TRADE_BLOCKED', $signal['symbol'], $signal['signal'], $signal['confidence'], 'Daily loss guard active.');
+            $this->log(
+                $config,
+                'TRADE_BLOCKED',
+                $signal['symbol'],
+                $signal['signal'],
+                $signal['confidence'],
+                'Daily loss guard active.',
+                $this->runtimeContext($dynamic, ['status' => 'BLOCKED'])
+            );
             return;
         }
 
@@ -397,7 +421,15 @@ class FutureTradeBotService
             'status' => 'OPEN',
             'meta' => ['signal' => $signal, 'dynamic' => $dynamic['public'], 'algorithm_mode' => $dynamic['mode'], 'idempotency_key' => (string) Str::uuid()],
         ]);
-        $this->log($config->fresh('state'), $signal['signal'] . '_EXECUTED', $signal['symbol'], $signal['signal'], $signal['confidence'], 'Paper futures position opened.');
+        $this->log(
+            $config->fresh('state'),
+            $signal['signal'] . '_EXECUTED',
+            $signal['symbol'],
+            $signal['signal'],
+            $signal['confidence'],
+            'Paper futures position opened.',
+            $this->runtimeContext($dynamic, ['status' => 'OPEN', 'side' => $side, 'entryPrice' => $price, 'quantity' => $qty, 'mode' => 'PAPER'])
+        );
     }
 
     private function manageOpenPosition(FutureTradeBotConfig $config, float $price): void
@@ -459,6 +491,7 @@ class FutureTradeBotService
         }
 
         $settings = $config->mergedSettings();
+        $state = $this->state($config);
         $dynamic = $this->dynamicDecision($config, $state, (array) ($state->scanner_snapshot ?? []), null, $settings);
         $settings = $dynamic['settings'];
         $client = $this->liveClient($settings);
@@ -534,7 +567,15 @@ class FutureTradeBotService
             'status' => 'OPEN',
             'meta' => ['entry_order' => $response, 'stop_order' => $stopResponse, 'take_profit_order' => $takeResponse, 'signal' => $signal, 'dynamic' => $dynamic['public'], 'algorithm_mode' => $dynamic['mode']],
         ]);
-        $this->log($config->fresh('state'), 'LIVE_' . $signal['signal'] . '_EXECUTED', $symbol, $signal['signal'], (float) $signal['confidence'], 'Live futures entry submitted with protective reduce-only exits.');
+        $this->log(
+            $config->fresh('state'),
+            'LIVE_' . $signal['signal'] . '_EXECUTED',
+            $symbol,
+            $signal['signal'],
+            (float) $signal['confidence'],
+            'Live futures entry submitted with protective reduce-only exits.',
+            $this->runtimeContext($dynamic, ['status' => 'OPEN', 'side' => $positionSide, 'entryPrice' => $entry, 'quantity' => (float) $qty, 'mode' => $settings['forceTestnet'] ?? true ? 'LIVE_TESTNET' : 'LIVE'])
+        );
     }
 
     private function closeLivePosition(FutureTradeBotConfig $config, float $price, string $reason): void
@@ -545,6 +586,7 @@ class FutureTradeBotService
         }
 
         $settings = $config->mergedSettings();
+        $dynamic = $this->dynamicDecision($config, $state, (array) ($state->scanner_snapshot ?? []), null, $settings);
         $client = $this->liveClient($settings);
         $side = $state->position_side === 'LONG' ? 'SELL' : 'BUY';
         $filters = $this->symbolFilters($client->fetchExchangeInfo((string) $state->current_symbol), (string) $state->current_symbol);
@@ -596,7 +638,15 @@ class FutureTradeBotService
             'cooldown_until' => now()->addSeconds((int) ($settings['cooldownSeconds'] ?? 10)),
             'current_signal' => $reason,
         ]);
-        $this->log($config->fresh('state'), 'LIVE_' . $reason, $state->current_symbol, 'CLOSE', 1, 'Live futures reduce-only close submitted.');
+        $this->log(
+            $config->fresh('state'),
+            'LIVE_' . $reason,
+            $state->current_symbol,
+            'CLOSE',
+            1,
+            'Live futures reduce-only close submitted.',
+            $this->runtimeContext($dynamic, ['status' => $reason, 'side' => $state->position_side, 'entryPrice' => $entry, 'exitPrice' => $price, 'netPnl' => $net, 'mode' => $settings['forceTestnet'] ?? true ? 'LIVE_TESTNET' : 'LIVE'])
+        );
     }
 
     private function closePaperPosition(FutureTradeBotConfig $config, float $price, string $reason): void
@@ -643,7 +693,15 @@ class FutureTradeBotService
 	            'cooldown_until' => now()->addSeconds((int) ($dynamic['settings']['cooldownSeconds'] ?? $settings['cooldownSeconds'] ?? 10)),
             'current_signal' => $reason,
         ]);
-        $this->log($config->fresh('state'), $reason, $state->current_symbol, 'CLOSE_' . $side, 1, 'Paper futures position closed.');
+        $this->log(
+            $config->fresh('state'),
+            $reason,
+            $state->current_symbol,
+            'CLOSE_' . $side,
+            1,
+            'Paper futures position closed.',
+            $this->runtimeContext($dynamic, ['status' => $reason, 'side' => $side, 'entryPrice' => $entry, 'exitPrice' => $price, 'netPnl' => $net, 'mode' => 'PAPER'])
+        );
     }
 
     private function scoreTicker(array $ticker, array $settings): array
@@ -930,6 +988,27 @@ class FutureTradeBotService
         }
 
         return ['bids' => $bids, 'asks' => $asks];
+    }
+
+    private function runtimeContext(?array $dynamic, array $extra = []): array
+    {
+        $public = (array) ($dynamic['public'] ?? $dynamic ?? []);
+        $recommended = (array) ($public['recommended'] ?? []);
+        $analysis = (array) ($public['analysis'] ?? []);
+
+        return array_filter(array_merge([
+            'algorithmMode' => $public['mode'] ?? null,
+            'algorithmFlag' => isset($public['mode']) ? $this->algorithmFlag((string) $public['mode']) : null,
+            'effectiveMinConfidence' => $public['effectiveMinConfidence'] ?? null,
+            'activeTakeProfitPercent' => $recommended['takeProfitPercent'] ?? null,
+            'activeStopLossPercent' => $recommended['stopLossPercent'] ?? null,
+            'activeTrailingTakeProfitPercent' => $recommended['trailingTakeProfitPercent'] ?? null,
+            'activeCooldownSeconds' => $recommended['cooldownSeconds'] ?? null,
+            'activeTradeAmountUsdt' => $recommended['tradeAmountUsdt'] ?? null,
+            'trendStrength' => $analysis['trendStrength'] ?? null,
+            'directionAgreement' => $analysis['directionAgreement'] ?? null,
+            'choppy' => $analysis['choppy'] ?? null,
+        ], $extra), static fn ($value) => $value !== null);
     }
 
     private function appendChartPoint(FutureTradeBotState $state, string $symbol, float $price, ?array $dynamic = null, ?float $confidence = null, ?string $signal = null): array
