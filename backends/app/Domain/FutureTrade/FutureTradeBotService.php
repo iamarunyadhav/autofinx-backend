@@ -6,6 +6,7 @@ use App\Domain\Exchange\BinanceFuturesClient;
 use App\Domain\Portfolio\LivePortfolioGuardService;
 use App\Models\FutureTradeBotConfig;
 use App\Models\FutureTradeBotState;
+use Illuminate\Http\Client\Pool;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
 use Throwable;
@@ -713,8 +714,15 @@ class FutureTradeBotService
         $low        = (float) ($ticker['lowPrice'] ?? $price);
         $vwap       = (float) ($ticker['weightedAvgPrice'] ?? 0);
         $openPrice  = (float) ($ticker['openPrice'] ?? $price);
+        $sequence   = (array) ($ticker['sequence'] ?? []);
 
         $rangePct   = $price > 0 ? (($high - $low) / $price) * 100 : 0;
+        $sequenceNetChange = (float) ($sequence['netChangePercent'] ?? 0);
+        $sequenceBullishRatio = (float) ($sequence['bullishRatio'] ?? 0);
+        $sequenceBearishRatio = (float) ($sequence['bearishRatio'] ?? 0);
+        $sequenceConsistency = (float) ($sequence['consistency'] ?? 0);
+        $sequenceVolatility = (float) ($sequence['volatilityPercent'] ?? 0);
+        $sequenceImpulse = (string) ($sequence['impulse'] ?? 'NEUTRAL');
 
         // --- Signal Direction (replaces raw 24h change direction) ---
         // Use VWAP cross: price above VWAP = recent buying pressure (bullish)
@@ -725,6 +733,8 @@ class FutureTradeBotService
 
         // Short-term momentum: current price vs open price (intraday direction)
         $intradayChangePct = $openPrice > 0 ? (($price - $openPrice) / $openPrice) * 100 : $change;
+        $bullishVotes = 0.0;
+        $bearishVotes = 0.0;
 
         // Signal requires BOTH VWAP confirmation AND price in upper/lower zone
         if ($vwapBullish && $rangePosition >= 0.45 && $intradayChangePct >= 0) {
@@ -761,11 +771,103 @@ class FutureTradeBotService
         $choppy  = $rangePct > 9 && abs($change) < 1.5;
         $signal  = $choppy && ($settings['avoidChoppyMarket'] ?? true) ? 'WAIT' : $rawSignal;
 
+        if ($vwapBullish) {
+            $bullishVotes += 1.0;
+        } else {
+            $bearishVotes += 1.0;
+        }
+
+        if ($intradayChangePct >= 0.10) {
+            $bullishVotes += 1.1;
+        } elseif ($intradayChangePct <= -0.10) {
+            $bearishVotes += 1.1;
+        }
+
+        if ($change >= 0.25) {
+            $bullishVotes += 0.8;
+        } elseif ($change <= -0.25) {
+            $bearishVotes += 0.8;
+        }
+
+        if ($rangePosition >= 0.60) {
+            $bullishVotes += 0.7;
+        } elseif ($rangePosition <= 0.40) {
+            $bearishVotes += 0.7;
+        }
+
+        if ($sequenceNetChange >= 0.12) {
+            $bullishVotes += 1.6;
+        } elseif ($sequenceNetChange <= -0.12) {
+            $bearishVotes += 1.6;
+        }
+
+        if ($sequenceBullishRatio >= 0.58) {
+            $bullishVotes += 1.0;
+        }
+        if ($sequenceBearishRatio >= 0.58) {
+            $bearishVotes += 1.0;
+        }
+
+        if ($sequenceImpulse === 'BUY') {
+            $bullishVotes += 0.9;
+        } elseif ($sequenceImpulse === 'SELL') {
+            $bearishVotes += 0.9;
+        }
+
+        $voteGap = abs($bullishVotes - $bearishVotes);
+        $dominantSignal = $bullishVotes > $bearishVotes ? 'BUY' : ($bearishVotes > $bullishVotes ? 'SELL' : 'WAIT');
+        $strongDirectionalSequence = $sequenceConsistency >= 0.55 && abs($sequenceNetChange) >= 0.12;
+        $conflicted = $voteGap < 1.2
+            || ($dominantSignal === 'BUY' && ($sequenceNetChange < -0.08 || $sequenceImpulse === 'SELL'))
+            || ($dominantSignal === 'SELL' && ($sequenceNetChange > 0.08 || $sequenceImpulse === 'BUY'));
+        $microChoppy = $sequenceVolatility > 0.22 && abs($sequenceNetChange) < 0.10;
+        $choppy = $choppy || $microChoppy;
+
+        $signal = $dominantSignal;
+        if (($settings['avoidChoppyMarket'] ?? true) && ($choppy || $conflicted || ! $strongDirectionalSequence)) {
+            $signal = 'WAIT';
+        }
+
+        $volumeScore = min(0.20, log10(max($quoteVolume, 1)) / 50);
+        $intradayScore = min(0.18, abs($intradayChangePct) / 5);
+        $sequenceScore = min(0.22, abs($sequenceNetChange) / 1.2);
+        $consistencyScore = min(0.18, $sequenceConsistency * 0.18);
+        $rangeScore = $rangePct >= 0.45 && $rangePct <= 5.5
+            ? min(0.12, $rangePct / 25)
+            : ($rangePct > 5.5 ? max(0.02, 0.12 - (($rangePct - 5.5) * 0.02)) : 0.03);
+        $directionalBonus = $strongDirectionalSequence ? 0.12 : 0.04;
+        $alignmentBonus = ($signal === 'BUY' && $vwapBullish && $sequenceNetChange > 0 && $intradayChangePct > 0)
+            || ($signal === 'SELL' && ! $vwapBullish && $sequenceNetChange < 0 && $intradayChangePct < 0)
+            ? 0.12
+            : 0.0;
+        $penalty = 0.0;
+        if ($conflicted) {
+            $penalty += 0.18;
+        }
+        if ($choppy) {
+            $penalty += 0.16;
+        }
+        if (! $strongDirectionalSequence) {
+            $penalty += 0.12;
+        }
+
+        $confidence = round($this->clamp($volumeScore + $intradayScore + $sequenceScore + $consistencyScore + $rangeScore + $directionalBonus + $alignmentBonus - $penalty, 0.01, 0.99), 4);
+
         $reasonParts = [];
         if ($signal === 'WAIT') {
-            $reasonParts[] = 'Choppy futures market avoided';
+            if ($choppy) {
+                $reasonParts[] = 'Choppy futures market avoided';
+            }
+            if ($conflicted ?? false) {
+                $reasonParts[] = 'Direction conflict between ticker and 10m candle sequence';
+            }
+            if (! ($strongDirectionalSequence ?? false)) {
+                $reasonParts[] = '10m sequence not strong enough for entry';
+            }
         } else {
             $reasonParts[] = $vwapBullish ? 'Price above VWAP (bullish)' : 'Price below VWAP (bearish)';
+            $reasonParts[] = sprintf('10m sequence %.2f%%', $sequenceNetChange);
+            $reasonParts[] = sprintf('Sequence consistency %.0f%%', $sequenceConsistency * 100);
             $reasonParts[] = sprintf('Range position %.0f%%', $rangePosition * 100);
             $reasonParts[] = sprintf('Intraday %.2f%%', $intradayChangePct);
         }
@@ -780,6 +882,7 @@ class FutureTradeBotService
             'rangePercent'    => round($rangePct, 4),
             'rangePosition'   => round($rangePosition, 4),
             'vwapBullish'     => $vwapBullish,
+            'sequence'        => $sequence,
             'confidence'      => $confidence,
             'timeframe'       => $settings['timeframe'] ?? '5m',
             'reason'          => implode(' | ', $reasonParts),
@@ -793,7 +896,17 @@ class FutureTradeBotService
         try {
             $base = rtrim((string) env('BINANCE_FUTURES_API_URL', 'https://fapi.binance.com'), '/');
             $rows = Http::timeout(7)->get($base . '/fapi/v1/ticker/24hr')->throw()->json();
-            $result = collect($rows)->filter(fn ($row) => in_array((string) ($row['symbol'] ?? ''), $symbols, true))->values()->all();
+            $sequenceSnapshots = $this->sequenceSnapshots($symbols, $settings, $base);
+            $result = collect($rows)
+                ->filter(fn ($row) => in_array((string) ($row['symbol'] ?? ''), $symbols, true))
+                ->map(function (array $row) use ($sequenceSnapshots) {
+                    $symbol = (string) ($row['symbol'] ?? '');
+                    $row['sequence'] = $sequenceSnapshots[$symbol] ?? $this->emptySequenceSnapshot();
+
+                    return $row;
+                })
+                ->values()
+                ->all();
             if (! empty($result)) {
                 \Illuminate\Support\Facades\Cache::put($cacheKey, $result, 60);
             }
@@ -802,6 +915,146 @@ class FutureTradeBotService
             // Return last known good prices rather than fake mock data
             return \Illuminate\Support\Facades\Cache::get($cacheKey, []);
         }
+    }
+
+    private function sequenceSnapshots(array $symbols, array $settings, string $base): array
+    {
+        $lookbackMinutes = max(6, min(15, (int) ($settings['dynamicLookbackMinutes'] ?? 10)));
+        $limit = max(10, $lookbackMinutes + 2);
+        $cacheTtlSeconds = max(15, min(45, (int) ($settings['scanIntervalSeconds'] ?? 3) * 8));
+        $snapshots = [];
+        $missing = [];
+
+        foreach ($symbols as $symbol) {
+            $cacheKey = 'future_trade_sequence_' . md5($symbol . '|' . $limit);
+            $cached = \Illuminate\Support\Facades\Cache::get($cacheKey);
+
+            if (is_array($cached)) {
+                $snapshots[$symbol] = $cached;
+            } else {
+                $missing[$symbol] = $cacheKey;
+            }
+        }
+
+        if ($missing === []) {
+            return $snapshots;
+        }
+
+        $responses = Http::pool(function (Pool $pool) use ($missing, $base, $limit) {
+            $requests = [];
+            foreach (array_keys($missing) as $symbol) {
+                $requests[$symbol] = $pool
+                    ->as($symbol)
+                    ->timeout(5)
+                    ->get($base . '/fapi/v1/klines', [
+                        'symbol' => $symbol,
+                        'interval' => '1m',
+                        'limit' => $limit,
+                    ]);
+            }
+
+            return $requests;
+        });
+
+        foreach ($missing as $symbol => $cacheKey) {
+            try {
+                $payload = $responses[$symbol]?->successful() ? $responses[$symbol]->json() : [];
+                $sequence = $this->buildSequenceSnapshot(is_array($payload) ? $payload : []);
+                $snapshots[$symbol] = $sequence;
+                \Illuminate\Support\Facades\Cache::put($cacheKey, $sequence, $cacheTtlSeconds);
+            } catch (Throwable) {
+                $snapshots[$symbol] = $this->emptySequenceSnapshot();
+            }
+        }
+
+        return $snapshots;
+    }
+
+    private function buildSequenceSnapshot(array $candles): array
+    {
+        if (count($candles) < 3) {
+            return $this->emptySequenceSnapshot();
+        }
+
+        $opens = [];
+        $closes = [];
+
+        foreach ($candles as $row) {
+            if (! is_array($row) || count($row) < 5) {
+                continue;
+            }
+
+            $open = (float) ($row[1] ?? 0);
+            $close = (float) ($row[4] ?? 0);
+
+            if ($open <= 0 || $close <= 0) {
+                continue;
+            }
+
+            $opens[] = $open;
+            $closes[] = $close;
+        }
+
+        if (count($closes) < 3) {
+            return $this->emptySequenceSnapshot();
+        }
+
+        $first = $closes[0];
+        $last = $closes[count($closes) - 1];
+        $netChange = $first > 0 ? (($last - $first) / $first) * 100 : 0.0;
+        $upCandles = 0;
+        $downCandles = 0;
+        $moves = [];
+
+        for ($i = 0; $i < count($closes); $i++) {
+            $open = $opens[$i] ?? $closes[$i];
+            if ($closes[$i] > $open) {
+                $upCandles++;
+            } elseif ($closes[$i] < $open) {
+                $downCandles++;
+            }
+
+            if ($i > 0 && $closes[$i - 1] > 0) {
+                $moves[] = abs((($closes[$i] - $closes[$i - 1]) / $closes[$i - 1]) * 100);
+            }
+        }
+
+        $directionalCandles = max(1, $upCandles + $downCandles);
+        $bullishRatio = $upCandles / $directionalCandles;
+        $bearishRatio = $downCandles / $directionalCandles;
+        $consistency = max($bullishRatio, $bearishRatio);
+        $volatility = count($moves) ? array_sum($moves) / count($moves) : 0.0;
+
+        $recent = array_slice($closes, -3);
+        $impulse = 'NEUTRAL';
+        if (count($recent) === 3) {
+            if ($recent[2] > $recent[1] && $recent[1] > $recent[0]) {
+                $impulse = 'BUY';
+            } elseif ($recent[2] < $recent[1] && $recent[1] < $recent[0]) {
+                $impulse = 'SELL';
+            }
+        }
+
+        return [
+            'netChangePercent' => round($netChange, 4),
+            'bullishRatio' => round($bullishRatio, 4),
+            'bearishRatio' => round($bearishRatio, 4),
+            'consistency' => round($consistency, 4),
+            'volatilityPercent' => round($volatility, 4),
+            'impulse' => $impulse,
+        ];
+    }
+
+    private function emptySequenceSnapshot(): array
+    {
+        return [
+            'netChangePercent' => 0.0,
+            'bullishRatio' => 0.0,
+            'bearishRatio' => 0.0,
+            'consistency' => 0.0,
+            'volatilityPercent' => 0.0,
+            'impulse' => 'NEUTRAL',
+        ];
     }
 
     private function dynamicDecision(FutureTradeBotConfig $config, FutureTradeBotState $state, array $signals, ?array $best, array $settings): array
