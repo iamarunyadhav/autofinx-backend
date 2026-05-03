@@ -58,6 +58,7 @@ class Fast2XController extends Controller
             'enable_live_trading' => $config->enable_live_trading,
             'ai_brain_enabled' => $config->ai_brain_enabled,
             'algorithm_markdown' => $config->algorithm_markdown,
+            'available_symbols' => config('fast2x.available_symbols', ['BTCUSDT']),
         ]);
     }
 

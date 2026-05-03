@@ -310,6 +310,7 @@ class FutureTradeBotService
             'paper_trading' => $config->paper_trading,
             'enable_live_trading' => $config->enable_live_trading,
             'live_env_enabled' => (bool) config('future_trade.enable_live_trading'),
+            'available_symbols' => config('future_trade.available_symbols', []),
         ];
     }
 
@@ -615,29 +616,83 @@ class FutureTradeBotService
 
     private function scoreTicker(array $ticker, array $settings): array
     {
-        $price = (float) ($ticker['lastPrice'] ?? $ticker['price'] ?? 0);
-        $change = (float) ($ticker['priceChangePercent'] ?? 0);
+        $price      = (float) ($ticker['lastPrice'] ?? $ticker['price'] ?? 0);
+        $change     = (float) ($ticker['priceChangePercent'] ?? 0);
         $quoteVolume = (float) ($ticker['quoteVolume'] ?? 0);
-        $high = (float) ($ticker['highPrice'] ?? $price);
-        $low = (float) ($ticker['lowPrice'] ?? $price);
-        $rangePct = $price > 0 ? (($high - $low) / $price) * 100 : 0;
-        $volumeScore = min(0.25, log10(max($quoteVolume, 1)) / 40);
-        $momentumScore = min(0.45, abs($change) / 12);
-        $rangeScore = min(0.2, $rangePct / 30);
-        $confidence = round(min(0.99, 0.3 + $volumeScore + $momentumScore + $rangeScore), 4);
-        $choppy = $rangePct > 9 && abs($change) < 1.5;
-        $signal = $choppy && ($settings['avoidChoppyMarket'] ?? true) ? 'WAIT' : ($change >= 0 ? 'BUY' : 'SELL');
+        $high       = (float) ($ticker['highPrice'] ?? $price);
+        $low        = (float) ($ticker['lowPrice'] ?? $price);
+        $vwap       = (float) ($ticker['weightedAvgPrice'] ?? 0);
+        $openPrice  = (float) ($ticker['openPrice'] ?? $price);
+
+        $rangePct   = $price > 0 ? (($high - $low) / $price) * 100 : 0;
+
+        // --- Signal Direction (replaces raw 24h change direction) ---
+        // Use VWAP cross: price above VWAP = recent buying pressure (bullish)
+        $vwapBullish = $vwap > 0 && $price > $vwap;
+
+        // Price position within 24h range: 0 = at low, 1 = at high
+        $rangePosition = ($high > $low) ? (($price - $low) / ($high - $low)) : 0.5;
+
+        // Short-term momentum: current price vs open price (intraday direction)
+        $intradayChangePct = $openPrice > 0 ? (($price - $openPrice) / $openPrice) * 100 : $change;
+
+        // Signal requires BOTH VWAP confirmation AND price in upper/lower zone
+        if ($vwapBullish && $rangePosition >= 0.45 && $intradayChangePct >= 0) {
+            $rawSignal = 'BUY';
+        } elseif (! $vwapBullish && $rangePosition <= 0.55 && $intradayChangePct <= 0) {
+            $rawSignal = 'SELL';
+        } else {
+            // Conflicting signals — lower confidence, use 24h change as tiebreak
+            $rawSignal = $change >= 0 ? 'BUY' : 'SELL';
+        }
+
+        // --- Confidence Scoring (no hardcoded base) ---
+        // Volume quality: how significant is the market activity
+        $volumeScore = min(0.30, log10(max($quoteVolume, 1)) / 35);
+
+        // Momentum strength: intraday change magnitude (not raw 24h)
+        $momentumScore = min(0.35, abs($intradayChangePct) / 10);
+
+        // Range quality: moderate range preferred — too tight = no opportunity, too wide = choppy
+        $rangeScore = $rangePct >= 0.5 && $rangePct <= 6
+            ? min(0.20, $rangePct / 15)
+            : ($rangePct > 6 ? max(0.0, 0.20 - ($rangePct - 6) * 0.02) : 0.05);
+
+        // VWAP alignment bonus
+        $alignmentBonus = ($vwapBullish && $rawSignal === 'BUY') || (! $vwapBullish && $rawSignal === 'SELL') ? 0.12 : 0.0;
+
+        // Direction consistency: intraday and 24h change pointing same way
+        $consistencyBonus = (($rawSignal === 'BUY' && $change >= 0 && $intradayChangePct >= 0) ||
+                             ($rawSignal === 'SELL' && $change <= 0 && $intradayChangePct <= 0)) ? 0.08 : 0.0;
+
+        $confidence = round(min(0.99, $volumeScore + $momentumScore + $rangeScore + $alignmentBonus + $consistencyBonus), 4);
+
+        // Choppy: large range, tiny net move — avoid regardless
+        $choppy  = $rangePct > 9 && abs($change) < 1.5;
+        $signal  = $choppy && ($settings['avoidChoppyMarket'] ?? true) ? 'WAIT' : $rawSignal;
+
+        $reasonParts = [];
+        if ($signal === 'WAIT') {
+            $reasonParts[] = 'Choppy futures market avoided';
+        } else {
+            $reasonParts[] = $vwapBullish ? 'Price above VWAP (bullish)' : 'Price below VWAP (bearish)';
+            $reasonParts[] = sprintf('Range position %.0f%%', $rangePosition * 100);
+            $reasonParts[] = sprintf('Intraday %.2f%%', $intradayChangePct);
+        }
 
         return [
-            'symbol' => (string) ($ticker['symbol'] ?? 'BTCUSDT'),
-            'signal' => $signal,
-            'price' => $price,
-            'changePercent' => round($change, 4),
-            'volume' => $quoteVolume,
-            'rangePercent' => round($rangePct, 4),
-            'confidence' => $confidence,
-            'timeframe' => $settings['timeframe'] ?? '5m',
-            'reason' => $signal === 'WAIT' ? 'Choppy futures market avoided' : 'Momentum, volume and range confirmation',
+            'symbol'          => (string) ($ticker['symbol'] ?? 'BTCUSDT'),
+            'signal'          => $signal,
+            'price'           => $price,
+            'changePercent'   => round($change, 4),
+            'intradayChange'  => round($intradayChangePct, 4),
+            'volume'          => $quoteVolume,
+            'rangePercent'    => round($rangePct, 4),
+            'rangePosition'   => round($rangePosition, 4),
+            'vwapBullish'     => $vwapBullish,
+            'confidence'      => $confidence,
+            'timeframe'       => $settings['timeframe'] ?? '5m',
+            'reason'          => implode(' | ', $reasonParts),
         ];
     }
 

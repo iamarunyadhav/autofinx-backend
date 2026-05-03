@@ -153,8 +153,10 @@ class Fast2XService
         $rebound = $bottom > 0 ? (($price - $bottom) / $bottom) * 100 : 0;
         $state?->update(['current_bottom' => $bottom, 'decision' => 'WAITING_FOR_SIGNAL']);
 
-        if (($dynamic['marketMode'] ?? '') === 'CHOPPY') {
-            $this->logs->log($config, 'BUY_SKIPPED_DUE_TO_RISK', ['reason' => 'Choppy market avoided']);
+        if (($dynamic['avoidEntry'] ?? false) || ($dynamic['marketMode'] ?? '') === 'CHOPPY') {
+            $mode = $dynamic['marketMode'] ?? 'UNKNOWN';
+            $vol  = $dynamic['volatilityLevel'] ?? 'UNKNOWN';
+            $this->logs->log($config, 'BUY_SKIPPED_DUE_TO_RISK', ['reason' => "Entry avoided: mode={$mode} volatility={$vol}"]);
             return ['decision' => 'BUY_SKIPPED_DUE_TO_RISK'];
         }
 

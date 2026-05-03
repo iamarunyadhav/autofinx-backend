@@ -4,8 +4,18 @@ return [
     'paper_trading' => env('FUTURE_TRADE_PAPER_TRADING', true),
     'enable_live_trading' => env('FUTURE_TRADE_ENABLE_LIVE_TRADING', false),
     'force_testnet' => env('FUTURE_TRADE_FORCE_TESTNET', true),
+
+    // All futures symbols available in the UI selector
+    'available_symbols' => [
+        'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT',
+        'ADAUSDT', 'AVAXUSDT', 'DOTUSDT', 'LINKUSDT', 'MATICUSDT',
+        'DOGEUSDT', 'LTCUSDT', 'UNIUSDT', 'ATOMUSDT', 'NEARUSDT',
+        'APTUSDT', 'ARBUSDT', 'OPUSDT', 'SUIUSDT', 'SEIUSDT',
+    ],
+
     'defaults' => [
-        'symbols' => ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT'],
+        // Scan these 6 coins by default — diversified across sectors
+        'symbols' => ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'AVAXUSDT'],
         'timeframe' => '5m',
         'paperTrading' => true,
         'liveTrading' => false,
@@ -13,17 +23,23 @@ return [
         'leverage' => 3,
         'marginMode' => 'isolated',
         'tradeAmountUsdt' => 25,
-        'minConfidence' => 0.75,
-        'takeProfitPercent' => 0.80,
-        'stopLossPercent' => 0.50,
-        'trailingTakeProfitPercent' => 0.35,
-        'rollbackLossPercent' => 0.35,
+        // Higher confidence threshold — only enter on strong signals
+        'minConfidence' => 0.82,
+        // TP at 1.2% with 3x leverage = 3.6% on notional — worthwhile
+        'takeProfitPercent' => 1.2,
+        // Tighter SL: 0.4% stop, keeping R:R at 3:1
+        'stopLossPercent' => 0.4,
+        'trailingTakeProfitPercent' => 0.30,
+        // Tighter rollback — cut losses sooner
+        'rollbackLossPercent' => 0.25,
         'maxDailyLossPercent' => 2,
         'maxOpenPositions' => 1,
-        'maxTradesPerDay' => 25,
+        // Fewer high-quality trades rather than many low-quality ones
+        'maxTradesPerDay' => 10,
         'maxLeverage' => 5,
         'maxSpreadPercent' => 0.12,
-        'cooldownSeconds' => 10,
+        // Longer cooldown prevents chasing failed trades
+        'cooldownSeconds' => 60,
         'scanIntervalSeconds' => 3,
         'autoExecutePaperSignals' => true,
         'avoidChoppyMarket' => true,
