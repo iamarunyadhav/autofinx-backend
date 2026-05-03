@@ -444,6 +444,8 @@ Route::prefix('v1')->group(function () {
         Route::post('workspaces/{workspace}/future-trade/reset-paper', [FutureTradeBotController::class, 'resetPaper'])->middleware('require.2fa');
         Route::get('workspaces/{workspace}/future-trade/config', [FutureTradeBotController::class, 'config']);
         Route::put('workspaces/{workspace}/future-trade/config', [FutureTradeBotController::class, 'updateConfig'])->middleware('require.2fa');
+        Route::get('workspaces/{workspace}/future-trade/env-config', [FutureTradeBotController::class, 'envConfig'])->middleware('require.2fa');
+        Route::put('workspaces/{workspace}/future-trade/env-config', [FutureTradeBotController::class, 'updateEnvConfig'])->middleware('require.2fa');
         Route::get('workspaces/{workspace}/future-trade/trades', [FutureTradeBotController::class, 'trades']);
         Route::get('workspaces/{workspace}/future-trade/logs', [FutureTradeBotController::class, 'logs']);
 

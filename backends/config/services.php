@@ -44,6 +44,10 @@ return [
         'futures_ws_url' => env('BINANCE_FUTURES_WS_URL', 'wss://fstream.binance.com'),
         'futures_testnet_api_url' => env('BINANCE_FUTURES_TESTNET_API_URL', 'https://testnet.binancefuture.com'),
         'futures_testnet_ws_url' => env('BINANCE_FUTURES_TESTNET_WS_URL', 'wss://stream.binancefuture.com'),
+        'futures_live_api_key' => env('BINANCE_FUTURES_LIVE_API_KEY', env('BINANCE_API_KEY')),
+        'futures_live_api_secret' => env('BINANCE_FUTURES_LIVE_API_SECRET', env('BINANCE_API_SECRET')),
+        'futures_testnet_api_key' => env('BINANCE_FUTURES_TESTNET_API_KEY', env('BINANCE_API_KEY')),
+        'futures_testnet_api_secret' => env('BINANCE_FUTURES_TESTNET_API_SECRET', env('BINANCE_API_SECRET')),
     ],
 
     'metal_broker' => [

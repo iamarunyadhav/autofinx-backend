@@ -43,7 +43,10 @@ class FutureTradeBotService
     {
         $settings = array_merge($config->mergedSettings(), (array) ($payload['settings'] ?? []));
         $liveRequested = (bool) ($settings['liveTrading'] ?? false);
-        $liveAllowed = $liveRequested && (bool) config('future_trade.enable_live_trading');
+        $forceTestnet = array_key_exists('forceTestnet', $settings)
+            ? (bool) $settings['forceTestnet']
+            : (bool) config('future_trade.force_testnet');
+        $liveAllowed = $liveRequested && $this->environmentTradingReady($forceTestnet);
 
         if ($liveAllowed) {
             $guard = $this->liveGuard->canActivate($config->workspace_id, 'future_trade');
@@ -54,9 +57,7 @@ class FutureTradeBotService
 
         $settings['liveTrading'] = $liveAllowed;
         $settings['paperTrading'] = ! $liveAllowed;
-        $settings['forceTestnet'] = array_key_exists('forceTestnet', $settings)
-            ? (bool) $settings['forceTestnet']
-            : (bool) config('future_trade.force_testnet');
+        $settings['forceTestnet'] = $forceTestnet;
 
         $config->update([
             'paper_trading' => ! $liveAllowed,
@@ -69,14 +70,15 @@ class FutureTradeBotService
             $this->log($config->fresh('state'), 'LIVE_GUARD_BLOCKED', null, null, 0, 'Another live bot is already active for this workspace/account. Future Trade stays in paper mode.');
         }
 
-        $this->log($config->fresh('state'), 'CONFIG_UPDATED', null, null, 0, $liveAllowed ? 'Future Trade Bot config saved. Live futures testnet enabled.' : 'Future Trade Bot config saved. Paper trading active.');
+        $this->log($config->fresh('state'), 'CONFIG_UPDATED', null, null, 0, $liveAllowed ? 'Future Trade Bot config saved. ' . ($forceTestnet ? 'Testnet futures enabled.' : 'Live futures enabled.') : 'Future Trade Bot config saved. Paper trading active.');
         return $config->fresh('state');
     }
 
     public function start(FutureTradeBotConfig $config): FutureTradeBotState
     {
         $config->update(['enabled' => true, 'paper_trading' => true, 'enable_live_trading' => false]);
-        if ((bool) ($config->mergedSettings()['liveTrading'] ?? false) && (bool) config('future_trade.enable_live_trading')) {
+        $settings = $config->mergedSettings();
+        if ((bool) ($settings['liveTrading'] ?? false) && $this->environmentTradingReady((bool) ($settings['forceTestnet'] ?? true))) {
             $guard = $this->liveGuard->canActivate($config->workspace_id, 'future_trade');
             if ($guard['allowed']) {
                 $config->update(['paper_trading' => false, 'enable_live_trading' => true]);
@@ -194,7 +196,7 @@ class FutureTradeBotService
             $positionPrice = $positionTicker ? (float) ($positionTicker['lastPrice'] ?? $positionTicker['price'] ?? 0) : 0;
 
             if ($positionPrice > 0) {
-                $chart = $this->appendChartPoint($state, $positionSymbol, $positionPrice, $dynamic['effectiveMinConfidence'], (float) $state->confidence);
+                $chart = $this->appendChartPoint($state, $positionSymbol, $positionPrice, $dynamic['public'], (float) $state->confidence, (string) $state->current_signal);
                 $state->update([
                     'connection_status' => 'Connected',
                     'current_price' => $positionPrice,
@@ -205,7 +207,7 @@ class FutureTradeBotService
                 $this->manageOpenPosition($config->fresh('state'), $positionPrice);
             }
         } else {
-            $chart = $this->appendChartPoint($state, $best['symbol'], (float) $best['price'], $dynamic['effectiveMinConfidence'], (float) $best['confidence']);
+            $chart = $this->appendChartPoint($state, $best['symbol'], (float) $best['price'], $dynamic['public'], (float) $best['confidence'], (string) $best['signal']);
             $state->update([
                 'connection_status' => 'Connected',
                 'current_symbol' => $best['symbol'],
@@ -266,7 +268,11 @@ class FutureTradeBotService
             'dynamic' => $dynamic['public'],
             'paperTrading' => ! $this->isLiveMode($config),
             'liveTrading' => $this->isLiveMode($config),
-            'liveTradingEnvEnabled' => (bool) config('future_trade.enable_live_trading'),
+            'liveTradingEnvEnabled' => $this->environmentTradingReady((bool) ($settings['forceTestnet'] ?? true)),
+            'testnetTradingEnvEnabled' => (bool) config('future_trade.enable_testnet_trading'),
+            'realTradingEnvEnabled' => (bool) config('future_trade.enable_live_trading'),
+            'testnetCredentialsConfigured' => $this->hasFuturesCredentials(true),
+            'realCredentialsConfigured' => $this->hasFuturesCredentials(false),
             'liveGuard' => $this->liveGuard->canActivate($config->workspace_id, 'future_trade'),
             'walletBalance' => $accountSummary['walletBalance'],
             'availableBalance' => $accountSummary['availableBalance'],
@@ -308,7 +314,7 @@ class FutureTradeBotService
             'risk' => [
                 'lossPrevention' => 'Stop loss, rollback, trailing profit, cooldown, max daily loss and max trades are active in paper mode.',
                 'paperTrading' => ! $this->isLiveMode($config),
-	                'liveTradingBlocked' => ! (bool) config('future_trade.enable_live_trading'),
+	                'liveTradingBlocked' => ! $this->environmentTradingReady((bool) ($settings['forceTestnet'] ?? true)),
 	            ],
 	            'dynamic' => $dynamic['public'],
 	        ];
@@ -322,7 +328,11 @@ class FutureTradeBotService
             'algorithm_notes' => $config->algorithm_notes,
             'paper_trading' => $config->paper_trading,
             'enable_live_trading' => $config->enable_live_trading,
-            'live_env_enabled' => (bool) config('future_trade.enable_live_trading'),
+            'live_env_enabled' => $this->environmentTradingReady((bool) ($config->mergedSettings()['forceTestnet'] ?? true)),
+            'testnet_env_enabled' => (bool) config('future_trade.enable_testnet_trading'),
+            'real_env_enabled' => (bool) config('future_trade.enable_live_trading'),
+            'testnet_credentials_configured' => $this->hasFuturesCredentials(true),
+            'real_credentials_configured' => $this->hasFuturesCredentials(false),
             'available_symbols' => config('future_trade.available_symbols', []),
         ];
     }
@@ -385,7 +395,7 @@ class FutureTradeBotService
             'reason' => 'AUTO_' . $signal['signal'] . '_SIGNAL',
             'mode' => 'PAPER',
             'status' => 'OPEN',
-            'meta' => ['signal' => $signal, 'dynamic' => $dynamic['public'], 'idempotency_key' => (string) Str::uuid()],
+            'meta' => ['signal' => $signal, 'dynamic' => $dynamic['public'], 'algorithm_mode' => $dynamic['mode'], 'idempotency_key' => (string) Str::uuid()],
         ]);
         $this->log($config->fresh('state'), $signal['signal'] . '_EXECUTED', $signal['symbol'], $signal['signal'], $signal['confidence'], 'Paper futures position opened.');
     }
@@ -449,6 +459,8 @@ class FutureTradeBotService
         }
 
         $settings = $config->mergedSettings();
+        $dynamic = $this->dynamicDecision($config, $state, (array) ($state->scanner_snapshot ?? []), null, $settings);
+        $settings = $dynamic['settings'];
         $client = $this->liveClient($settings);
         $symbol = strtoupper((string) $signal['symbol']);
         $side = $signal['signal'] === 'BUY' ? 'BUY' : 'SELL';
@@ -520,7 +532,7 @@ class FutureTradeBotService
             'reason' => 'LIVE_' . $signal['signal'] . '_SIGNAL',
             'mode' => $settings['forceTestnet'] ?? true ? 'LIVE_TESTNET' : 'LIVE',
             'status' => 'OPEN',
-            'meta' => ['entry_order' => $response, 'stop_order' => $stopResponse, 'take_profit_order' => $takeResponse, 'signal' => $signal, 'dynamic' => $dynamic['public']],
+            'meta' => ['entry_order' => $response, 'stop_order' => $stopResponse, 'take_profit_order' => $takeResponse, 'signal' => $signal, 'dynamic' => $dynamic['public'], 'algorithm_mode' => $dynamic['mode']],
         ]);
         $this->log($config->fresh('state'), 'LIVE_' . $signal['signal'] . '_EXECUTED', $symbol, $signal['signal'], (float) $signal['confidence'], 'Live futures entry submitted with protective reduce-only exits.');
     }
@@ -566,7 +578,7 @@ class FutureTradeBotService
             'reason' => $reason,
             'mode' => $settings['forceTestnet'] ?? true ? 'LIVE_TESTNET' : 'LIVE',
             'status' => 'SUBMITTED',
-            'meta' => ['close_order' => $response],
+            'meta' => ['close_order' => $response, 'dynamic' => $dynamic['public'], 'algorithm_mode' => $dynamic['mode']],
         ]);
 
         $state->update([
@@ -590,6 +602,8 @@ class FutureTradeBotService
     private function closePaperPosition(FutureTradeBotConfig $config, float $price, string $reason): void
     {
         $state = $this->state($config);
+        $settings = $config->mergedSettings();
+        $dynamic = $this->dynamicDecision($config, $state, (array) ($state->scanner_snapshot ?? []), null, $settings);
         $side = (string) $state->position_side;
         $direction = $side === 'LONG' ? 1 : -1;
         $entry = (float) $state->entry_price;
@@ -604,14 +618,15 @@ class FutureTradeBotService
             'entry_price' => $entry,
             'exit_price' => $price,
             'quantity' => $qty,
-            'leverage' => (float) ($config->mergedSettings()['leverage'] ?? 3),
+	            'leverage' => (float) ($dynamic['settings']['leverage'] ?? $settings['leverage'] ?? 3),
             'gross_pnl' => $gross,
             'fees' => $fees,
             'net_pnl' => $net,
             'reason' => $reason,
             'mode' => 'PAPER',
-            'status' => 'FILLED',
-        ]);
+	            'status' => 'FILLED',
+	            'meta' => ['dynamic' => $dynamic['public'], 'algorithm_mode' => $dynamic['mode']],
+	        ]);
 
         $state->update([
             'state' => 'COOLDOWN',
@@ -625,7 +640,7 @@ class FutureTradeBotService
             'daily_loss' => $net < 0 ? (float) $state->daily_loss + abs($net) : (float) $state->daily_loss,
             'wins' => $net > 0 ? (int) $state->wins + 1 : (int) $state->wins,
             'losses' => $net < 0 ? (int) $state->losses + 1 : (int) $state->losses,
-            'cooldown_until' => now()->addSeconds((int) ($config->mergedSettings()['cooldownSeconds'] ?? 10)),
+	            'cooldown_until' => now()->addSeconds((int) ($dynamic['settings']['cooldownSeconds'] ?? $settings['cooldownSeconds'] ?? 10)),
             'current_signal' => $reason,
         ]);
         $this->log($config->fresh('state'), $reason, $state->current_symbol, 'CLOSE_' . $side, 1, 'Paper futures position closed.');
@@ -917,18 +932,43 @@ class FutureTradeBotService
         return ['bids' => $bids, 'asks' => $asks];
     }
 
-    private function appendChartPoint(FutureTradeBotState $state, string $symbol, float $price, ?float $effectiveMinConfidence = null, ?float $confidence = null): array
+    private function appendChartPoint(FutureTradeBotState $state, string $symbol, float $price, ?array $dynamic = null, ?float $confidence = null, ?string $signal = null): array
     {
         $points = (array) ($state->chart_points ?? []);
+        $recommended = (array) ($dynamic['recommended'] ?? []);
+        $analysis = (array) ($dynamic['analysis'] ?? []);
         $points[] = [
             'time' => now()->format('H:i:s'),
             'symbol' => $symbol,
+            'signal' => $signal,
             'price' => $price,
             'pnl' => (float) $state->unrealized_pnl_percent,
             'confidence' => $confidence,
-            'effectiveMinConfidence' => $effectiveMinConfidence,
+            'algorithmMode' => $dynamic['mode'] ?? 'fixed',
+            'algorithmFlag' => $this->algorithmFlag((string) ($dynamic['mode'] ?? 'fixed')),
+            'effectiveMinConfidence' => $dynamic['effectiveMinConfidence'] ?? null,
+            'activeTakeProfitPercent' => $recommended['takeProfitPercent'] ?? null,
+            'activeStopLossPercent' => $recommended['stopLossPercent'] ?? null,
+            'activeTrailingTakeProfitPercent' => $recommended['trailingTakeProfitPercent'] ?? null,
+            'activeCooldownSeconds' => $recommended['cooldownSeconds'] ?? null,
+            'activeTradeAmountUsdt' => $recommended['tradeAmountUsdt'] ?? null,
+            'trendStrength' => $analysis['trendStrength'] ?? null,
+            'directionAgreement' => $analysis['directionAgreement'] ?? null,
+            'choppy' => $analysis['choppy'] ?? null,
+            'decisionStatus' => $confidence !== null && isset($dynamic['effectiveMinConfidence'])
+                ? ($confidence >= (float) $dynamic['effectiveMinConfidence'] ? 'ELIGIBLE' : 'BELOW_CONFIDENCE')
+                : 'TRACKING',
         ];
         return array_slice($points, -120);
+    }
+
+    private function algorithmFlag(string $mode): string
+    {
+        return match ($mode) {
+            'semi_dynamic' => 'SEMI',
+            'fully_dynamic' => 'AUTO',
+            default => 'NORMAL',
+        };
     }
 
     private function stopLossPrice(float $entry, string $side, array $settings): float
@@ -998,26 +1038,60 @@ class FutureTradeBotService
 
     private function isLiveMode(FutureTradeBotConfig $config): bool
     {
+        $settings = $config->mergedSettings();
         return (bool) $config->enable_live_trading
-            && (bool) ($config->mergedSettings()['liveTrading'] ?? false)
-            && (bool) config('future_trade.enable_live_trading');
+            && (bool) ($settings['liveTrading'] ?? false)
+            && $this->environmentTradingReady((bool) ($settings['forceTestnet'] ?? true));
     }
 
     private function liveClient(array $settings): BinanceFuturesClient
     {
-        if (! (bool) config('future_trade.enable_live_trading')) {
-            throw new \RuntimeException('Future Trade live trading is disabled by environment.');
+        $forceTestnet = (bool) ($settings['forceTestnet'] ?? true);
+        if (! $this->environmentTradingReady($forceTestnet)) {
+            throw new \RuntimeException($forceTestnet
+                ? 'Future Trade testnet trading requires FUTURE_TRADE_ENABLE_TESTNET_TRADING=true and testnet futures API credentials.'
+                : 'Future Trade live trading requires FUTURE_TRADE_ENABLE_LIVE_TRADING=true and live futures API credentials.'
+            );
         }
-
-        $baseUrl = (bool) ($settings['forceTestnet'] ?? true)
+        $baseUrl = $forceTestnet
             ? config('services.binance.futures_testnet_api_url', 'https://testnet.binancefuture.com')
             : config('services.binance.futures_api_url', 'https://fapi.binance.com');
+        $apiKey = $forceTestnet
+            ? config('services.binance.futures_testnet_api_key', '')
+            : config('services.binance.futures_live_api_key', '');
+        $apiSecret = $forceTestnet
+            ? config('services.binance.futures_testnet_api_secret', '')
+            : config('services.binance.futures_live_api_secret', '');
 
         return new BinanceFuturesClient(
-            apiKey: (string) env('BINANCE_API_KEY', ''),
-            apiSecret: (string) env('BINANCE_API_SECRET', ''),
+            apiKey: (string) $apiKey,
+            apiSecret: (string) $apiSecret,
             baseUrl: (string) $baseUrl,
         );
+    }
+
+    private function environmentTradingEnabled(bool $forceTestnet): bool
+    {
+        return $forceTestnet
+            ? (bool) config('future_trade.enable_testnet_trading')
+            : (bool) config('future_trade.enable_live_trading');
+    }
+
+    private function environmentTradingReady(bool $forceTestnet): bool
+    {
+        return $this->environmentTradingEnabled($forceTestnet) && $this->hasFuturesCredentials($forceTestnet);
+    }
+
+    private function hasFuturesCredentials(bool $forceTestnet): bool
+    {
+        $key = $forceTestnet
+            ? (string) config('services.binance.futures_testnet_api_key', '')
+            : (string) config('services.binance.futures_live_api_key', '');
+        $secret = $forceTestnet
+            ? (string) config('services.binance.futures_testnet_api_secret', '')
+            : (string) config('services.binance.futures_live_api_secret', '');
+
+        return $key !== '' && $secret !== '';
     }
 
     private function symbolFilters(array $exchangeInfo, string $symbol): array

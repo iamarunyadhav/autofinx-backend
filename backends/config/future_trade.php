@@ -2,6 +2,7 @@
 
 return [
     'paper_trading' => env('FUTURE_TRADE_PAPER_TRADING', true),
+    'enable_testnet_trading' => env('FUTURE_TRADE_ENABLE_TESTNET_TRADING', false),
     'enable_live_trading' => env('FUTURE_TRADE_ENABLE_LIVE_TRADING', false),
     'force_testnet' => env('FUTURE_TRADE_FORCE_TESTNET', true),
 
