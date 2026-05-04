@@ -319,6 +319,7 @@ class FutureTradeBotService
             'totalProfit' => $accountSummary['totalProfit'],
             'balanceSource' => $accountSummary['balanceSource'],
             'accountAsset' => $accountSummary['accountAsset'],
+            'balanceError' => $accountSummary['balanceError'],
         ];
     }
 
@@ -1516,6 +1517,7 @@ class FutureTradeBotService
             'totalProfit' => $botProfit - $botLoss,
             'balanceSource' => $this->isLiveMode($config) ? 'BINANCE_FUTURES' : 'PAPER_LEDGER',
             'accountAsset' => 'USDT',
+            'balanceError' => null,
         ];
 
         if (! $this->isLiveMode($config)) {
@@ -1524,11 +1526,22 @@ class FutureTradeBotService
 
         try {
             $account = $this->liveClient($config->mergedSettings())->fetchAccountInfo();
-            $summary['walletBalance'] = isset($account['totalWalletBalance']) ? (float) $account['totalWalletBalance'] : null;
-            $summary['availableBalance'] = isset($account['availableBalance']) ? (float) $account['availableBalance'] : null;
-            $summary['marginBalance'] = isset($account['totalMarginBalance']) ? (float) $account['totalMarginBalance'] : null;
+            $asset = collect((array) ($account['assets'] ?? []))
+                ->first(fn ($row) => strtoupper((string) ($row['asset'] ?? '')) === 'USDT');
+
+            $summary['walletBalance'] = isset($account['totalWalletBalance'])
+                ? (float) $account['totalWalletBalance']
+                : (isset($asset['walletBalance']) ? (float) $asset['walletBalance'] : null);
+            $summary['availableBalance'] = isset($account['availableBalance'])
+                ? (float) $account['availableBalance']
+                : (isset($asset['availableBalance']) ? (float) $asset['availableBalance'] : null);
+            $summary['marginBalance'] = isset($account['totalMarginBalance'])
+                ? (float) $account['totalMarginBalance']
+                : (isset($asset['marginBalance']) ? (float) $asset['marginBalance'] : null);
+            $summary['accountAsset'] = strtoupper((string) ($asset['asset'] ?? 'USDT')) ?: 'USDT';
         } catch (Throwable $e) {
             $summary['balanceSource'] = 'BINANCE_UNAVAILABLE';
+            $summary['balanceError'] = $e->getMessage();
             $this->log($config->fresh('state'), 'BALANCE_SYNC_FAILED', $config->state?->current_symbol, null, 0, $e->getMessage());
         }
 
