@@ -4,28 +4,13 @@ namespace App\Http\Controllers\Api;
 
 use App\Domain\FutureTrade\FutureTradeBotService;
 use App\Http\Controllers\Controller;
-use App\Support\EnvFileEditor;
-use Illuminate\Support\Facades\Artisan;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 
 class FutureTradeBotController extends Controller
 {
-    private const ENV_KEYS = [
-        'FUTURE_TRADE_ENABLE_TESTNET_TRADING',
-        'FUTURE_TRADE_ENABLE_LIVE_TRADING',
-        'FUTURE_TRADE_FORCE_TESTNET',
-        'BINANCE_FUTURES_API_URL',
-        'BINANCE_FUTURES_TESTNET_API_URL',
-        'BINANCE_FUTURES_LIVE_API_KEY',
-        'BINANCE_FUTURES_LIVE_API_SECRET',
-        'BINANCE_FUTURES_TESTNET_API_KEY',
-        'BINANCE_FUTURES_TESTNET_API_SECRET',
-    ];
-
     public function __construct(
         private readonly FutureTradeBotService $bot,
-        private readonly EnvFileEditor $env,
     ) {}
 
     public function status(string $workspace): JsonResponse
@@ -75,7 +60,7 @@ class FutureTradeBotController extends Controller
 
     public function envConfig(string $workspace): JsonResponse
     {
-        return response()->json($this->envPayload());
+        return response()->json($this->envPayload($this->bot->getOrCreateConfig($workspace)));
     }
 
     public function updateEnvConfig(Request $request, string $workspace): JsonResponse
@@ -96,50 +81,38 @@ class FutureTradeBotController extends Controller
         ]);
 
         $mode = (string) $data['mode'];
-        $values = [
-            'FUTURE_TRADE_ENABLE_TESTNET_TRADING' => $mode === 'testnet' ? 'true' : 'false',
-            'FUTURE_TRADE_ENABLE_LIVE_TRADING' => $mode === 'live' ? 'true' : 'false',
-            'FUTURE_TRADE_FORCE_TESTNET' => $mode === 'testnet' || ($mode === 'paper' && (bool) $data['force_testnet']) ? 'true' : 'false',
-            'BINANCE_FUTURES_API_URL' => (string) $data['live_api_url'],
-            'BINANCE_FUTURES_TESTNET_API_URL' => (string) $data['testnet_api_url'],
+        $botConfig = $this->bot->getOrCreateConfig($workspace);
+        $settings = $botConfig->mergedSettings();
+
+        $payload = [
+            'settings' => [
+                'envMode' => $mode,
+                'envTestnetEnabled' => (bool) $data['testnet_enabled'],
+                'envLiveEnabled' => (bool) $data['live_enabled'],
+                'envForceTestnet' => (bool) $data['force_testnet'],
+                'liveApiUrl' => (string) $data['live_api_url'],
+                'testnetApiUrl' => (string) $data['testnet_api_url'],
+                'liveApiKey' => array_key_exists('live_api_key', $data)
+                    ? (string) ($data['live_api_key'] ?? '')
+                    : (string) ($settings['liveApiKey'] ?? ''),
+                'liveApiSecret' => (bool) ($data['replace_live_secret'] ?? false)
+                    ? (string) ($data['live_api_secret'] ?? '')
+                    : (string) ($settings['liveApiSecret'] ?? ''),
+                'testnetApiKey' => array_key_exists('testnet_api_key', $data)
+                    ? (string) ($data['testnet_api_key'] ?? '')
+                    : (string) ($settings['testnetApiKey'] ?? ''),
+                'testnetApiSecret' => (bool) ($data['replace_testnet_secret'] ?? false)
+                    ? (string) ($data['testnet_api_secret'] ?? '')
+                    : (string) ($settings['testnetApiSecret'] ?? ''),
+                'liveTrading' => $mode !== 'paper',
+                'paperTrading' => $mode === 'paper',
+                'forceTestnet' => $mode !== 'live',
+            ],
         ];
 
-        if (array_key_exists('live_api_key', $data)) {
-            $values['BINANCE_FUTURES_LIVE_API_KEY'] = (string) ($data['live_api_key'] ?? '');
-        }
-        if ((bool) ($data['replace_live_secret'] ?? false)) {
-            $values['BINANCE_FUTURES_LIVE_API_SECRET'] = (string) ($data['live_api_secret'] ?? '');
-        }
-        if (array_key_exists('testnet_api_key', $data)) {
-            $values['BINANCE_FUTURES_TESTNET_API_KEY'] = (string) ($data['testnet_api_key'] ?? '');
-        }
-        if ((bool) ($data['replace_testnet_secret'] ?? false)) {
-            $values['BINANCE_FUTURES_TESTNET_API_SECRET'] = (string) ($data['testnet_api_secret'] ?? '');
-        }
+        $savedConfig = $this->bot->updateConfig($botConfig, $payload);
 
-        $this->env->write($values);
-        Artisan::call('config:clear');
-
-        config([
-            'future_trade.enable_testnet_trading' => $values['FUTURE_TRADE_ENABLE_TESTNET_TRADING'] === 'true',
-            'future_trade.enable_live_trading' => $values['FUTURE_TRADE_ENABLE_LIVE_TRADING'] === 'true',
-            'future_trade.force_testnet' => $values['FUTURE_TRADE_FORCE_TESTNET'] === 'true',
-            'services.binance.futures_api_url' => $values['BINANCE_FUTURES_API_URL'],
-            'services.binance.futures_testnet_api_url' => $values['BINANCE_FUTURES_TESTNET_API_URL'],
-        ]);
-
-        foreach ([
-            'BINANCE_FUTURES_LIVE_API_KEY' => 'services.binance.futures_live_api_key',
-            'BINANCE_FUTURES_LIVE_API_SECRET' => 'services.binance.futures_live_api_secret',
-            'BINANCE_FUTURES_TESTNET_API_KEY' => 'services.binance.futures_testnet_api_key',
-            'BINANCE_FUTURES_TESTNET_API_SECRET' => 'services.binance.futures_testnet_api_secret',
-        ] as $envKey => $configKey) {
-            if (array_key_exists($envKey, $values)) {
-                config([$configKey => $values[$envKey]]);
-            }
-        }
-
-        return response()->json($this->envPayload());
+        return response()->json($this->envPayload($savedConfig));
     }
 
     public function trades(string $workspace): JsonResponse
@@ -152,26 +125,24 @@ class FutureTradeBotController extends Controller
         return response()->json($this->bot->getOrCreateConfig($workspace)->logs()->orderByDesc('occurred_at')->limit(100)->get());
     }
 
-    private function envPayload(): array
+    private function envPayload($config): array
     {
-        $values = $this->env->read(self::ENV_KEYS);
+        $settings = $config->mergedSettings();
         $mask = fn (string $value) => $value === '' ? '' : substr($value, 0, 4) . str_repeat('*', max(4, strlen($value) - 8)) . substr($value, -4);
 
         return [
-            'mode' => $values['FUTURE_TRADE_ENABLE_LIVE_TRADING'] === 'true'
-                ? 'live'
-                : ($values['FUTURE_TRADE_ENABLE_TESTNET_TRADING'] === 'true' ? 'testnet' : 'paper'),
-            'testnet_enabled' => $values['FUTURE_TRADE_ENABLE_TESTNET_TRADING'] === 'true',
-            'live_enabled' => $values['FUTURE_TRADE_ENABLE_LIVE_TRADING'] === 'true',
-            'force_testnet' => $values['FUTURE_TRADE_FORCE_TESTNET'] !== 'false',
-            'live_api_url' => $values['BINANCE_FUTURES_API_URL'] ?: 'https://fapi.binance.com',
-            'testnet_api_url' => $values['BINANCE_FUTURES_TESTNET_API_URL'] ?: 'https://testnet.binancefuture.com',
-            'live_api_key' => $values['BINANCE_FUTURES_LIVE_API_KEY'],
-            'live_api_secret_masked' => $mask($values['BINANCE_FUTURES_LIVE_API_SECRET']),
-            'testnet_api_key' => $values['BINANCE_FUTURES_TESTNET_API_KEY'],
-            'testnet_api_secret_masked' => $mask($values['BINANCE_FUTURES_TESTNET_API_SECRET']),
-            'live_configured' => $values['BINANCE_FUTURES_LIVE_API_KEY'] !== '' && $values['BINANCE_FUTURES_LIVE_API_SECRET'] !== '',
-            'testnet_configured' => $values['BINANCE_FUTURES_TESTNET_API_KEY'] !== '' && $values['BINANCE_FUTURES_TESTNET_API_SECRET'] !== '',
+            'mode' => (string) ($settings['envMode'] ?? 'paper'),
+            'testnet_enabled' => (bool) ($settings['envTestnetEnabled'] ?? false),
+            'live_enabled' => (bool) ($settings['envLiveEnabled'] ?? false),
+            'force_testnet' => (bool) ($settings['envForceTestnet'] ?? true),
+            'live_api_url' => (string) ($settings['liveApiUrl'] ?? 'https://fapi.binance.com'),
+            'testnet_api_url' => (string) ($settings['testnetApiUrl'] ?? 'https://testnet.binancefuture.com'),
+            'live_api_key' => (string) ($settings['liveApiKey'] ?? ''),
+            'live_api_secret_masked' => $mask((string) ($settings['liveApiSecret'] ?? '')),
+            'testnet_api_key' => (string) ($settings['testnetApiKey'] ?? ''),
+            'testnet_api_secret_masked' => $mask((string) ($settings['testnetApiSecret'] ?? '')),
+            'live_configured' => (string) ($settings['liveApiKey'] ?? '') !== '' && (string) ($settings['liveApiSecret'] ?? '') !== '',
+            'testnet_configured' => (string) ($settings['testnetApiKey'] ?? '') !== '' && (string) ($settings['testnetApiSecret'] ?? '') !== '',
         ];
     }
 }

@@ -49,7 +49,7 @@ class FutureTradeBotService
         $forceTestnet = array_key_exists('forceTestnet', $settings)
             ? (bool) $settings['forceTestnet']
             : (bool) config('future_trade.force_testnet');
-        $liveAllowed = $liveRequested && $this->environmentTradingReady($forceTestnet);
+        $liveAllowed = $liveRequested && $this->environmentTradingReady($forceTestnet, $settings);
 
         if ($liveAllowed) {
             $guard = $this->liveGuard->canActivate($config->workspace_id, 'future_trade');
@@ -81,7 +81,7 @@ class FutureTradeBotService
     {
         $config->update(['enabled' => true, 'paper_trading' => true, 'enable_live_trading' => false]);
         $settings = $config->mergedSettings();
-        if ((bool) ($settings['liveTrading'] ?? false) && $this->environmentTradingReady((bool) ($settings['forceTestnet'] ?? true))) {
+        if ((bool) ($settings['liveTrading'] ?? false) && $this->environmentTradingReady((bool) ($settings['forceTestnet'] ?? true), $settings)) {
             $guard = $this->liveGuard->canActivate($config->workspace_id, 'future_trade');
             if ($guard['allowed']) {
                 $config->update(['paper_trading' => false, 'enable_live_trading' => true]);
@@ -165,6 +165,7 @@ class FutureTradeBotService
 
     public function resetPaper(FutureTradeBotConfig $config): FutureTradeBotState
     {
+        $config->logs()->delete();
         $config->trades()->delete();
         $state = $this->state($config);
         $this->persistState($state, [
@@ -190,7 +191,6 @@ class FutureTradeBotService
             'scanner_snapshot' => [],
             'chart_points' => [],
         ]);
-        $this->log($config->fresh('state'), 'PAPER_RESET', null, null, 0, 'Paper futures ledger reset.');
         return $state->fresh();
     }
 
@@ -305,11 +305,11 @@ class FutureTradeBotService
             'liveTrading' => $this->isLiveMode($config),
             'dailyLossLocked' => (bool) ($state->daily_stop_until && $state->daily_stop_until->isFuture()),
             'manualRestartAllowed' => true,
-            'liveTradingEnvEnabled' => $this->environmentTradingReady((bool) ($settings['forceTestnet'] ?? true)),
-            'testnetTradingEnvEnabled' => (bool) config('future_trade.enable_testnet_trading'),
-            'realTradingEnvEnabled' => (bool) config('future_trade.enable_live_trading'),
-            'testnetCredentialsConfigured' => $this->hasFuturesCredentials(true),
-            'realCredentialsConfigured' => $this->hasFuturesCredentials(false),
+            'liveTradingEnvEnabled' => $this->environmentTradingReady((bool) ($settings['forceTestnet'] ?? true), $settings),
+            'testnetTradingEnvEnabled' => $this->environmentTradingEnabled(true, $settings),
+            'realTradingEnvEnabled' => $this->environmentTradingEnabled(false, $settings),
+            'testnetCredentialsConfigured' => $this->hasFuturesCredentials(true, $settings),
+            'realCredentialsConfigured' => $this->hasFuturesCredentials(false, $settings),
             'liveGuard' => $this->liveGuard->canActivate($config->workspace_id, 'future_trade'),
             'walletBalance' => $accountSummary['walletBalance'],
             'availableBalance' => $accountSummary['availableBalance'],
@@ -355,7 +355,7 @@ class FutureTradeBotService
             'risk' => [
                 'lossPrevention' => 'Stop loss, rollback, trailing profit, cooldown, max daily loss and max trades are active in paper mode.',
                 'paperTrading' => ! $this->isLiveMode($config),
-	                'liveTradingBlocked' => ! $this->environmentTradingReady((bool) ($settings['forceTestnet'] ?? true)),
+	                'liveTradingBlocked' => ! $this->environmentTradingReady((bool) ($settings['forceTestnet'] ?? true), $settings),
 	            ],
 	            'dynamic' => $dynamic['public'],
 	        ];
@@ -369,11 +369,11 @@ class FutureTradeBotService
             'algorithm_notes' => $config->algorithm_notes,
             'paper_trading' => $config->paper_trading,
             'enable_live_trading' => $config->enable_live_trading,
-            'live_env_enabled' => $this->environmentTradingReady((bool) ($config->mergedSettings()['forceTestnet'] ?? true)),
-            'testnet_env_enabled' => (bool) config('future_trade.enable_testnet_trading'),
-            'real_env_enabled' => (bool) config('future_trade.enable_live_trading'),
-            'testnet_credentials_configured' => $this->hasFuturesCredentials(true),
-            'real_credentials_configured' => $this->hasFuturesCredentials(false),
+            'live_env_enabled' => $this->environmentTradingReady((bool) ($config->mergedSettings()['forceTestnet'] ?? true), $config->mergedSettings()),
+            'testnet_env_enabled' => $this->environmentTradingEnabled(true, $config->mergedSettings()),
+            'real_env_enabled' => $this->environmentTradingEnabled(false, $config->mergedSettings()),
+            'testnet_credentials_configured' => $this->hasFuturesCredentials(true, $config->mergedSettings()),
+            'real_credentials_configured' => $this->hasFuturesCredentials(false, $config->mergedSettings()),
             'available_symbols' => config('future_trade.available_symbols', []),
         ];
     }
@@ -946,7 +946,9 @@ class FutureTradeBotService
         $symbols = array_map('strtoupper', (array) ($settings['symbols'] ?? []));
         $cacheKey = 'future_trade_market_snapshot_' . md5(implode(',', $symbols));
         try {
-            $base = rtrim((string) env('BINANCE_FUTURES_API_URL', 'https://fapi.binance.com'), '/');
+            $base = rtrim((string) (($settings['forceTestnet'] ?? true)
+                ? ($settings['testnetApiUrl'] ?? 'https://testnet.binancefuture.com')
+                : ($settings['liveApiUrl'] ?? 'https://fapi.binance.com')), '/');
             $rows = Http::timeout(7)->get($base . '/fapi/v1/ticker/24hr')->throw()->json();
             $sequenceSnapshots = $this->sequenceSnapshots($symbols, $settings, $base);
             $result = collect($rows)
@@ -1538,27 +1540,27 @@ class FutureTradeBotService
         $settings = $config->mergedSettings();
         return (bool) $config->enable_live_trading
             && (bool) ($settings['liveTrading'] ?? false)
-            && $this->environmentTradingReady((bool) ($settings['forceTestnet'] ?? true));
+            && $this->environmentTradingReady((bool) ($settings['forceTestnet'] ?? true), $settings);
     }
 
     private function liveClient(array $settings): BinanceFuturesClient
     {
         $forceTestnet = (bool) ($settings['forceTestnet'] ?? true);
-        if (! $this->environmentTradingReady($forceTestnet)) {
+        if (! $this->environmentTradingReady($forceTestnet, $settings)) {
             throw new \RuntimeException($forceTestnet
-                ? 'Future Trade testnet trading requires FUTURE_TRADE_ENABLE_TESTNET_TRADING=true and testnet futures API credentials.'
-                : 'Future Trade live trading requires FUTURE_TRADE_ENABLE_LIVE_TRADING=true and live futures API credentials.'
+                ? 'Future Trade testnet trading requires Testnet mode enabled in My Config and valid testnet futures API credentials.'
+                : 'Future Trade live trading requires Live mode enabled in My Config and valid live futures API credentials.'
             );
         }
         $baseUrl = $forceTestnet
-            ? config('services.binance.futures_testnet_api_url', 'https://testnet.binancefuture.com')
-            : config('services.binance.futures_api_url', 'https://fapi.binance.com');
+            ? ((string) ($settings['testnetApiUrl'] ?? 'https://testnet.binancefuture.com'))
+            : ((string) ($settings['liveApiUrl'] ?? 'https://fapi.binance.com'));
         $apiKey = $forceTestnet
-            ? config('services.binance.futures_testnet_api_key', '')
-            : config('services.binance.futures_live_api_key', '');
+            ? (string) ($settings['testnetApiKey'] ?? '')
+            : (string) ($settings['liveApiKey'] ?? '');
         $apiSecret = $forceTestnet
-            ? config('services.binance.futures_testnet_api_secret', '')
-            : config('services.binance.futures_live_api_secret', '');
+            ? (string) ($settings['testnetApiSecret'] ?? '')
+            : (string) ($settings['liveApiSecret'] ?? '');
 
         return new BinanceFuturesClient(
             apiKey: (string) $apiKey,
@@ -1567,26 +1569,26 @@ class FutureTradeBotService
         );
     }
 
-    private function environmentTradingEnabled(bool $forceTestnet): bool
+    private function environmentTradingEnabled(bool $forceTestnet, array $settings): bool
     {
         return $forceTestnet
-            ? (bool) config('future_trade.enable_testnet_trading')
-            : (bool) config('future_trade.enable_live_trading');
+            ? (bool) ($settings['envTestnetEnabled'] ?? false)
+            : (bool) ($settings['envLiveEnabled'] ?? false);
     }
 
-    private function environmentTradingReady(bool $forceTestnet): bool
+    private function environmentTradingReady(bool $forceTestnet, array $settings): bool
     {
-        return $this->environmentTradingEnabled($forceTestnet) && $this->hasFuturesCredentials($forceTestnet);
+        return $this->environmentTradingEnabled($forceTestnet, $settings) && $this->hasFuturesCredentials($forceTestnet, $settings);
     }
 
-    private function hasFuturesCredentials(bool $forceTestnet): bool
+    private function hasFuturesCredentials(bool $forceTestnet, array $settings): bool
     {
         $key = $forceTestnet
-            ? (string) config('services.binance.futures_testnet_api_key', '')
-            : (string) config('services.binance.futures_live_api_key', '');
+            ? (string) ($settings['testnetApiKey'] ?? '')
+            : (string) ($settings['liveApiKey'] ?? '');
         $secret = $forceTestnet
-            ? (string) config('services.binance.futures_testnet_api_secret', '')
-            : (string) config('services.binance.futures_live_api_secret', '');
+            ? (string) ($settings['testnetApiSecret'] ?? '')
+            : (string) ($settings['liveApiSecret'] ?? '');
 
         return $key !== '' && $secret !== '';
     }
