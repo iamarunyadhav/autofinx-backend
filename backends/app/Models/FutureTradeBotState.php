@@ -25,6 +25,8 @@ class FutureTradeBotState extends BaseModel
         'confidence' => 'decimal:4',
         'last_scan_at' => 'datetime',
         'cooldown_until' => 'datetime',
+        'trading_day' => 'date',
+        'daily_stop_until' => 'datetime',
         'scanner_snapshot' => 'array',
         'chart_points' => 'array',
     ];

@@ -7,6 +7,7 @@ use App\Domain\Portfolio\LivePortfolioGuardService;
 use App\Models\FutureTradeBotConfig;
 use App\Models\FutureTradeBotState;
 use Illuminate\Http\Client\Pool;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
 use Throwable;
@@ -35,6 +36,7 @@ class FutureTradeBotService
             'status' => 'Stopped',
             'state' => 'IDLE',
             'connection_status' => 'Disconnected',
+            'trading_day' => now()->toDateString(),
         ]);
 
         return $config->fresh('state');
@@ -88,29 +90,31 @@ class FutureTradeBotService
             }
         }
         $state = $this->state($config);
-        $state->update([
+        $this->persistState($state, [
             'status' => 'Running',
             'state' => 'SCANNING',
             'connection_status' => 'Connected',
             'current_signal' => 'WAITING_FOR_SIGNAL',
+            'daily_stop_until' => null,
+            'trading_day' => now()->toDateString(),
         ]);
         $this->log($config->fresh('state'), 'BOT_STARTED', null, null, 0, 'Futures paper scanner started.');
         $this->scan($config->fresh('state'), true);
-        return $state->fresh();
+        return $state->exists ? $state->fresh() : $state;
     }
 
     public function stop(FutureTradeBotConfig $config): FutureTradeBotState
     {
         $config->update(['enabled' => false]);
         $state = $this->state($config);
-        $state->update([
+        $this->persistState($state, [
             'status' => 'Stopped',
             'state' => 'STOPPED',
             'connection_status' => 'Disconnected',
             'current_signal' => 'WAITING_FOR_SIGNAL',
         ]);
         $this->log($config->fresh('state'), 'BOT_STOPPED', $state->current_symbol, null, 0, 'Operator stopped futures bot.');
-        return $state->fresh();
+        return $state->exists ? $state->fresh() : $state;
     }
 
     public function emergencyStop(FutureTradeBotConfig $config): FutureTradeBotState
@@ -128,7 +132,7 @@ class FutureTradeBotService
             }
         }
         $config->update(['enabled' => false, 'settings' => $settings]);
-        $state->update([
+        $this->persistState($state, [
             'status' => 'Stopped',
             'state' => 'EMERGENCY_STOP',
             'connection_status' => 'Disconnected',
@@ -137,15 +141,16 @@ class FutureTradeBotService
             'position_side' => null,
         ]);
         $this->log($config->fresh('state'), 'EMERGENCY_STOP', $state->current_symbol, null, 0, 'All paper futures activity halted.');
-        return $state->fresh();
+        return $state->exists ? $state->fresh() : $state;
     }
 
     public function resetPaper(FutureTradeBotConfig $config): FutureTradeBotState
     {
         $config->trades()->delete();
         $state = $this->state($config);
-        $state->update([
+        $this->persistState($state, [
             'state' => 'IDLE',
+            'status' => 'Stopped',
             'current_symbol' => null,
             'current_signal' => 'WAITING_FOR_SIGNAL',
             'entry_price' => null,
@@ -161,6 +166,8 @@ class FutureTradeBotService
             'trade_count_today' => 0,
             'wins' => 0,
             'losses' => 0,
+            'daily_stop_until' => null,
+            'trading_day' => now()->toDateString(),
             'scanner_snapshot' => [],
             'chart_points' => [],
         ]);
@@ -172,6 +179,8 @@ class FutureTradeBotService
     {
         $config = $config->fresh('state');
         $state = $this->state($config);
+        $state = $this->refreshDailyCycleState($config, $state);
+        $lockedForDay = $this->applyDailyLossLock($config, $state);
         $settings = $config->mergedSettings();
         $market = $this->marketSnapshot($settings);
         $signals = array_map(fn (array $ticker) => $this->scoreTicker($ticker, $settings), $market);
@@ -198,7 +207,7 @@ class FutureTradeBotService
 
             if ($positionPrice > 0) {
                 $chart = $this->appendChartPoint($state, $positionSymbol, $positionPrice, $dynamic['public'], (float) $state->confidence, (string) $state->current_signal);
-                $state->update([
+                $this->persistState($state, [
                     'connection_status' => 'Connected',
                     'current_price' => $positionPrice,
                     'last_scan_at' => now(),
@@ -209,7 +218,7 @@ class FutureTradeBotService
             }
         } else {
             $chart = $this->appendChartPoint($state, $best['symbol'], (float) $best['price'], $dynamic['public'], (float) $best['confidence'], (string) $best['signal']);
-            $state->update([
+            $this->persistState($state, [
                 'connection_status' => 'Connected',
                 'current_symbol' => $best['symbol'],
                 'current_signal' => $best['signal'],
@@ -220,7 +229,7 @@ class FutureTradeBotService
                 'chart_points' => $chart,
             ]);
 
-            if ($allowPaperExecution && $config->enabled && ($settings['autoExecutePaperSignals'] ?? true)) {
+            if (! $lockedForDay && $allowPaperExecution && $config->enabled && ($settings['autoExecutePaperSignals'] ?? true)) {
                 $this->maybeEnterPaperPosition($config->fresh('state'), $best);
             }
         }
@@ -230,11 +239,10 @@ class FutureTradeBotService
 
     public function statusPayload(FutureTradeBotConfig $config): array
     {
-        if ($config->enabled) {
-            $this->scan($config, true);
-            $config = $config->fresh('state');
-        }
-
+        $state = $this->state($config);
+        $state = $this->refreshDailyCycleState($config, $state);
+        $this->applyDailyLossLock($config, $state);
+        $config = $config->fresh('state');
         $state = $this->state($config);
         $settings = $config->mergedSettings();
         $dynamic = $this->dynamicDecision($config, $state, (array) ($state->scanner_snapshot ?? []), null, $settings);
@@ -288,19 +296,23 @@ class FutureTradeBotService
 
     public function dashboardPayload(FutureTradeBotConfig $config): array
     {
-        $scan = $this->scan($config, $config->enabled);
+        $state = $this->state($config);
+        $state = $this->refreshDailyCycleState($config, $state);
+        $this->applyDailyLossLock($config, $state);
         $config = $config->fresh('state');
         $state = $this->state($config);
         $settings = $config->mergedSettings();
-        $dynamic = $this->dynamicDecision($config, $state, $scan['signals'], $scan['bestSignal'], $settings);
+        $signals = array_slice((array) ($state->scanner_snapshot ?? []), 0, 20);
+        $bestSignal = $signals[0] ?? null;
+        $dynamic = $this->dynamicDecision($config, $state, $signals, $bestSignal, $settings);
         $effectiveSettings = $dynamic['settings'];
         $entry = (float) ($state->entry_price ?? 0);
         $peak = (float) ($state->peak_price ?? 0);
 
         return [
             'status' => $this->statusPayload($config),
-            'scanner' => $scan['signals'],
-            'bestSignal' => $scan['bestSignal'],
+            'scanner' => $signals,
+            'bestSignal' => $bestSignal,
             'chart' => $state->chart_points ?? [],
             'levels' => [
                 'entry' => $entry ?: null,
@@ -398,7 +410,7 @@ class FutureTradeBotService
         $side = $signal['signal'] === 'BUY' ? 'LONG' : 'SHORT';
         $price = (float) $signal['price'];
         $qty = ((float) ($settings['tradeAmountUsdt'] ?? 25) * (float) ($settings['leverage'] ?? 3)) / max($price, 0.00000001);
-        $state->update([
+        $this->persistState($state, [
             'state' => 'IN_POSITION',
             'current_symbol' => $signal['symbol'],
             'position_side' => $side,
@@ -408,6 +420,8 @@ class FutureTradeBotService
             'bottom_price' => $price,
             'current_signal' => $signal['signal'] . '_EXECUTED',
             'trade_count_today' => (int) $state->trade_count_today + 1,
+            'status' => 'Running',
+            'connection_status' => 'Connected',
         ]);
 
         $config->trades()->create([
@@ -455,7 +469,7 @@ class FutureTradeBotService
         $peak = $side === 'LONG' ? max((float) ($state->peak_price ?? $entry), $price) : min((float) ($state->peak_price ?? $entry), $price);
         $bottom = $side === 'LONG' ? min((float) ($state->bottom_price ?? $entry), $price) : max((float) ($state->bottom_price ?? $entry), $price);
 
-        $state->update([
+        $this->persistState($state, [
             'current_price' => $price,
             'peak_price' => $peak,
             'bottom_price' => $bottom,
@@ -544,7 +558,7 @@ class FutureTradeBotService
         ]);
 
         $state = $this->state($config);
-        $state->update([
+        $this->persistState($state, [
             'state' => 'LIVE_IN_POSITION',
             'current_symbol' => $symbol,
             'position_side' => $positionSide,
@@ -554,6 +568,8 @@ class FutureTradeBotService
             'bottom_price' => $entry,
             'current_signal' => $signal['signal'] . '_LIVE_EXECUTED',
             'trade_count_today' => (int) $state->trade_count_today + 1,
+            'status' => 'Running',
+            'connection_status' => 'Connected',
         ]);
 
         $config->trades()->create([
@@ -624,7 +640,7 @@ class FutureTradeBotService
             'meta' => ['close_order' => $response, 'dynamic' => $dynamic['public'], 'algorithm_mode' => $dynamic['mode']],
         ]);
 
-        $state->update([
+        $this->persistState($state, [
             'state' => 'COOLDOWN',
             'position_side' => null,
             'entry_price' => null,
@@ -638,6 +654,8 @@ class FutureTradeBotService
             'losses' => $net < 0 ? (int) $state->losses + 1 : (int) $state->losses,
             'cooldown_until' => now()->addSeconds((int) ($settings['cooldownSeconds'] ?? 10)),
             'current_signal' => $reason,
+            'status' => 'Running',
+            'connection_status' => 'Connected',
         ]);
         $this->log(
             $config->fresh('state'),
@@ -648,6 +666,8 @@ class FutureTradeBotService
             'Live futures reduce-only close submitted.',
             $this->runtimeContext($dynamic, ['status' => $reason, 'side' => $state->position_side, 'entryPrice' => $entry, 'exitPrice' => $price, 'netPnl' => $net, 'mode' => $settings['forceTestnet'] ?? true ? 'LIVE_TESTNET' : 'LIVE'])
         );
+        $freshConfig = $config->fresh('state');
+        $this->applyDailyLossLock($freshConfig, $this->state($freshConfig));
     }
 
     private function closePaperPosition(FutureTradeBotConfig $config, float $price, string $reason): void
@@ -679,7 +699,7 @@ class FutureTradeBotService
 	            'meta' => ['dynamic' => $dynamic['public'], 'algorithm_mode' => $dynamic['mode']],
 	        ]);
 
-        $state->update([
+        $this->persistState($state, [
             'state' => 'COOLDOWN',
             'position_side' => null,
             'entry_price' => null,
@@ -691,8 +711,10 @@ class FutureTradeBotService
             'daily_loss' => $net < 0 ? (float) $state->daily_loss + abs($net) : (float) $state->daily_loss,
             'wins' => $net > 0 ? (int) $state->wins + 1 : (int) $state->wins,
             'losses' => $net < 0 ? (int) $state->losses + 1 : (int) $state->losses,
-	            'cooldown_until' => now()->addSeconds((int) ($dynamic['settings']['cooldownSeconds'] ?? $settings['cooldownSeconds'] ?? 10)),
+            'cooldown_until' => now()->addSeconds((int) ($dynamic['settings']['cooldownSeconds'] ?? $settings['cooldownSeconds'] ?? 10)),
             'current_signal' => $reason,
+            'status' => 'Running',
+            'connection_status' => 'Connected',
         ]);
         $this->log(
             $config->fresh('state'),
@@ -703,6 +725,8 @@ class FutureTradeBotService
             'Paper futures position closed.',
             $this->runtimeContext($dynamic, ['status' => $reason, 'side' => $side, 'entryPrice' => $entry, 'exitPrice' => $price, 'netPnl' => $net, 'mode' => 'PAPER'])
         );
+        $freshConfig = $config->fresh('state');
+        $this->applyDailyLossLock($freshConfig, $this->state($freshConfig));
     }
 
     private function scoreTicker(array $ticker, array $settings): array
@@ -1301,6 +1325,78 @@ class FutureTradeBotService
             'fully_dynamic' => 'AUTO',
             default => 'NORMAL',
         };
+    }
+
+    private function refreshDailyCycleState(FutureTradeBotConfig $config, FutureTradeBotState $state): FutureTradeBotState
+    {
+        $today = now()->toDateString();
+        $storedDay = $state->trading_day?->toDateString();
+
+        if ($storedDay === $today) {
+            return $state;
+        }
+
+        $wasLocked = $state->daily_stop_until !== null;
+        $status = $config->enabled ? 'Running' : 'Stopped';
+        $phase = $config->enabled ? 'SCANNING' : 'IDLE';
+
+        $this->persistState($state, [
+            'trading_day' => $today,
+            'daily_stop_until' => null,
+            'daily_profit' => 0,
+            'daily_loss' => 0,
+            'trade_count_today' => 0,
+            'status' => $status,
+            'state' => $phase,
+            'connection_status' => $config->enabled ? 'Connected' : 'Disconnected',
+        ]);
+
+        if ($wasLocked && $config->enabled && $config->exists) {
+            $this->log($config->fresh('state'), 'DAILY_LIMIT_RESET', $state->current_symbol, null, 0, 'New trading day started. Future Trade resumed automatically.');
+        }
+
+        return $state->exists ? $state->fresh() : $state;
+    }
+
+    private function applyDailyLossLock(FutureTradeBotConfig $config, FutureTradeBotState $state): bool
+    {
+        $settings = $config->mergedSettings();
+        $limit = max(0.0, (float) ($settings['maxDailyLossPercent'] ?? 0));
+
+        if ($limit <= 0 || (float) $state->quantity > 0) {
+            return false;
+        }
+
+        if ((float) $state->daily_loss < $limit) {
+            return false;
+        }
+
+        $alreadyLocked = $state->daily_stop_until && $state->daily_stop_until->isFuture();
+        $lockUntil = now()->endOfDay();
+
+        $this->persistState($state, [
+            'status' => 'Stopped',
+            'state' => 'DAILY_LOSS_LOCKED',
+            'connection_status' => 'Daily loss limit reached',
+            'daily_stop_until' => $lockUntil,
+            'current_signal' => 'DAILY_LOSS_LIMIT_HIT',
+        ]);
+
+        if (! $alreadyLocked && $config->exists) {
+            $this->log($config->fresh('state'), 'DAILY_LOSS_LIMIT_HIT', $state->current_symbol, null, 0, 'Daily loss limit reached. Bot locked until next trading day.');
+        }
+
+        return true;
+    }
+
+    private function persistState(FutureTradeBotState $state, array $attributes): void
+    {
+        if ($state->exists) {
+            $state->update($attributes);
+            return;
+        }
+
+        $state->forceFill($attributes);
     }
 
     private function stopLossPrice(float $entry, string $side, array $settings): float
