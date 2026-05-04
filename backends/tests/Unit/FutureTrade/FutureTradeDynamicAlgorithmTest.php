@@ -123,7 +123,8 @@ class FutureTradeDynamicAlgorithmTest extends TestCase
             $this->signal('BTCUSDT', 'BUY', 0.765, 200, 0.1, 18.0),
         ]);
 
-        $this->assertSame(0.88, $decision['effectiveMinConfidence']);
+        $this->assertLessThanOrEqual(0.88, $decision['effectiveMinConfidence']);
+        $this->assertGreaterThan(0.86, $decision['effectiveMinConfidence']);
         $this->assertGreaterThan($decision['public']['analysis']['bestConfidence'], $decision['effectiveMinConfidence']);
     }
 

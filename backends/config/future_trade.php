@@ -25,7 +25,7 @@ return [
         'marginMode' => 'isolated',
         'tradeAmountUsdt' => 25,
         // Higher confidence threshold — only enter on strong signals
-        'minConfidence' => 0.82,
+        'minConfidence' => 0.74,
         // TP at 1.2% with 3x leverage = 3.6% on notional — worthwhile
         'takeProfitPercent' => 1.2,
         // Tighter SL: 0.4% stop, keeping R:R at 3:1
@@ -40,13 +40,13 @@ return [
         'maxLeverage' => 5,
         'maxSpreadPercent' => 0.12,
         // Longer cooldown prevents chasing failed trades
-        'cooldownSeconds' => 60,
+        'cooldownSeconds' => 45,
         'scanIntervalSeconds' => 3,
-        'confidenceMode' => 'fixed',
+        'confidenceMode' => 'semi_dynamic',
         'dynamicLookbackMinutes' => 10,
-        'dynamicMinConfidenceFloor' => 0.68,
+        'dynamicMinConfidenceFloor' => 0.64,
         'dynamicMinConfidenceCeiling' => 0.88,
-        'dynamicReentryBuffer' => 0.02,
+        'dynamicReentryBuffer' => 0.015,
         'dynamicSuggestionEnabled' => true,
         'autoExecutePaperSignals' => true,
         'avoidChoppyMarket' => true,

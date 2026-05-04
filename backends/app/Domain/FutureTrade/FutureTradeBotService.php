@@ -245,7 +245,11 @@ class FutureTradeBotService
         $config = $config->fresh('state');
         $state = $this->state($config);
         $settings = $config->mergedSettings();
-        $dynamic = $this->dynamicDecision($config, $state, (array) ($state->scanner_snapshot ?? []), null, $settings);
+        $signals = array_slice((array) ($state->scanner_snapshot ?? []), 0, 20);
+        $bestSignal = $signals[0] ?? null;
+        $dynamic = $this->dynamicDecision($config, $state, $signals, $bestSignal, $settings);
+        $effectiveMinConfidence = (float) ($dynamic['effectiveMinConfidence'] ?? ($settings['minConfidence'] ?? 0));
+        $signalConfidence = (float) ($bestSignal['confidence'] ?? $state->confidence ?? 0);
         $wins = (int) $state->wins;
         $losses = (int) $state->losses;
         $total = max(1, $wins + $losses);
@@ -260,8 +264,11 @@ class FutureTradeBotService
             'connectionStatus' => $state->connection_status,
             'currentSymbol' => $state->current_symbol,
             'currentSignal' => $state->current_signal,
+            'entryReason' => $this->entryReasonSummary($state, $bestSignal, $effectiveMinConfidence),
             'currentPrice' => (float) ($state->current_price ?? 0),
             'confidence' => (float) $state->confidence,
+            'activeMinConfidence' => round($effectiveMinConfidence, 4),
+            'signalConfidenceGap' => round($signalConfidence - $effectiveMinConfidence, 4),
             'positionSide' => $state->position_side,
             'entryPrice' => (float) ($state->entry_price ?? 0),
             'quantity' => (float) $state->quantity,
@@ -1107,17 +1114,17 @@ class FutureTradeBotService
                 $next['trailingTakeProfitPercent'] = max(0.03, (float) ($settings['trailingTakeProfitPercent'] ?? 0.18) * 0.85);
                 $adjustments[] = 'Choppy market: require stronger confidence and take faster profit.';
             } elseif ($analysis['trendStrength'] >= 0.68 && $analysis['directionAgreement'] >= 0.58) {
-                $effective -= $mode === 'fully_dynamic' ? 0.035 : 0.02;
+                $effective -= $mode === 'fully_dynamic' ? 0.045 : 0.028;
                 $next['takeProfitPercent'] = (float) ($settings['takeProfitPercent'] ?? 0.45) * ($mode === 'fully_dynamic' ? 1.20 : 1.10);
                 $next['trailingTakeProfitPercent'] = (float) ($settings['trailingTakeProfitPercent'] ?? 0.18) * ($mode === 'fully_dynamic' ? 1.08 : 1.03);
                 $adjustments[] = 'Strong aligned trend: allow earlier entry and let target breathe.';
             } else {
-                $effective += $mode === 'fully_dynamic' ? 0.015 : 0.01;
+                $effective += $mode === 'fully_dynamic' ? 0.01 : 0.005;
                 $adjustments[] = 'Mixed signal: keep entry slightly stricter.';
             }
 
             if ($analysis['confidenceGap'] < 0.025) {
-                $effective += $mode === 'fully_dynamic' ? 0.025 : 0.015;
+                $effective += $mode === 'fully_dynamic' ? 0.018 : 0.01;
                 $adjustments[] = 'Top signals are close together: avoid weak ranking edge.';
             }
 
@@ -1126,7 +1133,7 @@ class FutureTradeBotService
                 $next['cooldownSeconds'] = max((int) ($settings['cooldownSeconds'] ?? 60), $mode === 'fully_dynamic' ? 120 : 90);
                 $adjustments[] = 'Recent loss: raise threshold and extend cooldown.';
             } elseif ($analysis['lastTradeReason'] && str_contains($analysis['lastTradeReason'], 'TAKE_PROFIT')) {
-                $effective += (float) ($settings['dynamicReentryBuffer'] ?? 0.02);
+                $effective += (float) ($settings['dynamicReentryBuffer'] ?? 0.02) * 0.7;
                 $adjustments[] = 'Recent take profit: require a re-entry buffer to avoid chasing.';
             }
 
@@ -1137,7 +1144,7 @@ class FutureTradeBotService
                     $next['tradeAmountUsdt'] = max(5, (float) ($settings['tradeAmountUsdt'] ?? 25) * 0.75);
                     $adjustments[] = 'Low current win rate: reduce size and demand cleaner entries.';
                 } elseif ($winRate >= 65 && $analysis['trendStrength'] >= 0.55) {
-                    $effective -= 0.015;
+                    $effective -= 0.02;
                     $adjustments[] = 'Good win rate with trend support: modestly loosen entry.';
                 }
             }
@@ -1174,6 +1181,47 @@ class FutureTradeBotService
                 'suggestion' => $suggestion,
             ],
         ];
+    }
+
+    private function entryReasonSummary(FutureTradeBotState $state, ?array $bestSignal, float $effectiveMinConfidence): ?string
+    {
+        if ($state->daily_stop_until && now()->lt($state->daily_stop_until)) {
+            return 'Daily loss limit lock is active until the next trading day reset.';
+        }
+
+        if ($state->cooldown_until && now()->lt($state->cooldown_until) && ((string) $state->state !== 'IN_POSITION')) {
+            return sprintf(
+                'Cooldown active until %s.',
+                $state->cooldown_until->timezone(config('app.timezone'))->format('H:i:s')
+            );
+        }
+
+        if (! $bestSignal) {
+            return 'Scanner has not produced a ranked signal yet.';
+        }
+
+        $parts = [];
+        $reason = trim((string) ($bestSignal['reason'] ?? ''));
+        if ($reason !== '') {
+            $parts[] = $reason;
+        }
+
+        $signal = strtoupper((string) ($bestSignal['signal'] ?? 'WAIT'));
+        $confidence = (float) ($bestSignal['confidence'] ?? 0);
+        if ($confidence < $effectiveMinConfidence) {
+            $parts[] = sprintf(
+                'Confidence %.1f%% is below active minimum %.1f%%.',
+                $confidence * 100,
+                $effectiveMinConfidence * 100
+            );
+        } elseif ($signal === 'WAIT') {
+            $parts[] = sprintf(
+                'Confidence %.1f%% is ready, but the entry guard still wants a cleaner sequence.',
+                $confidence * 100
+            );
+        }
+
+        return implode(' ', array_values(array_filter($parts)));
     }
 
     private function trendAnalysis(FutureTradeBotState $state, array $signals, ?array $best, array $settings): array
