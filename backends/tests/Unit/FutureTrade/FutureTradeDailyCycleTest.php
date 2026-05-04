@@ -82,6 +82,65 @@ class FutureTradeDailyCycleTest extends TestCase
         $this->assertSame('SCANNING', $refreshed->state);
     }
 
+    public function test_manual_start_after_daily_loss_lock_clears_today_lock_and_resets_day_counters(): void
+    {
+        Carbon::setTestNow('2026-05-04 15:30:00');
+
+        $service = new FutureTradeBotService(new LivePortfolioGuardService());
+        $config = FutureTradeBotConfig::create([
+            'workspace_id' => '00000000-0000-0000-0000-000000000199',
+            'enabled' => false,
+            'paper_trading' => true,
+            'enable_live_trading' => false,
+            'settings' => [
+                'symbols' => ['ETHUSDT'],
+                'timeframe' => '5m',
+                'paperTrading' => true,
+                'liveTrading' => false,
+                'forceTestnet' => true,
+                'minConfidence' => 0.78,
+                'confidenceMode' => 'semi_dynamic',
+                'takeProfitPercent' => 0.45,
+                'stopLossPercent' => 0.35,
+                'trailingTakeProfitPercent' => 0.22,
+                'rollbackLossPercent' => 0.18,
+                'maxDailyLossPercent' => 0.8,
+                'maxTradesPerDay' => 8,
+                'cooldownSeconds' => 120,
+                'dynamicLookbackMinutes' => 10,
+                'dynamicMinConfidenceFloor' => 0.70,
+                'dynamicMinConfidenceCeiling' => 0.88,
+                'dynamicReentryBuffer' => 0.03,
+                'tradeAmountUsdt' => 50,
+                'autoExecutePaperSignals' => false,
+                'avoidChoppyMarket' => true,
+                'scanIntervalSeconds' => 3,
+            ],
+            'algorithm_notes' => 'test',
+        ]);
+
+        $config->state()->create([
+            'status' => 'Stopped',
+            'state' => 'DAILY_LOSS_LOCKED',
+            'connection_status' => 'Daily loss limit reached',
+            'current_signal' => 'DAILY_LOSS_LIMIT_HIT',
+            'daily_profit' => 0.1,
+            'daily_loss' => 1.1,
+            'trade_count_today' => 6,
+            'trading_day' => '2026-05-04',
+            'daily_stop_until' => '2026-05-04 23:59:59',
+        ]);
+
+        $started = $service->start($config->fresh('state'));
+
+        $this->assertSame('Running', $started->status);
+        $this->assertSame('SCANNING', $started->state);
+        $this->assertSame(0.0, (float) $started->daily_loss);
+        $this->assertSame(0.0, (float) $started->daily_profit);
+        $this->assertSame(0, (int) $started->trade_count_today);
+        $this->assertNull($started->daily_stop_until);
+    }
+
     private function invoke(FutureTradeBotService $service, string $method, array $arguments): mixed
     {
         $reflection = new ReflectionMethod($service, $method);

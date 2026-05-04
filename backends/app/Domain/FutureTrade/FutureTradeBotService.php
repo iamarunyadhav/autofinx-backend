@@ -90,6 +90,25 @@ class FutureTradeBotService
             }
         }
         $state = $this->state($config);
+        $wasDailyLocked = $state->daily_stop_until && $state->daily_stop_until->isFuture();
+        if ($wasDailyLocked) {
+            $this->persistState($state, [
+                'daily_profit' => 0,
+                'daily_loss' => 0,
+                'trade_count_today' => 0,
+                'daily_stop_until' => null,
+                'trading_day' => now()->toDateString(),
+            ]);
+            $this->log(
+                $config->fresh('state'),
+                'MANUAL_DAILY_LOCK_OVERRIDE',
+                $state->current_symbol,
+                null,
+                0,
+                'Operator manually restarted the bot after daily loss lock. Daily loss counters reset for a supervised retry.'
+            );
+            $state = $this->state($config);
+        }
         $this->persistState($state, [
             'status' => 'Running',
             'state' => 'SCANNING',
@@ -284,6 +303,8 @@ class FutureTradeBotService
             'dynamic' => $dynamic['public'],
             'paperTrading' => ! $this->isLiveMode($config),
             'liveTrading' => $this->isLiveMode($config),
+            'dailyLossLocked' => (bool) ($state->daily_stop_until && $state->daily_stop_until->isFuture()),
+            'manualRestartAllowed' => true,
             'liveTradingEnvEnabled' => $this->environmentTradingReady((bool) ($settings['forceTestnet'] ?? true)),
             'testnetTradingEnvEnabled' => (bool) config('future_trade.enable_testnet_trading'),
             'realTradingEnvEnabled' => (bool) config('future_trade.enable_live_trading'),
