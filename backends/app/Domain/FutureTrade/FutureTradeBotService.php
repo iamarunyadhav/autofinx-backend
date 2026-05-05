@@ -117,8 +117,19 @@ class FutureTradeBotService
             'daily_stop_until' => null,
             'trading_day' => now()->toDateString(),
         ]);
-        $this->log($config->fresh('state'), 'BOT_STARTED', null, null, 0, 'Futures paper scanner started.');
-        $this->scan($config->fresh('state'), true);
+        $startedConfig = $config->fresh('state');
+        $startedSettings = $startedConfig->mergedSettings();
+        $this->log(
+            $startedConfig,
+            'BOT_STARTED',
+            null,
+            null,
+            0,
+            $this->isLiveMode($startedConfig)
+                ? (($startedSettings['forceTestnet'] ?? true) ? 'Futures live testnet scanner started.' : 'Futures live scanner started.')
+                : 'Futures paper scanner started.'
+        );
+        $this->scan($startedConfig, true);
         return $state->exists ? $state->fresh() : $state;
     }
 
@@ -192,6 +203,53 @@ class FutureTradeBotService
             'chart_points' => [],
         ]);
         return $state->fresh();
+    }
+
+    public function resetDailyLoss(FutureTradeBotConfig $config): FutureTradeBotState
+    {
+        $state = $this->state($config);
+        $this->persistState($state, [
+            'daily_profit' => 0,
+            'daily_loss' => 0,
+            'trade_count_today' => 0,
+            'daily_stop_until' => null,
+            'trading_day' => now()->toDateString(),
+            'current_signal' => 'WAITING_FOR_SIGNAL',
+        ]);
+
+        $this->log($config->fresh('state'), 'DAILY_LOSS_RESET', $state->current_symbol, null, 0, 'Operator reset the current trading day loss counters.');
+
+        return $state->fresh();
+    }
+
+    public function testConnection(FutureTradeBotConfig $config): array
+    {
+        $settings = $config->mergedSettings();
+        $mode = (string) ($settings['envMode'] ?? 'paper');
+        if ($mode === 'paper') {
+            return [
+                'connected' => false,
+                'mode' => 'paper',
+                'message' => 'Paper mode selected. Switch to Testnet or Live in My Config to test a Binance futures connection.',
+            ];
+        }
+
+        $forceTestnet = $mode !== 'live';
+        $client = $this->liveClient(array_merge($settings, ['forceTestnet' => $forceTestnet]));
+        $client->ping();
+        $account = $client->fetchAccountInfo();
+        $asset = collect((array) ($account['assets'] ?? []))
+            ->first(fn ($row) => strtoupper((string) ($row['asset'] ?? '')) === 'USDT');
+
+        return [
+            'connected' => true,
+            'mode' => $mode,
+            'message' => $forceTestnet ? 'Binance Futures testnet connection OK.' : 'Binance Futures live connection OK.',
+            'walletBalance' => isset($account['totalWalletBalance']) ? (float) $account['totalWalletBalance'] : (float) ($asset['walletBalance'] ?? 0),
+            'availableBalance' => isset($account['availableBalance']) ? (float) $account['availableBalance'] : (float) ($asset['availableBalance'] ?? 0),
+            'marginBalance' => isset($account['totalMarginBalance']) ? (float) $account['totalMarginBalance'] : (float) ($asset['marginBalance'] ?? 0),
+            'accountAsset' => strtoupper((string) ($asset['asset'] ?? 'USDT')) ?: 'USDT',
+        ];
     }
 
     public function scan(FutureTradeBotConfig $config, bool $allowPaperExecution = true): array

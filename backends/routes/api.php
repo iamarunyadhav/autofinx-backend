@@ -429,6 +429,9 @@ Route::prefix('v1')->group(function () {
         Route::post('workspaces/{workspace}/fast2x/reset-paper', [Fast2XController::class, 'resetPaper'])->middleware('require.2fa');
         Route::get('workspaces/{workspace}/fast2x/config', [Fast2XController::class, 'config']);
         Route::put('workspaces/{workspace}/fast2x/config', [Fast2XController::class, 'updateConfig'])->middleware('require.2fa');
+        Route::get('workspaces/{workspace}/fast2x/env-config', [Fast2XController::class, 'envConfig'])->middleware('require.2fa');
+        Route::put('workspaces/{workspace}/fast2x/env-config', [Fast2XController::class, 'updateEnvConfig'])->middleware('require.2fa');
+        Route::post('workspaces/{workspace}/fast2x/test-connection', [Fast2XController::class, 'testConnection'])->middleware('require.2fa');
         Route::get('workspaces/{workspace}/fast2x/trades', [Fast2XController::class, 'trades']);
         Route::get('workspaces/{workspace}/fast2x/logs', [Fast2XController::class, 'logs']);
         Route::get('workspaces/{workspace}/fast2x/live-price', [Fast2XController::class, 'livePrice']);
@@ -442,10 +445,12 @@ Route::prefix('v1')->group(function () {
         Route::post('workspaces/{workspace}/future-trade/stop', [FutureTradeBotController::class, 'stop'])->middleware('require.2fa');
         Route::post('workspaces/{workspace}/future-trade/emergency-stop', [FutureTradeBotController::class, 'emergencyStop'])->middleware('require.2fa');
         Route::post('workspaces/{workspace}/future-trade/reset-paper', [FutureTradeBotController::class, 'resetPaper'])->middleware('require.2fa');
+        Route::post('workspaces/{workspace}/future-trade/reset-daily-loss', [FutureTradeBotController::class, 'resetDailyLoss'])->middleware('require.2fa');
         Route::get('workspaces/{workspace}/future-trade/config', [FutureTradeBotController::class, 'config']);
         Route::put('workspaces/{workspace}/future-trade/config', [FutureTradeBotController::class, 'updateConfig'])->middleware('require.2fa');
         Route::get('workspaces/{workspace}/future-trade/env-config', [FutureTradeBotController::class, 'envConfig'])->middleware('require.2fa');
         Route::put('workspaces/{workspace}/future-trade/env-config', [FutureTradeBotController::class, 'updateEnvConfig'])->middleware('require.2fa');
+        Route::post('workspaces/{workspace}/future-trade/test-connection', [FutureTradeBotController::class, 'testConnection'])->middleware('require.2fa');
         Route::get('workspaces/{workspace}/future-trade/trades', [FutureTradeBotController::class, 'trades']);
         Route::get('workspaces/{workspace}/future-trade/logs', [FutureTradeBotController::class, 'logs']);
 

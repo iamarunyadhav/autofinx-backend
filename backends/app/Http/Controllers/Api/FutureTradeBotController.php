@@ -43,6 +43,11 @@ class FutureTradeBotController extends Controller
         return response()->json(['state' => $this->bot->resetPaper($this->bot->getOrCreateConfig($workspace))]);
     }
 
+    public function resetDailyLoss(string $workspace): JsonResponse
+    {
+        return response()->json(['state' => $this->bot->resetDailyLoss($this->bot->getOrCreateConfig($workspace))]);
+    }
+
     public function config(string $workspace): JsonResponse
     {
         return response()->json($this->bot->configPayload($this->bot->getOrCreateConfig($workspace)));
@@ -113,6 +118,18 @@ class FutureTradeBotController extends Controller
         $savedConfig = $this->bot->updateConfig($botConfig, $payload);
 
         return response()->json($this->envPayload($savedConfig));
+    }
+
+    public function testConnection(string $workspace): JsonResponse
+    {
+        try {
+            return response()->json($this->bot->testConnection($this->bot->getOrCreateConfig($workspace)));
+        } catch (\Throwable $e) {
+            return response()->json([
+                'connected' => false,
+                'message' => $e->getMessage(),
+            ], 422);
+        }
     }
 
     public function trades(string $workspace): JsonResponse
