@@ -927,15 +927,26 @@ class FutureTradeBotService
 
         $voteGap = abs($bullishVotes - $bearishVotes);
         $dominantSignal = $bullishVotes > $bearishVotes ? 'BUY' : ($bearishVotes > $bullishVotes ? 'SELL' : 'WAIT');
-        $strongDirectionalSequence = $sequenceConsistency >= 0.55 && abs($sequenceNetChange) >= 0.12;
-        $conflicted = $voteGap < 1.2
-            || ($dominantSignal === 'BUY' && ($sequenceNetChange < -0.08 || $sequenceImpulse === 'SELL'))
-            || ($dominantSignal === 'SELL' && ($sequenceNetChange > 0.08 || $sequenceImpulse === 'BUY'));
-        $microChoppy = $sequenceVolatility > 0.22 && abs($sequenceNetChange) < 0.10;
+        $strongDirectionalSequence = $sequenceConsistency >= 0.48 && abs($sequenceNetChange) >= 0.08;
+        $conflicted = $voteGap < 0.95
+            || ($dominantSignal === 'BUY' && ($sequenceNetChange < -0.12 || $sequenceImpulse === 'SELL'))
+            || ($dominantSignal === 'SELL' && ($sequenceNetChange > 0.12 || $sequenceImpulse === 'BUY'));
+        $microChoppy = $sequenceVolatility > 0.30 && abs($sequenceNetChange) < 0.06;
         $choppy = $choppy || $microChoppy;
 
+        $sequenceBiasAligned = ($dominantSignal === 'BUY' && ($sequenceNetChange >= 0 || $sequenceImpulse === 'BUY' || $sequenceBullishRatio >= 0.52))
+            || ($dominantSignal === 'SELL' && ($sequenceNetChange <= 0 || $sequenceImpulse === 'SELL' || $sequenceBearishRatio >= 0.52));
+        $tickerBiasAligned = ($dominantSignal === 'BUY' && ($vwapBullish || $intradayChangePct > 0 || $rangePosition >= 0.55))
+            || ($dominantSignal === 'SELL' && (! $vwapBullish || $intradayChangePct < 0 || $rangePosition <= 0.45));
+        $cleanOverride = ! $choppy
+            && $dominantSignal !== 'WAIT'
+            && $voteGap >= 1.75
+            && $sequenceConsistency >= 0.46
+            && $tickerBiasAligned
+            && $sequenceBiasAligned;
+
         $signal = $dominantSignal;
-        if (($settings['avoidChoppyMarket'] ?? true) && ($choppy || $conflicted || ! $strongDirectionalSequence)) {
+        if (($settings['avoidChoppyMarket'] ?? true) && ($choppy || (($conflicted || ! $strongDirectionalSequence) && ! $cleanOverride))) {
             $signal = 'WAIT';
         }
 
@@ -964,6 +975,10 @@ class FutureTradeBotService
 
         $confidence = round($this->clamp($volumeScore + $intradayScore + $sequenceScore + $consistencyScore + $rangeScore + $directionalBonus + $alignmentBonus - $penalty, 0.01, 0.99), 4);
 
+        if ($signal === 'WAIT' && $cleanOverride && $confidence >= 0.58) {
+            $signal = $dominantSignal;
+        }
+
         $reasonParts = [];
         if ($signal === 'WAIT') {
             if ($choppy) {
@@ -981,6 +996,9 @@ class FutureTradeBotService
             $reasonParts[] = sprintf('Sequence consistency %.0f%%', $sequenceConsistency * 100);
             $reasonParts[] = sprintf('Range position %.0f%%', $rangePosition * 100);
             $reasonParts[] = sprintf('Intraday %.2f%%', $intradayChangePct);
+            if ($cleanOverride && ($conflicted || ! $strongDirectionalSequence)) {
+                $reasonParts[] = 'High-conviction override accepted despite mixed micro sequence';
+            }
         }
 
         return [
