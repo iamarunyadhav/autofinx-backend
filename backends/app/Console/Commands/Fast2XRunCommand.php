@@ -29,7 +29,7 @@ class Fast2XRunCommand extends Command
 
             if (! $provider->isWebSocketConnected() && (time() - $lastWebSocketRetryAt) >= $websocketRetrySeconds) {
                 try {
-                    $provider->connectWebSocket($symbol);
+                    $provider->configuredConnectWebSocket($config);
                     $config->state?->update(['websocket_status' => 'Connected']);
                     $this->info('Fast2X WebSocket loop connected for ' . $symbol);
                 } catch (Throwable $e) {
@@ -52,7 +52,7 @@ class Fast2XRunCommand extends Command
             }
 
             try {
-                $ticker = $provider->latestTicker($symbol);
+                $ticker = $provider->configuredTicker($config);
                 $config->state?->update(['websocket_status' => 'Polling Fallback']);
                 $fast2x->processTick($config->fresh('state'), $ticker['tick'], (int) $ticker['latencyMs'], true);
             } catch (Throwable $e) {

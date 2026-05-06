@@ -25,7 +25,7 @@ class BotStateService
 
     public function start(Fast2XConfig $config): Fast2XState
     {
-        if ($config->enable_live_trading) {
+        if ($config->usesLiveVenue()) {
             $guard = $this->liveGuard->canActivate($config->workspace_id, 'fast2x');
             if (! $guard['allowed']) {
                 $settings = $config->mergedSettings();
@@ -46,7 +46,8 @@ class BotStateService
             'websocket_status' => 'Connected',
             'decision' => 'WAITING_FOR_SIGNAL',
         ]);
-        $this->logs->log($config->fresh('state'), 'BOT_STARTED', ['reason' => 'Paper trading default. Trading involves risk. This bot does not guarantee profit.']);
+        $mode = strtoupper($config->fresh()->executionMode());
+        $this->logs->log($config->fresh('state'), 'BOT_STARTED', ['reason' => "Fast2X {$mode} mode started. Trading involves risk. This bot does not guarantee profit."]);
         return $state->fresh();
     }
 

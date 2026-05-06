@@ -113,9 +113,12 @@ class Fast2XController extends Controller
             'testnetApiSecret' => (bool) ($data['replace_testnet_secret'] ?? false) ? (string) ($data['testnet_api_secret'] ?? '') : (string) ($settings['testnetApiSecret'] ?? ''),
         ]);
 
-        $config->update(['settings' => $nextSettings]);
+        $saved = $this->fast2x->updateConfig($config, [
+            'settings' => $nextSettings,
+            'enable_live_trading' => $mode !== 'paper',
+        ]);
 
-        return response()->json($this->envPayload($config->fresh('state')));
+        return response()->json($this->envPayload($saved));
     }
 
     public function testConnection(string $workspace): JsonResponse
@@ -157,7 +160,7 @@ class Fast2XController extends Controller
             return response()->json([
                 'connected' => true,
                 'mode' => $mode,
-                'message' => $forceTestnet ? 'Binance Spot testnet connection OK. Fast2X execution is still paper-simulated in this build.' : 'Binance Spot live connection OK. Fast2X execution is still paper-simulated in this build.',
+                'message' => $forceTestnet ? 'Binance Spot testnet connection OK. Fast2X can execute through the testnet venue when Testnet mode is active.' : 'Binance Spot live connection OK. Fast2X can execute through the live venue when Live mode is active.',
                 'accountAsset' => strtoupper((string) ($asset['asset'] ?? 'USDT')) ?: 'USDT',
                 'free' => isset($asset['free']) ? (float) $asset['free'] : 0,
                 'locked' => isset($asset['locked']) ? (float) $asset['locked'] : 0,

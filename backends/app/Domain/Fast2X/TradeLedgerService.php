@@ -12,7 +12,7 @@ class TradeLedgerService
         return $config->trades()->create(array_merge([
             'bot_name' => 'Fast2X',
             'symbol' => $config->normalizedSymbol(),
-            'mode' => $config->paper_trading ? 'PAPER' : 'LIVE',
+            'mode' => strtoupper($config->executionMode()),
             'status' => 'FILLED',
         ], $data));
     }

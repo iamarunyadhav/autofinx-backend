@@ -51,7 +51,7 @@ class RiskGuardService
             return $duplicate;
         }
 
-        if (! $config->paper_trading && (! $config->enable_live_trading || ! config('fast2x.enable_live_trading'))) {
+        if ($config->usesLiveVenue() && ! config('fast2x.enable_live_trading')) {
             return ['allowed' => false, 'reason' => 'Live trading is blocked unless explicitly enabled'];
         }
 

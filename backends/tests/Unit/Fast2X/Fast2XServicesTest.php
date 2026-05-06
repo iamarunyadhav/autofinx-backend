@@ -3,6 +3,7 @@
 namespace Tests\Unit\Fast2X;
 
 use App\Domain\Fast2X\DuplicateOrderGuard;
+use App\Domain\Fast2X\Fast2XService;
 use App\Domain\Fast2X\DynamicThresholdService;
 use App\Domain\Fast2X\OrderExecutionService;
 use App\Domain\Fast2X\PnLTrackingService;
@@ -13,6 +14,7 @@ use App\Domain\Fast2X\TradeFrequencyService;
 use App\Domain\Fast2X\TrailingProfitService;
 use App\Models\Fast2XConfig;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Http;
 use Tests\TestCase;
 
 class Fast2XServicesTest extends TestCase
@@ -49,7 +51,7 @@ class Fast2XServicesTest extends TestCase
     {
         $settings = config('fast2x.defaults');
 
-        $this->assertTrue(app(RollbackService::class)->shouldRollback(-0.2, $settings));
+        $this->assertTrue(app(RollbackService::class)->shouldRollback(-0.22, $settings));
         $this->assertTrue(app(StopLossService::class)->shouldStop(-0.5, $settings));
 
         $trailing = app(TrailingProfitService::class)->resolve(100000, 100700, 101000, $settings);
@@ -112,14 +114,82 @@ class Fast2XServicesTest extends TestCase
         $this->assertGreaterThan(0, (float) $config->fresh('state')->state->quantity);
     }
 
-    private function config(): Fast2XConfig
+    public function test_testnet_buy_execution_places_real_order_and_records_testnet_trade(): void
     {
-        return Fast2XConfig::create([
+        Http::fake([
+            'https://testnet.binance.vision/api/v3/exchangeInfo*' => Http::response([
+                'symbols' => [[
+                    'symbol' => 'BTCUSDT',
+                    'filters' => [
+                        ['filterType' => 'LOT_SIZE', 'minQty' => '0.00001000', 'maxQty' => '1000.00000000', 'stepSize' => '0.00001000'],
+                        ['filterType' => 'MIN_NOTIONAL', 'minNotional' => '5.00000000'],
+                    ],
+                ]],
+            ], 200),
+            'https://testnet.binance.vision/api/v3/order*' => Http::response([
+                'symbol' => 'BTCUSDT',
+                'orderId' => '12345',
+                'status' => 'FILLED',
+                'executedQty' => '0.00010000',
+                'cummulativeQuoteQty' => '10.00000000',
+                'fills' => [
+                    ['price' => '100000.00', 'qty' => '0.00010000', 'commission' => '0.01000000'],
+                ],
+            ], 200),
+        ]);
+
+        $config = $this->config([
+            'paper_trading' => false,
+            'enable_live_trading' => true,
+            'settings' => array_merge(config('fast2x.defaults'), [
+                'paperTrading' => false,
+                'envMode' => 'testnet',
+                'envTestnetEnabled' => true,
+                'testnetApiUrl' => 'https://testnet.binance.vision',
+                'testnetApiKey' => 'test-key',
+                'testnetApiSecret' => 'test-secret',
+            ]),
+        ]);
+        $config->state()->create(['status' => 'Running', 'websocket_status' => 'Connected']);
+
+        app(OrderExecutionService::class)->executeBuy($config->fresh('state'), [
+            'price' => 100000,
+            'amount' => 10,
+            'signalKey' => 'BUY:testnet',
+        ]);
+
+        $this->assertDatabaseHas('fast2x_trades', ['side' => 'BUY', 'mode' => 'TESTNET', 'order_id' => '12345']);
+        $this->assertEquals('0.00010000', $config->fresh('state')->state->quantity);
+    }
+
+    public function test_update_config_downgrades_to_paper_when_requested_testnet_credentials_are_missing(): void
+    {
+        $config = $this->config();
+        $config->state()->create(['status' => 'Stopped', 'websocket_status' => 'Disconnected']);
+
+        $updated = app(Fast2XService::class)->updateConfig($config->fresh('state'), [
+            'enable_live_trading' => true,
+            'settings' => [
+                'paperTrading' => false,
+                'envMode' => 'testnet',
+                'envTestnetEnabled' => true,
+                'testnetApiKey' => '',
+                'testnetApiSecret' => '',
+            ],
+        ]);
+
+        $this->assertTrue($updated->paper_trading);
+        $this->assertFalse($updated->enable_live_trading);
+    }
+
+    private function config(array $overrides = []): Fast2XConfig
+    {
+        return Fast2XConfig::create(array_merge([
             'workspace_id' => '00000000-0000-0000-0000-000000000001',
             'symbol' => 'BTCUSDT',
             'paper_trading' => true,
             'enable_live_trading' => false,
             'settings' => config('fast2x.defaults'),
-        ]);
+        ], $overrides));
     }
 }

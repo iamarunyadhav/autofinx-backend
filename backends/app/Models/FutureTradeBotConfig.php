@@ -35,4 +35,26 @@ class FutureTradeBotConfig extends BaseModel
     {
         return array_merge(config('future_trade.defaults', []), (array) $this->settings);
     }
+
+    public function executionMode(): string
+    {
+        if (! $this->enable_live_trading) {
+            return 'paper';
+        }
+
+        $settings = $this->mergedSettings();
+        $liveTrading = (bool) ($settings['liveTrading'] ?? false);
+        $forceTestnet = (bool) ($settings['forceTestnet'] ?? true);
+
+        if (! $liveTrading) {
+            return 'paper';
+        }
+
+        return $forceTestnet ? 'testnet' : 'live';
+    }
+
+    public function usesLiveVenue(): bool
+    {
+        return $this->executionMode() === 'live';
+    }
 }

@@ -26,7 +26,7 @@ class LivePortfolioGuardService
     {
         if ($ignoreBot !== 'fast2x') {
             $fast2x = Fast2XConfig::where('workspace_id', $workspaceId)->with('state')->first();
-            if ($fast2x && $fast2x->enable_live_trading && $fast2x->state && ($fast2x->state->status === 'Running' || (float) $fast2x->state->quantity > 0)) {
+            if ($fast2x && $fast2x->usesLiveVenue() && $fast2x->state && ($fast2x->state->status === 'Running' || (float) $fast2x->state->quantity > 0)) {
                 return [
                     'key' => 'fast2x',
                     'label' => 'Fast2X',
@@ -37,7 +37,7 @@ class LivePortfolioGuardService
 
         if ($ignoreBot !== 'future_trade') {
             $futureTrade = FutureTradeBotConfig::where('workspace_id', $workspaceId)->with('state')->first();
-            if ($futureTrade && $futureTrade->enable_live_trading && $futureTrade->enabled && $futureTrade->state && ($futureTrade->state->status === 'Running' || (float) $futureTrade->state->quantity > 0)) {
+            if ($futureTrade && $futureTrade->usesLiveVenue() && $futureTrade->enabled && $futureTrade->state && ($futureTrade->state->status === 'Running' || (float) $futureTrade->state->quantity > 0)) {
                 return [
                     'key' => 'future_trade',
                     'label' => 'Future Trade Bot',

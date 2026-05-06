@@ -47,19 +47,32 @@ class Fast2XService
     public function updateConfig(Fast2XConfig $config, array $payload): Fast2XConfig
     {
         $settings = array_merge($config->mergedSettings(), (array) ($payload['settings'] ?? []));
-        $paperTrading = array_key_exists('paperTrading', $settings) ? (bool) $settings['paperTrading'] : true;
-        $liveAllowed = (bool) ($payload['enable_live_trading'] ?? false);
+        $requestedMode = strtolower((string) ($settings['envMode'] ?? 'paper'));
+        $requestedVenueTrading = (bool) ($payload['enable_live_trading'] ?? false) && in_array($requestedMode, ['testnet', 'live'], true);
+        $paperTrading = ! $requestedVenueTrading;
+        $liveAllowed = $requestedVenueTrading;
+        $downgradeReason = null;
 
-        if (! $paperTrading && (! $liveAllowed || ! (bool) config('fast2x.enable_live_trading'))) {
+        if ($requestedMode === 'live' && ! (bool) config('fast2x.enable_live_trading')) {
             $paperTrading = true;
             $liveAllowed = false;
+            $downgradeReason = 'Live spot execution is globally disabled for Fast2X.';
         }
 
-        if (! $paperTrading && $liveAllowed) {
+        if ($requestedVenueTrading && ! $this->environmentTradingReady($requestedMode, $settings)) {
+            $paperTrading = true;
+            $liveAllowed = false;
+            $downgradeReason = $requestedMode === 'testnet'
+                ? 'Fast2X Testnet mode requires Testnet gate enabled with valid testnet spot credentials.'
+                : 'Fast2X Live mode requires Live gate enabled with valid live spot credentials.';
+        }
+
+        if ($requestedMode === 'live' && ! $paperTrading && $liveAllowed) {
             $guard = $this->liveGuard->canActivate($config->workspace_id, 'fast2x');
             if (! $guard['allowed']) {
                 $paperTrading = true;
                 $liveAllowed = false;
+                $downgradeReason = $guard['reason'];
             }
         }
 
@@ -72,8 +85,9 @@ class Fast2XService
             'settings' => array_merge($settings, ['paperTrading' => $paperTrading]),
         ]);
 
-        if (! $paperTrading && ! $liveAllowed) {
-            $this->logs->log($config->fresh('state'), 'LIVE_GUARD_BLOCKED', ['reason' => 'Another live bot is already active for this workspace/account.']);
+        if ($requestedVenueTrading && $paperTrading && ! $liveAllowed && $downgradeReason) {
+            $event = $requestedMode === 'live' ? 'LIVE_GUARD_BLOCKED' : 'TESTNET_GUARD_BLOCKED';
+            $this->logs->log($config->fresh('state'), $event, ['reason' => $downgradeReason]);
         }
 
         $this->logs->log($config->fresh('state'), 'CONFIG_UPDATED', ['reason' => 'Operator updated Fast2X configuration']);
@@ -83,7 +97,7 @@ class Fast2XService
     public function refreshLivePrice(Fast2XConfig $config): array
     {
         try {
-            $ticker = $this->provider->latestTicker($config->normalizedSymbol());
+            $ticker = $this->provider->configuredTicker($config);
             $this->processTick($config->fresh('state'), $ticker['tick'], $ticker['latencyMs'], false);
             return [
                 'currentPrice' => $ticker['tick']['price'],
@@ -256,7 +270,7 @@ class Fast2XService
             'botName' => 'Fast2X',
             'state' => $state->state,
             'status' => $state->status,
-            'mode' => $config->paper_trading ? 'Paper Trading' : 'Live Trading',
+            'mode' => $this->modeLabel($config),
             'exchange' => 'Binance Spot',
             'symbol' => $config->normalizedSymbol(),
             'webSocketStatus' => $state->websocket_status,
@@ -268,8 +282,8 @@ class Fast2XService
             'decision' => $state->decision,
             'dynamicThresholds' => $state->runtime_meta['dynamic_thresholds'] ?? null,
             'indicatorConfirmation' => $state->runtime_meta['indicator_confirmation'] ?? null,
-            'warning' => $config->paper_trading ? null : 'Live trading is risky and requires explicit environment enablement.',
-            'liveGuard' => $this->liveGuard->canActivate($config->workspace_id, 'fast2x'),
+            'warning' => $config->executionMode() === 'live' ? 'Live trading is risky and requires explicit environment enablement.' : null,
+            'liveGuard' => $config->usesLiveVenue() ? $this->liveGuard->canActivate($config->workspace_id, 'fast2x') : ['allowed' => true, 'reason' => null, 'activeBot' => null],
             'settings' => $settings,
         ];
     }
@@ -364,7 +378,7 @@ class Fast2XService
             'autoManagement' => [
                 'state' => $state->state,
                 'decision' => $state->decision,
-                'mode' => $config->paper_trading ? 'PAPER' : 'LIVE',
+                'mode' => strtoupper($config->executionMode()),
                 'aiBrainEnabled' => (bool) $config->ai_brain_enabled,
                 'dynamicThresholds' => $state->runtime_meta['dynamic_thresholds'] ?? null,
                 'indicatorConfirmation' => $state->runtime_meta['indicator_confirmation'] ?? null,
@@ -404,5 +418,33 @@ class Fast2XService
         }
 
         return $settings;
+    }
+
+    private function environmentTradingReady(string $mode, array $settings): bool
+    {
+        if (! in_array($mode, ['testnet', 'live'], true)) {
+            return false;
+        }
+
+        $enabled = $mode === 'testnet'
+            ? (bool) ($settings['envTestnetEnabled'] ?? false)
+            : (bool) ($settings['envLiveEnabled'] ?? false);
+        $key = $mode === 'testnet'
+            ? (string) ($settings['testnetApiKey'] ?? '')
+            : (string) ($settings['liveApiKey'] ?? '');
+        $secret = $mode === 'testnet'
+            ? (string) ($settings['testnetApiSecret'] ?? '')
+            : (string) ($settings['liveApiSecret'] ?? '');
+
+        return $enabled && $key !== '' && $secret !== '';
+    }
+
+    private function modeLabel(Fast2XConfig $config): string
+    {
+        return match ($config->executionMode()) {
+            'live' => 'Live Spot',
+            'testnet' => 'Testnet Spot',
+            default => 'Paper Spot',
+        };
     }
 }

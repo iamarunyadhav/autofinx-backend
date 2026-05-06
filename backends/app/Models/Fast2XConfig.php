@@ -40,4 +40,25 @@ class Fast2XConfig extends BaseModel
     {
         return array_merge(config('fast2x.defaults', []), (array) $this->settings);
     }
+
+    public function executionMode(): string
+    {
+        if ($this->paper_trading || ! $this->enable_live_trading) {
+            return 'paper';
+        }
+
+        $mode = strtolower((string) ($this->mergedSettings()['envMode'] ?? 'paper'));
+
+        return $mode === 'live' ? 'live' : 'testnet';
+    }
+
+    public function usesLiveVenue(): bool
+    {
+        return $this->executionMode() === 'live';
+    }
+
+    public function usesTestnetVenue(): bool
+    {
+        return $this->executionMode() === 'testnet';
+    }
 }
