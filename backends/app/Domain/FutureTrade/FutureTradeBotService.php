@@ -1918,7 +1918,10 @@ class FutureTradeBotService
         }
 
         try {
-            $account = $this->liveClient($config->mergedSettings())->fetchAccountInfo();
+            $cacheKey = 'future_trade_account_summary:' . $config->workspace_id . ':' . ($config->executionMode());
+            $account = Cache::remember($cacheKey, now()->addSeconds(10), function () use ($config) {
+                return $this->liveClient($config->mergedSettings())->fetchAccountInfo();
+            });
             $asset = collect((array) ($account['assets'] ?? []))
                 ->first(fn ($row) => strtoupper((string) ($row['asset'] ?? '')) === 'USDT');
 

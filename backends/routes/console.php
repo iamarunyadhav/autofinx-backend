@@ -2,7 +2,6 @@
 
 use App\Jobs\DetectStaleFeedsJob;
 use App\Jobs\KeepAliveUserStreamsJob;
-use App\Jobs\SyncOrderStatusJob;
 use Illuminate\Foundation\Inspiring;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Schedule;
@@ -21,10 +20,13 @@ Schedule::command('strategy:heal')
     ->onOneServer()
     ->runInBackground();
 
+/*
+Temporarily disabled to reduce unnecessary Binance REST pressure while only Future Trade and Fast2X are needed.
 Schedule::command('orders:poll-status')
     ->everyTwoMinutes()
     ->onOneServer()
     ->runInBackground();
+*/
 
 Schedule::command('market:ws-consume --once --store-ohlc')
     ->everySecond()
@@ -36,6 +38,8 @@ Schedule::command('metals:poll-prices --once')
     ->withoutOverlapping()
     ->runInBackground();
 
+/*
+Temporarily disabled to reduce unnecessary Binance REST pressure while only Future Trade and Fast2X are needed.
 Schedule::command('bots:evaluate')
     ->everySecond()
     ->withoutOverlapping()
@@ -59,6 +63,7 @@ Schedule::command('quick-trades:settle')
 Schedule::job(new SyncOrderStatusJob(100))
     ->everyTenSeconds()
     ->withoutOverlapping();
+*/
 
 Schedule::job(new KeepAliveUserStreamsJob())
     ->everyThirtyMinutes()

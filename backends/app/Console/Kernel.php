@@ -33,12 +33,8 @@ use App\Console\Commands\FutureTradeBotRunCommand;
 use App\Console\Commands\FutureTradeDiagnosticsCommand;
 use App\Console\Commands\FutureTradeScanAllCommand;
 use App\Jobs\DetectStaleFeedsJob;
-use App\Jobs\DispatchAiDecisionCycleJob;
-use App\Jobs\ExpireAiDecisionsJob;
 use App\Jobs\KeepAliveUserStreamsJob;
-use App\Jobs\RunExitMonitoringJob;
 use App\Jobs\RunWithdrawalSchedulesJob;
-use App\Jobs\SyncOrderStatusJob;
 use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Foundation\Console\Kernel as ConsoleKernel;
 
@@ -68,6 +64,8 @@ class Kernel extends ConsoleKernel
             ->after(function () { $this->markRunEnd('strategy:heal'); })
             ->description('Heal strategies after maintenance and retry failed orders');
 
+        /*
+        Temporarily disabled to reduce unnecessary Binance REST pressure while only Future Trade and Fast2X are needed.
         $schedule->command('orders:poll-status')
             ->everyTwoMinutes()
             ->onOneServer()
@@ -75,6 +73,7 @@ class Kernel extends ConsoleKernel
             ->before(function () { $this->markRunStart('orders:poll-status'); })
             ->after(function () { $this->markRunEnd('orders:poll-status'); })
             ->description('Poll provider status for pending orders');
+        */
 
         $schedule->command('market:ws-consume --once --store-ohlc')
             ->everySecond()
@@ -88,6 +87,8 @@ class Kernel extends ConsoleKernel
             ->runInBackground()
             ->description('Poll metal broker rates and cache USD/LKR conversions');
 
+        /*
+        Temporarily disabled to reduce unnecessary Binance REST pressure while only Future Trade and Fast2X are needed.
         $schedule->command('bots:evaluate')
             ->everySecond()
             ->withoutOverlapping()
@@ -99,6 +100,7 @@ class Kernel extends ConsoleKernel
             ->withoutOverlapping()
             ->runInBackground()
             ->description('Evaluate stateful anchor-based ratio bots');
+        */
 
         $schedule->command('future-trade:scan-all')
             ->everySecond()
@@ -116,6 +118,8 @@ class Kernel extends ConsoleKernel
             ->after(function () { $this->markRunEnd('future-trade:diagnostics'); })
             ->description('Persist FutureTrade runtime diagnostics and blocker snapshots');
 
+        /*
+        Temporarily disabled to reduce unnecessary Binance REST pressure while only Future Trade and Fast2X are needed.
         $schedule->command('ratio-bots:reconcile')
             ->everyMinute()
             ->withoutOverlapping()
@@ -126,6 +130,7 @@ class Kernel extends ConsoleKernel
             ->everyTenSeconds()
             ->withoutOverlapping()
             ->description('Reconcile order status/fills from exchange REST fallback');
+        */
 
         $schedule->job(new KeepAliveUserStreamsJob())
             ->everyThirtyMinutes()
@@ -142,6 +147,8 @@ class Kernel extends ConsoleKernel
             ->withoutOverlapping()
             ->description('Run due automated withdrawal schedules');
 
+        /*
+        Temporarily disabled to reduce unnecessary Binance REST pressure while only Future Trade and Fast2X are needed.
         $schedule->job(new ExpireAiDecisionsJob())
             ->everyMinute()
             ->withoutOverlapping()
@@ -156,6 +163,7 @@ class Kernel extends ConsoleKernel
             ->everyTenSeconds()
             ->withoutOverlapping()
             ->description('Evaluate managed live spot exits and dispatch protective exits safely');
+        */
 
         $schedule->command('ops:readiness-check')
             ->everyMinute()
