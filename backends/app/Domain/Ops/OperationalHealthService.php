@@ -276,6 +276,8 @@ class OperationalHealthService
             'warnings' => array_values(array_unique($warnings)),
             'queue_backlog' => $backlog,
             'failed_jobs' => $failedJobs,
+            'warning_threshold' => $warningThreshold,
+            'block_threshold' => $blockThreshold,
         ];
     }
 
