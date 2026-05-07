@@ -72,3 +72,9 @@ Schedule::job(new KeepAliveUserStreamsJob())
 Schedule::job(new DetectStaleFeedsJob((int) env('LIVE_TRADING_STALE_FEED_THRESHOLD_SEC', 60)))
     ->everyMinute()
     ->withoutOverlapping();
+
+Schedule::command('future-trade:diagnostics --persist')
+    ->everyFiveMinutes()
+    ->withoutOverlapping()
+    ->runInBackground();
+
