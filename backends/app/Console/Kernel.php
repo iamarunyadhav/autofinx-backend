@@ -30,6 +30,7 @@ use App\Console\Commands\TradingHealthCheckCommand;
 use App\Console\Commands\RatioBotsEvaluateCommand;
 use App\Console\Commands\Fast2XRunCommand;
 use App\Console\Commands\FutureTradeBotRunCommand;
+use App\Console\Commands\FutureTradeDiagnosticsCommand;
 use App\Console\Commands\FutureTradeScanAllCommand;
 use App\Jobs\DetectStaleFeedsJob;
 use App\Jobs\DispatchAiDecisionCycleJob;
@@ -103,7 +104,17 @@ class Kernel extends ConsoleKernel
             ->everySecond()
             ->withoutOverlapping()
             ->runInBackground()
+            ->before(function () { $this->markRunStart('future-trade:scan-all'); })
+            ->after(function () { $this->markRunEnd('future-trade:scan-all'); })
             ->description('Scan all enabled FutureTrade bot workspaces');
+
+        $schedule->command('future-trade:diagnostics --persist')
+            ->everyFiveMinutes()
+            ->withoutOverlapping()
+            ->runInBackground()
+            ->before(function () { $this->markRunStart('future-trade:diagnostics'); })
+            ->after(function () { $this->markRunEnd('future-trade:diagnostics'); })
+            ->description('Persist FutureTrade runtime diagnostics and blocker snapshots');
 
         $schedule->command('ratio-bots:reconcile')
             ->everyMinute()
@@ -188,6 +199,7 @@ class Kernel extends ConsoleKernel
         RatioBotsEvaluateCommand::class,
         Fast2XRunCommand::class,
         FutureTradeBotRunCommand::class,
+        FutureTradeDiagnosticsCommand::class,
         FutureTradeScanAllCommand::class,
     ];
 

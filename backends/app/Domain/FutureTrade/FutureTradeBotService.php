@@ -3,11 +3,14 @@
 namespace App\Domain\FutureTrade;
 
 use App\Domain\Exchange\BinanceFuturesClient;
+use App\Domain\Ops\OperationalHealthService;
 use App\Domain\Portfolio\LivePortfolioGuardService;
 use App\Models\FutureTradeBotConfig;
 use App\Models\FutureTradeBotState;
+use App\Models\SchedulerRun;
 use Illuminate\Http\Client\Pool;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
 use Throwable;
@@ -16,6 +19,7 @@ class FutureTradeBotService
 {
     public function __construct(
         private readonly LivePortfolioGuardService $liveGuard,
+        private readonly OperationalHealthService $operationalHealth,
     ) {}
 
     public function getOrCreateConfig(string $workspaceId): FutureTradeBotConfig
@@ -256,62 +260,97 @@ class FutureTradeBotService
     {
         $config = $config->fresh('state');
         $state = $this->state($config);
-        $state = $this->refreshDailyCycleState($config, $state);
-        $lockedForDay = $this->applyDailyLossLock($config, $state);
-        $settings = $config->mergedSettings();
-        $market = $this->marketSnapshot($settings);
-        $signals = array_map(fn (array $ticker) => $this->scoreTicker($ticker, $settings), $market);
-        usort($signals, fn ($a, $b) => $b['confidence'] <=> $a['confidence']);
-        $best = $signals[0] ?? null;
+        try {
+            $state = $this->refreshDailyCycleState($config, $state);
+            $lockedForDay = $this->applyDailyLossLock($config, $state);
+            $settings = $config->mergedSettings();
+            $market = $this->marketSnapshot($config, $settings);
+            $signals = array_map(fn (array $ticker) => $this->scoreTicker($ticker, $settings), $market);
+            usort($signals, fn ($a, $b) => $b['confidence'] <=> $a['confidence']);
+            $best = $signals[0] ?? null;
 
-        if (! $best) {
-            return ['signals' => [], 'bestSignal' => null];
-        }
+            if (! $best) {
+                $this->persistState($state, [
+                    'connection_status' => 'No market data',
+                    'current_signal' => 'WAITING_FOR_SIGNAL',
+                    'last_scan_at' => now(),
+                ]);
+                $this->logThrottled(
+                    $config->fresh('state'),
+                    'SCAN_EMPTY',
+                    $state->current_symbol,
+                    null,
+                    0,
+                    'Future Trade scan returned no ranked symbols. Market snapshot may be empty or stale.',
+                    ['status' => 'EMPTY'],
+                    60
+                );
+                return ['signals' => [], 'bestSignal' => null];
+            }
 
-        $dynamic = $this->dynamicDecision($config, $state, $signals, $best, $settings);
-        $settings = $dynamic['settings'];
-        $best['effectiveMinConfidence'] = $dynamic['effectiveMinConfidence'];
-        $best['dynamicMode'] = $dynamic['mode'];
+            $dynamic = $this->dynamicDecision($config, $state, $signals, $best, $settings);
+            $settings = $dynamic['settings'];
+            $best['effectiveMinConfidence'] = $dynamic['effectiveMinConfidence'];
+            $best['dynamicMode'] = $dynamic['mode'];
 
-        $state->refresh();
-        $inPosition = (float) $state->quantity > 0;
+            $state->refresh();
+            $inPosition = (float) $state->quantity > 0;
 
-        if ($inPosition) {
-            // When holding a position, track the price of THAT symbol, not the best signal's symbol
-            $positionSymbol = (string) $state->current_symbol;
-            $positionTicker = collect($market)->first(fn ($row) => (string) ($row['symbol'] ?? '') === $positionSymbol);
-            $positionPrice = $positionTicker ? (float) ($positionTicker['lastPrice'] ?? $positionTicker['price'] ?? 0) : 0;
+            if ($inPosition) {
+                $positionSymbol = (string) $state->current_symbol;
+                $positionTicker = collect($market)->first(fn ($row) => (string) ($row['symbol'] ?? '') === $positionSymbol);
+                $positionPrice = $positionTicker ? (float) ($positionTicker['lastPrice'] ?? $positionTicker['price'] ?? 0) : 0;
 
-            if ($positionPrice > 0) {
-                $chart = $this->appendChartPoint($state, $positionSymbol, $positionPrice, $dynamic['public'], (float) $state->confidence, (string) $state->current_signal);
+                if ($positionPrice > 0) {
+                    $chart = $this->appendChartPoint($state, $positionSymbol, $positionPrice, $dynamic['public'], (float) $state->confidence, (string) $state->current_signal);
+                    $this->persistState($state, [
+                        'connection_status' => 'Connected',
+                        'current_price' => $positionPrice,
+                        'last_scan_at' => now(),
+                        'scanner_snapshot' => array_slice($signals, 0, 12),
+                        'chart_points' => $chart,
+                    ]);
+                    $this->manageOpenPosition($config->fresh('state'), $positionPrice);
+                }
+            } else {
+                $chart = $this->appendChartPoint($state, $best['symbol'], (float) $best['price'], $dynamic['public'], (float) $best['confidence'], (string) $best['signal']);
                 $this->persistState($state, [
                     'connection_status' => 'Connected',
-                    'current_price' => $positionPrice,
+                    'current_symbol' => $best['symbol'],
+                    'current_signal' => $best['signal'],
+                    'current_price' => $best['price'],
+                    'confidence' => $best['confidence'],
                     'last_scan_at' => now(),
                     'scanner_snapshot' => array_slice($signals, 0, 12),
                     'chart_points' => $chart,
                 ]);
-                $this->manageOpenPosition($config->fresh('state'), $positionPrice);
+
+                $autoExecutionEnabled = $this->isLiveMode($config) || (bool) ($settings['autoExecutePaperSignals'] ?? true);
+                if (! $lockedForDay && $allowPaperExecution && $config->enabled && $autoExecutionEnabled) {
+                    $this->maybeEnterPaperPosition($config->fresh('state'), $best);
+                }
             }
-        } else {
-            $chart = $this->appendChartPoint($state, $best['symbol'], (float) $best['price'], $dynamic['public'], (float) $best['confidence'], (string) $best['signal']);
+
+            return ['signals' => array_slice($signals, 0, 20), 'bestSignal' => $best];
+        } catch (Throwable $e) {
             $this->persistState($state, [
-                'connection_status' => 'Connected',
-                'current_symbol' => $best['symbol'],
-                'current_signal' => $best['signal'],
-                'current_price' => $best['price'],
-                'confidence' => $best['confidence'],
+                'state' => 'SCAN_ERROR',
+                'connection_status' => 'Error',
                 'last_scan_at' => now(),
-                'scanner_snapshot' => array_slice($signals, 0, 12),
-                'chart_points' => $chart,
             ]);
+            $this->logThrottled(
+                $config->fresh('state'),
+                'SCAN_FAILED',
+                $state->current_symbol,
+                $state->current_signal,
+                (float) ($state->confidence ?? 0),
+                $e->getMessage(),
+                ['status' => 'ERROR'],
+                30
+            );
 
-            if (! $lockedForDay && $allowPaperExecution && $config->enabled && ($settings['autoExecutePaperSignals'] ?? true)) {
-                $this->maybeEnterPaperPosition($config->fresh('state'), $best);
-            }
+            return ['signals' => [], 'bestSignal' => null, 'error' => $e->getMessage()];
         }
-
-        return ['signals' => array_slice($signals, 0, 20), 'bestSignal' => $best];
     }
 
     public function statusPayload(FutureTradeBotConfig $config): array
@@ -414,11 +453,206 @@ class FutureTradeBotService
             'risk' => [
                 'lossPrevention' => 'Stop loss, rollback, trailing profit, cooldown, max daily loss and max trades are active in paper mode.',
                 'paperTrading' => ! $this->isLiveMode($config),
-	                'liveTradingBlocked' => ! $this->environmentTradingReady((bool) ($settings['forceTestnet'] ?? true), $settings),
+	            'liveTradingBlocked' => ! $this->environmentTradingReady((bool) ($settings['forceTestnet'] ?? true), $settings),
 	            ],
+	            'diagnostics' => $this->diagnosticsPayload($config),
 	            'dynamic' => $dynamic['public'],
 	        ];
 	    }
+
+    public function diagnosticsPayload(FutureTradeBotConfig $config, bool $persist = false): array
+    {
+        $state = $this->state($config);
+        $state = $this->refreshDailyCycleState($config, $state);
+        $this->applyDailyLossLock($config, $state);
+        $config = $config->fresh('state');
+        $state = $this->state($config);
+        $settings = $config->mergedSettings();
+        $signals = array_slice((array) ($state->scanner_snapshot ?? []), 0, 20);
+        $bestSignal = $signals[0] ?? null;
+        $dynamic = $this->dynamicDecision($config, $state, $signals, $bestSignal, $settings);
+        $effectiveSettings = $dynamic['settings'];
+        $effectiveMinConfidence = (float) ($dynamic['effectiveMinConfidence'] ?? ($settings['minConfidence'] ?? 0));
+        $account = $this->accountSummary($config);
+        $health = $this->operationalHealth->summary($config->workspace_id);
+        $forceTestnet = (bool) ($settings['forceTestnet'] ?? true);
+        $envReady = $this->environmentTradingReady($forceTestnet, $settings);
+        $liveGuard = $this->liveGuard->canActivate($config->workspace_id, 'future_trade');
+        $requiredTradeAmountUsdt = (float) ($effectiveSettings['tradeAmountUsdt'] ?? $settings['tradeAmountUsdt'] ?? 0);
+
+        $botBlockers = [];
+        $botWarnings = [];
+        $botChecks = [];
+
+        $botChecks[] = [
+            'label' => 'Mode',
+            'state' => $this->isLiveMode($config) ? 'ok' : 'info',
+            'message' => $this->isLiveMode($config)
+                ? (($settings['forceTestnet'] ?? true) ? 'Live testnet mode is active.' : 'Live futures mode is active.')
+                : 'Paper futures mode is active.',
+        ];
+
+        if ((bool) ($settings['emergencyStop'] ?? false)) {
+            $botBlockers[] = 'emergency_stop_enabled';
+            $botChecks[] = ['label' => 'Emergency stop', 'state' => 'blocked', 'message' => 'Algorithm config has emergency stop enabled.'];
+        }
+
+        if ($state->daily_stop_until && $state->daily_stop_until->isFuture()) {
+            $botBlockers[] = 'daily_loss_lock_active';
+            $botChecks[] = ['label' => 'Daily lock', 'state' => 'blocked', 'message' => 'Daily loss lock is active until the next trading day reset.'];
+        }
+
+        if ($state->cooldown_until && $state->cooldown_until->isFuture() && (string) $state->state !== 'IN_POSITION') {
+            $botWarnings[] = 'cooldown_active';
+            $botChecks[] = [
+                'label' => 'Cooldown',
+                'state' => 'warning',
+                'message' => sprintf('Cooldown active until %s.', $state->cooldown_until->timezone(config('app.timezone'))->format('H:i:s')),
+            ];
+        }
+
+        if ((int) $state->trade_count_today >= (int) ($settings['maxTradesPerDay'] ?? 0) && (int) ($settings['maxTradesPerDay'] ?? 0) > 0) {
+            $botBlockers[] = 'max_trades_per_day_reached';
+            $botChecks[] = ['label' => 'Trade limit', 'state' => 'blocked', 'message' => 'Today trade limit has been reached.'];
+        }
+
+        if ($bestSignal) {
+            $signalConfidence = (float) ($bestSignal['confidence'] ?? 0);
+            if (($bestSignal['signal'] ?? 'WAIT') === 'WAIT') {
+                $botWarnings[] = 'best_signal_wait';
+                $botChecks[] = ['label' => 'Scanner', 'state' => 'warning', 'message' => (string) ($bestSignal['reason'] ?? 'Scanner still returned WAIT.')];
+            } elseif ($signalConfidence < $effectiveMinConfidence) {
+                $botBlockers[] = 'confidence_below_threshold';
+                $botChecks[] = [
+                    'label' => 'Entry threshold',
+                    'state' => 'blocked',
+                    'message' => sprintf('Best signal %.1f%% is below active minimum %.1f%%.', $signalConfidence * 100, $effectiveMinConfidence * 100),
+                ];
+            } else {
+                $botChecks[] = [
+                    'label' => 'Entry threshold',
+                    'state' => 'ok',
+                    'message' => sprintf('Best signal %.1f%% is above active minimum %.1f%%.', $signalConfidence * 100, $effectiveMinConfidence * 100),
+                ];
+            }
+        } else {
+            $botWarnings[] = 'scanner_snapshot_empty';
+            $botChecks[] = ['label' => 'Scanner', 'state' => 'warning', 'message' => 'No scanner snapshot is available yet.'];
+        }
+
+        if ((bool) ($settings['liveTrading'] ?? false)) {
+            if (! $envReady) {
+                $botBlockers[] = 'live_environment_not_ready';
+                $botChecks[] = ['label' => 'Live environment', 'state' => 'blocked', 'message' => $forceTestnet
+                    ? 'Testnet mode is selected but testnet gate or credentials are missing.'
+                    : 'Live mode is selected but live gate or credentials are missing.'];
+            } else {
+                $botChecks[] = ['label' => 'Live environment', 'state' => 'ok', 'message' => $forceTestnet ? 'Testnet gate and credentials are ready.' : 'Live gate and credentials are ready.'];
+            }
+
+            if (! ($liveGuard['allowed'] ?? false)) {
+                $botBlockers[] = 'live_guard_blocked';
+                $botChecks[] = ['label' => 'Live guard', 'state' => 'blocked', 'message' => (string) ($liveGuard['reason'] ?? 'Another live bot is active.')];
+            }
+        }
+
+        $walletState = 'info';
+        $walletMessage = $this->isLiveMode($config)
+            ? 'Live wallet balance is being monitored.'
+            : 'Paper mode uses ledger-only balance and does not check Binance futures wallet.';
+
+        if ($account['balanceSource'] === 'BINANCE_UNAVAILABLE') {
+            $walletState = 'blocked';
+            $walletMessage = (string) ($account['balanceError'] ?? 'Binance futures balance is unavailable.');
+            $botBlockers[] = 'wallet_balance_unavailable';
+        } elseif ($this->isLiveMode($config) && $account['availableBalance'] !== null && $requiredTradeAmountUsdt > 0 && (float) $account['availableBalance'] < $requiredTradeAmountUsdt) {
+            $walletState = 'blocked';
+            $walletMessage = sprintf(
+                'Available balance %.4f %s is lower than required trade amount %.4f USDT.',
+                (float) $account['availableBalance'],
+                (string) ($account['accountAsset'] ?? 'USDT'),
+                $requiredTradeAmountUsdt
+            );
+            $botBlockers[] = 'available_balance_too_low';
+        }
+
+        $latestAlert = $config->logs()
+            ->whereIn('event', ['SCAN_FAILED', 'MARKET_SNAPSHOT_FAILED', 'LIVE_ENTRY_FAILED', 'BALANCE_SYNC_FAILED', 'TRADE_BLOCKED', 'SIGNAL_SKIPPED', 'LIVE_GUARD_BLOCKED', 'DAILY_LOSS_LIMIT_HIT'])
+            ->orderByDesc('occurred_at')
+            ->first();
+
+        $recentRuns = SchedulerRun::query()
+            ->orderByDesc('started_at')
+            ->limit(5)
+            ->get(['id', 'command', 'status', 'started_at', 'finished_at', 'duration_ms'])
+            ->values()
+            ->all();
+
+        $stateName = ($health['state'] ?? 'healthy') === 'blocked' || $botBlockers !== []
+            ? 'blocked'
+            : (($health['state'] ?? 'healthy') !== 'healthy' || $botWarnings !== [] ? 'warning' : 'healthy');
+
+        $summary = match ($stateName) {
+            'blocked' => 'Trade automation is blocked by runtime or server checks. Review the blocker list below.',
+            'warning' => 'Trade automation is running with warnings. Review runtime and server signals before trusting entries.',
+            default => 'Runtime checks look healthy. Trade flow is eligible when the signal threshold passes.',
+        };
+
+        $payload = [
+            'state' => $stateName,
+            'summary' => $summary,
+            'generatedAt' => now()->toIso8601String(),
+            'botBlockers' => array_values(array_unique($botBlockers)),
+            'botWarnings' => array_values(array_unique($botWarnings)),
+            'botChecks' => $botChecks,
+            'wallet' => [
+                'state' => $walletState,
+                'message' => $walletMessage,
+                'walletBalance' => $account['walletBalance'],
+                'availableBalance' => $account['availableBalance'],
+                'marginBalance' => $account['marginBalance'],
+                'accountAsset' => $account['accountAsset'],
+                'requiredTradeAmountUsdt' => $requiredTradeAmountUsdt,
+            ],
+            'server' => [
+                'state' => $health['state'] ?? 'unknown',
+                'blockers' => array_values((array) ($health['blockers'] ?? [])),
+                'warnings' => array_values((array) ($health['warnings'] ?? [])),
+                'scheduler' => $health['checks']['scheduler'] ?? null,
+                'queue' => $health['checks']['queue'] ?? null,
+                'rest' => $health['checks']['rest_health'] ?? null,
+                'streams' => $health['checks']['streams'] ?? null,
+            ],
+            'latestAlert' => $latestAlert ? [
+                'event' => $latestAlert->event,
+                'reason' => $latestAlert->reason,
+                'occurredAt' => optional($latestAlert->occurred_at)->toIso8601String(),
+            ] : null,
+            'recentSchedulerRuns' => $recentRuns,
+        ];
+
+        if ($persist) {
+            $this->logThrottled(
+                $config->fresh('state'),
+                'RUNTIME_DIAGNOSTIC',
+                $state->current_symbol,
+                $state->current_signal,
+                (float) ($state->confidence ?? 0),
+                $summary,
+                [
+                    'status' => strtoupper($stateName),
+                    'botBlockers' => $payload['botBlockers'],
+                    'botWarnings' => $payload['botWarnings'],
+                    'serverState' => $payload['server']['state'],
+                    'serverBlockers' => $payload['server']['blockers'],
+                    'walletState' => $payload['wallet']['state'],
+                ],
+                240
+            );
+        }
+
+        return $payload;
+    }
 
     public function configPayload(FutureTradeBotConfig $config): array
     {
@@ -446,7 +680,30 @@ class FutureTradeBotService
         if ((string) $state->state === 'IN_POSITION' || (float) $state->quantity > 0) {
             return;
         }
-        if (($settings['emergencyStop'] ?? false) || $signal['signal'] === 'WAIT') {
+        if (($settings['emergencyStop'] ?? false)) {
+            $this->logThrottled(
+                $config,
+                'TRADE_BLOCKED',
+                $signal['symbol'],
+                $signal['signal'],
+                (float) ($signal['confidence'] ?? 0),
+                'Emergency stop is enabled in algorithm config.',
+                $this->runtimeContext($dynamic, ['status' => 'BLOCKED']),
+                30
+            );
+            return;
+        }
+        if ($signal['signal'] === 'WAIT') {
+            $this->logThrottled(
+                $config,
+                'SIGNAL_SKIPPED',
+                $signal['symbol'],
+                $signal['signal'],
+                (float) ($signal['confidence'] ?? 0),
+                (string) ($signal['reason'] ?? 'Strategy returned WAIT.'),
+                $this->runtimeContext($dynamic, ['status' => 'SKIPPED']),
+                30
+            );
             return;
         }
         if ((float) $signal['confidence'] < (float) ($settings['minConfidence'] ?? 0.68)) {
@@ -462,6 +719,16 @@ class FutureTradeBotService
             return;
         }
         if ($state->cooldown_until && $state->cooldown_until->isFuture()) {
+            $this->logThrottled(
+                $config,
+                'TRADE_BLOCKED',
+                $signal['symbol'],
+                $signal['signal'],
+                (float) ($signal['confidence'] ?? 0),
+                sprintf('Cooldown active until %s.', $state->cooldown_until->timezone(config('app.timezone'))->format('H:i:s')),
+                $this->runtimeContext($dynamic, ['status' => 'BLOCKED']),
+                30
+            );
             return;
         }
         if ((int) $state->trade_count_today >= (int) ($settings['maxTradesPerDay'] ?? 25)) {
@@ -490,7 +757,24 @@ class FutureTradeBotService
         }
 
         if ($this->isLiveMode($config)) {
-            $this->openLivePosition($config, $signal);
+            try {
+                $this->openLivePosition($config, $signal);
+            } catch (Throwable $e) {
+                $this->persistState($state, [
+                    'connection_status' => 'Live entry failed',
+                    'state' => 'LIVE_ENTRY_ERROR',
+                ]);
+                $this->logThrottled(
+                    $config->fresh('state'),
+                    'LIVE_ENTRY_FAILED',
+                    $signal['symbol'],
+                    $signal['signal'],
+                    (float) ($signal['confidence'] ?? 0),
+                    $e->getMessage(),
+                    $this->runtimeContext($dynamic, ['status' => 'ERROR']),
+                    30
+                );
+            }
             return;
         }
 
@@ -603,6 +887,32 @@ class FutureTradeBotService
         $price = (float) $signal['price'];
         $leverage = min((int) ($settings['leverage'] ?? 3), (int) ($settings['maxLeverage'] ?? 5));
         $filters = $this->symbolFilters($client->fetchExchangeInfo($symbol), $symbol);
+        $account = $client->fetchAccountInfo();
+        $asset = collect((array) ($account['assets'] ?? []))
+            ->first(fn ($row) => strtoupper((string) ($row['asset'] ?? '')) === 'USDT');
+        $availableBalance = isset($account['availableBalance'])
+            ? (float) $account['availableBalance']
+            : (float) ($asset['availableBalance'] ?? 0);
+        $requiredTradeAmountUsdt = (float) ($settings['tradeAmountUsdt'] ?? 25);
+
+        if ($availableBalance > 0 && $availableBalance < $requiredTradeAmountUsdt) {
+            $this->log(
+                $config->fresh('state'),
+                'TRADE_BLOCKED',
+                $symbol,
+                $signal['signal'],
+                (float) ($signal['confidence'] ?? 0),
+                sprintf('Available balance %.4f USDT is lower than required trade amount %.4f USDT.', $availableBalance, $requiredTradeAmountUsdt),
+                $this->runtimeContext($dynamic, [
+                    'status' => 'BLOCKED',
+                    'availableBalance' => $availableBalance,
+                    'requiredTradeAmountUsdt' => $requiredTradeAmountUsdt,
+                ])
+            );
+
+            return;
+        }
+
         $qty = ((float) ($settings['tradeAmountUsdt'] ?? 25) * $leverage) / max($price, 0.00000001);
         $qty = $this->formatStep($qty, $filters['stepSize']);
 
@@ -618,31 +928,6 @@ class FutureTradeBotService
         ]);
 
         $entry = (float) ($response['avgPrice'] ?? 0) ?: $price;
-        $stop = $this->stopLossPrice($entry, $positionSide, $settings);
-        $take = $this->takeProfitPrice($entry, $positionSide, $settings);
-        $exitSide = $side === 'BUY' ? 'SELL' : 'BUY';
-        $stopResponse = $client->placeOrder([
-            'symbol' => $symbol,
-            'side' => $exitSide,
-            'type' => 'STOP_MARKET',
-            'stopPrice' => $this->formatStep($stop, $filters['tickSize']),
-            'quantity' => $qty,
-            'reduceOnly' => 'true',
-            'workingType' => 'MARK_PRICE',
-            'newClientOrderId' => substr('ft-sl-' . Str::uuid(), 0, 36),
-            'positionSide' => 'BOTH',
-        ]);
-        $takeResponse = $client->placeOrder([
-            'symbol' => $symbol,
-            'side' => $exitSide,
-            'type' => 'TAKE_PROFIT_MARKET',
-            'stopPrice' => $this->formatStep($take, $filters['tickSize']),
-            'quantity' => $qty,
-            'reduceOnly' => 'true',
-            'workingType' => 'MARK_PRICE',
-            'newClientOrderId' => substr('ft-tp-' . Str::uuid(), 0, 36),
-            'positionSide' => 'BOTH',
-        ]);
 
         $state = $this->state($config);
         $this->persistState($state, [
@@ -669,7 +954,13 @@ class FutureTradeBotService
             'reason' => 'LIVE_' . $signal['signal'] . '_SIGNAL',
             'mode' => $settings['forceTestnet'] ?? true ? 'LIVE_TESTNET' : 'LIVE',
             'status' => 'OPEN',
-            'meta' => ['entry_order' => $response, 'stop_order' => $stopResponse, 'take_profit_order' => $takeResponse, 'signal' => $signal, 'dynamic' => $dynamic['public'], 'algorithm_mode' => $dynamic['mode']],
+            'meta' => [
+                'entry_order' => $response,
+                'exit_management' => 'BOT_MANAGED_MARKET_CLOSE',
+                'signal' => $signal,
+                'dynamic' => $dynamic['public'],
+                'algorithm_mode' => $dynamic['mode'],
+            ],
         ]);
         $this->log(
             $config->fresh('state'),
@@ -677,7 +968,7 @@ class FutureTradeBotService
             $symbol,
             $signal['signal'],
             (float) $signal['confidence'],
-            'Live futures entry submitted with protective reduce-only exits.',
+            'Live futures entry submitted. TP/SL/trailing are managed by the bot loop.',
             $this->runtimeContext($dynamic, ['status' => 'OPEN', 'side' => $positionSide, 'entryPrice' => $entry, 'quantity' => (float) $qty, 'mode' => $settings['forceTestnet'] ?? true ? 'LIVE_TESTNET' : 'LIVE'])
         );
     }
@@ -1018,7 +1309,7 @@ class FutureTradeBotService
         ];
     }
 
-    private function marketSnapshot(array $settings): array
+    private function marketSnapshot(FutureTradeBotConfig $config, array $settings): array
     {
         $symbols = array_map('strtoupper', (array) ($settings['symbols'] ?? []));
         $cacheKey = 'future_trade_market_snapshot_' . md5(implode(',', $symbols));
@@ -1042,9 +1333,24 @@ class FutureTradeBotService
                 \Illuminate\Support\Facades\Cache::put($cacheKey, $result, 60);
             }
             return $result;
-        } catch (Throwable) {
-            // Return last known good prices rather than fake mock data
-            return \Illuminate\Support\Facades\Cache::get($cacheKey, []);
+        } catch (Throwable $e) {
+            $cached = Cache::get($cacheKey, []);
+            $this->logThrottled(
+                $config->fresh('state'),
+                'MARKET_SNAPSHOT_FAILED',
+                $config->state?->current_symbol,
+                null,
+                0,
+                $e->getMessage(),
+                [
+                    'status' => 'ERROR',
+                    'cachedSymbols' => is_array($cached) ? count($cached) : 0,
+                    'requestedSymbols' => count($symbols),
+                ],
+                60
+            );
+
+            return $cached;
         }
     }
 
@@ -1341,11 +1647,18 @@ class FutureTradeBotService
             }
         }
         $volatility = count($moves) ? array_sum($moves) / count($moves) : 0.0;
-        $direction = $priceChangePct >= 0 ? 'BUY' : 'SELL';
         $usableSignals = array_values(array_filter($signals, fn ($signal) => isset($signal['signal']) && $signal['signal'] !== 'WAIT'));
+        $bestSignalDirection = strtoupper((string) ($best['signal'] ?? ''));
+        $priceDirection = $priceChangePct >= 0 ? 'BUY' : 'SELL';
         $agreement = count($usableSignals)
-            ? count(array_filter($usableSignals, fn ($signal) => ($signal['signal'] ?? '') === ($best['signal'] ?? $direction))) / count($usableSignals)
+            ? count(array_filter($usableSignals, fn ($signal) => strtoupper((string) ($signal['signal'] ?? '')) === ($bestSignalDirection ?: $priceDirection))) / count($usableSignals)
             : 0.0;
+        $direction = in_array($bestSignalDirection, ['BUY', 'SELL'], true) && $agreement >= 0.5
+            ? $bestSignalDirection
+            : $priceDirection;
+        $directionSource = in_array($bestSignalDirection, ['BUY', 'SELL'], true) && $agreement >= 0.5
+            ? 'scanner_consensus'
+            : (count($usableSignals) > 0 ? 'price_action_fallback' : 'price_action_only');
         $bestConfidence = (float) ($best['confidence'] ?? ($signals[0]['confidence'] ?? 0));
         $secondConfidence = (float) ($signals[1]['confidence'] ?? 0);
         $gap = max(0.0, $bestConfidence - $secondConfidence);
@@ -1364,9 +1677,13 @@ class FutureTradeBotService
         return [
             'lookbackMinutes' => $lookbackMinutes,
             'sampleCount' => count($prices),
+            'usableSignalCount' => count($usableSignals),
             'priceChangePercent' => round($priceChangePct, 4),
             'volatilityPercent' => round($volatility, 4),
             'direction' => $direction,
+            'priceDirection' => $priceDirection,
+            'signalDirection' => $bestSignalDirection ?: 'WAIT',
+            'directionSource' => $directionSource,
             'directionAgreement' => round($agreement, 4),
             'confidenceGap' => round($gap, 4),
             'trendStrength' => round($trendStrength, 4),
@@ -1618,7 +1935,16 @@ class FutureTradeBotService
         } catch (Throwable $e) {
             $summary['balanceSource'] = 'BINANCE_UNAVAILABLE';
             $summary['balanceError'] = $e->getMessage();
-            $this->log($config->fresh('state'), 'BALANCE_SYNC_FAILED', $config->state?->current_symbol, null, 0, $e->getMessage());
+            $this->logThrottled(
+                $config->fresh('state'),
+                'BALANCE_SYNC_FAILED',
+                $config->state?->current_symbol,
+                null,
+                0,
+                $e->getMessage(),
+                ['status' => 'ERROR'],
+                60
+            );
         }
 
         return $summary;
@@ -1716,5 +2042,17 @@ class FutureTradeBotService
             'context' => $context,
             'occurred_at' => now(),
         ]);
+    }
+
+    private function logThrottled(FutureTradeBotConfig $config, string $event, ?string $symbol, ?string $signal, float $confidence, string $reason, array $context = [], int $ttlSeconds = 60): void
+    {
+        $fingerprint = sha1(json_encode([$config->id, $event, $symbol, $signal, trim($reason)]));
+        $cacheKey = 'future_trade_log_throttle:' . $fingerprint;
+
+        if (! Cache::add($cacheKey, true, now()->addSeconds(max(5, $ttlSeconds)))) {
+            return;
+        }
+
+        $this->log($config, $event, $symbol, $signal, $confidence, $reason, $context);
     }
 }
