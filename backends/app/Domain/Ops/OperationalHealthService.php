@@ -33,9 +33,9 @@ class OperationalHealthService
         $now = now();
         $killSwitch = $this->killSwitch->state($workspaceId);
         $providerBreaker = $this->breakers->providerState($workspaceId, 'binance');
-        $staleFeedBreaker = $this->breakers->staleFeedState($workspaceId);
         $restHealth = $this->binanceHealth->snapshot($workspaceId);
         $marketData = $this->marketDataHealth($workspaceId, $now);
+        $staleFeedBreaker = $this->resolvedStaleFeedBreaker($workspaceId, $marketData);
         $streamHealth = $this->streamHealth($workspaceId, $now);
         $queueHealth = $this->queueHealth();
         $schedulerHealth = $this->schedulerHealth($now);
@@ -179,6 +179,24 @@ class OperationalHealthService
             'last_tick_at' => $lastTickAt?->toIso8601String(),
             'age_seconds' => $ageSeconds,
         ];
+    }
+
+    private function resolvedStaleFeedBreaker(string $workspaceId, array $marketData): array
+    {
+        $staleFeedBreaker = $this->breakers->staleFeedState($workspaceId);
+
+        if (($staleFeedBreaker['active'] ?? false) && ($marketData['state'] ?? null) === 'healthy') {
+            $this->breakers->clearStaleFeedBreaker($workspaceId, [
+                'auto_cleared' => true,
+                'reason' => 'fresh_market_data_detected',
+                'last_tick_at' => $marketData['last_tick_at'] ?? null,
+                'age_seconds' => $marketData['age_seconds'] ?? null,
+            ], 'health_summary');
+
+            $staleFeedBreaker = $this->breakers->staleFeedState($workspaceId);
+        }
+
+        return $staleFeedBreaker;
     }
 
     private function streamHealth(string $workspaceId, \Illuminate\Support\Carbon $now): array
