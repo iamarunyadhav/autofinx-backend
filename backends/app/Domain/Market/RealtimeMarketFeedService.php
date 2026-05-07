@@ -3,6 +3,7 @@
 namespace App\Domain\Market;
 
 use App\Jobs\RunRatioBotEvaluationJob;
+use App\Models\FutureTradeBotConfig;
 use App\Models\MarketFeedStatus;
 use App\Models\MarketOhlc;
 use App\Models\RatioBotConfig;
@@ -25,7 +26,7 @@ class RealtimeMarketFeedService
      */
     public function selectedSymbols(string $marketType = 'spot', ?string $workspaceId = null, ?string $botId = null): array
     {
-        return RatioBotConfig::query()
+        $ratioSymbols = RatioBotConfig::query()
             ->when($botId, fn ($query) => $query->whereKey($botId))
             ->when($workspaceId, fn ($query) => $query->where('workspace_id', $workspaceId))
             ->where('market_type', strtolower($marketType))
@@ -33,6 +34,38 @@ class RealtimeMarketFeedService
             ->orderBy('symbol')
             ->pluck('symbol')
             ->map(fn (string $symbol) => strtoupper(trim($symbol)))
+            ->filter()
+            ->unique()
+            ->values()
+            ->all();
+
+        $futureTradeSymbols = [];
+        if ($botId === null || $botId === '') {
+            $futureTradeSymbols = FutureTradeBotConfig::query()
+                ->with('state')
+                ->when($workspaceId, fn ($query) => $query->where('workspace_id', $workspaceId))
+                ->where('enabled', true)
+                ->get()
+                ->flatMap(function (FutureTradeBotConfig $config): array {
+                    $settings = $config->mergedSettings();
+                    $symbols = array_map(
+                        static fn ($symbol) => strtoupper(trim((string) $symbol)),
+                        (array) ($settings['symbols'] ?? config('future_trade.defaults.symbols', []))
+                    );
+
+                    $currentSymbol = strtoupper(trim((string) ($config->state?->current_symbol ?? '')));
+                    if ($currentSymbol !== '') {
+                        $symbols[] = $currentSymbol;
+                    }
+
+                    return array_values(array_filter($symbols));
+                })
+                ->unique()
+                ->values()
+                ->all();
+        }
+
+        return collect([...$ratioSymbols, ...$futureTradeSymbols])
             ->filter()
             ->unique()
             ->values()
@@ -127,6 +160,8 @@ class RealtimeMarketFeedService
             }
         }
 
+        $this->touchWorkspaceFeedStatuses($symbol, $marketType, $price, $eventTimestampMs, $stream, $eventType, $closedKline, $eventLagMs);
+
         $botConfigs = RatioBotConfig::query()
             ->with('state')
             ->where('symbol', $symbol)
@@ -175,6 +210,59 @@ class RealtimeMarketFeedService
         }
     }
 
+    private function touchWorkspaceFeedStatuses(
+        string $symbol,
+        string $marketType,
+        ?float $price,
+        int $eventTimestampMs,
+        string $stream,
+        string $eventType,
+        bool $closedKline,
+        int $eventLagMs,
+    ): void {
+        $workspaceIds = RatioBotConfig::query()
+            ->where('symbol', $symbol)
+            ->where('market_type', strtolower($marketType))
+            ->pluck('workspace_id')
+            ->merge(
+                FutureTradeBotConfig::query()
+                    ->with('state')
+                    ->where('enabled', true)
+                    ->get()
+                    ->filter(function (FutureTradeBotConfig $config) use ($symbol): bool {
+                        $settingsSymbols = array_map(
+                            static fn ($value) => strtoupper(trim((string) $value)),
+                            (array) ($config->mergedSettings()['symbols'] ?? config('future_trade.defaults.symbols', []))
+                        );
+                        $currentSymbol = strtoupper(trim((string) ($config->state?->current_symbol ?? '')));
+
+                        return in_array($symbol, $settingsSymbols, true) || $currentSymbol === $symbol;
+                    })
+                    ->pluck('workspace_id')
+            )
+            ->filter()
+            ->unique()
+            ->values();
+
+        foreach ($workspaceIds as $workspaceId) {
+            $this->upsertFeedStatus(
+                (string) $workspaceId,
+                $symbol,
+                $marketType,
+                $price,
+                $eventTimestampMs,
+                $stream !== '' ? $stream : ($eventType !== '' ? $eventType : 'websocket'),
+                'healthy',
+                [
+                    'event_type' => $eventType,
+                    'stream' => $stream,
+                    'closed_kline' => $closedKline,
+                    'event_lag_ms' => $eventLagMs,
+                ]
+            );
+        }
+    }
+
     /**
      * @param  string[]  $symbols
      */
@@ -211,6 +299,18 @@ class RealtimeMarketFeedService
         string $status,
         array $context = [],
     ): void {
+        $this->upsertFeedStatus(
+            (string) $config->workspace_id,
+            $config->normalizedSymbol(),
+            $config->marketType(),
+            $price,
+            $timestampMs,
+            $source,
+            $status,
+            $context
+        );
+
+        $tickAt = $timestampMs ? Carbon::createFromTimestampMs($timestampMs) : now();
         $symbolModel = Symbol::firstOrCreate(
             ['symbol' => $config->normalizedSymbol()],
             [
@@ -220,32 +320,7 @@ class RealtimeMarketFeedService
                 'metadata' => ['auto_created' => true],
             ]
         );
-
-        $tickAt = $timestampMs ? Carbon::createFromTimestampMs($timestampMs) : now();
         $previousStatus = (string) ($config->state?->feed_status ?? '');
-
-        MarketFeedStatus::updateOrCreate(
-            [
-                'workspace_id' => $config->workspace_id,
-                'symbol_id' => $symbolModel->id,
-                'exchange' => $config->exchangeKey(),
-                'market_type' => $config->marketType(),
-            ],
-            [
-                'id' => MarketFeedStatus::query()
-                    ->where('workspace_id', $config->workspace_id)
-                    ->where('symbol_id', $symbolModel->id)
-                    ->where('exchange', $config->exchangeKey())
-                    ->where('market_type', $config->marketType())
-                    ->value('id') ?: (string) Str::uuid(),
-                'symbol' => $config->normalizedSymbol(),
-                'last_tick_at' => $tickAt,
-                'last_price' => $price,
-                'source' => $source,
-                'status' => $status,
-                'meta_json' => $context,
-            ]
-        );
 
         if ($config->state) {
             $config->state->update([
@@ -277,6 +352,52 @@ class RealtimeMarketFeedService
                 'occurred_at' => now(),
             ]);
         }
+    }
+
+    private function upsertFeedStatus(
+        string $workspaceId,
+        string $symbol,
+        string $marketType,
+        ?float $price,
+        ?int $timestampMs,
+        string $source,
+        string $status,
+        array $context = [],
+    ): void {
+        $symbolModel = Symbol::firstOrCreate(
+            ['symbol' => strtoupper(trim($symbol))],
+            [
+                'id' => (string) Str::uuid(),
+                'type' => 'crypto',
+                'exchange' => $this->exchangeKey($marketType),
+                'metadata' => ['auto_created' => true],
+            ]
+        );
+
+        $tickAt = $timestampMs ? Carbon::createFromTimestampMs($timestampMs) : now();
+
+        MarketFeedStatus::updateOrCreate(
+            [
+                'workspace_id' => $workspaceId,
+                'symbol_id' => $symbolModel->id,
+                'exchange' => $this->exchangeKey($marketType),
+                'market_type' => strtolower($marketType),
+            ],
+            [
+                'id' => MarketFeedStatus::query()
+                    ->where('workspace_id', $workspaceId)
+                    ->where('symbol_id', $symbolModel->id)
+                    ->where('exchange', $this->exchangeKey($marketType))
+                    ->where('market_type', strtolower($marketType))
+                    ->value('id') ?: (string) Str::uuid(),
+                'symbol' => strtoupper(trim($symbol)),
+                'last_tick_at' => $tickAt,
+                'last_price' => $price,
+                'source' => $source,
+                'status' => $status,
+                'meta_json' => $context,
+            ]
+        );
     }
 
     private function extractPrice(string $eventType, array $data): ?float

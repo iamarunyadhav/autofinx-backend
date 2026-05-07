@@ -29,18 +29,30 @@ class DetectStaleFeedsJob implements ShouldQueue
     {
         $now = now();
         $latestTick = MarketTick::orderByDesc('occurred_at')->first();
-        $latestTickAt = $latestTick?->occurred_at;
+        $latestFeedStatus = Schema::hasTable('market_feed_status')
+            ? MarketFeedStatus::whereNotNull('last_tick_at')->orderByDesc('last_tick_at')->first()
+            : null;
+
+        $latestTickAt = collect([
+            $latestTick?->occurred_at,
+            $latestFeedStatus?->last_tick_at,
+        ])->filter()->sortDesc()->first();
+
         $globalFeedIsStale = $latestTickAt !== null
             && $latestTickAt->lt($now->copy()->subSeconds($this->thresholdSeconds));
 
         if ($globalFeedIsStale) {
             $breakers->activateStaleFeedBreaker(null, [
                 'last_tick_at' => $latestTickAt?->toIso8601String(),
+                'latest_workspace_id' => $latestFeedStatus?->workspace_id,
+                'latest_symbol_id' => $latestFeedStatus?->symbol_id,
                 'threshold_seconds' => $this->thresholdSeconds,
             ]);
         } else {
             $breakers->clearStaleFeedBreaker(null, [
                 'last_tick_at' => $latestTickAt?->toIso8601String(),
+                'latest_workspace_id' => $latestFeedStatus?->workspace_id,
+                'latest_symbol_id' => $latestFeedStatus?->symbol_id,
                 'threshold_seconds' => $this->thresholdSeconds,
             ]);
         }
@@ -54,6 +66,12 @@ class DetectStaleFeedsJob implements ShouldQueue
             ->get();
 
         foreach ($stale as $row) {
+            $breakers->activateStaleFeedBreaker((string) $row->workspace_id, [
+                'symbol_id' => $row->symbol_id,
+                'last_tick_at' => optional($row->last_tick_at)?->toIso8601String(),
+                'threshold_seconds' => $this->thresholdSeconds,
+            ]);
+
             RiskEvent::create([
                 'id' => (string) Str::uuid(),
                 'workspace_id' => $row->workspace_id,
@@ -67,5 +85,16 @@ class DetectStaleFeedsJob implements ShouldQueue
                 'triggered_at' => $now,
             ]);
         }
+
+        MarketFeedStatus::whereNotNull('last_tick_at')
+            ->where('last_tick_at', '>=', $now->copy()->subSeconds($this->thresholdSeconds))
+            ->get()
+            ->each(function (MarketFeedStatus $row) use ($breakers): void {
+                $breakers->clearStaleFeedBreaker((string) $row->workspace_id, [
+                    'symbol_id' => $row->symbol_id,
+                    'last_tick_at' => optional($row->last_tick_at)?->toIso8601String(),
+                    'threshold_seconds' => $this->thresholdSeconds,
+                ]);
+            });
     }
 }
