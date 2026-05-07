@@ -20,6 +20,7 @@ class FuturesOrderIntentService
         private readonly FuturesAnomalyService $anomalies,
         private readonly IntegrationManager $integrations,
         private readonly LiveExecutionEventService $events,
+        private readonly FuturesOrderSizingService $orderSizing,
     ) {
     }
 
@@ -129,6 +130,8 @@ class FuturesOrderIntentService
         ], 'info', 'futures_submission', $traceId);
 
         try {
+            $this->assertOrderQuantityAndNotional($proposal, $market);
+
             $client->setLeverage($symbol, (int) round((float) $proposal['leverage']));
             $client->setMarginType($symbol, (string) $proposal['margin_mode']);
 
@@ -196,23 +199,38 @@ class FuturesOrderIntentService
 
     private function proposal(array $payload, array $market): array
     {
+        $type = strtolower((string) ($payload['type'] ?? 'market'));
+        $reduceOnly = (bool) ($payload['reduce_only'] ?? false);
+        $normalizedQty = $this->orderSizing->evaluate(
+            (float) ($payload['qty'] ?? 0),
+            $this->orderReferencePrice($type, isset($payload['price']) ? (float) $payload['price'] : null, (float) ($market['mark_price'] ?? 0)),
+            [
+                'stepSize' => (float) ($market['step_size'] ?? 0.001),
+                'minNotional' => (float) ($market['exchange_min_notional'] ?? 0),
+            ],
+            $reduceOnly,
+        );
+
         return [
             'symbol' => $market['symbol'],
             'side' => strtolower((string) ($payload['side'] ?? 'buy')),
-            'type' => strtolower((string) ($payload['type'] ?? 'market')),
-            'qty' => (float) ($payload['qty'] ?? 0),
+            'type' => $type,
+            'qty' => (float) $normalizedQty['quantity_float'],
             'price' => isset($payload['price']) ? (float) $payload['price'] : null,
             'mark_price' => (float) ($market['mark_price'] ?? 0),
             'entry_price' => (float) ($payload['entry_price'] ?? ($market['mark_price'] ?? 0)),
-            'notional' => (float) ($market['notional'] ?? 0),
+            'notional' => (float) $normalizedQty['notional'],
             'leverage' => (float) ($payload['leverage'] ?? 1),
             'margin_mode' => strtolower((string) ($payload['margin_mode'] ?? 'isolated')),
             'position_mode' => strtolower((string) ($payload['position_mode'] ?? 'one_way')),
             'position_side' => strtoupper((string) ($payload['position_side'] ?? 'BOTH')),
-            'reduce_only' => (bool) ($payload['reduce_only'] ?? false),
+            'reduce_only' => $reduceOnly,
             'protective_exit' => (bool) ($payload['protective_exit'] ?? false),
             'confidence' => array_key_exists('confidence', $payload) ? (float) ($payload['confidence'] ?? 0) : null,
             'source' => strtolower((string) ($payload['source'] ?? 'manual_operator')),
+            'step_size' => (float) ($market['step_size'] ?? 0.001),
+            'exchange_min_notional' => (float) ($market['exchange_min_notional'] ?? 0),
+            'min_open_notional' => (float) ($market['min_open_notional'] ?? 0),
         ];
     }
 
@@ -235,7 +253,15 @@ class FuturesOrderIntentService
             'notional' => $notional,
             'liquidation_buffer_pct' => $liquidationBuffer,
             'exchange_info_symbol_count' => count((array) ($exchangeInfo['symbols'] ?? [])),
+            'step_size' => (float) ($this->symbolFilters($exchangeInfo, $symbol)['stepSize'] ?? 0.001),
+            'exchange_min_notional' => (float) ($this->symbolFilters($exchangeInfo, $symbol)['minNotional'] ?? 0),
+            'min_open_notional' => max(FuturesOrderSizingService::BINANCE_MIN_OPEN_NOTIONAL, (float) ($this->symbolFilters($exchangeInfo, $symbol)['minNotional'] ?? 0)),
         ];
+    }
+
+    private function symbolFilters(array $exchangeInfo, string $symbol): array
+    {
+        return $this->orderSizing->extractFilters($exchangeInfo, $symbol);
     }
 
     private function client(Integration $integration, array $config): BinanceFuturesClient
@@ -283,5 +309,47 @@ class FuturesOrderIntentService
         $trimmed = rtrim(rtrim($raw, '0'), '.');
 
         return $trimmed === '' ? '0' : $trimmed;
+    }
+
+    private function orderReferencePrice(string $type, ?float $limitPrice, float $markPrice): float
+    {
+        if ($type === 'limit' && $limitPrice !== null && $limitPrice > 0) {
+            return $limitPrice;
+        }
+
+        return $markPrice;
+    }
+
+    private function assertOrderQuantityAndNotional(array $proposal, array $market): void
+    {
+        if ((float) ($proposal['qty'] ?? 0) <= 0) {
+            throw new RuntimeException(sprintf(
+                'Rounded order quantity became zero after Binance step-size formatting. Increase quantity so it stays above the %.8f step size.',
+                (float) ($proposal['step_size'] ?? 0.001)
+            ));
+        }
+
+        if ((bool) ($proposal['reduce_only'] ?? false)) {
+            return;
+        }
+
+        $referencePrice = $this->orderReferencePrice(
+            (string) ($proposal['type'] ?? 'market'),
+            isset($proposal['price']) ? (float) $proposal['price'] : null,
+            (float) ($market['mark_price'] ?? 0),
+        );
+        $notional = (float) ($proposal['qty'] ?? 0) * max($referencePrice, 0);
+        $minOpenNotional = max(
+            FuturesOrderSizingService::BINANCE_MIN_OPEN_NOTIONAL,
+            (float) ($proposal['exchange_min_notional'] ?? 0)
+        );
+
+        if ($notional < $minOpenNotional) {
+            throw new RuntimeException(sprintf(
+                'Final order notional %.4f USDT is below the Binance futures minimum %.4f USDT after quantity rounding. Increase trade size or use reduce-only for closes.',
+                $notional,
+                $minOpenNotional
+            ));
+        }
     }
 }

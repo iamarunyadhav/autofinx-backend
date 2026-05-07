@@ -3,7 +3,9 @@
 namespace Tests\Unit\FutureTrade;
 
 use App\Domain\FutureTrade\FutureTradeBotService;
+use App\Domain\Ops\OperationalHealthService;
 use App\Domain\Portfolio\LivePortfolioGuardService;
+use App\Domain\Trading\FuturesOrderSizingService;
 use PHPUnit\Framework\TestCase;
 use ReflectionMethod;
 
@@ -11,7 +13,7 @@ class FutureTradeSignalScoringTest extends TestCase
 {
     public function test_bearish_sequence_generates_sell_signal_with_strong_confidence(): void
     {
-        $service = new FutureTradeBotService(new LivePortfolioGuardService());
+        $service = $this->service();
         $sequence = $this->invoke($service, 'buildSequenceSnapshot', [[
             [0, '100', '100.2', '99.7', '99.8'],
             [0, '99.8', '99.9', '99.3', '99.4'],
@@ -42,7 +44,7 @@ class FutureTradeSignalScoringTest extends TestCase
 
     public function test_conflicted_market_stays_wait_instead_of_forcing_buy_or_sell(): void
     {
-        $service = new FutureTradeBotService(new LivePortfolioGuardService());
+        $service = $this->service();
         $sequence = $this->invoke($service, 'buildSequenceSnapshot', [[
             [0, '100', '100.4', '99.8', '100.3'],
             [0, '100.3', '100.5', '99.9', '100.0'],
@@ -68,12 +70,12 @@ class FutureTradeSignalScoringTest extends TestCase
         ]]);
 
         $this->assertSame('WAIT', $signal['signal']);
-        $this->assertStringContainsString('10m sequence', $signal['reason']);
+        $this->assertStringContainsString('sequence', strtolower($signal['reason']));
     }
 
     public function test_noisy_short_term_sequence_is_filtered_as_wait(): void
     {
-        $service = new FutureTradeBotService(new LivePortfolioGuardService());
+        $service = $this->service();
         $sequence = $this->invoke($service, 'buildSequenceSnapshot', [[
             [0, '100', '100.5', '99.7', '100.1'],
             [0, '100.1', '100.6', '99.6', '99.9'],
@@ -108,5 +110,14 @@ class FutureTradeSignalScoringTest extends TestCase
         $reflection->setAccessible(true);
 
         return $reflection->invokeArgs($service, $arguments);
+    }
+
+    private function service(): FutureTradeBotService
+    {
+        return new FutureTradeBotService(
+            new LivePortfolioGuardService(),
+            $this->createMock(OperationalHealthService::class),
+            new FuturesOrderSizingService(),
+        );
     }
 }

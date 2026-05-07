@@ -3,7 +3,9 @@
 namespace Tests\Unit\FutureTrade;
 
 use App\Domain\FutureTrade\FutureTradeBotService;
+use App\Domain\Ops\OperationalHealthService;
 use App\Domain\Portfolio\LivePortfolioGuardService;
+use App\Domain\Trading\FuturesOrderSizingService;
 use App\Models\FutureTradeBotConfig;
 use App\Models\FutureTradeBotState;
 use Carbon\Carbon;
@@ -22,7 +24,7 @@ class FutureTradeDailyCycleTest extends TestCase
     {
         Carbon::setTestNow('2026-05-04 10:30:00');
 
-        $service = new FutureTradeBotService(new LivePortfolioGuardService());
+        $service = $this->service();
         $config = new FutureTradeBotConfig([
             'workspace_id' => '00000000-0000-0000-0000-000000000099',
             'enabled' => true,
@@ -52,7 +54,7 @@ class FutureTradeDailyCycleTest extends TestCase
     {
         Carbon::setTestNow('2026-05-05 08:00:00');
 
-        $service = new FutureTradeBotService(new LivePortfolioGuardService());
+        $service = $this->service();
         $config = new FutureTradeBotConfig([
             'workspace_id' => '00000000-0000-0000-0000-000000000099',
             'enabled' => true,
@@ -86,7 +88,7 @@ class FutureTradeDailyCycleTest extends TestCase
     {
         Carbon::setTestNow('2026-05-04 15:30:00');
 
-        $service = new FutureTradeBotService(new LivePortfolioGuardService());
+        $service = $this->service();
         $config = FutureTradeBotConfig::create([
             'workspace_id' => '00000000-0000-0000-0000-000000000199',
             'enabled' => false,
@@ -147,5 +149,14 @@ class FutureTradeDailyCycleTest extends TestCase
         $reflection->setAccessible(true);
 
         return $reflection->invokeArgs($service, $arguments);
+    }
+
+    private function service(): FutureTradeBotService
+    {
+        return new FutureTradeBotService(
+            new LivePortfolioGuardService(),
+            $this->createMock(OperationalHealthService::class),
+            new FuturesOrderSizingService(),
+        );
     }
 }

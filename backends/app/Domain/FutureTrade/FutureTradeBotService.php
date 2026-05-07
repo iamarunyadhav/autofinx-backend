@@ -5,6 +5,7 @@ namespace App\Domain\FutureTrade;
 use App\Domain\Exchange\BinanceFuturesClient;
 use App\Domain\Ops\OperationalHealthService;
 use App\Domain\Portfolio\LivePortfolioGuardService;
+use App\Domain\Trading\FuturesOrderSizingService;
 use App\Models\FutureTradeBotConfig;
 use App\Models\FutureTradeBotState;
 use App\Models\SchedulerRun;
@@ -20,6 +21,7 @@ class FutureTradeBotService
     public function __construct(
         private readonly LivePortfolioGuardService $liveGuard,
         private readonly OperationalHealthService $operationalHealth,
+        private readonly FuturesOrderSizingService $orderSizing,
     ) {}
 
     public function getOrCreateConfig(string $workspaceId): FutureTradeBotConfig
@@ -886,7 +888,7 @@ class FutureTradeBotService
         $positionSide = $signal['signal'] === 'BUY' ? 'LONG' : 'SHORT';
         $price = (float) $signal['price'];
         $leverage = min((int) ($settings['leverage'] ?? 3), (int) ($settings['maxLeverage'] ?? 5));
-        $filters = $this->symbolFilters($client->fetchExchangeInfo($symbol), $symbol);
+        $filters = $this->orderSizing->extractFilters($client->fetchExchangeInfo($symbol), $symbol);
         $account = $client->fetchAccountInfo();
         $asset = collect((array) ($account['assets'] ?? []))
             ->first(fn ($row) => strtoupper((string) ($row['asset'] ?? '')) === 'USDT');
@@ -913,8 +915,62 @@ class FutureTradeBotService
             return;
         }
 
-        $qty = ((float) ($settings['tradeAmountUsdt'] ?? 25) * $leverage) / max($price, 0.00000001);
-        $qty = $this->formatStep($qty, $filters['stepSize']);
+        $sizing = $this->orderSizing->evaluate(
+            ((float) ($settings['tradeAmountUsdt'] ?? 25) * $leverage) / max($price, 0.00000001),
+            $price,
+            $filters,
+        );
+        $qty = $sizing['quantity'];
+        $qtyFloat = (float) $sizing['quantity_float'];
+        $notional = (float) $sizing['notional'];
+        $minNotional = (float) $sizing['minOpenNotional'];
+
+        if ($qtyFloat <= 0) {
+            $this->log(
+                $config->fresh('state'),
+                'TRADE_BLOCKED',
+                $symbol,
+                $signal['signal'],
+                (float) ($signal['confidence'] ?? 0),
+                'Rounded quantity became zero after symbol step-size formatting.',
+                $this->runtimeContext($dynamic, [
+                    'status' => 'BLOCKED',
+                    'price' => $price,
+                    'quantity' => $qtyFloat,
+                    'stepSize' => $sizing['stepSize'],
+                ])
+            );
+
+            return;
+        }
+
+        if ($minNotional > 0 && $notional < $minNotional) {
+            $this->log(
+                $config->fresh('state'),
+                'TRADE_BLOCKED',
+                $symbol,
+                $signal['signal'],
+                (float) ($signal['confidence'] ?? 0),
+                sprintf(
+                    'Final order notional %.4f USDT is below Binance minimum %.4f USDT after quantity rounding. Increase trade size.',
+                    $notional,
+                    $minNotional
+                ),
+                $this->runtimeContext($dynamic, [
+                    'status' => 'BLOCKED',
+                    'price' => $price,
+                    'quantity' => $qtyFloat,
+                    'notional' => $notional,
+                    'minNotional' => $minNotional,
+                    'exchangeMinNotional' => $sizing['exchangeMinNotional'],
+                    'tradeAmountUsdt' => $requiredTradeAmountUsdt,
+                    'leverage' => $leverage,
+                    'stepSize' => $sizing['stepSize'],
+                ])
+            );
+
+            return;
+        }
 
         $client->setLeverage($symbol, $leverage);
         $client->setMarginType($symbol, (string) ($settings['marginMode'] ?? 'isolated'));
@@ -1547,7 +1603,7 @@ class FutureTradeBotService
                 $winRate = $analysis['winRate'];
                 if ($winRate > 0 && $winRate < 45) {
                     $effective += 0.03;
-                    $next['tradeAmountUsdt'] = max(5, (float) ($settings['tradeAmountUsdt'] ?? 25) * 0.75);
+                    $next['tradeAmountUsdt'] = max(25, (float) ($settings['tradeAmountUsdt'] ?? 25) * 0.75);
                     $adjustments[] = 'Low current win rate: reduce size and demand cleaner entries.';
                 } elseif ($winRate >= 65 && $analysis['trendStrength'] >= 0.55) {
                     $effective -= 0.02;
@@ -2021,6 +2077,7 @@ class FutureTradeBotService
         return [
             'stepSize' => (float) ($lot['stepSize'] ?? 0.001),
             'tickSize' => (float) ($price['tickSize'] ?? 0.01),
+            'minNotional' => (float) (($filters->first(fn ($row) => ($row['filterType'] ?? null) === 'MIN_NOTIONAL')['notional'] ?? $filters->first(fn ($row) => ($row['filterType'] ?? null) === 'MIN_NOTIONAL')['minNotional'] ?? $filters->first(fn ($row) => ($row['filterType'] ?? null) === 'NOTIONAL')['minNotional'] ?? $filters->first(fn ($row) => ($row['filterType'] ?? null) === 'NOTIONAL')['notional'] ?? 0)),
         ];
     }
 

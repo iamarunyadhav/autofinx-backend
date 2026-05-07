@@ -3,7 +3,9 @@
 namespace Tests\Unit\FutureTrade;
 
 use App\Domain\FutureTrade\FutureTradeBotService;
+use App\Domain\Ops\OperationalHealthService;
 use App\Domain\Portfolio\LivePortfolioGuardService;
+use App\Domain\Trading\FuturesOrderSizingService;
 use App\Models\FutureTradeBotConfig;
 use App\Models\FutureTradeBotState;
 use PHPUnit\Framework\TestCase;
@@ -169,7 +171,11 @@ class FutureTradeDynamicAlgorithmTest extends TestCase
             'settings' => $settings,
         ]);
         $best = $signals[0] ?? null;
-        $service = new FutureTradeBotService(new LivePortfolioGuardService());
+        $service = new FutureTradeBotService(
+            new LivePortfolioGuardService(),
+            $this->createMock(OperationalHealthService::class),
+            new FuturesOrderSizingService(),
+        );
         $method = new ReflectionMethod($service, 'dynamicDecision');
         $method->setAccessible(true);
 
