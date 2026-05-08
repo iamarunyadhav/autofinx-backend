@@ -1,4 +1,4 @@
-﻿<?php
+<?php
 
 namespace App\Console;
 
@@ -103,16 +103,11 @@ class Kernel extends ConsoleKernel
         */
 
         /*
-        Disabled on purpose: the zcadmin cron daemon owns continuous Future Trade scans.
-        Keeping this scheduler active would duplicate scans and increase Binance API traffic.
-        $schedule->command('future-trade:scan-all')
-            ->everySecond()
-            ->withoutOverlapping()
-            ->runInBackground()
-            ->before(function () { $this->markRunStart('future-trade:scan-all'); })
-            ->after(function () { $this->markRunEnd('future-trade:scan-all'); })
-            ->description('Scan all enabled FutureTrade bot workspaces');
+        Future Trade scan scheduling is owned from routes/console.php.
+        Keep the command registered here for direct artisan usage, but do not
+        duplicate the schedule entry in both places.
         */
+
 
         $schedule->command('future-trade:diagnostics --persist')
             ->everyFiveMinutes()

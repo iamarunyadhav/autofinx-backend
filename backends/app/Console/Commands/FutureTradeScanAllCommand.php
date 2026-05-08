@@ -9,7 +9,7 @@ use Illuminate\Console\Command;
 class FutureTradeScanAllCommand extends Command
 {
     protected $signature = 'future-trade:scan-all {--loop} {--sleep-ms=500}';
-    protected $description = 'Scan all enabled FutureTrade bot workspaces. Use --loop for continuous daemon mode.';
+    protected $description = 'Scan all enabled FutureTrade bot workspaces. Use --loop only for a supervised long-running daemon, not Laravel scheduler.';
 
     public function handle(FutureTradeBotService $bot): int
     {
