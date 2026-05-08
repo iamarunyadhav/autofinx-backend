@@ -54,6 +54,7 @@ use App\Http\Controllers\Api\RatioBotController;
 use App\Http\Controllers\Api\Fast2XController;
 use App\Http\Controllers\Api\FutureTradeBotController;
 use App\Http\Controllers\Api\FuturesController;
+use App\Http\Controllers\Api\JobsController;
 use App\Http\Controllers\Api\SweepController;
 use App\Http\Controllers\Api\StrategySchemaController;
 use App\Http\Controllers\Api\WithdrawalScheduleController;
@@ -353,6 +354,11 @@ Route::prefix('v1')->group(function () {
 
         Route::get('ops/health', [OpsController::class, 'health']);
         Route::get('ops/audit-logs', [OpsController::class, 'auditLogs']);
+        Route::get('jobs/dashboard', [JobsController::class, 'dashboard']);
+        Route::post('jobs/restart-workers', [JobsController::class, 'restartWorkers'])->middleware(['require.2fa','throttle:10,1']);
+        Route::post('jobs/failed/retry', [JobsController::class, 'retryFailed'])->middleware(['require.2fa','throttle:20,1']);
+        Route::post('jobs/failed/forget', [JobsController::class, 'forgetFailed'])->middleware(['require.2fa','throttle:20,1']);
+        Route::post('jobs/pending/clear', [JobsController::class, 'clearPending'])->middleware(['require.2fa','throttle:10,1']);
         Route::post('ops/kill-switch', [OpsController::class, 'killSwitch'])->middleware(['require.2fa','throttle:5,1']);
         Route::post('ops/provider-breaker', [OpsController::class, 'providerBreaker'])->middleware(['require.2fa','throttle:10,1']);
         Route::get('ops/scheduler-runs', [OpsController::class, 'schedulerRuns']);
