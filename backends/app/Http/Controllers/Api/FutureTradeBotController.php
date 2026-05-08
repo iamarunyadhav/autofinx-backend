@@ -48,6 +48,27 @@ class FutureTradeBotController extends Controller
         return response()->json(['state' => $this->bot->resetDailyLoss($this->bot->getOrCreateConfig($workspace))]);
     }
 
+    public function recover(Request $request, string $workspace): JsonResponse
+    {
+        $data = $request->validate([
+            'action' => 'nullable|string|in:auto,sync_state,cancel_reduce_only',
+        ]);
+
+        try {
+            return response()->json(
+                $this->bot->recoverRuntime(
+                    $this->bot->getOrCreateConfig($workspace),
+                    (string) ($data['action'] ?? 'auto'),
+                )
+            );
+        } catch (\Throwable $e) {
+            return response()->json([
+                'resolved' => false,
+                'message' => $e->getMessage(),
+            ], 422);
+        }
+    }
+
     public function config(string $workspace): JsonResponse
     {
         return response()->json($this->bot->configPayload($this->bot->getOrCreateConfig($workspace)));

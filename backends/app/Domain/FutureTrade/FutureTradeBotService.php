@@ -228,6 +228,43 @@ class FutureTradeBotService
         return $state->fresh();
     }
 
+    public function recoverRuntime(FutureTradeBotConfig $config, string $action = 'auto'): array
+    {
+        $state = $this->state($config);
+        $settings = $config->mergedSettings();
+        $symbol = strtoupper((string) ($state->current_symbol ?? ''));
+
+        if (! $config->enable_live_trading) {
+            return [
+                'action' => $action,
+                'resolved' => false,
+                'message' => 'Live recovery actions are available only when Future Trade is using Binance Futures live/testnet mode.',
+                'state' => $state->fresh(),
+            ];
+        }
+
+        if ($symbol === '') {
+            return [
+                'action' => $action,
+                'resolved' => false,
+                'message' => 'No active Future Trade symbol is available to recover.',
+                'state' => $state->fresh(),
+            ];
+        }
+
+        $client = $this->liveClient($settings);
+        $result = match ($action) {
+            'cancel_reduce_only' => $this->cancelReduceOnlyOrders($config, $client, $symbol),
+            'sync_state' => $this->synchronizeLivePositionState($config, $client, $symbol, 'OPERATOR_SYNC'),
+            default => $this->resolveRuntimeState($config, $client, $symbol, 'OPERATOR_AUTO_RECOVERY'),
+        };
+
+        return $result + [
+            'action' => $action,
+            'state' => $this->state($config->fresh('state')),
+        ];
+    }
+
     public function testConnection(FutureTradeBotConfig $config): array
     {
         $settings = $config->mergedSettings();
@@ -1039,18 +1076,56 @@ class FutureTradeBotService
         $settings = $config->mergedSettings();
         $dynamic = $this->dynamicDecision($config, $state, (array) ($state->scanner_snapshot ?? []), null, $settings);
         $client = $this->liveClient($settings);
-        $side = $state->position_side === 'LONG' ? 'SELL' : 'BUY';
-        $filters = $this->symbolFilters($client->fetchExchangeInfo((string) $state->current_symbol), (string) $state->current_symbol);
-        $qty = $this->formatStep((float) $state->quantity, $filters['stepSize']);
-        $response = $client->placeOrder([
-            'symbol' => (string) $state->current_symbol,
-            'side' => $side,
-            'type' => 'MARKET',
-            'quantity' => $qty,
-            'reduceOnly' => 'true',
-            'newClientOrderId' => substr('ft-close-' . Str::uuid(), 0, 36),
-            'positionSide' => 'BOTH',
-        ]);
+        $symbol = (string) $state->current_symbol;
+        $filters = $this->symbolFilters($client->fetchExchangeInfo($symbol), $symbol);
+        $exchange = $this->exchangePositionSnapshot($client, $symbol);
+
+        if ((float) ($exchange['quantity'] ?? 0) <= 0) {
+            $this->resolveRuntimeState($config, $client, $symbol, 'NO_EXCHANGE_POSITION_FOR_CLOSE');
+
+            return;
+        }
+
+        $this->cancelReduceOnlyOrders($config, $client, $symbol, $exchange['reduce_only_orders']);
+
+        $side = (($exchange['position_side'] ?? null) === 'LONG' ? 'SELL' : 'BUY');
+        $qtyFloat = min(max((float) $state->quantity, 0.0), (float) $exchange['quantity']);
+        $qty = $this->formatStep($qtyFloat, $filters['stepSize']);
+
+        if ((float) $qty <= 0) {
+            $this->resolveRuntimeState($config, $client, $symbol, 'ZERO_CLOSE_QUANTITY_AFTER_SYNC');
+
+            return;
+        }
+
+        try {
+            $response = $client->placeOrder([
+                'symbol' => $symbol,
+                'side' => $side,
+                'type' => 'MARKET',
+                'quantity' => $qty,
+                'reduceOnly' => 'true',
+                'newClientOrderId' => substr('ft-close-' . Str::uuid(), 0, 36),
+                'positionSide' => 'BOTH',
+            ]);
+        } catch (Throwable $e) {
+            if ($this->isReduceOnlyRejected($e)) {
+                $resolution = $this->resolveRuntimeState($config, $client, $symbol, 'REDUCE_ONLY_REJECTED');
+                $this->log(
+                    $config->fresh('state'),
+                    'LIVE_CLOSE_RECOVERY',
+                    $symbol,
+                    'CLOSE',
+                    1,
+                    'Reduce-only close was rejected. Exchange state was re-synced.',
+                    $this->runtimeContext($dynamic, $resolution + ['status' => 'RECOVERED'])
+                );
+
+                return;
+            }
+
+            throw $e;
+        }
 
         $direction = $state->position_side === 'LONG' ? 1 : -1;
         $entry = (float) $state->entry_price;
@@ -2114,5 +2189,196 @@ class FutureTradeBotService
         }
 
         $this->log($config, $event, $symbol, $signal, $confidence, $reason, $context);
+    }
+
+    private function resolveRuntimeState(FutureTradeBotConfig $config, BinanceFuturesClient $client, string $symbol, string $reason): array
+    {
+        $exchange = $this->exchangePositionSnapshot($client, $symbol);
+        $cancelled = $this->cancelReduceOnlyOrders($config, $client, $symbol, $exchange['reduce_only_orders']);
+        $synced = $this->synchronizeLivePositionState($config, $client, $symbol, $reason, $exchange);
+
+        return [
+            'resolved' => true,
+            'message' => (string) ($synced['message'] ?? 'Runtime state re-synced from Binance.'),
+            'exchange_quantity' => (float) ($exchange['quantity'] ?? 0),
+            'exchange_side' => $exchange['position_side'] ?? null,
+            'cancelled_reduce_only_orders' => (int) ($cancelled['cancelled_reduce_only_orders'] ?? 0),
+            'local_state_cleared' => (bool) ($synced['local_state_cleared'] ?? false),
+            'position_still_open' => (bool) ($synced['position_still_open'] ?? false),
+        ];
+    }
+
+    private function synchronizeLivePositionState(
+        FutureTradeBotConfig $config,
+        BinanceFuturesClient $client,
+        string $symbol,
+        string $reason,
+        ?array $exchangeSnapshot = null,
+    ): array {
+        $state = $this->state($config);
+        $exchange = $exchangeSnapshot ?? $this->exchangePositionSnapshot($client, $symbol);
+        $exchangeQty = (float) ($exchange['quantity'] ?? 0);
+
+        if ($exchangeQty <= 0) {
+            $this->persistState($state, [
+                'state' => $config->enabled ? 'SCANNING' : 'STOPPED',
+                'status' => $config->enabled ? 'Running' : 'Stopped',
+                'current_signal' => 'WAITING_FOR_SIGNAL',
+                'entry_price' => null,
+                'quantity' => 0,
+                'position_side' => null,
+                'peak_price' => null,
+                'bottom_price' => null,
+                'unrealized_pnl' => 0,
+                'unrealized_pnl_percent' => 0,
+                'current_price' => (float) ($exchange['mark_price'] ?? $state->current_price ?? 0),
+                'connection_status' => 'Connected',
+            ]);
+
+            $this->log(
+                $config->fresh('state'),
+                'LIVE_STATE_SYNCED',
+                $symbol,
+                null,
+                0,
+                'Binance shows no open futures position. Local bot position state was cleared.',
+                ['reason' => $reason, 'exchangeQuantity' => 0]
+            );
+
+            return [
+                'resolved' => true,
+                'local_state_cleared' => true,
+                'position_still_open' => false,
+                'exchange_quantity' => 0.0,
+                'exchange_side' => null,
+                'message' => 'Binance shows no open position now. Bot state was cleared and scanner can continue.',
+            ];
+        }
+
+        $side = (string) ($exchange['position_side'] ?? $state->position_side ?? '');
+        $entryPrice = (float) ($exchange['entry_price'] ?? $state->entry_price ?? 0);
+        $markPrice = (float) ($exchange['mark_price'] ?? $state->current_price ?? 0);
+        $unrealized = (float) ($exchange['unrealized_pnl'] ?? 0);
+        $unrealizedPercent = $entryPrice > 0
+            ? (($markPrice - $entryPrice) / $entryPrice) * ($side === 'LONG' ? 100 : -100)
+            : 0.0;
+
+        $this->persistState($state, [
+            'state' => 'LIVE_IN_POSITION',
+            'status' => 'Running',
+            'current_symbol' => $symbol,
+            'position_side' => $side,
+            'entry_price' => $entryPrice,
+            'quantity' => $exchangeQty,
+            'current_price' => $markPrice,
+            'unrealized_pnl' => $unrealized,
+            'unrealized_pnl_percent' => $unrealizedPercent,
+            'connection_status' => 'Connected',
+        ]);
+
+        $this->log(
+            $config->fresh('state'),
+            'LIVE_STATE_SYNCED',
+            $symbol,
+            null,
+            0,
+            'Future Trade local state was updated from Binance open position data.',
+            ['reason' => $reason, 'exchangeQuantity' => $exchangeQty, 'exchangeSide' => $side]
+        );
+
+        return [
+            'resolved' => true,
+            'local_state_cleared' => false,
+            'position_still_open' => true,
+            'exchange_quantity' => $exchangeQty,
+            'exchange_side' => $side,
+            'message' => sprintf('Binance still has an open %s position of %.8f. Bot state was synced to exchange.', strtolower($side), $exchangeQty),
+        ];
+    }
+
+    private function cancelReduceOnlyOrders(
+        FutureTradeBotConfig $config,
+        BinanceFuturesClient $client,
+        string $symbol,
+        ?array $orders = null,
+    ): array {
+        $source = $orders ?? $this->exchangePositionSnapshot($client, $symbol)['reduce_only_orders'];
+        $cancelled = 0;
+
+        foreach ($source as $order) {
+            try {
+                $client->cancelOrder(
+                    $symbol,
+                    isset($order['orderId']) ? (string) $order['orderId'] : null,
+                    isset($order['clientOrderId']) ? (string) $order['clientOrderId'] : null,
+                );
+                $cancelled++;
+            } catch (Throwable $e) {
+                $this->log(
+                    $config->fresh('state'),
+                    'LIVE_CANCEL_ORDER_FAILED',
+                    $symbol,
+                    null,
+                    0,
+                    $e->getMessage(),
+                    ['orderId' => $order['orderId'] ?? null, 'clientOrderId' => $order['clientOrderId'] ?? null]
+                );
+            }
+        }
+
+        if ($cancelled > 0) {
+            $this->log(
+                $config->fresh('state'),
+                'LIVE_REDUCE_ONLY_CANCELLED',
+                $symbol,
+                null,
+                0,
+                sprintf('Cancelled %d Binance reduce-only close order(s).', $cancelled),
+                ['cancelled' => $cancelled]
+            );
+        }
+
+        return [
+            'resolved' => true,
+            'cancelled_reduce_only_orders' => $cancelled,
+            'message' => $cancelled > 0
+                ? sprintf('Cancelled %d reduce-only Binance order(s).', $cancelled)
+                : 'No reduce-only Binance orders were waiting.',
+        ];
+    }
+
+    private function exchangePositionSnapshot(BinanceFuturesClient $client, string $symbol): array
+    {
+        $riskPayload = $client->fetchPositionRisk($symbol);
+        $riskRows = collect(is_array($riskPayload) && array_is_list($riskPayload) ? $riskPayload : [$riskPayload])
+            ->filter(fn ($row) => is_array($row) && strtoupper((string) ($row['symbol'] ?? '')) === strtoupper($symbol));
+        $activeRisk = $riskRows->first(fn ($row) => abs((float) ($row['positionAmt'] ?? 0)) > 0);
+        $openOrdersPayload = $client->fetchOpenOrders($symbol);
+        $openOrders = collect(is_array($openOrdersPayload) && array_is_list($openOrdersPayload) ? $openOrdersPayload : [$openOrdersPayload])
+            ->filter(fn ($row) => is_array($row) && strtoupper((string) ($row['symbol'] ?? '')) === strtoupper($symbol))
+            ->values();
+        $reduceOnlyOrders = $openOrders
+            ->filter(fn ($row) => filter_var($row['reduceOnly'] ?? false, FILTER_VALIDATE_BOOLEAN))
+            ->values()
+            ->all();
+        $positionAmt = (float) ($activeRisk['positionAmt'] ?? 0);
+
+        return [
+            'quantity' => abs($positionAmt),
+            'signed_quantity' => $positionAmt,
+            'position_side' => $positionAmt > 0 ? 'LONG' : ($positionAmt < 0 ? 'SHORT' : null),
+            'entry_price' => (float) ($activeRisk['entryPrice'] ?? 0),
+            'mark_price' => (float) ($activeRisk['markPrice'] ?? 0),
+            'unrealized_pnl' => (float) ($activeRisk['unRealizedProfit'] ?? 0),
+            'reduce_only_orders' => $reduceOnlyOrders,
+            'open_orders' => $openOrders->all(),
+        ];
+    }
+
+    private function isReduceOnlyRejected(Throwable $e): bool
+    {
+        $message = $e->getMessage();
+
+        return str_contains($message, '-2022') || str_contains($message, 'ReduceOnly Order is rejected');
     }
 }

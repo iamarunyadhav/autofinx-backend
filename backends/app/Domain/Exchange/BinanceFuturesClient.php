@@ -161,6 +161,30 @@ class BinanceFuturesClient
         return (array) $response->json();
     }
 
+    public function cancelOrder(string $symbol, ?string $orderId = null, ?string $clientOrderId = null): array
+    {
+        $params = ['symbol' => BinanceSymbolNormalizer::normalize($symbol)];
+        if ($orderId) {
+            $params['orderId'] = $orderId;
+        }
+        if ($clientOrderId) {
+            $params['origClientOrderId'] = $clientOrderId;
+        }
+
+        $response = $this->signedRequest('DELETE', '/fapi/v1/order', $params);
+
+        return (array) $response->json();
+    }
+
+    public function cancelOpenOrders(string $symbol): array
+    {
+        $response = $this->signedRequest('DELETE', '/fapi/v1/allOpenOrders', [
+            'symbol' => BinanceSymbolNormalizer::normalize($symbol),
+        ]);
+
+        return (array) $response->json();
+    }
+
     private function signedRequest(string $method, string $path, array $params = [], bool $throw = true): Response
     {
         $signedPayload = $this->sign($params);
