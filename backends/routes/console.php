@@ -113,6 +113,7 @@ Schedule::job(new DetectStaleFeedsJob((int) env('LIVE_TRADING_STALE_FEED_THRESHO
 
 Schedule::command('future-trade:scan-all')
     ->everySecond()
+    ->onOneServer()
     ->withoutOverlapping()
     ->runInBackground()
     ->before(fn () => $markRunStart('future-trade:scan-all'))
