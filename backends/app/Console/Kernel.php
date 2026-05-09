@@ -32,9 +32,6 @@ use App\Console\Commands\Fast2XRunCommand;
 use App\Console\Commands\FutureTradeBotRunCommand;
 use App\Console\Commands\FutureTradeDiagnosticsCommand;
 use App\Console\Commands\FutureTradeScanAllCommand;
-use App\Jobs\DetectStaleFeedsJob;
-use App\Jobs\KeepAliveUserStreamsJob;
-use App\Jobs\RunWithdrawalSchedulesJob;
 use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Foundation\Console\Kernel as ConsoleKernel;
 
@@ -47,134 +44,8 @@ class Kernel extends ConsoleKernel
 
     protected function schedule(Schedule $schedule): void
     {
-        $cron = config('exchange.sync_cron', '*/10 * * * *');
-        $schedule->command('connections:sync')
-            ->cron($cron)
-            ->onOneServer()
-            ->runInBackground()
-            ->before(function () { $this->markRunStart('connections:sync'); })
-            ->after(function () { $this->markRunEnd('connections:sync'); })
-            ->description('Sync exchange connections and refresh balances/positions');
-
-        $schedule->command('strategy:heal')
-            ->everyTenMinutes()
-            ->onOneServer()
-            ->runInBackground()
-            ->before(function () { $this->markRunStart('strategy:heal'); })
-            ->after(function () { $this->markRunEnd('strategy:heal'); })
-            ->description('Heal strategies after maintenance and retry failed orders');
-
-        /*
-        Temporarily disabled to reduce unnecessary Binance REST pressure while only Future Trade and Fast2X are needed.
-        $schedule->command('orders:poll-status')
-            ->everyTwoMinutes()
-            ->onOneServer()
-            ->runInBackground()
-            ->before(function () { $this->markRunStart('orders:poll-status'); })
-            ->after(function () { $this->markRunEnd('orders:poll-status'); })
-            ->description('Poll provider status for pending orders');
-        */
-
-        $schedule->command('market:ws-consume --once --store-ohlc')
-            ->everySecond()
-            ->withoutOverlapping()
-            ->runInBackground()
-            ->description('Refresh live price cache and rolling OHLC snapshots');
-
-        $schedule->command('metals:poll-prices --once')
-            ->everyFiveSeconds()
-            ->withoutOverlapping()
-            ->runInBackground()
-            ->description('Poll metal broker rates and cache USD/LKR conversions');
-
-        /*
-        Temporarily disabled to reduce unnecessary Binance REST pressure while only Future Trade and Fast2X are needed.
-        $schedule->command('bots:evaluate')
-            ->everySecond()
-            ->withoutOverlapping()
-            ->runInBackground()
-            ->description('Evaluate running bots and emit executable trade signals');
-
-        $schedule->command('ratio-bots:evaluate')
-            ->everySecond()
-            ->withoutOverlapping()
-            ->runInBackground()
-            ->description('Evaluate stateful anchor-based ratio bots');
-        */
-
-        /*
-        Future Trade scan scheduling is owned from routes/console.php.
-        Keep the command registered here for direct artisan usage, but do not
-        duplicate the schedule entry in both places.
-        */
-
-
-        $schedule->command('future-trade:diagnostics --persist')
-            ->everyFiveMinutes()
-            ->withoutOverlapping()
-            ->runInBackground()
-            ->before(function () { $this->markRunStart('future-trade:diagnostics'); })
-            ->after(function () { $this->markRunEnd('future-trade:diagnostics'); })
-            ->description('Persist FutureTrade runtime diagnostics and blocker snapshots');
-
-        /*
-        Temporarily disabled to reduce unnecessary Binance REST pressure while only Future Trade and Fast2X are needed.
-        $schedule->command('ratio-bots:reconcile')
-            ->everyMinute()
-            ->withoutOverlapping()
-            ->runInBackground()
-            ->description('Reconcile ratio bot orders and positions against exchange state');
-
-        $schedule->job(new SyncOrderStatusJob(100))
-            ->everyTenSeconds()
-            ->withoutOverlapping()
-            ->description('Reconcile order status/fills from exchange REST fallback');
-        */
-
-        $schedule->job(new KeepAliveUserStreamsJob())
-            ->everyThirtyMinutes()
-            ->withoutOverlapping()
-            ->description('Keep Binance user stream listen keys alive');
-
-        $schedule->job(new DetectStaleFeedsJob((int) env('LIVE_TRADING_STALE_FEED_THRESHOLD_SEC', 60)))
-            ->everyMinute()
-            ->withoutOverlapping()
-            ->description('Activate or clear stale feed breaker for live trading');
-
-        $schedule->job(new RunWithdrawalSchedulesJob())
-            ->everyMinute()
-            ->withoutOverlapping()
-            ->description('Run due automated withdrawal schedules');
-
-        /*
-        Temporarily disabled to reduce unnecessary Binance REST pressure while only Future Trade and Fast2X are needed.
-        $schedule->job(new ExpireAiDecisionsJob())
-            ->everyMinute()
-            ->withoutOverlapping()
-            ->description('Expire stale AI trade approvals');
-
-        $schedule->job(new DispatchAiDecisionCycleJob())
-            ->everyMinute()
-            ->withoutOverlapping()
-            ->description('Dispatch scheduled AI decision cycles for enabled spot workspaces');
-
-        $schedule->job(new RunExitMonitoringJob())
-            ->everyTenSeconds()
-            ->withoutOverlapping()
-            ->description('Evaluate managed live spot exits and dispatch protective exits safely');
-        */
-
-        $schedule->command('ops:readiness-check')
-            ->everyMinute()
-            ->onOneServer()
-            ->withoutOverlapping()
-            ->description('Persist readiness snapshots and sync readiness incidents');
-
-        $schedule->command('ops:maturity-cycle')
-            ->everyFiveMinutes()
-            ->onOneServer()
-            ->withoutOverlapping()
-            ->description('Capture operational trend snapshots, drift detections, and maintenance confidence');
+        // All production schedule definitions live in routes/console.php.
+        // Keep Kernel available for command registration only.
     }
 
     protected $commands = [
@@ -210,23 +81,4 @@ class Kernel extends ConsoleKernel
         FutureTradeScanAllCommand::class,
     ];
 
-    private function markRunStart(string $command): void
-    {
-        \App\Models\SchedulerRun::create([
-            'id' => (string) \Illuminate\Support\Str::uuid(),
-            'command' => $command,
-            'started_at' => now(),
-            'status' => 'running',
-        ]);
-    }
-
-    private function markRunEnd(string $command): void
-    {
-        $run = \App\Models\SchedulerRun::where('command', $command)->orderByDesc('started_at')->first();
-        if (! $run) return;
-        $run->finished_at = now();
-        $run->duration_ms = $run->started_at ? $run->started_at->diffInMilliseconds($run->finished_at) : null;
-        $run->status = 'completed';
-        $run->save();
-    }
 }

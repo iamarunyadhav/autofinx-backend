@@ -12,14 +12,17 @@ use App\Models\ExchangeConnection;
 use App\Models\Integration;
 use App\Models\RatioBotConfig;
 use Illuminate\Bus\Queueable;
+use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 
-class KeepAliveUserStreamsJob implements ShouldQueue
+class KeepAliveUserStreamsJob implements ShouldQueue, ShouldBeUnique
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
+
+    public int $uniqueFor = 1700;
 
     public function __construct()
     {
@@ -94,5 +97,10 @@ class KeepAliveUserStreamsJob implements ShouldQueue
                 }
             }
         }
+    }
+
+    public function uniqueId(): string
+    {
+        return 'keepalive-user-streams';
     }
 }

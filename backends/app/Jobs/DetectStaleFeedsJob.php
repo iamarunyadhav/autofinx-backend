@@ -9,6 +9,7 @@ use App\Models\MarketFeedStatus;
 use App\Models\RatioBotConfig;
 use App\Models\RiskEvent;
 use Illuminate\Bus\Queueable;
+use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
@@ -16,9 +17,11 @@ use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 
-class DetectStaleFeedsJob implements ShouldQueue
+class DetectStaleFeedsJob implements ShouldQueue, ShouldBeUnique
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
+
+    public int $uniqueFor = 55;
     public int $thresholdSeconds;
 
     public function __construct(int $thresholdSeconds = 60)
@@ -113,6 +116,11 @@ class DetectStaleFeedsJob implements ShouldQueue
                 ]);
             }
         }
+    }
+
+    public function uniqueId(): string
+    {
+        return 'detect-stale-feeds:' . $this->thresholdSeconds;
     }
 
     /**
