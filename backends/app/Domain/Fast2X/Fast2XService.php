@@ -22,6 +22,7 @@ class Fast2XService
         private readonly OrderExecutionService $orders,
         private readonly DecisionLogService $logs,
         private readonly LivePortfolioGuardService $liveGuard,
+        private readonly ExternalSignalFusionService $signalFusion,
     ) {}
 
     public function getOrCreateConfig(string $workspaceId): Fast2XConfig
@@ -133,6 +134,7 @@ class Fast2XService
         $history = array_slice($history, -120);
         $dynamic = $this->thresholds->resolve($history, $settings);
         $confirmation = $this->indicators->confirm($history, $settings);
+        $externalSignalGate = $this->signalFusion->evaluate($config, $confirmation, $price);
         $spreadPercent = $price > 0 ? ((float) ($tick['spread'] ?? 0) / $price) * 100 : 0;
 
         $state->update([
@@ -144,22 +146,23 @@ class Fast2XService
                 'ticks' => $history,
                 'dynamic_thresholds' => $dynamic,
                 'indicator_confirmation' => $confirmation,
+                'external_signal_gate' => $externalSignalGate,
                 'latest_tick' => $tick,
             ]),
         ]);
 
         if (! $allowTrading || $state->status !== 'Running') {
-            return ['decision' => 'WAITING_FOR_SIGNAL', 'dynamic' => $dynamic, 'indicator' => $confirmation];
+            return ['decision' => 'WAITING_FOR_SIGNAL', 'dynamic' => $dynamic, 'indicator' => $confirmation, 'externalSignalGate' => $externalSignalGate];
         }
 
         if ((float) $state->quantity > 0 && (float) $state->entry_price > 0) {
             return $this->manageOpenPosition($config->fresh('state'), $price, $dynamic, $tickAgeMs, $spreadPercent, $latencyMs);
         }
 
-        return $this->evaluateEntry($config->fresh('state'), $price, $dynamic, $confirmation, $tickAgeMs, $spreadPercent, $latencyMs);
+        return $this->evaluateEntry($config->fresh('state'), $price, $dynamic, $confirmation, $externalSignalGate, $tickAgeMs, $spreadPercent, $latencyMs);
     }
 
-    private function evaluateEntry(Fast2XConfig $config, float $price, array $dynamic, array $confirmation, int $tickAgeMs, float $spreadPercent, int $latencyMs): array
+    private function evaluateEntry(Fast2XConfig $config, float $price, array $dynamic, array $confirmation, array $externalSignalGate, int $tickAgeMs, float $spreadPercent, int $latencyMs): array
     {
         $state = $config->state;
         $settings = $this->brainAdjustedSettings($config);
@@ -181,6 +184,11 @@ class Fast2XService
         if (! ($confirmation['allowTrade'] ?? false)) {
             $this->logs->log($config, 'BUY_SKIPPED_DUE_TO_RISK', ['reason' => implode(', ', (array) $confirmation['reasons'])]);
             return ['decision' => 'BUY_SKIPPED_DUE_TO_RISK'];
+        }
+
+        if (! ($externalSignalGate['allowed'] ?? true)) {
+            $this->logs->log($config, 'BUY_SKIPPED_DUE_TO_SIGNAL', ['reason' => implode(', ', (array) ($externalSignalGate['reasons'] ?? ['External signal confirmation failed']))]);
+            return ['decision' => 'BUY_SKIPPED_DUE_TO_SIGNAL', 'reason' => implode(', ', (array) ($externalSignalGate['reasons'] ?? []))];
         }
 
         $signalKey = 'BUY:' . $config->normalizedSymbol() . ':' . now()->format('YmdHi');
@@ -282,6 +290,7 @@ class Fast2XService
             'decision' => $state->decision,
             'dynamicThresholds' => $state->runtime_meta['dynamic_thresholds'] ?? null,
             'indicatorConfirmation' => $state->runtime_meta['indicator_confirmation'] ?? null,
+            'externalSignalGate' => $state->runtime_meta['external_signal_gate'] ?? null,
             'warning' => $config->executionMode() === 'live' ? 'Live trading is risky and requires explicit environment enablement.' : null,
             'liveGuard' => $config->usesLiveVenue() ? $this->liveGuard->canActivate($config->workspace_id, 'fast2x') : ['allowed' => true, 'reason' => null, 'activeBot' => null],
             'settings' => $settings,
@@ -382,6 +391,7 @@ class Fast2XService
                 'aiBrainEnabled' => (bool) $config->ai_brain_enabled,
                 'dynamicThresholds' => $state->runtime_meta['dynamic_thresholds'] ?? null,
                 'indicatorConfirmation' => $state->runtime_meta['indicator_confirmation'] ?? null,
+                'externalSignalGate' => $state->runtime_meta['external_signal_gate'] ?? null,
                 'riskControls' => [
                     'rollbackLossPercent' => (float) ($settings['rollbackLossPercent'] ?? 0.15),
                     'stopLossPercent' => (float) ($settings['stopLossPercent'] ?? 0.4),

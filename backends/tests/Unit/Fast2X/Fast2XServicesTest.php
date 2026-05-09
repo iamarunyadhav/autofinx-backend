@@ -3,6 +3,7 @@
 namespace Tests\Unit\Fast2X;
 
 use App\Domain\Fast2X\DuplicateOrderGuard;
+use App\Domain\Fast2X\ExternalSignalFusionService;
 use App\Domain\Fast2X\Fast2XService;
 use App\Domain\Fast2X\DynamicThresholdService;
 use App\Domain\Fast2X\OrderExecutionService;
@@ -13,8 +14,10 @@ use App\Domain\Fast2X\StopLossService;
 use App\Domain\Fast2X\TradeFrequencyService;
 use App\Domain\Fast2X\TrailingProfitService;
 use App\Models\Fast2XConfig;
+use App\Models\Signal;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Str;
 use Tests\TestCase;
 
 class Fast2XServicesTest extends TestCase
@@ -180,6 +183,50 @@ class Fast2XServicesTest extends TestCase
 
         $this->assertTrue($updated->paper_trading);
         $this->assertFalse($updated->enable_live_trading);
+    }
+
+    public function test_external_signal_fusion_blocks_when_recent_signal_is_missing(): void
+    {
+        $config = $this->config();
+
+        $result = app(ExternalSignalFusionService::class)->evaluate($config, [
+            'allowTrade' => true,
+            'confidence' => 0.84,
+        ], 100000);
+
+        $this->assertTrue($result['enabled']);
+        $this->assertFalse($result['allowed']);
+        $this->assertSame('No recent external signal available', $result['reasons'][0]);
+    }
+
+    public function test_external_signal_fusion_allows_aligned_strong_signal(): void
+    {
+        $config = $this->config();
+
+        Signal::create([
+            'id' => (string) Str::uuid(),
+            'workspace_id' => $config->workspace_id,
+            'symbol' => 'BTCUSDT',
+            'action' => 'BUY',
+            'confidence' => 0.9,
+            'strategy_name' => 'MTF Pro Signal',
+            'meta' => [
+                'source' => 'mt5-mtf-pro',
+                'score' => 9,
+                'rr' => 2.6,
+                'htf_aligned' => true,
+                'news_risk' => 'LOW',
+            ],
+        ]);
+
+        $result = app(ExternalSignalFusionService::class)->evaluate($config, [
+            'allowTrade' => true,
+            'confidence' => 0.83,
+        ], 100000);
+
+        $this->assertTrue($result['allowed']);
+        $this->assertSame('BUY', $result['latestSignal']['action']);
+        $this->assertGreaterThanOrEqual(0.74, $result['confidence']);
     }
 
     private function config(array $overrides = []): Fast2XConfig
