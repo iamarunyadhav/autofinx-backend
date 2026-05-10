@@ -10,6 +10,7 @@ use App\Models\RatioBotConfig;
 use App\Models\RatioBotEvent;
 use App\Models\Symbol;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
@@ -194,15 +195,10 @@ class RealtimeMarketFeedService
                 continue;
             }
 
-            $debounceSeconds = max(1, (int) ($config->min_seconds_between_evaluations ?? 1));
-            $cacheKey = sprintf(
-                'ratio-bot:feed-dispatch:%s:%s:%s',
-                $config->id,
-                $closedKline ? 'candle' : ($eventType !== '' ? $eventType : 'tick'),
-                $closedKline ? Carbon::createFromTimestampMs($eventTimestampMs)->format('YmdHis') : floor($eventTimestampMs / max($debounceSeconds * 1000, 1))
-            );
+            $dispatchKey = $this->dispatchDeduplicationKey($config, $closedKline, $eventType, $eventTimestampMs, $timeframe);
+            $dispatchTtlSeconds = $this->dispatchDeduplicationTtlSeconds($config, $closedKline, $timeframe);
 
-            if (! Cache::add($cacheKey, 1, now()->addSeconds($debounceSeconds))) {
+            if (! Cache::add($dispatchKey, 1, now()->addSeconds($dispatchTtlSeconds))) {
                 continue;
             }
 
@@ -261,6 +257,70 @@ class RealtimeMarketFeedService
                 ]
             );
         }
+    }
+
+    private function dispatchDeduplicationKey(
+        RatioBotConfig $config,
+        bool $closedKline,
+        string $eventType,
+        int $eventTimestampMs,
+        string $timeframe,
+    ): string {
+        if (! $closedKline) {
+            $debounceSeconds = max(1, (int) ($config->min_seconds_between_evaluations ?? 1));
+
+            return sprintf(
+                'ratio-bot:feed-dispatch:%s:%s:%s',
+                $config->id,
+                $eventType !== '' ? $eventType : 'tick',
+                floor($eventTimestampMs / max($debounceSeconds * 1000, 1))
+            );
+        }
+
+        return sprintf(
+            'ratio-bot:feed-dispatch:%s:candle:%s:%s',
+            $config->id,
+            strtolower($timeframe ?: '1m'),
+            $eventTimestampMs
+        );
+    }
+
+    private function dispatchDeduplicationTtlSeconds(
+        RatioBotConfig $config,
+        bool $closedKline,
+        string $timeframe,
+    ): int {
+        if (! $closedKline) {
+            return max(1, (int) ($config->min_seconds_between_evaluations ?? 1));
+        }
+
+        return max(
+            $this->timeframeToSeconds($timeframe),
+            max(1, (int) ($config->min_seconds_between_evaluations ?? 1))
+        );
+    }
+
+    private function timeframeToSeconds(string $timeframe): int
+    {
+        $normalized = strtolower(trim($timeframe));
+        if ($normalized === '') {
+            return 60;
+        }
+
+        if (! preg_match('/^(\d+)([mhdw])$/', $normalized, $matches)) {
+            return 60;
+        }
+
+        $value = max(1, (int) Arr::get($matches, 1, 1));
+        $unit = Arr::get($matches, 2, 'm');
+
+        return match ($unit) {
+            'm' => $value * 60,
+            'h' => $value * 3600,
+            'd' => $value * 86400,
+            'w' => $value * 604800,
+            default => 60,
+        };
     }
 
     /**

@@ -13,6 +13,7 @@ use App\Models\ExchangeConnection;
 use App\Models\Order;
 use App\Models\RatioBotConfig;
 use Illuminate\Bus\Queueable;
+use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
@@ -27,12 +28,13 @@ use Throwable;
 /**
  * Scheduled or manually triggered evaluation of one ratio bot config.
  */
-class RunRatioBotEvaluationJob implements ShouldQueue
+class RunRatioBotEvaluationJob implements ShouldQueue, ShouldBeUnique
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
     public int $tries = 1;
     public int $timeout = 60;
+    public int $uniqueFor = 75;
 
     public function __construct(
         public readonly string $ratioBotConfigId,
@@ -46,6 +48,11 @@ class RunRatioBotEvaluationJob implements ShouldQueue
         return [
             (new WithoutOverlapping('ratio-bot-eval:' . $this->ratioBotConfigId))->expireAfter(55),
         ];
+    }
+
+    public function uniqueId(): string
+    {
+        return 'ratio-bot-eval:' . $this->ratioBotConfigId;
     }
 
     public function handle(
