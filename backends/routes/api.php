@@ -359,6 +359,7 @@ Route::prefix('v1')->group(function () {
         Route::post('jobs/failed/retry', [JobsController::class, 'retryFailed'])->middleware(['require.2fa','throttle:20,1']);
         Route::post('jobs/failed/forget', [JobsController::class, 'forgetFailed'])->middleware(['require.2fa','throttle:20,1']);
         Route::post('jobs/pending/clear', [JobsController::class, 'clearPending'])->middleware(['require.2fa','throttle:10,1']);
+        Route::post('jobs/pending/prune-stale', [JobsController::class, 'pruneStalePending'])->middleware(['require.2fa','throttle:10,1']);
         Route::post('ops/kill-switch', [OpsController::class, 'killSwitch'])->middleware(['require.2fa','throttle:5,1']);
         Route::post('ops/provider-breaker', [OpsController::class, 'providerBreaker'])->middleware(['require.2fa','throttle:10,1']);
         Route::get('ops/scheduler-runs', [OpsController::class, 'schedulerRuns']);

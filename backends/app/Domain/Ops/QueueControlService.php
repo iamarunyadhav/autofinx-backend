@@ -15,21 +15,33 @@ class QueueControlService
     public function dashboard(int $limit = 25): array
     {
         $queues = $this->queueRows();
+        $stalePruneConfig = $this->stalePruneConfig();
         $connection = (string) config('queue.default', 'database');
         $backlog = array_sum(array_column($queues, 'pending'));
+        $excludedQueues = collect(config('ops.live_readiness.queue_backlog_excluded_queues', []))
+            ->map(fn ($queue) => (string) $queue)
+            ->filter()
+            ->all();
+        $blockingBacklog = array_sum(array_map(
+            fn (array $row) => in_array($row['name'], $excludedQueues, true) ? 0 : (int) $row['pending'],
+            $queues
+        ));
         $failed = array_sum(array_column($queues, 'failed'));
         $warningThreshold = (int) config('ops.live_readiness.queue_backlog_warning', 100);
         $blockThreshold = (int) config('ops.live_readiness.queue_backlog_block', 500);
-        $state = $backlog >= $blockThreshold ? 'blocked' : ($backlog >= $warningThreshold || $failed > 0 ? 'degraded' : 'healthy');
+        $state = $blockingBacklog >= $blockThreshold ? 'blocked' : ($blockingBacklog >= $warningThreshold || $failed > 0 ? 'degraded' : 'healthy');
 
         return [
             'state' => $state,
             'connection' => $connection,
             'driver' => (string) config("queue.connections.{$connection}.driver", $connection),
             'backlog' => $backlog,
+            'blocking_backlog' => $blockingBacklog,
             'failed' => $failed,
             'warning_threshold' => $warningThreshold,
             'block_threshold' => $blockThreshold,
+            'excluded_queues' => $excludedQueues,
+            'protected_queues' => $this->protectedQueues(),
             'horizon' => [
                 'installed' => class_exists(\Laravel\Horizon\Horizon::class),
                 'enabled' => (bool) config('queue_control.horizon_enabled', false),
@@ -43,18 +55,24 @@ class QueueControlService
             'worker' => [
                 'restart_signal_available' => true,
                 'recommended_command' => (string) config('queue_control.worker_command'),
+                'topology' => 'three_worker_split',
                 'supervisor_command' => 'sudo supervisorctl restart autofinx-queue:*',
                 'horizon_command' => 'php artisan horizon',
+                'profiles' => $this->workerProfiles(),
             ],
             'queues' => $queues,
             'pending_jobs' => $this->pendingJobs($limit),
             'failed_jobs' => $this->failedJobs($limit),
+            'stale_prune' => [
+                ...$stalePruneConfig,
+                'candidates' => $this->stalePendingCandidates($stalePruneConfig['older_than_minutes'], $limit),
+            ],
             'scheduler_runs' => SchedulerRun::query()
                 ->orderByDesc('started_at')
                 ->limit($limit)
                 ->get(['id', 'command', 'status', 'started_at', 'finished_at', 'duration_ms'])
                 ->values(),
-            'recommendations' => $this->recommendations($state, $connection, $backlog, $failed),
+            'recommendations' => $this->recommendations($state, $connection, $blockingBacklog, $failed),
             'generated_at' => now()->toIso8601String(),
         ];
     }
@@ -106,6 +124,7 @@ class QueueControlService
     public function clearPending(string $queue, ?string $connection = null): array
     {
         abort_unless((bool) config('queue_control.allow_pending_clear', true), 403, 'Queue clearing is disabled on this server.');
+        abort_if(in_array($queue, $this->protectedQueues(), true), 422, "Queue {$queue} is protected. Use stale prune or worker scaling instead.");
 
         $connection = $connection ?: (string) config('queue.default', 'database');
         Artisan::call('queue:clear', [
@@ -120,6 +139,70 @@ class QueueControlService
             'connection' => $connection,
             'message' => "Pending jobs were cleared for {$queue}.",
             'artisan_output' => trim(Artisan::output()),
+        ];
+    }
+
+    public function pruneStalePending(?array $queues = null, ?int $olderThanMinutes = null): array
+    {
+        $config = $this->stalePruneConfig();
+        abort_unless((bool) $config['enabled'], 403, 'Stale queue pruning is disabled on this server.');
+        abort_unless(Schema::hasTable('jobs'), 422, 'Jobs table is not available.');
+
+        $olderThanMinutes = max(1, (int) ($olderThanMinutes ?: $config['older_than_minutes']));
+        $requestedQueues = collect($queues ?? [])
+            ->map(fn ($queue) => trim((string) $queue))
+            ->filter()
+            ->values()
+            ->all();
+        $maxDelete = max(1, (int) $config['max_delete']);
+
+        $rows = DB::table('jobs')
+            ->whereNull('reserved_at')
+            ->where('created_at', '<=', time() - ($olderThanMinutes * 60))
+            ->when($requestedQueues !== [], fn ($query) => $query->whereIn('queue', $requestedQueues))
+            ->orderBy('created_at')
+            ->limit($maxDelete)
+            ->get();
+
+        $deletedIds = [];
+        $deletedByQueue = [];
+        $deletedByJob = [];
+        $skipped = [];
+
+        foreach ($rows as $row) {
+            $candidate = $this->pendingCleanupCandidate($row, $olderThanMinutes);
+            if (! $candidate['prunable']) {
+                $skipped[] = [
+                    'id' => (string) $row->id,
+                    'queue' => (string) $row->queue,
+                    'job' => (string) $candidate['display_name'],
+                    'reason' => (string) $candidate['prune_reason'],
+                ];
+                continue;
+            }
+
+            $deletedIds[] = $row->id;
+            $queue = (string) $row->queue;
+            $job = (string) $candidate['display_name'];
+            $deletedByQueue[$queue] = ($deletedByQueue[$queue] ?? 0) + 1;
+            $deletedByJob[$job] = ($deletedByJob[$job] ?? 0) + 1;
+        }
+
+        if ($deletedIds !== []) {
+            DB::table('jobs')->whereIn('id', $deletedIds)->delete();
+        }
+
+        return [
+            'action' => 'prune_stale_pending',
+            'older_than_minutes' => $olderThanMinutes,
+            'requested_queues' => $requestedQueues,
+            'pruned' => count($deletedIds),
+            'pruned_by_queue' => $deletedByQueue,
+            'pruned_by_job' => $deletedByJob,
+            'skipped' => array_slice($skipped, 0, 25),
+            'message' => count($deletedIds) > 0
+                ? 'Stale safe pending jobs were pruned.'
+                : 'No stale safe pending jobs matched the request.',
         ];
     }
 
@@ -219,19 +302,28 @@ class QueueControlService
             return [];
         }
 
+        $staleMinutes = $this->stalePruneConfig()['older_than_minutes'];
+
         return DB::table('jobs')
             ->orderBy('available_at')
             ->limit(max(1, min(100, $limit)))
             ->get()
-            ->map(fn ($row) => [
-                'id' => (string) $row->id,
-                'queue' => (string) $row->queue,
-                'attempts' => (int) $row->attempts,
-                'reserved' => $row->reserved_at !== null,
-                'available_at' => $this->fromTimestamp((int) $row->available_at),
-                'created_at' => $this->fromTimestamp((int) $row->created_at),
-                ...$this->payloadSummary((string) $row->payload),
-            ])
+            ->map(function ($row) use ($staleMinutes) {
+                $candidate = $this->pendingCleanupCandidate($row, $staleMinutes);
+
+                return [
+                    'id' => (string) $row->id,
+                    'queue' => (string) $row->queue,
+                    'attempts' => (int) $row->attempts,
+                    'reserved' => $row->reserved_at !== null,
+                    'available_at' => $this->fromTimestamp((int) $row->available_at),
+                    'created_at' => $this->fromTimestamp((int) $row->created_at),
+                    'age_seconds' => $candidate['age_seconds'],
+                    'prunable' => $candidate['prunable'],
+                    'prune_reason' => $candidate['prune_reason'],
+                    ...$candidate['payload'],
+                ];
+            })
             ->values()
             ->all();
     }
@@ -335,6 +427,7 @@ class QueueControlService
 
         if ($state === 'blocked') {
             $items[] = "Backlog is {$backlog}; start or scale workers before live automation.";
+            $items[] = 'Use the 3-worker split so live execution queues stay separate from analytics and safe monitoring backlog.';
         }
 
         if ($failed > 0) {
@@ -342,5 +435,128 @@ class QueueControlService
         }
 
         return $items;
+    }
+
+    private function workerProfiles(): array
+    {
+        return collect(config('queue_control.worker_profiles', []))
+            ->map(function (array $profile, string $key) {
+                return [
+                    'key' => $key,
+                    'label' => (string) ($profile['label'] ?? $key),
+                    'purpose' => (string) ($profile['purpose'] ?? ''),
+                    'queues' => array_values(array_map('strval', (array) ($profile['queues'] ?? []))),
+                    'command' => (string) ($profile['command'] ?? ''),
+                ];
+            })
+            ->values()
+            ->all();
+    }
+
+    private function stalePendingCandidates(int $olderThanMinutes, int $limit): array
+    {
+        if (! Schema::hasTable('jobs')) {
+            return [
+                'older_than_minutes' => $olderThanMinutes,
+                'prunable_total' => 0,
+                'sample' => [],
+            ];
+        }
+
+        $rows = DB::table('jobs')
+            ->whereNull('reserved_at')
+            ->where('created_at', '<=', time() - ($olderThanMinutes * 60))
+            ->orderBy('created_at')
+            ->limit(max(1, min(100, $limit)))
+            ->get();
+
+        $sample = [];
+        $prunableTotal = 0;
+
+        foreach ($rows as $row) {
+            $candidate = $this->pendingCleanupCandidate($row, $olderThanMinutes);
+            if ($candidate['prunable']) {
+                $prunableTotal++;
+            }
+
+            $sample[] = [
+                'id' => (string) $row->id,
+                'queue' => (string) $row->queue,
+                'display_name' => $candidate['display_name'],
+                'age_seconds' => $candidate['age_seconds'],
+                'prunable' => $candidate['prunable'],
+                'prune_reason' => $candidate['prune_reason'],
+            ];
+        }
+
+        return [
+            'older_than_minutes' => $olderThanMinutes,
+            'prunable_total' => $prunableTotal,
+            'sample' => $sample,
+        ];
+    }
+
+    private function pendingCleanupCandidate(object $row, int $olderThanMinutes): array
+    {
+        $payload = $this->payloadSummary((string) $row->payload);
+        $displayName = (string) ($payload['display_name'] ?? 'Unknown job');
+        $queue = (string) $row->queue;
+        $ageSeconds = max(0, time() - (int) $row->created_at);
+        $config = $this->stalePruneConfig();
+
+        $prunable = false;
+        $reason = 'queue_not_allowlisted';
+
+        if ($row->reserved_at !== null) {
+            $reason = 'reserved_job';
+        } elseif ($ageSeconds < ($olderThanMinutes * 60)) {
+            $reason = 'not_stale_enough';
+        } elseif (in_array($queue, $config['safe_queues'], true)) {
+            $prunable = true;
+            $reason = 'safe_queue';
+        } elseif (in_array($displayName, $config['safe_job_classes'], true)) {
+            $prunable = true;
+            $reason = 'safe_job_class';
+        } elseif (in_array($queue, $this->protectedQueues(), true)) {
+            $reason = 'protected_queue';
+        }
+
+        return [
+            'display_name' => $displayName,
+            'age_seconds' => $ageSeconds,
+            'prunable' => $prunable,
+            'prune_reason' => $reason,
+            'payload' => $payload,
+        ];
+    }
+
+    private function protectedQueues(): array
+    {
+        return collect(config('queue_control.protected_queues', []))
+            ->map(fn ($queue) => trim((string) $queue))
+            ->filter()
+            ->values()
+            ->all();
+    }
+
+    private function stalePruneConfig(): array
+    {
+        $config = (array) config('queue_control.stale_prune', []);
+
+        return [
+            'enabled' => (bool) ($config['enabled'] ?? true),
+            'older_than_minutes' => max(1, (int) ($config['older_than_minutes'] ?? 30)),
+            'max_delete' => max(1, (int) ($config['max_delete'] ?? 250)),
+            'safe_queues' => collect((array) ($config['safe_queues'] ?? []))
+                ->map(fn ($queue) => trim((string) $queue))
+                ->filter()
+                ->values()
+                ->all(),
+            'safe_job_classes' => collect((array) ($config['safe_job_classes'] ?? []))
+                ->map(fn ($job) => trim((string) $job))
+                ->filter()
+                ->values()
+                ->all(),
+        ];
     }
 }

@@ -46,6 +46,18 @@ class JobsController extends Controller
         return response()->json($queues->clearPending($data['queue'], $data['connection'] ?? null));
     }
 
+    public function pruneStalePending(Request $request, QueueControlService $queues)
+    {
+        $data = $request->validate([
+            'queues' => 'nullable|array',
+            'queues.*' => 'string|max:80',
+            'older_than_minutes' => 'nullable|integer|min:1|max:10080',
+            'confirm' => 'accepted',
+        ]);
+
+        return response()->json($queues->pruneStalePending($data['queues'] ?? null, $data['older_than_minutes'] ?? null));
+    }
+
     public function restartWorkers(QueueControlService $queues)
     {
         return response()->json($queues->restartWorkers());

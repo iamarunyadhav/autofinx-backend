@@ -261,12 +261,23 @@ class OperationalHealthService
     private function queueHealth(): array
     {
         $backlog = 0;
+        $blockingBacklog = 0;
         $failedJobs = 0;
         $warnings = [];
         $blockers = [];
+        $excludedQueues = collect(config('ops.live_readiness.queue_backlog_excluded_queues', []))
+            ->map(fn ($queue) => (string) $queue)
+            ->filter()
+            ->values()
+            ->all();
 
         if (Schema::hasTable('jobs')) {
             $backlog = \Illuminate\Support\Facades\DB::table('jobs')->count();
+            $blockingBacklog = $excludedQueues === []
+                ? $backlog
+                : \Illuminate\Support\Facades\DB::table('jobs')
+                    ->whereNotIn('queue', $excludedQueues)
+                    ->count();
         }
 
         if (Schema::hasTable('failed_jobs')) {
@@ -276,9 +287,9 @@ class OperationalHealthService
         $warningThreshold = (int) config('ops.live_readiness.queue_backlog_warning', 100);
         $blockThreshold = (int) config('ops.live_readiness.queue_backlog_block', 500);
 
-        if ($backlog >= $blockThreshold) {
+        if ($blockingBacklog >= $blockThreshold) {
             $blockers[] = 'queue_backlog_blocked';
-        } elseif ($backlog >= $warningThreshold) {
+        } elseif ($blockingBacklog >= $warningThreshold) {
             $warnings[] = 'queue_backlog_warning';
         }
 
@@ -293,9 +304,11 @@ class OperationalHealthService
             'blockers' => $blockers,
             'warnings' => array_values(array_unique($warnings)),
             'queue_backlog' => $backlog,
+            'blocking_backlog' => $blockingBacklog,
             'failed_jobs' => $failedJobs,
             'warning_threshold' => $warningThreshold,
             'block_threshold' => $blockThreshold,
+            'excluded_queues' => $excludedQueues,
         ];
     }
 

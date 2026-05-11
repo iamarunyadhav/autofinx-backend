@@ -27,6 +27,10 @@ return [
         'scheduler_block_minutes' => (int) env('OPS_SCHEDULER_BLOCK_MINUTES', 30),
         'queue_backlog_warning' => (int) env('OPS_QUEUE_BACKLOG_WARNING', 100),
         'queue_backlog_block' => (int) env('OPS_QUEUE_BACKLOG_BLOCK', 500),
+        'queue_backlog_excluded_queues' => array_values(array_filter(array_map(
+            static fn (string $queue) => trim($queue),
+            explode(',', (string) env('OPS_QUEUE_BACKLOG_EXCLUDED_QUEUES', 'monitoring'))
+        ))),
         'uncertain_order_warning' => (int) env('OPS_UNCERTAIN_ORDER_WARNING', 3),
         'uncertain_order_block' => (int) env('OPS_UNCERTAIN_ORDER_BLOCK', 10),
         'order_failure_warning' => (int) env('OPS_ORDER_FAILURE_WARNING', 3),

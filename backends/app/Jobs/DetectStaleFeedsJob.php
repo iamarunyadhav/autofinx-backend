@@ -26,7 +26,7 @@ class DetectStaleFeedsJob implements ShouldQueue, ShouldBeUnique
 
     public function __construct(int $thresholdSeconds = 60)
     {
-        $this->onQueue('monitoring');
+        $this->onQueue('monitoring_safe');
         $this->thresholdSeconds = $thresholdSeconds;
     }
 
