@@ -1630,12 +1630,20 @@ class FutureTradeBotService
         $symbols = array_map('strtoupper', (array) ($settings['symbols'] ?? []));
         $cacheKey = 'future_trade_market_snapshot_' . md5(implode(',', $symbols));
         try {
-            $base = rtrim((string) (($settings['forceTestnet'] ?? true)
+            // Execution base: testnet or live depending on settings
+            $execBase = rtrim((string) (($settings['forceTestnet'] ?? true)
                 ? ($settings['testnetApiUrl'] ?? 'https://testnet.binancefuture.com')
                 : ($settings['liveApiUrl'] ?? 'https://fapi.binance.com')), '/');
-            $rows = Http::timeout(7)->get($base . '/fapi/v1/ticker/24hr')->throw()->json();
-            $sequenceSnapshots = $this->sequenceSnapshots($symbols, $settings, $base);
-            $htfSnapshots = $this->higherTfSnapshots($symbols, $settings, $base);
+
+            // Data base: always live Binance for real market data (public endpoints, no auth needed)
+            // This gives accurate prices, real volume, and real kline history regardless of execution mode
+            $dataBase = ($settings['useLiveDataFeed'] ?? true)
+                ? rtrim((string) ($settings['liveApiUrl'] ?? 'https://fapi.binance.com'), '/')
+                : $execBase;
+
+            $rows = Http::timeout(7)->get($dataBase . '/fapi/v1/ticker/24hr')->throw()->json();
+            $sequenceSnapshots = $this->sequenceSnapshots($symbols, $settings, $dataBase);
+            $htfSnapshots = $this->higherTfSnapshots($symbols, $settings, $dataBase);
             $configId = (string) $config->id;
             $result = collect($rows)
                 ->filter(fn ($row) => in_array((string) ($row['symbol'] ?? ''), $symbols, true))
