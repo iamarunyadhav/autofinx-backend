@@ -1706,13 +1706,19 @@ class FutureTradeBotService
 
             if ($mode === 'fully_dynamic') {
                 $winRate = $analysis['winRate'];
-                if ($winRate > 0 && $winRate < 45) {
-                    $effective += 0.03;
-                    $next['tradeAmountUsdt'] = max(25, $baseTradeAmount * 0.75);
-                    $adjustments[] = 'Low current win rate: reduce size and demand cleaner entries.';
-                } elseif ($winRate >= 65 && $analysis['trendStrength'] >= 0.55) {
-                    $effective -= 0.02;
-                    $adjustments[] = 'Good win rate with trend support: modestly loosen entry.';
+                $totalTrades = max(0, (int) ($analysis['totalTrades'] ?? 0));
+                $sampleWeight = $this->clamp((float) ($analysis['winRateSampleWeight'] ?? 0), 0.0, 1.0);
+                if ($totalTrades < 5) {
+                    $adjustments[] = 'Limited trade sample: keep win-rate influence muted until more closes are recorded.';
+                }
+
+                if ($winRate > 0 && $winRate < 45 && $sampleWeight >= 0.05) {
+                    $effective += 0.012 + (0.028 * $sampleWeight);
+                    $next['tradeAmountUsdt'] = max(25, $baseTradeAmount * (1 - (0.10 + (0.15 * $sampleWeight))));
+                    $adjustments[] = sprintf('Weak win rate over %d closed trades: reduce size and demand cleaner entries.', $totalTrades);
+                } elseif ($winRate >= 62 && $analysis['trendStrength'] >= 0.55 && $sampleWeight >= 0.35) {
+                    $effective -= 0.006 + (0.014 * $sampleWeight);
+                    $adjustments[] = sprintf('Healthy win rate over %d closed trades with trend support: modestly loosen entry.', $totalTrades);
                 }
 
                 $atrPercent = max(0.08, (float) ($analysis['atrPercent'] ?? 0));
@@ -1762,13 +1768,17 @@ class FutureTradeBotService
                 if ($analysis['lastTradeReason'] && str_contains($analysis['lastTradeReason'], 'LOSS')) {
                     $sizeMultiplier *= 0.9;
                 }
-                $dynamicTradeAmount = $this->clamp($baseTradeAmount * $sizeMultiplier, 25.0, $baseTradeAmount);
+                $preAdjustedTradeAmount = max(25.0, (float) ($next['tradeAmountUsdt'] ?? $baseTradeAmount));
+                $dynamicTradeAmount = $this->clamp($preAdjustedTradeAmount * $sizeMultiplier, 25.0, $baseTradeAmount);
 
                 $next['stopLossPercent'] = $dynamicStop;
                 $next['takeProfitPercent'] = $dynamicTarget;
                 $next['trailingTakeProfitPercent'] = $dynamicTrailing;
                 $next['cooldownSeconds'] = $dynamicCooldown;
                 $next['tradeAmountUsdt'] = $dynamicTradeAmount;
+                if ($analysis['lastTradeReason'] && str_contains($analysis['lastTradeReason'], 'LOSS')) {
+                    $effective = max($effective, $base + 0.01);
+                }
                 $adjustments[] = sprintf(
                     'Regime %s: ATR %.3f%% and volatility %.3f%% tuned TP/SL/cooldown/size inside conservative caps.',
                     $regime,
@@ -1896,7 +1906,9 @@ class FutureTradeBotService
         $lastTrade = (! $stateReason && $stateConfig) ? $stateConfig->trades()->where('status', 'FILLED')->orderByDesc('created_at')->first() : null;
         $wins = (int) $state->wins;
         $losses = (int) $state->losses;
-        $winRate = ($wins + $losses) > 0 ? round(($wins / ($wins + $losses)) * 100, 2) : 0.0;
+        $totalTrades = $wins + $losses;
+        $winRate = $totalTrades > 0 ? round(($wins / $totalTrades) * 100, 2) : 0.0;
+        $winRateSampleWeight = $this->clamp(($totalTrades - 3) / 12, 0, 1);
         $atrPercent = $this->atrPercentProxy($points, $best);
         $regime = $choppy
             ? 'choppy'
@@ -1924,6 +1936,8 @@ class FutureTradeBotService
             'bestConfidence' => round($bestConfidence, 4),
             'lastTradeReason' => $stateReason ?: $lastTrade?->reason,
             'winRate' => $winRate,
+            'totalTrades' => $totalTrades,
+            'winRateSampleWeight' => round($winRateSampleWeight, 4),
         ];
     }
 

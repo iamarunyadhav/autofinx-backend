@@ -159,6 +159,45 @@ class FutureTradeDynamicAlgorithmTest extends TestCase
         $this->assertLessThanOrEqual(30.0, $decision['public']['recommended']['tradeAmountUsdt']);
     }
 
+    public function test_fully_dynamic_does_not_overtrust_tiny_win_rate_samples(): void
+    {
+        $decision = $this->decision([
+            'confidenceMode' => 'fully_dynamic',
+            'minConfidence' => 0.78,
+            'tradeAmountUsdt' => 25,
+        ], $this->state([
+            'wins' => 1,
+            'losses' => 0,
+            'chart_points' => $this->trendPoints(100, 103, 24),
+        ]), [
+            $this->signal('BTCUSDT', 'BUY', 0.94, 103, 3.0, 3.6),
+        ]);
+
+        $this->assertSame(0.0, $decision['public']['analysis']['winRateSampleWeight']);
+        $this->assertGreaterThanOrEqual(0.73, $decision['effectiveMinConfidence']);
+        $this->assertLessThan(0.78, $decision['effectiveMinConfidence']);
+        $this->assertStringContainsString('Limited trade sample', implode(' ', $decision['public']['adjustments']));
+    }
+
+    public function test_fully_dynamic_uses_larger_trade_samples_to_reduce_size_after_poor_win_rate(): void
+    {
+        $decision = $this->decision([
+            'confidenceMode' => 'fully_dynamic',
+            'minConfidence' => 0.72,
+            'tradeAmountUsdt' => 100,
+        ], $this->state([
+            'wins' => 4,
+            'losses' => 8,
+            'chart_points' => $this->trendPoints(100, 101.5, 24),
+        ]), [
+            $this->signal('ETHUSDT', 'BUY', 0.9, 101.5, 1.5, 2.8),
+        ]);
+
+        $this->assertGreaterThan(0.5, $decision['public']['analysis']['winRateSampleWeight']);
+        $this->assertLessThan(90.0, $decision['public']['recommended']['tradeAmountUsdt']);
+        $this->assertStringContainsString('Weak win rate', implode(' ', $decision['public']['adjustments']));
+    }
+
     public function test_dynamic_decision_payload_contains_ui_suggestion_and_auditable_recommended_values(): void
     {
         $decision = $this->decision([
