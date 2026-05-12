@@ -94,6 +94,7 @@ class FutureTradeDynamicAlgorithmTest extends TestCase
             'minConfidence' => 0.72,
             'tradeAmountUsdt' => 100,
             'cooldownSeconds' => 60,
+            'stopLossPercent' => 0.28,
         ], $this->state([
             'wins' => 1,
             'losses' => 3,
@@ -105,7 +106,9 @@ class FutureTradeDynamicAlgorithmTest extends TestCase
 
         $this->assertGreaterThan(0.72, $decision['effectiveMinConfidence']);
         $this->assertGreaterThanOrEqual(120, $decision['public']['recommended']['cooldownSeconds']);
-        $this->assertSame(75.0, $decision['public']['recommended']['tradeAmountUsdt']);
+        $this->assertLessThan(100.0, $decision['public']['recommended']['tradeAmountUsdt']);
+        $this->assertGreaterThanOrEqual(25.0, $decision['public']['recommended']['tradeAmountUsdt']);
+        $this->assertGreaterThan(0.28, $decision['public']['recommended']['stopLossPercent']);
         $this->assertStringContainsString('Recent loss', implode(' ', $decision['public']['adjustments']));
     }
 
@@ -128,6 +131,32 @@ class FutureTradeDynamicAlgorithmTest extends TestCase
         $this->assertLessThanOrEqual(0.88, $decision['effectiveMinConfidence']);
         $this->assertGreaterThan(0.86, $decision['effectiveMinConfidence']);
         $this->assertGreaterThan($decision['public']['analysis']['bestConfidence'], $decision['effectiveMinConfidence']);
+    }
+
+    public function test_fully_dynamic_trend_regime_uses_bounded_volatility_tuned_targets(): void
+    {
+        $decision = $this->decision([
+            'confidenceMode' => 'fully_dynamic',
+            'minConfidence' => 0.74,
+            'takeProfitPercent' => 0.8,
+            'stopLossPercent' => 0.28,
+            'trailingTakeProfitPercent' => 0.16,
+            'cooldownSeconds' => 120,
+            'tradeAmountUsdt' => 30,
+        ], $this->state([
+            'wins' => 4,
+            'losses' => 1,
+            'chart_points' => $this->trendPoints(100, 103.2, 30),
+        ]), [
+            $this->signal('BTCUSDT', 'BUY', 0.93, 103.2, 3.2, 4.0),
+            $this->signal('ETHUSDT', 'BUY', 0.81, 52, 2.7, 3.6),
+        ]);
+
+        $this->assertSame('trend', $decision['public']['analysis']['regime']);
+        $this->assertGreaterThanOrEqual(0.28, $decision['public']['recommended']['stopLossPercent']);
+        $this->assertLessThanOrEqual(0.448, $decision['public']['recommended']['stopLossPercent']);
+        $this->assertGreaterThan(0.8, $decision['public']['recommended']['takeProfitPercent']);
+        $this->assertLessThanOrEqual(30.0, $decision['public']['recommended']['tradeAmountUsdt']);
     }
 
     public function test_dynamic_decision_payload_contains_ui_suggestion_and_auditable_recommended_values(): void

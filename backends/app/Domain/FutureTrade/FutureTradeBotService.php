@@ -962,6 +962,23 @@ class FutureTradeBotService
             $price,
             $filters,
         );
+        $autoSized = $this->minimumSafeTradeAmountUsdt((float) ($settings['tradeAmountUsdt'] ?? 25), $leverage, $price, $filters);
+        if (
+            (
+                (float) ($sizing['quantity_float'] ?? 0) <= 0
+                || ((float) ($sizing['minOpenNotional'] ?? 0) > 0 && (float) ($sizing['notional'] ?? 0) < (float) ($sizing['minOpenNotional'] ?? 0))
+            )
+            && $autoSized !== null
+            && ($availableBalance <= 0 || $autoSized <= $availableBalance)
+        ) {
+            $settings['tradeAmountUsdt'] = $autoSized;
+            $requiredTradeAmountUsdt = $autoSized;
+            $sizing = $this->orderSizing->evaluate(
+                ($autoSized * $leverage) / max($price, 0.00000001),
+                $price,
+                $filters,
+            );
+        }
         $qty = $sizing['quantity'];
         $qtyFloat = (float) $sizing['quantity_float'];
         $notional = (float) $sizing['notional'];
@@ -980,6 +997,7 @@ class FutureTradeBotService
                     'price' => $price,
                     'quantity' => $qtyFloat,
                     'stepSize' => $sizing['stepSize'],
+                    'recommendedTradeAmountUsdt' => $this->minimumSafeTradeAmountUsdt((float) ($settings['tradeAmountUsdt'] ?? 25), $leverage, $price, $filters),
                 ])
             );
 
@@ -1008,6 +1026,7 @@ class FutureTradeBotService
                     'tradeAmountUsdt' => $requiredTradeAmountUsdt,
                     'leverage' => $leverage,
                     'stepSize' => $sizing['stepSize'],
+                    'recommendedTradeAmountUsdt' => $this->minimumSafeTradeAmountUsdt((float) ($settings['tradeAmountUsdt'] ?? 25), $leverage, $price, $filters),
                 ])
             );
 
@@ -1058,6 +1077,7 @@ class FutureTradeBotService
                 'signal' => $signal,
                 'dynamic' => $dynamic['public'],
                 'algorithm_mode' => $dynamic['mode'],
+                'effective_trade_amount_usdt' => $requiredTradeAmountUsdt,
             ],
         ]);
         $this->log(
@@ -1648,17 +1668,22 @@ class FutureTradeBotService
         $effective = $base;
         $adjustments = [];
         $next = $settings;
+        $baseTakeProfit = (float) ($settings['takeProfitPercent'] ?? 0.45);
+        $baseStopLoss = (float) ($settings['stopLossPercent'] ?? 0.25);
+        $baseTrailing = (float) ($settings['trailingTakeProfitPercent'] ?? 0.18);
+        $baseCooldown = max(10, (int) ($settings['cooldownSeconds'] ?? 60));
+        $baseTradeAmount = max(25.0, (float) ($settings['tradeAmountUsdt'] ?? 25));
 
         if ($mode !== 'fixed') {
             if ($analysis['choppy']) {
                 $effective += $mode === 'fully_dynamic' ? 0.06 : 0.04;
-                $next['takeProfitPercent'] = max(0.05, (float) ($settings['takeProfitPercent'] ?? 0.45) * ($mode === 'fully_dynamic' ? 0.82 : 0.90));
-                $next['trailingTakeProfitPercent'] = max(0.03, (float) ($settings['trailingTakeProfitPercent'] ?? 0.18) * 0.85);
+                $next['takeProfitPercent'] = max(0.05, $baseTakeProfit * ($mode === 'fully_dynamic' ? 0.82 : 0.90));
+                $next['trailingTakeProfitPercent'] = max(0.03, $baseTrailing * 0.85);
                 $adjustments[] = 'Choppy market: require stronger confidence and take faster profit.';
             } elseif ($analysis['trendStrength'] >= 0.68 && $analysis['directionAgreement'] >= 0.58) {
                 $effective -= $mode === 'fully_dynamic' ? 0.045 : 0.028;
-                $next['takeProfitPercent'] = (float) ($settings['takeProfitPercent'] ?? 0.45) * ($mode === 'fully_dynamic' ? 1.20 : 1.10);
-                $next['trailingTakeProfitPercent'] = (float) ($settings['trailingTakeProfitPercent'] ?? 0.18) * ($mode === 'fully_dynamic' ? 1.08 : 1.03);
+                $next['takeProfitPercent'] = $baseTakeProfit * ($mode === 'fully_dynamic' ? 1.20 : 1.10);
+                $next['trailingTakeProfitPercent'] = $baseTrailing * ($mode === 'fully_dynamic' ? 1.08 : 1.03);
                 $adjustments[] = 'Strong aligned trend: allow earlier entry and let target breathe.';
             } else {
                 $effective += $mode === 'fully_dynamic' ? 0.01 : 0.005;
@@ -1672,7 +1697,7 @@ class FutureTradeBotService
 
             if ($analysis['lastTradeReason'] && str_contains($analysis['lastTradeReason'], 'LOSS')) {
                 $effective += $mode === 'fully_dynamic' ? 0.045 : 0.03;
-                $next['cooldownSeconds'] = max((int) ($settings['cooldownSeconds'] ?? 60), $mode === 'fully_dynamic' ? 120 : 90);
+                $next['cooldownSeconds'] = max($baseCooldown, $mode === 'fully_dynamic' ? 120 : 90);
                 $adjustments[] = 'Recent loss: raise threshold and extend cooldown.';
             } elseif ($analysis['lastTradeReason'] && str_contains($analysis['lastTradeReason'], 'TAKE_PROFIT')) {
                 $effective += (float) ($settings['dynamicReentryBuffer'] ?? 0.02) * 0.7;
@@ -1683,12 +1708,73 @@ class FutureTradeBotService
                 $winRate = $analysis['winRate'];
                 if ($winRate > 0 && $winRate < 45) {
                     $effective += 0.03;
-                    $next['tradeAmountUsdt'] = max(25, (float) ($settings['tradeAmountUsdt'] ?? 25) * 0.75);
+                    $next['tradeAmountUsdt'] = max(25, $baseTradeAmount * 0.75);
                     $adjustments[] = 'Low current win rate: reduce size and demand cleaner entries.';
                 } elseif ($winRate >= 65 && $analysis['trendStrength'] >= 0.55) {
                     $effective -= 0.02;
                     $adjustments[] = 'Good win rate with trend support: modestly loosen entry.';
                 }
+
+                $atrPercent = max(0.08, (float) ($analysis['atrPercent'] ?? 0));
+                $volatilityPercent = max(0.04, (float) ($analysis['volatilityPercent'] ?? 0));
+                $regime = (string) ($analysis['regime'] ?? 'balanced');
+                $stopFloor = max(0.12, $baseStopLoss * 0.78);
+                $stopCeiling = max($stopFloor + 0.05, min(0.95, $baseStopLoss * 1.55));
+                $targetFloor = max(0.10, $baseTakeProfit * 0.75);
+                $targetCeiling = max($targetFloor + 0.1, min(1.8, $baseTakeProfit * 1.55));
+                $trailingFloor = max(0.03, $baseTrailing * 0.75);
+                $trailingCeiling = max($trailingFloor + 0.02, min(0.75, $baseTrailing * 1.35));
+                $atrStop = match ($regime) {
+                    'trend' => $atrPercent * 0.72,
+                    'choppy' => $atrPercent * 0.54,
+                    'range' => $atrPercent * 0.60,
+                    default => $atrPercent * 0.66,
+                };
+                $dynamicStop = $this->clamp(max($stopFloor, $atrStop), $stopFloor, $stopCeiling);
+                $rewardMultiple = match ($regime) {
+                    'trend' => 2.3,
+                    'choppy' => 1.55,
+                    'range' => 1.75,
+                    default => 1.95,
+                };
+                $dynamicTarget = $this->clamp(max($targetFloor, $dynamicStop * $rewardMultiple), $targetFloor, $targetCeiling);
+                $dynamicTrailing = $this->clamp(max($trailingFloor, $dynamicStop * ($regime === 'trend' ? 0.58 : 0.5)), $trailingFloor, $trailingCeiling);
+                $cooldownBase = match ($regime) {
+                    'trend' => max(45, (int) round($baseCooldown * 0.85)),
+                    'choppy' => max($baseCooldown, 120),
+                    'range' => max($baseCooldown, 90),
+                    default => max($baseCooldown, 75),
+                };
+                $volatilityCooldown = (int) round($volatilityPercent * 160);
+                $dynamicCooldown = (int) $this->clamp((float) max($cooldownBase, $volatilityCooldown), 45.0, 180.0);
+                if ($analysis['lastTradeReason'] && str_contains($analysis['lastTradeReason'], 'LOSS')) {
+                    $dynamicCooldown = max($dynamicCooldown, 120);
+                }
+                $sizeMultiplier = 1.0;
+                if ($analysis['choppy']) {
+                    $sizeMultiplier *= 0.82;
+                } elseif ($regime === 'range') {
+                    $sizeMultiplier *= 0.9;
+                }
+                if ($volatilityPercent >= 0.4) {
+                    $sizeMultiplier *= 0.85;
+                }
+                if ($analysis['lastTradeReason'] && str_contains($analysis['lastTradeReason'], 'LOSS')) {
+                    $sizeMultiplier *= 0.9;
+                }
+                $dynamicTradeAmount = $this->clamp($baseTradeAmount * $sizeMultiplier, 25.0, $baseTradeAmount);
+
+                $next['stopLossPercent'] = $dynamicStop;
+                $next['takeProfitPercent'] = $dynamicTarget;
+                $next['trailingTakeProfitPercent'] = $dynamicTrailing;
+                $next['cooldownSeconds'] = $dynamicCooldown;
+                $next['tradeAmountUsdt'] = $dynamicTradeAmount;
+                $adjustments[] = sprintf(
+                    'Regime %s: ATR %.3f%% and volatility %.3f%% tuned TP/SL/cooldown/size inside conservative caps.',
+                    $regime,
+                    $atrPercent,
+                    $volatilityPercent
+                );
             }
         } else {
             $adjustments[] = 'Fixed mode: using the manual minConfidence without automatic adjustment.';
@@ -1696,9 +1782,11 @@ class FutureTradeBotService
 
         $effective = $this->clamp($effective, $floor, $ceiling);
         $next['minConfidence'] = $effective;
-        $next['takeProfitPercent'] = $this->clamp((float) ($next['takeProfitPercent'] ?? $settings['takeProfitPercent'] ?? 0.45), 0.05, max(0.06, (float) ($settings['takeProfitPercent'] ?? 0.45) * 1.6));
-        $next['stopLossPercent'] = $this->clamp((float) ($next['stopLossPercent'] ?? $settings['stopLossPercent'] ?? 0.25), 0.05, max(0.06, (float) ($settings['stopLossPercent'] ?? 0.25) * 1.35));
-        $next['trailingTakeProfitPercent'] = $this->clamp((float) ($next['trailingTakeProfitPercent'] ?? $settings['trailingTakeProfitPercent'] ?? 0.18), 0.03, max(0.04, (float) ($settings['trailingTakeProfitPercent'] ?? 0.18) * 1.4));
+        $next['takeProfitPercent'] = $this->clamp((float) ($next['takeProfitPercent'] ?? $baseTakeProfit), 0.05, max(0.06, $baseTakeProfit * 1.6));
+        $next['stopLossPercent'] = $this->clamp((float) ($next['stopLossPercent'] ?? $baseStopLoss), 0.05, max(0.06, $baseStopLoss * 1.6));
+        $next['trailingTakeProfitPercent'] = $this->clamp((float) ($next['trailingTakeProfitPercent'] ?? $baseTrailing), 0.03, max(0.04, $baseTrailing * 1.4));
+        $next['cooldownSeconds'] = (int) $this->clamp((float) ($next['cooldownSeconds'] ?? $baseCooldown), 10.0, 180.0);
+        $next['tradeAmountUsdt'] = $this->clamp((float) ($next['tradeAmountUsdt'] ?? $baseTradeAmount), 25.0, max(25.0, $baseTradeAmount));
 
         $suggestion = $this->dynamicSuggestionText($mode, $analysis, $base, $next, $adjustments);
 
@@ -1809,6 +1897,12 @@ class FutureTradeBotService
         $wins = (int) $state->wins;
         $losses = (int) $state->losses;
         $winRate = ($wins + $losses) > 0 ? round(($wins / ($wins + $losses)) * 100, 2) : 0.0;
+        $atrPercent = $this->atrPercentProxy($points, $best);
+        $regime = $choppy
+            ? 'choppy'
+            : ($trendStrength >= 0.68 && $agreement >= 0.58
+                ? 'trend'
+                : ($volatility >= 0.22 ? 'range' : 'balanced'));
 
         return [
             'lookbackMinutes' => $lookbackMinutes,
@@ -1816,6 +1910,8 @@ class FutureTradeBotService
             'usableSignalCount' => count($usableSignals),
             'priceChangePercent' => round($priceChangePct, 4),
             'volatilityPercent' => round($volatility, 4),
+            'atrPercent' => round($atrPercent, 4),
+            'rangePercent' => round($range, 4),
             'direction' => $direction,
             'priceDirection' => $priceDirection,
             'signalDirection' => $bestSignalDirection ?: 'WAIT',
@@ -1824,6 +1920,7 @@ class FutureTradeBotService
             'confidenceGap' => round($gap, 4),
             'trendStrength' => round($trendStrength, 4),
             'choppy' => $choppy,
+            'regime' => $regime,
             'bestConfidence' => round($bestConfidence, 4),
             'lastTradeReason' => $stateReason ?: $lastTrade?->reason,
             'winRate' => $winRate,
@@ -1837,7 +1934,7 @@ class FutureTradeBotService
         $lines = [
             sprintf('%s mode: %s over the last %d minute window.', ucfirst($modeLabel), $bias, (int) $analysis['lookbackMinutes']),
             sprintf('Base minConfidence %.2f, effective %.2f, trend strength %.0f%%, agreement %.0f%%.', $base, (float) ($settings['minConfidence'] ?? $base), $analysis['trendStrength'] * 100, $analysis['directionAgreement'] * 100),
-            sprintf('Recommended values: TP %.2f%%, SL %.2f%%, trailing %.2f%%, cooldown %ds.', (float) ($settings['takeProfitPercent'] ?? 0), (float) ($settings['stopLossPercent'] ?? 0), (float) ($settings['trailingTakeProfitPercent'] ?? 0), (int) ($settings['cooldownSeconds'] ?? 0)),
+            sprintf('Recommended values: TP %.2f%%, SL %.2f%%, trailing %.2f%%, cooldown %ds, size %.2f USDT.', (float) ($settings['takeProfitPercent'] ?? 0), (float) ($settings['stopLossPercent'] ?? 0), (float) ($settings['trailingTakeProfitPercent'] ?? 0), (int) ($settings['cooldownSeconds'] ?? 0), (float) ($settings['tradeAmountUsdt'] ?? 0)),
         ];
 
         if ($adjustments) {
@@ -1850,6 +1947,49 @@ class FutureTradeBotService
     private function clamp(float $value, float $min, float $max): float
     {
         return max($min, min($max, $value));
+    }
+
+    private function atrPercentProxy(array $points, ?array $best): float
+    {
+        $prices = array_values(array_filter(array_map(fn ($row) => (float) ($row['price'] ?? 0), $points), fn ($value) => $value > 0));
+        $moves = [];
+        for ($i = 1; $i < count($prices); $i++) {
+            if ($prices[$i - 1] > 0) {
+                $moves[] = abs((($prices[$i] - $prices[$i - 1]) / $prices[$i - 1]) * 100);
+            }
+        }
+
+        $chartAtr = count($moves) > 0 ? array_sum($moves) / count($moves) : 0.0;
+        $signalRange = max(0.0, (float) ($best['rangePercent'] ?? 0));
+
+        return max($chartAtr * 1.35, $signalRange * 0.22, $chartAtr > 0 ? 0.08 : 0.12);
+    }
+
+    private function minimumSafeTradeAmountUsdt(float $baseTradeAmountUsdt, int $leverage, float $price, array $filters): ?float
+    {
+        if ($price <= 0 || $leverage <= 0) {
+            return null;
+        }
+
+        $stepSize = max(0.0, (float) ($filters['stepSize'] ?? 0));
+        $exchangeMinNotional = max(\App\Domain\Trading\FuturesOrderSizingService::BINANCE_MIN_OPEN_NOTIONAL, (float) ($filters['minNotional'] ?? 0));
+        if ($stepSize <= 0 && $exchangeMinNotional <= 0) {
+            return null;
+        }
+
+        $requiredQty = max($stepSize, $exchangeMinNotional > 0 ? ($exchangeMinNotional / $price) : 0.0);
+        if ($requiredQty <= 0) {
+            return null;
+        }
+
+        $bufferedQty = max($stepSize, $requiredQty * 1.02);
+        $requiredTradeAmount = ($bufferedQty * $price) / $leverage;
+        $softCap = max($baseTradeAmountUsdt + 5.0, $baseTradeAmountUsdt * 1.35);
+        if ($requiredTradeAmount > $softCap) {
+            return null;
+        }
+
+        return round(max(25.0, $requiredTradeAmount), 4);
     }
 
     private function syntheticOrderbook(float $price): array
