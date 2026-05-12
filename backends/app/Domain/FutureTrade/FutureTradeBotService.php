@@ -775,6 +775,21 @@ class FutureTradeBotService
             );
             return;
         }
+        $rrTp = (float) ($settings['takeProfitPercent'] ?? 0.45);
+        $rrRollback = (float) ($settings['rollbackLossPercent'] ?? 0.18);
+        if ($rrTp < $rrRollback * 1.8) {
+            $this->logThrottled(
+                $config,
+                'TRADE_BLOCKED',
+                $signal['symbol'],
+                $signal['signal'],
+                (float) ($signal['confidence'] ?? 0),
+                sprintf('R:R gate: TP %.2f%% < rollback %.2f%% × 1.8 — insufficient reward for risk.', $rrTp, $rrRollback),
+                $this->runtimeContext($dynamic, ['status' => 'BLOCKED']),
+                60
+            );
+            return;
+        }
         if ($state->cooldown_until && $state->cooldown_until->isFuture()) {
             $this->logThrottled(
                 $config,
@@ -890,7 +905,7 @@ class FutureTradeBotService
 
         $direction = $side === 'LONG' ? 1 : -1;
         $gross = ($price - $entry) * $qty * $direction;
-        $fees = $price * $qty * 0.0004;
+        $fees = ($entry + $price) * $qty * 0.0004;
         $net = $gross - $fees;
         $notional = $entry * $qty;
         $pct = $notional > 0 ? ($net / $notional) * 100 : 0;
@@ -912,7 +927,7 @@ class FutureTradeBotService
             $reason = 'LOSS_ROLLBACK_TRIGGERED';
         } elseif (($side === 'LONG' && $price <= $this->stopLossPrice($entry, $side, $settings)) || ($side === 'SHORT' && $price >= $this->stopLossPrice($entry, $side, $settings))) {
             $reason = 'STOP_LOSS_HIT';
-        } elseif (($side === 'LONG' && $price <= $this->trailingPrice($peak, $side, $settings) && $peak > $entry) || ($side === 'SHORT' && $price >= $this->trailingPrice($peak, $side, $settings) && $peak < $entry)) {
+        } elseif ($pct >= 0.10 && (($side === 'LONG' && $price <= $this->trailingPrice($peak, $side, $settings) && $peak > $entry) || ($side === 'SHORT' && $price >= $this->trailingPrice($peak, $side, $settings) && $peak < $entry))) {
             $reason = 'TRAILING_PROFIT_HIT';
         }
 
@@ -1168,7 +1183,7 @@ class FutureTradeBotService
         $direction = $state->position_side === 'LONG' ? 1 : -1;
         $entry = (float) $state->entry_price;
         $gross = ($price - $entry) * (float) $state->quantity * $direction;
-        $fees = $price * (float) $state->quantity * 0.0004;
+        $fees = ($entry + $price) * (float) $state->quantity * 0.0004;
         $net = $gross - $fees;
 
         $config->trades()->create([
@@ -1227,7 +1242,7 @@ class FutureTradeBotService
         $entry = (float) $state->entry_price;
         $qty = (float) $state->quantity;
         $gross = ($price - $entry) * $qty * $direction;
-        $fees = $price * $qty * 0.0004;
+        $fees = ($entry + $price) * $qty * 0.0004;
         $net = $gross - $fees;
 
         $config->trades()->create([
@@ -2069,7 +2084,7 @@ class FutureTradeBotService
         if ($mode !== 'fixed') {
             if ($analysis['choppy']) {
                 $effective += $mode === 'fully_dynamic' ? 0.06 : 0.04;
-                $next['takeProfitPercent'] = max(0.05, $baseTakeProfit * ($mode === 'fully_dynamic' ? 0.82 : 0.90));
+                $next['takeProfitPercent'] = max(0.55, $baseTakeProfit * ($mode === 'fully_dynamic' ? 0.82 : 0.90));
                 $next['trailingTakeProfitPercent'] = max(0.03, $baseTrailing * 0.85);
                 $adjustments[] = 'Choppy market: require stronger confidence and take faster profit.';
             } elseif ($analysis['trendStrength'] >= 0.68 && $analysis['directionAgreement'] >= 0.58) {
@@ -2118,7 +2133,7 @@ class FutureTradeBotService
                 $regime = (string) ($analysis['regime'] ?? 'balanced');
                 $stopFloor = max(0.12, $baseStopLoss * 0.78);
                 $stopCeiling = max($stopFloor + 0.05, min(0.95, $baseStopLoss * 1.55));
-                $targetFloor = max(0.10, $baseTakeProfit * 0.75);
+                $targetFloor = max(0.55, $baseTakeProfit * 0.75);
                 $targetCeiling = max($targetFloor + 0.1, min(1.8, $baseTakeProfit * 1.55));
                 $trailingFloor = max(0.03, $baseTrailing * 0.75);
                 $trailingCeiling = max($trailingFloor + 0.02, min(0.75, $baseTrailing * 1.35));
@@ -2184,7 +2199,7 @@ class FutureTradeBotService
 
         $effective = $this->clamp($effective, $floor, $ceiling);
         $next['minConfidence'] = $effective;
-        $next['takeProfitPercent'] = $this->clamp((float) ($next['takeProfitPercent'] ?? $baseTakeProfit), 0.05, max(0.06, $baseTakeProfit * 1.6));
+        $next['takeProfitPercent'] = $this->clamp((float) ($next['takeProfitPercent'] ?? $baseTakeProfit), 0.55, max(0.60, $baseTakeProfit * 1.6));
         $next['stopLossPercent'] = $this->clamp((float) ($next['stopLossPercent'] ?? $baseStopLoss), 0.05, max(0.06, $baseStopLoss * 1.6));
         $next['trailingTakeProfitPercent'] = $this->clamp((float) ($next['trailingTakeProfitPercent'] ?? $baseTrailing), 0.03, max(0.04, $baseTrailing * 1.4));
         $next['cooldownSeconds'] = (int) $this->clamp((float) ($next['cooldownSeconds'] ?? $baseCooldown), 10.0, 180.0);
