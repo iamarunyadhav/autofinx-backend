@@ -98,4 +98,11 @@ return [
             explode(',', (string) env('QUEUE_DASHBOARD_STALE_PRUNE_SAFE_JOBS', 'App\\Jobs\\DetectStaleFeedsJob'))
         ))),
     ],
+    'auto_maintenance' => [
+        'enabled' => (bool) env('QUEUE_AUTO_MAINTENANCE_ENABLED', true),
+        'trigger_backlog' => (int) env('QUEUE_AUTO_MAINTENANCE_TRIGGER_BACKLOG', 300),
+        'prune_older_than_minutes' => (int) env('QUEUE_AUTO_MAINTENANCE_STALE_MINUTES', 30),
+        'restart_when_still_blocked' => (bool) env('QUEUE_AUTO_MAINTENANCE_RESTART_WHEN_STILL_BLOCKED', false),
+        'restart_cooldown_minutes' => (int) env('QUEUE_AUTO_MAINTENANCE_RESTART_COOLDOWN_MINUTES', 15),
+    ],
 ];

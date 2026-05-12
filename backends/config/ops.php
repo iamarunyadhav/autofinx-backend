@@ -29,7 +29,7 @@ return [
         'queue_backlog_block' => (int) env('OPS_QUEUE_BACKLOG_BLOCK', 500),
         'queue_backlog_excluded_queues' => array_values(array_filter(array_map(
             static fn (string $queue) => trim($queue),
-            explode(',', (string) env('OPS_QUEUE_BACKLOG_EXCLUDED_QUEUES', 'monitoring'))
+            explode(',', (string) env('OPS_QUEUE_BACKLOG_EXCLUDED_QUEUES', 'monitoring,monitoring_safe'))
         ))),
         'uncertain_order_warning' => (int) env('OPS_UNCERTAIN_ORDER_WARNING', 3),
         'uncertain_order_block' => (int) env('OPS_UNCERTAIN_ORDER_BLOCK', 10),

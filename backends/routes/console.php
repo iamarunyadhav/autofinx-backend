@@ -111,6 +111,13 @@ Schedule::job(new DetectStaleFeedsJob((int) env('LIVE_TRADING_STALE_FEED_THRESHO
     ->before(fn () => $markRunStart('DetectStaleFeedsJob'))
     ->after(fn () => $markRunEnd('DetectStaleFeedsJob'));
 
+Schedule::command('jobs:maintain-backlog')
+    ->everyMinute()
+    ->withoutOverlapping()
+    ->runInBackground()
+    ->before(fn () => $markRunStart('jobs:maintain-backlog'))
+    ->after(fn () => $markRunEnd('jobs:maintain-backlog'));
+
 Schedule::command('future-trade:scan-all')
     ->everySecond()
     ->onOneServer()

@@ -5,6 +5,7 @@ namespace App\Domain\Ops;
 use App\Models\SchedulerRun;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Artisan;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Schema;
@@ -67,6 +68,7 @@ class QueueControlService
                 ...$stalePruneConfig,
                 'candidates' => $this->stalePendingCandidates($stalePruneConfig['older_than_minutes'], $limit),
             ],
+            'auto_maintenance' => $this->autoMaintenanceConfig(),
             'scheduler_runs' => SchedulerRun::query()
                 ->orderByDesc('started_at')
                 ->limit($limit)
@@ -214,6 +216,60 @@ class QueueControlService
             'action' => 'restart_workers',
             'message' => 'Queue restart signal sent. Supervisor or Horizon workers will restart after the current job.',
             'artisan_output' => trim(Artisan::output()),
+        ];
+    }
+
+    public function maintainBacklog(): array
+    {
+        $config = $this->autoMaintenanceConfig();
+        if (! $config['enabled']) {
+            return [
+                'action' => 'maintain_backlog',
+                'enabled' => false,
+                'message' => 'Automatic backlog maintenance is disabled.',
+            ];
+        }
+
+        $dashboard = $this->dashboard(25);
+        $backlog = (int) ($dashboard['blocking_backlog'] ?? $dashboard['backlog'] ?? 0);
+        if ($backlog < $config['trigger_backlog']) {
+            return [
+                'action' => 'maintain_backlog',
+                'enabled' => true,
+                'trigger_backlog' => $config['trigger_backlog'],
+                'blocking_backlog' => $backlog,
+                'message' => 'Backlog is below the automatic maintenance threshold.',
+            ];
+        }
+
+        $prune = $this->pruneStalePending(null, $config['prune_older_than_minutes']);
+        $postPrune = $this->dashboard(25);
+        $postPruneBacklog = (int) ($postPrune['blocking_backlog'] ?? $postPrune['backlog'] ?? 0);
+        $restarted = false;
+
+        if (
+            $config['restart_when_still_blocked']
+            && ($postPrune['state'] ?? null) === 'blocked'
+            && $this->restartCooldownPassed($config['restart_cooldown_minutes'])
+        ) {
+            $this->restartWorkers();
+            Cache::put($this->restartCooldownCacheKey(), now()->toIso8601String(), now()->addMinutes($config['restart_cooldown_minutes']));
+            $restarted = true;
+        }
+
+        return [
+            'action' => 'maintain_backlog',
+            'enabled' => true,
+            'trigger_backlog' => $config['trigger_backlog'],
+            'blocking_backlog_before' => $backlog,
+            'blocking_backlog_after' => $postPruneBacklog,
+            'state_before' => $dashboard['state'] ?? null,
+            'state_after' => $postPrune['state'] ?? null,
+            'prune' => $prune,
+            'workers_restarted' => $restarted,
+            'message' => $restarted
+                ? 'Automatic backlog maintenance pruned safe stale jobs and sent a worker restart signal.'
+                : 'Automatic backlog maintenance completed.',
         ];
     }
 
@@ -558,5 +614,37 @@ class QueueControlService
                 ->values()
                 ->all(),
         ];
+    }
+
+    private function autoMaintenanceConfig(): array
+    {
+        $config = (array) config('queue_control.auto_maintenance', []);
+
+        return [
+            'enabled' => (bool) ($config['enabled'] ?? true),
+            'trigger_backlog' => max(1, (int) ($config['trigger_backlog'] ?? 300)),
+            'prune_older_than_minutes' => max(1, (int) ($config['prune_older_than_minutes'] ?? 30)),
+            'restart_when_still_blocked' => (bool) ($config['restart_when_still_blocked'] ?? false),
+            'restart_cooldown_minutes' => max(1, (int) ($config['restart_cooldown_minutes'] ?? 15)),
+        ];
+    }
+
+    private function restartCooldownPassed(int $minutes): bool
+    {
+        $lastRestart = Cache::get($this->restartCooldownCacheKey());
+        if (! is_string($lastRestart) || $lastRestart === '') {
+            return true;
+        }
+
+        try {
+            return Carbon::parse($lastRestart)->lte(now()->subMinutes($minutes));
+        } catch (Throwable) {
+            return true;
+        }
+    }
+
+    private function restartCooldownCacheKey(): string
+    {
+        return 'queue-control:last-auto-restart-at';
     }
 }

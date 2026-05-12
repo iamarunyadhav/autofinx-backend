@@ -21,6 +21,7 @@ use App\Console\Commands\YieldSimulateStart;
 use App\Console\Commands\DefiYieldSimulateStart;
 use App\Console\Commands\AnalyticsSnapshotRun;
 use App\Console\Commands\OperationalMaturityCycleCommand;
+use App\Console\Commands\QueueMaintainBacklogCommand;
 use App\Console\Commands\ReconcileOrdersCommand;
 use App\Console\Commands\ReconcileTradesCommand;
 use App\Console\Commands\ReconcileWalletCommand;
@@ -68,6 +69,7 @@ class Kernel extends ConsoleKernel
         DefiYieldSimulateStart::class,
         AnalyticsSnapshotRun::class,
         OperationalMaturityCycleCommand::class,
+        QueueMaintainBacklogCommand::class,
         ReconcileOrdersCommand::class,
         ReconcileTradesCommand::class,
         ReconcileWalletCommand::class,

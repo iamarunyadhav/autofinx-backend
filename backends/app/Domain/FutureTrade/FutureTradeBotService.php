@@ -473,12 +473,17 @@ class FutureTradeBotService
         $effectiveSettings = $dynamic['settings'];
         $entry = (float) ($state->entry_price ?? 0);
         $peak = (float) ($state->peak_price ?? 0);
+        $marketChartSymbol = $this->resolveMarketChartSymbol($state, $bestSignal, $settings);
+        $marketTimeframe = (string) ($settings['timeframe'] ?? '5m');
+        $marketCandles = $marketChartSymbol ? $this->fetchMarketCandles($marketChartSymbol, $marketTimeframe, 180) : [];
 
         return [
             'status' => $this->statusPayload($config),
             'scanner' => $signals,
             'bestSignal' => $bestSignal,
             'chart' => $state->chart_points ?? [],
+            'marketChart' => $this->marketChartPayload($marketChartSymbol, $marketTimeframe, 180, $marketCandles),
+            'indicatorSuite' => $this->indicatorSuitePayload($marketCandles, $bestSignal, $effectiveSettings, $marketTimeframe),
             'levels' => [
                 'entry' => $entry ?: null,
 	                'stopLoss' => $entry ? $this->stopLossPrice($entry, (string) $state->position_side, $effectiveSettings) : null,
@@ -1861,6 +1866,470 @@ class FutureTradeBotService
         }
 
         return ['bids' => $bids, 'asks' => $asks];
+    }
+
+    private function resolveMarketChartSymbol(FutureTradeBotState $state, ?array $bestSignal, array $settings): ?string
+    {
+        $bestSymbol = strtoupper(trim((string) ($bestSignal['symbol'] ?? '')));
+        if ($bestSymbol !== '') {
+            return $bestSymbol;
+        }
+
+        $currentSymbol = strtoupper(trim((string) ($state->current_symbol ?? '')));
+        if ($currentSymbol !== '') {
+            return $currentSymbol;
+        }
+
+        $symbols = array_values(array_filter((array) ($settings['symbols'] ?? []), fn ($value) => is_string($value) && trim($value) !== ''));
+
+        return isset($symbols[0]) ? strtoupper((string) $symbols[0]) : null;
+    }
+
+    private function marketChartPayload(?string $symbol, string $timeframe, int $limit = 180, ?array $candles = null): array
+    {
+        if (! $symbol) {
+            return [
+                'symbol' => null,
+                'timeframe' => $timeframe,
+                'candles' => [],
+            ];
+        }
+
+        return [
+            'symbol' => $symbol,
+            'timeframe' => $timeframe,
+            'candles' => $candles ?? $this->fetchMarketCandles($symbol, $timeframe, $limit),
+        ];
+    }
+
+    private function fetchMarketCandles(string $symbol, string $timeframe, int $limit = 180): array
+    {
+        $interval = $this->normalizeKlineInterval($timeframe);
+        $safeLimit = max(60, min(500, $limit));
+        $cacheKey = 'future_trade_market_chart_' . md5($symbol . '|' . $interval . '|' . $safeLimit);
+        $cached = Cache::get($cacheKey);
+
+        if (is_array($cached)) {
+            return $cached;
+        }
+
+        try {
+            $base = rtrim((string) config('services.binance.futures.base_url', 'https://fapi.binance.com'), '/');
+            $response = Http::timeout(5)->get($base . '/fapi/v1/klines', [
+                'symbol' => $symbol,
+                'interval' => $interval,
+                'limit' => $safeLimit,
+            ]);
+
+            $rows = $response->successful() ? $response->json() : [];
+            $candles = [];
+
+            foreach ((array) $rows as $row) {
+                if (! is_array($row) || count($row) < 6) {
+                    continue;
+                }
+
+                $openTime = (int) ($row[0] ?? 0);
+                $open = (float) ($row[1] ?? 0);
+                $high = (float) ($row[2] ?? 0);
+                $low = (float) ($row[3] ?? 0);
+                $close = (float) ($row[4] ?? 0);
+                $volume = (float) ($row[5] ?? 0);
+
+                if ($openTime <= 0 || $open <= 0 || $high <= 0 || $low <= 0 || $close <= 0) {
+                    continue;
+                }
+
+                $candles[] = [
+                    'time' => Carbon::createFromTimestampMs($openTime)->toIso8601String(),
+                    'open' => $open,
+                    'high' => $high,
+                    'low' => $low,
+                    'close' => $close,
+                    'volume' => $volume,
+                ];
+            }
+
+            Cache::put($cacheKey, $candles, now()->addSeconds(8));
+
+            return $candles;
+        } catch (Throwable) {
+            return [];
+        }
+    }
+
+    private function normalizeKlineInterval(string $timeframe): string
+    {
+        $candidate = strtolower(trim($timeframe));
+
+        return match ($candidate) {
+            '1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '12h', '1d' => $candidate,
+            default => '5m',
+        };
+    }
+
+    private function indicatorSuitePayload(array $candles, ?array $bestSignal, array $settings, string $timeframe): array
+    {
+        if (count($candles) < 40) {
+            return [
+                'preset' => 'PRO Scalper',
+                'state' => 'warming_up',
+                'summary' => 'Not enough live candles for indicator confirmation yet.',
+                'validations' => [],
+                'backtest' => [
+                    'trades' => 0,
+                    'wins' => 0,
+                    'losses' => 0,
+                    'winRate' => 0.0,
+                    'netPercent' => 0.0,
+                    'bestTrade' => 0.0,
+                    'worstTrade' => 0.0,
+                ],
+            ];
+        }
+
+        $enriched = $this->buildIndicatorCandles($candles, $timeframe);
+        $latest = $enriched[count($enriched) - 1];
+        $signal = strtoupper((string) ($bestSignal['signal'] ?? 'WAIT'));
+
+        $validationMap = [
+            'vwap' => $signal === 'BUY'
+                ? $latest['close'] >= $latest['vwap']
+                : ($signal === 'SELL' ? $latest['close'] <= $latest['vwap'] : null),
+            'emaTrend' => $signal === 'BUY'
+                ? $latest['emaFast'] > $latest['emaSlow']
+                : ($signal === 'SELL' ? $latest['emaFast'] < $latest['emaSlow'] : null),
+            'adxStrength' => $latest['adx'] >= 18,
+            'openingRange' => $signal === 'BUY'
+                ? ($latest['orHigh'] !== null && $latest['close'] >= $latest['orHigh'])
+                : ($signal === 'SELL' ? ($latest['orLow'] !== null && $latest['close'] <= $latest['orLow']) : null),
+            'notChoppy' => ! $latest['choppy'],
+        ];
+
+        $validations = [];
+        $passed = 0;
+        $total = 0;
+
+        foreach ($validationMap as $key => $result) {
+            if ($result === null) {
+                continue;
+            }
+            $total++;
+            $passed += $result ? 1 : 0;
+            $validations[] = [
+                'key' => $key,
+                'label' => match ($key) {
+                    'vwap' => 'Price aligned with VWAP',
+                    'emaTrend' => 'EMA trend filter aligned',
+                    'adxStrength' => 'ADX trend strength ready',
+                    'openingRange' => 'Opening range breakout confirmed',
+                    'notChoppy' => 'Market is not choppy',
+                    default => $key,
+                },
+                'passed' => (bool) $result,
+            ];
+        }
+
+        $score = $total > 0 ? round($passed / $total, 4) : 0.0;
+        $executionReady = in_array($signal, ['BUY', 'SELL'], true) && $score >= 0.8;
+        $backtest = $this->indicatorBacktestSummary($enriched, $settings);
+
+        return [
+            'preset' => 'PRO Scalper',
+            'state' => $executionReady ? 'confirmed' : (in_array($signal, ['BUY', 'SELL'], true) ? 'mixed' : 'waiting'),
+            'summary' => $executionReady
+                ? 'PRO Scalper confirmation layer agrees with the active scanner direction.'
+                : (in_array($signal, ['BUY', 'SELL'], true)
+                    ? 'Scanner found a direction, but PRO Scalper confirmations are still mixed.'
+                    : 'PRO Scalper is waiting for a cleaner execution setup.'),
+            'signal' => $signal,
+            'score' => $score,
+            'executionReady' => $executionReady,
+            'trend' => [
+                'direction' => $latest['emaFast'] >= $latest['emaSlow'] ? 'BUY' : 'SELL',
+                'adx' => round((float) $latest['adx'], 4),
+                'vwap' => round((float) $latest['vwap'], 8),
+                'openingRangeHigh' => $latest['orHigh'] !== null ? round((float) $latest['orHigh'], 8) : null,
+                'openingRangeLow' => $latest['orLow'] !== null ? round((float) $latest['orLow'], 8) : null,
+                'bubbleCount' => $this->indicatorBubbleCount($enriched),
+                'zones' => $this->indicatorZoneSummary($enriched),
+            ],
+            'validations' => $validations,
+            'backtest' => $backtest,
+        ];
+    }
+
+    private function buildIndicatorCandles(array $candles, string $timeframe): array
+    {
+        $prepared = [];
+        $closes = array_map(fn (array $row) => (float) ($row['close'] ?? 0), $candles);
+        $emaFast = $this->emaSeries($closes, 34);
+        $emaSlow = $this->emaSeries($closes, 89);
+        $adx = $this->adxSeries($candles, 14);
+        $atr = $this->atrSeries($candles, 14);
+        $tfMinutes = $this->timeframeMinutes($timeframe);
+        $orBars = max(1, (int) ceil((3 * $tfMinutes) / max($tfMinutes, 1)));
+        $cumPv = 0.0;
+        $cumV = 0.0;
+        $orHigh = null;
+        $orLow = null;
+
+        foreach (array_values($candles) as $index => $row) {
+            $high = (float) ($row['high'] ?? 0);
+            $low = (float) ($row['low'] ?? 0);
+            $close = (float) ($row['close'] ?? 0);
+            $open = (float) ($row['open'] ?? $close);
+            $volume = (float) ($row['volume'] ?? 0);
+            $hlc3 = ($high + $low + $close) / 3;
+            $cumPv += $hlc3 * max($volume, 0);
+            $cumV += max($volume, 0);
+
+            if ($index < $orBars) {
+                $orHigh = $orHigh === null ? $high : max($orHigh, $high);
+                $orLow = $orLow === null ? $low : min($orLow, $low);
+            }
+
+            $range = max($high - $low, 0.00000001);
+            $priceMovePct = $open > 0 ? (($close - $open) / $open) * 100 : 0.0;
+
+            $prepared[] = [
+                'index' => $index,
+                'open' => $open,
+                'high' => $high,
+                'low' => $low,
+                'close' => $close,
+                'volume' => $volume,
+                'vwap' => $cumV > 0 ? $cumPv / $cumV : $close,
+                'emaFast' => $emaFast[$index] ?? $close,
+                'emaSlow' => $emaSlow[$index] ?? $close,
+                'adx' => $adx[$index] ?? 0.0,
+                'atr' => $atr[$index] ?? ($high - $low),
+                'orHigh' => $index >= ($orBars - 1) ? $orHigh : null,
+                'orLow' => $index >= ($orBars - 1) ? $orLow : null,
+                'delta' => $range > 0 ? $volume * (($close - $open) / $range) : 0.0,
+                'choppy' => (($high - $low) / max($close, 1)) * 100 > 7.5 && abs($priceMovePct) < 0.35,
+            ];
+        }
+
+        return $prepared;
+    }
+
+    private function indicatorBacktestSummary(array $candles, array $settings): array
+    {
+        $position = null;
+        $trades = [];
+        $tp = max(0.0001, (float) ($settings['takeProfitPercent'] ?? 1.0) / 100);
+        $sl = max(0.0001, (float) ($settings['stopLossPercent'] ?? 0.3) / 100);
+
+        foreach ($candles as $index => $row) {
+            if ($index === 0) {
+                continue;
+            }
+
+            $longSignal = $row['close'] > $row['vwap']
+                && $row['emaFast'] > $row['emaSlow']
+                && $row['adx'] >= 18
+                && ! $row['choppy']
+                && $row['orHigh'] !== null
+                && $row['close'] >= $row['orHigh'];
+            $shortSignal = $row['close'] < $row['vwap']
+                && $row['emaFast'] < $row['emaSlow']
+                && $row['adx'] >= 18
+                && ! $row['choppy']
+                && $row['orLow'] !== null
+                && $row['close'] <= $row['orLow'];
+
+            if ($position === null) {
+                if ($longSignal) {
+                    $position = ['side' => 'BUY', 'entry' => (float) $row['close']];
+                } elseif ($shortSignal) {
+                    $position = ['side' => 'SELL', 'entry' => (float) $row['close']];
+                }
+                continue;
+            }
+
+            $entry = (float) ($position['entry'] ?? 0);
+            if ($entry <= 0) {
+                $position = null;
+                continue;
+            }
+
+            $pnl = ($position['side'] ?? 'BUY') === 'BUY'
+                ? (((float) $row['close'] - $entry) / $entry)
+                : (($entry - (float) $row['close']) / $entry);
+
+            $reverse = (($position['side'] ?? 'BUY') === 'BUY' && $shortSignal)
+                || (($position['side'] ?? 'BUY') === 'SELL' && $longSignal);
+
+            if ($pnl >= $tp || $pnl <= -$sl || $reverse) {
+                $trades[] = round($pnl * 100, 4);
+                $position = null;
+            }
+        }
+
+        $wins = count(array_filter($trades, fn (float $value) => $value > 0));
+        $losses = count($trades) - $wins;
+
+        return [
+            'trades' => count($trades),
+            'wins' => $wins,
+            'losses' => $losses,
+            'winRate' => count($trades) > 0 ? round(($wins / count($trades)) * 100, 2) : 0.0,
+            'netPercent' => round(array_sum($trades), 4),
+            'bestTrade' => count($trades) > 0 ? max($trades) : 0.0,
+            'worstTrade' => count($trades) > 0 ? min($trades) : 0.0,
+        ];
+    }
+
+    private function indicatorBubbleCount(array $candles): int
+    {
+        $absDelta = array_map(fn (array $row) => abs((float) ($row['delta'] ?? 0)), $candles);
+        $threshold = $this->percentile($absDelta, 85);
+
+        return count(array_filter($absDelta, fn (float $value) => $value >= max($threshold, 1.0)));
+    }
+
+    private function indicatorZoneSummary(array $candles): array
+    {
+        $highs = array_map(fn (array $row) => (float) ($row['high'] ?? 0), $candles);
+        $lows = array_map(fn (array $row) => (float) ($row['low'] ?? 0), $candles);
+
+        return [
+            'supply' => count($highs) ? round(max($highs), 8) : null,
+            'demand' => count($lows) ? round(min($lows), 8) : null,
+        ];
+    }
+
+    private function emaSeries(array $values, int $length): array
+    {
+        if ($values === []) {
+            return [];
+        }
+
+        $multiplier = 2 / ($length + 1);
+        $series = [];
+        $prev = (float) $values[0];
+        $series[] = $prev;
+
+        for ($i = 1; $i < count($values); $i++) {
+            $prev = (((float) $values[$i] - $prev) * $multiplier) + $prev;
+            $series[] = $prev;
+        }
+
+        return $series;
+    }
+
+    private function rmaSeries(array $values, int $length): array
+    {
+        if ($values === []) {
+            return [];
+        }
+
+        $series = [];
+        $prev = (float) $values[0];
+        $series[] = $prev;
+
+        for ($i = 1; $i < count($values); $i++) {
+            $prev = (($prev * ($length - 1)) + (float) $values[$i]) / $length;
+            $series[] = $prev;
+        }
+
+        return $series;
+    }
+
+    private function atrSeries(array $candles, int $length): array
+    {
+        if ($candles === []) {
+            return [];
+        }
+
+        $values = [];
+        foreach (array_values($candles) as $index => $row) {
+            $high = (float) ($row['high'] ?? 0);
+            $low = (float) ($row['low'] ?? 0);
+            if ($index === 0) {
+                $values[] = max(0.0, $high - $low);
+                continue;
+            }
+            $prevClose = (float) ($candles[$index - 1]['close'] ?? $high);
+            $values[] = max(
+                $high - $low,
+                abs($high - $prevClose),
+                abs($low - $prevClose),
+            );
+        }
+
+        return $this->rmaSeries($values, $length);
+    }
+
+    private function adxSeries(array $candles, int $length): array
+    {
+        if ($candles === []) {
+            return [];
+        }
+
+        $plusDm = [0.0];
+        $minusDm = [0.0];
+        $tr = [max(0.0, ((float) ($candles[0]['high'] ?? 0)) - ((float) ($candles[0]['low'] ?? 0)))];
+
+        for ($i = 1; $i < count($candles); $i++) {
+            $current = $candles[$i];
+            $prev = $candles[$i - 1];
+            $upMove = (float) ($current['high'] ?? 0) - (float) ($prev['high'] ?? 0);
+            $downMove = (float) ($prev['low'] ?? 0) - (float) ($current['low'] ?? 0);
+            $plusDm[] = $upMove > $downMove && $upMove > 0 ? $upMove : 0.0;
+            $minusDm[] = $downMove > $upMove && $downMove > 0 ? $downMove : 0.0;
+            $high = (float) ($current['high'] ?? 0);
+            $low = (float) ($current['low'] ?? 0);
+            $prevClose = (float) ($prev['close'] ?? $high);
+            $tr[] = max(
+                $high - $low,
+                abs($high - $prevClose),
+                abs($low - $prevClose),
+            );
+        }
+
+        $smTr = $this->rmaSeries($tr, $length);
+        $smPlus = $this->rmaSeries($plusDm, $length);
+        $smMinus = $this->rmaSeries($minusDm, $length);
+        $dx = [];
+
+        for ($i = 0; $i < count($smTr); $i++) {
+            $plusDi = $smTr[$i] != 0 ? (100 * $smPlus[$i]) / $smTr[$i] : 0.0;
+            $minusDi = $smTr[$i] != 0 ? (100 * $smMinus[$i]) / $smTr[$i] : 0.0;
+            $dx[] = ($plusDi + $minusDi) != 0 ? (100 * abs($plusDi - $minusDi)) / ($plusDi + $minusDi) : 0.0;
+        }
+
+        return $this->rmaSeries($dx, $length);
+    }
+
+    private function percentile(array $values, float $percent): float
+    {
+        if ($values === []) {
+            return 0.0;
+        }
+
+        sort($values);
+        $index = (int) floor($this->clamp(($percent / 100) * (count($values) - 1), 0, max(0, count($values) - 1)));
+
+        return (float) ($values[$index] ?? 0.0);
+    }
+
+    private function timeframeMinutes(string $timeframe): int
+    {
+        $normalized = strtolower(trim($timeframe));
+        if (! preg_match('/^(\d+)([mhd])$/', $normalized, $matches)) {
+            return 5;
+        }
+
+        $amount = (int) ($matches[1] ?? 5);
+        $unit = (string) ($matches[2] ?? 'm');
+
+        return match ($unit) {
+            'h' => $amount * 60,
+            'd' => $amount * 1440,
+            default => $amount,
+        };
     }
 
     private function runtimeContext(?array $dynamic, array $extra = []): array

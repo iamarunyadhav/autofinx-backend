@@ -184,3 +184,49 @@ test('jobs dashboard prunes only stale safe pending jobs', function () {
         ->and(DB::table('jobs')->where('queue', 'execution')->count())->toBe(1)
         ->and(DB::table('jobs')->where('queue', 'default')->count())->toBe(1);
 });
+
+test('automatic backlog maintenance prunes safe stale jobs only after threshold is crossed', function () {
+    config()->set('queue_control.auto_maintenance.enabled', true);
+    config()->set('queue_control.auto_maintenance.trigger_backlog', 3);
+    config()->set('queue_control.auto_maintenance.prune_older_than_minutes', 30);
+    config()->set('queue_control.stale_prune.safe_queues', ['analytics', 'default', 'monitoring_safe']);
+    config()->set('queue_control.stale_prune.safe_job_classes', ['App\\Jobs\\DetectStaleFeedsJob']);
+    config()->set('queue_control.protected_queues', ['critical', 'execution', 'reconcile', 'market', 'monitoring']);
+    config()->set('ops.live_readiness.queue_backlog_excluded_queues', []);
+
+    DB::table('jobs')->insert([
+        'queue' => 'analytics',
+        'payload' => queuedPayload('App\\Jobs\\ComputeAnalyticsJob'),
+        'attempts' => 0,
+        'reserved_at' => null,
+        'available_at' => time() - 3600,
+        'created_at' => time() - 3600,
+    ]);
+
+    DB::table('jobs')->insert([
+        'queue' => 'monitoring_safe',
+        'payload' => queuedPayload('App\\Jobs\\DetectStaleFeedsJob'),
+        'attempts' => 0,
+        'reserved_at' => null,
+        'available_at' => time() - 3600,
+        'created_at' => time() - 3600,
+    ]);
+
+    DB::table('jobs')->insert([
+        'queue' => 'execution',
+        'payload' => queuedPayload('App\\Jobs\\ExecuteSignalJob'),
+        'attempts' => 0,
+        'reserved_at' => null,
+        'available_at' => time() - 3600,
+        'created_at' => time() - 3600,
+    ]);
+
+    $result = app(\App\Domain\Ops\QueueControlService::class)->maintainBacklog();
+
+    expect($result['prune']['pruned'])->toBe(2)
+        ->and($result['blocking_backlog_before'])->toBe(3)
+        ->and($result['blocking_backlog_after'])->toBe(1)
+        ->and(DB::table('jobs')->where('queue', 'execution')->count())->toBe(1)
+        ->and(DB::table('jobs')->where('queue', 'analytics')->count())->toBe(0)
+        ->and(DB::table('jobs')->where('queue', 'monitoring_safe')->count())->toBe(0);
+});
