@@ -54,6 +54,7 @@ function createFutureTradeLiveConfig(string $workspaceId, array $state = [], arr
 }
 
 test('future trade auto recovery clears stale local position and cancels reduce-only orders', function () {
+    $this->withoutMiddleware('require.2fa');
     $workspace = Workspace::factory()->create();
     $user = User::factory()->create();
     $config = createFutureTradeLiveConfig($workspace->id);
@@ -105,6 +106,7 @@ test('future trade auto recovery clears stale local position and cancels reduce-
 });
 
 test('future trade sync state adopts actual Binance open position', function () {
+    $this->withoutMiddleware('require.2fa');
     $workspace = Workspace::factory()->create();
     $user = User::factory()->create();
     $config = createFutureTradeLiveConfig($workspace->id, [
