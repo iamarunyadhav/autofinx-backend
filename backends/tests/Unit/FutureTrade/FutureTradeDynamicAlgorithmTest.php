@@ -185,6 +185,7 @@ class FutureTradeDynamicAlgorithmTest extends TestCase
             'confidenceMode' => 'fully_dynamic',
             'minConfidence' => 0.72,
             'tradeAmountUsdt' => 100,
+            'rollbackLossPercent' => 0.18,
         ], $this->state([
             'wins' => 4,
             'losses' => 8,
@@ -194,7 +195,9 @@ class FutureTradeDynamicAlgorithmTest extends TestCase
         ]);
 
         $this->assertGreaterThan(0.5, $decision['public']['analysis']['winRateSampleWeight']);
+        $this->assertGreaterThanOrEqual(0.78, $decision['effectiveMinConfidence']);
         $this->assertLessThan(90.0, $decision['public']['recommended']['tradeAmountUsdt']);
+        $this->assertGreaterThan(0.18, $decision['settings']['rollbackLossPercent']);
         $this->assertStringContainsString('Weak win rate', implode(' ', $decision['public']['adjustments']));
     }
 

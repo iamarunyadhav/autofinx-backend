@@ -744,6 +744,7 @@ class FutureTradeBotService
         $settings = $config->mergedSettings();
         $dynamic = $this->dynamicDecision($config, $state, (array) ($state->scanner_snapshot ?? []), $signal, $settings);
         $settings = $dynamic['settings'];
+        $analysis = (array) ($dynamic['public']['analysis'] ?? []);
         if ((string) $state->state === 'IN_POSITION' || (float) $state->quantity > 0) {
             return;
         }
@@ -795,6 +796,45 @@ class FutureTradeBotService
                 $signal['confidence'],
                 'Confidence below dynamic threshold: needs ' . round((float) $settings['minConfidence'], 4),
                 $this->runtimeContext($dynamic, ['status' => 'SKIPPED'])
+            );
+            return;
+        }
+        if ((bool) ($signal['fastTimeframeWeakSetup'] ?? false) || (bool) ($signal['conflicted'] ?? false) || ! (bool) ($signal['strongSequence'] ?? true)) {
+            $this->logThrottled(
+                $config,
+                'SIGNAL_SKIPPED',
+                $signal['symbol'],
+                $signal['signal'],
+                (float) ($signal['confidence'] ?? 0),
+                'Weak 5m setup rejected before execution.',
+                $this->runtimeContext($dynamic, ['status' => 'SKIPPED']),
+                45
+            );
+            return;
+        }
+        if ((float) ($analysis['trendStrength'] ?? 0) < 0.45) {
+            $this->logThrottled(
+                $config,
+                'SIGNAL_SKIPPED',
+                $signal['symbol'],
+                $signal['signal'],
+                (float) ($signal['confidence'] ?? 0),
+                'Trend-strength gate blocked entry: runtime trend strength is below 45%.',
+                $this->runtimeContext($dynamic, ['status' => 'SKIPPED']),
+                45
+            );
+            return;
+        }
+        if ((int) ($analysis['totalTrades'] ?? 0) >= 6 && (float) ($analysis['winRate'] ?? 100) < 35) {
+            $this->logThrottled(
+                $config,
+                'SIGNAL_SKIPPED',
+                $signal['symbol'],
+                $signal['signal'],
+                (float) ($signal['confidence'] ?? 0),
+                sprintf('Poor regime guard blocked entry: %.2f%% win rate across %d closed trades.', (float) ($analysis['winRate'] ?? 0), (int) ($analysis['totalTrades'] ?? 0)),
+                $this->runtimeContext($dynamic, ['status' => 'SKIPPED']),
+                60
             );
             return;
         }
@@ -1481,8 +1521,9 @@ class FutureTradeBotService
 
         $voteGap = abs($bullishVotes - $bearishVotes);
         $dominantSignal = $bullishVotes > $bearishVotes ? 'BUY' : ($bearishVotes > $bullishVotes ? 'SELL' : 'WAIT');
-        $strongDirectionalSequence = $sequenceConsistency >= 0.44 && abs($sequenceNetChange) >= 0.06;
-        $conflicted = $voteGap < 0.80
+        $isFastTimeframe = in_array(strtolower((string) ($settings['timeframe'] ?? '5m')), ['1m', '3m', '5m'], true);
+        $strongDirectionalSequence = $sequenceConsistency >= ($isFastTimeframe ? 0.50 : 0.44) && abs($sequenceNetChange) >= ($isFastTimeframe ? 0.10 : 0.06);
+        $conflicted = $voteGap < ($isFastTimeframe ? 1.05 : 0.80)
             || ($dominantSignal === 'BUY' && ($sequenceNetChange < -0.18 || ($sequenceImpulse === 'SELL' && $sequenceBearishRatio >= 0.60)))
             || ($dominantSignal === 'SELL' && ($sequenceNetChange > 0.18 || ($sequenceImpulse === 'BUY' && $sequenceBullishRatio >= 0.60)));
         $microChoppy = $sequenceVolatility > 0.30 && abs($sequenceNetChange) < 0.06;
@@ -1498,9 +1539,23 @@ class FutureTradeBotService
             && $sequenceConsistency >= 0.46
             && $tickerBiasAligned
             && $sequenceBiasAligned;
+        $macroCounterTrend = ($dominantSignal === 'BUY' && ($htfBullish === false || $htf4hBullish === false))
+            || ($dominantSignal === 'SELL' && ($htfBullish === true || $htf4hBullish === true));
+        $macdCounterTrend = $macdBullish !== null
+            && (($dominantSignal === 'BUY' && ! $macdBullish) || ($dominantSignal === 'SELL' && $macdBullish));
+        $fiveMinuteWeakSetup = $isFastTimeframe && (
+            $conflicted
+            || ! $strongDirectionalSequence
+            || $macroCounterTrend
+            || $macdCounterTrend
+            || ($dominantSignal === 'BUY' && $rsi14 >= 68.0)
+            || ($dominantSignal === 'SELL' && $rsi14 <= 32.0)
+        );
 
         $signal = $dominantSignal;
-        if (($settings['avoidChoppyMarket'] ?? true) && ($choppy || (($conflicted || ! $strongDirectionalSequence) && ! $cleanOverride))) {
+        if ($fiveMinuteWeakSetup) {
+            $signal = 'WAIT';
+        } elseif (($settings['avoidChoppyMarket'] ?? true) && ($choppy || (($conflicted || ! $strongDirectionalSequence) && ! $cleanOverride))) {
             $signal = 'WAIT';
         }
 
@@ -1605,6 +1660,9 @@ class FutureTradeBotService
             if (! ($strongDirectionalSequence ?? false)) {
                 $reasonParts[] = sprintf('%s sequence not strong enough for entry', $tf);
             }
+            if ($fiveMinuteWeakSetup) {
+                $reasonParts[] = sprintf('%s weak setup rejected: stronger sequence and HTF alignment required', $tf);
+            }
             if ($htfBullish !== null && (($dominantSignal === 'BUY' && ! $htfBullish) || ($dominantSignal === 'SELL' && $htfBullish))) {
                 $reasonParts[] = sprintf('1h EMA50 %s — counter-trend', $htfBullish ? 'bullish' : 'bearish');
             }
@@ -1659,6 +1717,9 @@ class FutureTradeBotService
             'htfBullish'      => $htfBullish,
             'htf4hBullish'    => $htf4hBullish,
             'symbolPerfAdj'   => round($symbolPerfAdjust, 4),
+            'conflicted'      => $conflicted,
+            'strongSequence'  => $strongDirectionalSequence,
+            'fastTimeframeWeakSetup' => $fiveMinuteWeakSetup,
             'reason'          => implode(' | ', $reasonParts),
         ];
     }
@@ -2101,6 +2162,7 @@ class FutureTradeBotService
         $baseTakeProfit = (float) ($settings['takeProfitPercent'] ?? 0.45);
         $baseStopLoss = (float) ($settings['stopLossPercent'] ?? 0.25);
         $baseTrailing = (float) ($settings['trailingTakeProfitPercent'] ?? 0.18);
+        $baseRollback = (float) ($settings['rollbackLossPercent'] ?? 0.18);
         $baseCooldown = max(10, (int) ($settings['cooldownSeconds'] ?? 60));
         $baseTradeAmount = max(25.0, (float) ($settings['tradeAmountUsdt'] ?? 25));
 
@@ -2186,6 +2248,17 @@ class FutureTradeBotService
                 if ($analysis['lastTradeReason'] && str_contains($analysis['lastTradeReason'], 'LOSS')) {
                     $dynamicCooldown = max($dynamicCooldown, 120);
                 }
+                if ($totalTrades >= 6 && $winRate < 35) {
+                    $effective = max($effective, 0.78);
+                    $dynamicCooldown = max($dynamicCooldown, 180);
+                    $next['tradeAmountUsdt'] = max(25, $baseTradeAmount * 0.8);
+                    $adjustments[] = sprintf('Poor regime: %.2f%% win rate across %d trades forces stricter confidence and slower re-entry.', $winRate, $totalTrades);
+                }
+                if ((float) ($analysis['trendStrength'] ?? 0) < 0.45) {
+                    $effective = max($effective, 0.78);
+                    $dynamicCooldown = max($dynamicCooldown, 180);
+                    $adjustments[] = 'Weak trend strength: require 78%+ confidence and slower re-entry.';
+                }
                 $sizeMultiplier = 1.0;
                 if ($analysis['choppy']) {
                     $sizeMultiplier *= 0.82;
@@ -2200,10 +2273,12 @@ class FutureTradeBotService
                 }
                 $preAdjustedTradeAmount = max(25.0, (float) ($next['tradeAmountUsdt'] ?? $baseTradeAmount));
                 $dynamicTradeAmount = $this->clamp($preAdjustedTradeAmount * $sizeMultiplier, 25.0, $baseTradeAmount);
+                $dynamicRollback = $this->clamp(max($baseRollback, $dynamicStop * ($analysis['choppy'] ? 0.72 : 0.66)), 0.22, max(0.24, $baseRollback * 1.75));
 
                 $next['stopLossPercent'] = $dynamicStop;
                 $next['takeProfitPercent'] = $dynamicTarget;
                 $next['trailingTakeProfitPercent'] = $dynamicTrailing;
+                $next['rollbackLossPercent'] = $dynamicRollback;
                 $next['cooldownSeconds'] = $dynamicCooldown;
                 $next['tradeAmountUsdt'] = $dynamicTradeAmount;
                 if ($analysis['lastTradeReason'] && str_contains($analysis['lastTradeReason'], 'LOSS')) {
@@ -2225,6 +2300,7 @@ class FutureTradeBotService
         $next['takeProfitPercent'] = $this->clamp((float) ($next['takeProfitPercent'] ?? $baseTakeProfit), 0.55, max(0.60, $baseTakeProfit * 1.6));
         $next['stopLossPercent'] = $this->clamp((float) ($next['stopLossPercent'] ?? $baseStopLoss), 0.05, max(0.06, $baseStopLoss * 1.6));
         $next['trailingTakeProfitPercent'] = $this->clamp((float) ($next['trailingTakeProfitPercent'] ?? $baseTrailing), 0.03, max(0.04, $baseTrailing * 1.4));
+        $next['rollbackLossPercent'] = $this->clamp((float) ($next['rollbackLossPercent'] ?? $baseRollback), 0.18, max(0.22, $baseRollback * 1.75));
         $next['cooldownSeconds'] = (int) $this->clamp((float) ($next['cooldownSeconds'] ?? $baseCooldown), 10.0, 180.0);
         $next['tradeAmountUsdt'] = $this->clamp((float) ($next['tradeAmountUsdt'] ?? $baseTradeAmount), 25.0, max(25.0, $baseTradeAmount));
 
