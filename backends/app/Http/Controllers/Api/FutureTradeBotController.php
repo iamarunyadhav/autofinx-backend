@@ -158,14 +158,24 @@ class FutureTradeBotController extends Controller
         }
     }
 
-    public function trades(string $workspace): JsonResponse
+    public function trades(Request $request, string $workspace): JsonResponse
     {
-        return response()->json($this->bot->getOrCreateConfig($workspace)->trades()->orderByDesc('created_at')->limit(100)->get());
+        $query = $this->bot->getOrCreateConfig($workspace)->trades()->orderByDesc('created_at');
+        if (! filter_var($request->query('all', false), FILTER_VALIDATE_BOOL)) {
+            $query->limit(max(1, min(1000, (int) $request->query('limit', 100))));
+        }
+
+        return response()->json($query->get());
     }
 
-    public function logs(string $workspace): JsonResponse
+    public function logs(Request $request, string $workspace): JsonResponse
     {
-        return response()->json($this->bot->getOrCreateConfig($workspace)->logs()->orderByDesc('occurred_at')->limit(100)->get());
+        $query = $this->bot->getOrCreateConfig($workspace)->logs()->orderByDesc('occurred_at');
+        if (! filter_var($request->query('all', false), FILTER_VALIDATE_BOOL)) {
+            $query->limit(max(1, min(1000, (int) $request->query('limit', 100))));
+        }
+
+        return response()->json($query->get());
     }
 
     private function envPayload($config): array
