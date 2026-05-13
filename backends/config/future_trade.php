@@ -50,6 +50,7 @@ return [
         'dynamicSuggestionEnabled' => true,
         'autoExecutePaperSignals' => true,
         'avoidChoppyMarket' => true,
+        'strictEntryGuards' => false,
         'emergencyStop' => false,
     ],
 ];

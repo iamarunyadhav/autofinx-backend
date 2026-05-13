@@ -315,11 +315,60 @@ class FutureTradeDynamicAlgorithmTest extends TestCase
                 'ema200Bullish' => true,
             ],
             'symbolPerfAdjust' => 0.0,
-        ], ['timeframe' => '5m']);
+        ], ['timeframe' => '5m', 'strictEntryGuards' => true]);
 
         $this->assertSame('WAIT', $score['signal']);
         $this->assertStringContainsString('UT Bot', $score['reason']);
         $this->assertStringContainsString('market structure breakout', $score['reason']);
+    }
+
+    public function test_score_ticker_can_issue_directional_signal_without_strict_entry_guards(): void
+    {
+        $score = $this->scoreTicker([
+            'symbol' => 'ETHUSDT',
+            'lastPrice' => 99.8,
+            'priceChangePercent' => 0.4,
+            'quoteVolume' => 1200000,
+            'highPrice' => 100.1,
+            'lowPrice' => 98.9,
+            'weightedAvgPrice' => 99.4,
+            'openPrice' => 99.2,
+            'sequence' => [
+                'netChangePercent' => 0.18,
+                'consistency' => 0.60,
+                'volatilityPercent' => 0.18,
+                'impulse' => 'BUY',
+                'rsi14' => 59.0,
+                'emaBullish' => true,
+                'emaStackBullish' => true,
+                'emaStackBearish' => false,
+                'macdBullish' => true,
+                'macdHistogramGrowing' => true,
+                'adx14' => 21.0,
+                'sessionVwap' => 99.3,
+                'volumeOk' => true,
+                'extendedFromEma' => false,
+                'extendedFromVwap' => false,
+                'utSignal' => 'WAIT',
+                'utBias' => 'NEUTRAL',
+            ],
+            'structure' => [
+                'signal' => 'WAIT',
+                'bullishMsb' => false,
+                'bearishMsb' => false,
+                'bullishObValid' => false,
+                'bearishObValid' => false,
+            ],
+            'htf' => [
+                'emaBullish' => true,
+                'h4EmaBullish' => true,
+                'ema200Bullish' => true,
+            ],
+            'symbolPerfAdjust' => 0.0,
+        ], ['timeframe' => '5m', 'strictEntryGuards' => false]);
+
+        $this->assertSame('BUY', $score['signal']);
+        $this->assertGreaterThan(0.70, $score['confidence']);
     }
 
     private function decision(array $settings, FutureTradeBotState $state, array $signals): array

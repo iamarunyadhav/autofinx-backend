@@ -742,6 +742,7 @@ class FutureTradeBotService
     {
         $state = $this->state($config);
         $settings = $config->mergedSettings();
+        $strictEntryGuards = (bool) ($settings['strictEntryGuards'] ?? false);
         $dynamic = $this->dynamicDecision($config, $state, (array) ($state->scanner_snapshot ?? []), $signal, $settings);
         $settings = $dynamic['settings'];
         $analysis = (array) ($dynamic['public']['analysis'] ?? []);
@@ -799,7 +800,14 @@ class FutureTradeBotService
             );
             return;
         }
-        if ((bool) ($signal['fastTimeframeWeakSetup'] ?? false) || (bool) ($signal['conflicted'] ?? false) || ! (bool) ($signal['strongSequence'] ?? true)) {
+        if (
+            $strictEntryGuards
+            && (
+                (bool) ($signal['fastTimeframeWeakSetup'] ?? false)
+                || (bool) ($signal['conflicted'] ?? false)
+                || ! (bool) ($signal['strongSequence'] ?? true)
+            )
+        ) {
             $this->logThrottled(
                 $config,
                 'SIGNAL_SKIPPED',
@@ -812,7 +820,7 @@ class FutureTradeBotService
             );
             return;
         }
-        if ((float) ($analysis['trendStrength'] ?? 0) < 0.45) {
+        if ($strictEntryGuards && (float) ($analysis['trendStrength'] ?? 0) < 0.45) {
             $this->logThrottled(
                 $config,
                 'SIGNAL_SKIPPED',
@@ -825,7 +833,11 @@ class FutureTradeBotService
             );
             return;
         }
-        if ((int) ($analysis['totalTrades'] ?? 0) >= 6 && (float) ($analysis['winRate'] ?? 100) < 35) {
+        if (
+            $strictEntryGuards
+            && (int) ($analysis['totalTrades'] ?? 0) >= 6
+            && (float) ($analysis['winRate'] ?? 100) < 35
+        ) {
             $this->logThrottled(
                 $config,
                 'SIGNAL_SKIPPED',
@@ -1372,6 +1384,7 @@ class FutureTradeBotService
         $rangePosition = ($high > $low) ? (($price - $low) / ($high - $low)) : 0.5;
         $tf = strtolower((string) ($settings['timeframe'] ?? '5m'));
         $isFastTimeframe = in_array($tf, ['1m', '3m', '5m'], true);
+        $strictEntryGuards = (bool) ($settings['strictEntryGuards'] ?? false);
 
         $sequenceNetChange = (float) ($sequence['netChangePercent'] ?? 0.0);
         $sequenceConsistency = (float) ($sequence['consistency'] ?? 0.0);
@@ -1454,14 +1467,19 @@ class FutureTradeBotService
         $buyScore = count(array_filter($buyChecks));
         $sellScore = count(array_filter($sellChecks));
         $dominantSignal = $buyScore > $sellScore ? 'BUY' : ($sellScore > $buyScore ? 'SELL' : 'WAIT');
+        $dominantScore = max($buyScore, $sellScore);
         $voteGap = abs($buyScore - $sellScore);
         $conflicted = $buyScore >= 5 && $sellScore >= 5;
+        $minimumDirectionalScore = $strictEntryGuards
+            ? count($buyChecks)
+            : ($isFastTimeframe ? 8 : 7);
+        $minimumVoteGap = $strictEntryGuards
+            ? count($buyChecks)
+            : ($isFastTimeframe ? 2 : 1);
 
         $signal = 'WAIT';
-        if ($buyScore === count($buyChecks)) {
-            $signal = 'BUY';
-        } elseif ($sellScore === count($sellChecks)) {
-            $signal = 'SELL';
+        if ($dominantSignal !== 'WAIT' && $dominantScore >= $minimumDirectionalScore && $voteGap >= $minimumVoteGap) {
+            $signal = $dominantSignal;
         }
 
         $fiveMinuteWeakSetup = $isFastTimeframe && (
@@ -1473,7 +1491,7 @@ class FutureTradeBotService
             || ($dominantSignal === 'SELL' && ($utBias !== 'SELL' || ! $bearishMsb || ! $bearishObValid))
         );
 
-        if ($fiveMinuteWeakSetup || (($settings['avoidChoppyMarket'] ?? true) && $choppy)) {
+        if ($strictEntryGuards && ($fiveMinuteWeakSetup || (($settings['avoidChoppyMarket'] ?? true) && $choppy))) {
             $signal = 'WAIT';
         }
 
@@ -1525,11 +1543,17 @@ class FutureTradeBotService
         }
 
         $confidenceBase = max($buyScore, $sellScore) / max(1, count($buyChecks));
+        $directionalSignalBonus = $signal !== 'WAIT' && ! $strictEntryGuards ? 0.12 : 0.0;
+        $structureBonus = $signal === 'BUY' && ($bullishMsb || $bullishObValid || $structureSignal === 'BUY')
+            ? 0.03
+            : ($signal === 'SELL' && ($bearishMsb || $bearishObValid || $structureSignal === 'SELL') ? 0.03 : 0.0);
         $confidence = $this->clamp(
             ($confidenceBase * 0.82)
             + ($strongDirectionalSequence ? 0.08 : 0.0)
             + ($volumeOk ? 0.03 : 0.0)
             + ($macdHistGrowing ? 0.02 : 0.0)
+            + $directionalSignalBonus
+            + $structureBonus
             + $symbolPerfAdjust,
             0.01,
             0.99
