@@ -61,9 +61,7 @@ Schedule::command('orders:poll-status')
 Schedule::command('market:ws-consume --once --store-ohlc')
     ->everySecond()
     ->withoutOverlapping()
-    ->runInBackground()
-    ->before(fn () => $markRunStart('market:ws-consume'))
-    ->after(fn () => $markRunEnd('market:ws-consume'));
+    ->runInBackground();
 
 Schedule::command('metals:poll-prices --once')
     ->everyFiveSeconds()
@@ -122,9 +120,7 @@ Schedule::command('future-trade:scan-all')
     ->everySecond()
     ->onOneServer()
     ->withoutOverlapping()
-    ->runInBackground()
-    ->before(fn () => $markRunStart('future-trade:scan-all'))
-    ->after(fn () => $markRunEnd('future-trade:scan-all'));
+    ->runInBackground();
 
 Schedule::command('future-trade:diagnostics --persist')
     ->everyFiveMinutes()

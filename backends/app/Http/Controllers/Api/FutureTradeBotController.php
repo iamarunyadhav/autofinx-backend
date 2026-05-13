@@ -48,6 +48,11 @@ class FutureTradeBotController extends Controller
         return response()->json(['state' => $this->bot->resetDailyLoss($this->bot->getOrCreateConfig($workspace))]);
     }
 
+    public function clearHistory(string $workspace): JsonResponse
+    {
+        return response()->json($this->bot->clearHistory($this->bot->getOrCreateConfig($workspace)));
+    }
+
     public function recover(Request $request, string $workspace): JsonResponse
     {
         $data = $request->validate([

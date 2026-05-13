@@ -211,6 +211,29 @@ class FutureTradeBotService
         return $state->fresh();
     }
 
+    public function clearHistory(FutureTradeBotConfig $config): array
+    {
+        $trades = $config->trades()->count();
+        $logs = $config->logs()->count();
+        $config->trades()->delete();
+        $config->logs()->delete();
+        $state = $this->state($config);
+        $this->persistState($state, [
+            'realized_pnl' => 0,
+            'daily_profit' => 0,
+            'daily_loss' => 0,
+            'trade_count_today' => 0,
+            'wins' => 0,
+            'losses' => 0,
+            'chart_points' => [],
+            'scanner_snapshot' => [],
+            'daily_stop_until' => null,
+            'trading_day' => now()->toDateString(),
+        ]);
+        $this->log($config->fresh('state'), 'HISTORY_CLEARED', null, null, 0, "Operator cleared {$trades} trades and {$logs} logs for fresh analysis.");
+        return ['cleared_trades' => $trades, 'cleared_logs' => $logs];
+    }
+
     public function resetDailyLoss(FutureTradeBotConfig $config): FutureTradeBotState
     {
         $state = $this->state($config);

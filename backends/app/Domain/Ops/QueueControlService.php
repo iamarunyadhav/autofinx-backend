@@ -150,7 +150,7 @@ class QueueControlService
         abort_unless((bool) $config['enabled'], 403, 'Stale queue pruning is disabled on this server.');
         abort_unless(Schema::hasTable('jobs'), 422, 'Jobs table is not available.');
 
-        $olderThanMinutes = max(1, (int) ($olderThanMinutes ?: $config['older_than_minutes']));
+        $olderThanMinutes = $olderThanMinutes !== null && $olderThanMinutes === 0 ? 0 : max(1, (int) ($olderThanMinutes ?: $config['older_than_minutes']));
         $requestedQueues = collect($queues ?? [])
             ->map(fn ($queue) => trim((string) $queue))
             ->filter()
@@ -242,11 +242,24 @@ class QueueControlService
             ];
         }
 
-        $prune = $this->pruneStalePending(null, $config['prune_older_than_minutes']);
+        // Emergency mode: backlog > 500 — prune all safe jobs regardless of age (0 minutes)
+        $emergencyThreshold = max($config['trigger_backlog'] * 5, 500);
+        $isEmergency = $backlog >= $emergencyThreshold;
+        $pruneAgeMinutes = $isEmergency ? 0 : $config['prune_older_than_minutes'];
+
+        $prune = $this->pruneStalePending(null, $pruneAgeMinutes);
+
+        // If emergency and still high, do a second pass on the normal age threshold
         $postPrune = $this->dashboard(25);
         $postPruneBacklog = (int) ($postPrune['blocking_backlog'] ?? $postPrune['backlog'] ?? 0);
-        $restarted = false;
+        if ($isEmergency && $postPruneBacklog >= $config['trigger_backlog']) {
+            $prune2 = $this->pruneStalePending(null, $config['prune_older_than_minutes']);
+            $prune['pruned'] = ($prune['pruned'] ?? 0) + ($prune2['pruned'] ?? 0);
+            $postPrune = $this->dashboard(25);
+            $postPruneBacklog = (int) ($postPrune['blocking_backlog'] ?? $postPrune['backlog'] ?? 0);
+        }
 
+        $restarted = false;
         if (
             $config['restart_when_still_blocked']
             && ($postPrune['state'] ?? null) === 'blocked'
@@ -260,6 +273,7 @@ class QueueControlService
         return [
             'action' => 'maintain_backlog',
             'enabled' => true,
+            'emergency' => $isEmergency,
             'trigger_backlog' => $config['trigger_backlog'],
             'blocking_backlog_before' => $backlog,
             'blocking_backlog_after' => $postPruneBacklog,
@@ -267,9 +281,11 @@ class QueueControlService
             'state_after' => $postPrune['state'] ?? null,
             'prune' => $prune,
             'workers_restarted' => $restarted,
-            'message' => $restarted
-                ? 'Automatic backlog maintenance pruned safe stale jobs and sent a worker restart signal.'
-                : 'Automatic backlog maintenance completed.',
+            'message' => $isEmergency
+                ? 'Emergency backlog maintenance: pruned all safe-queue jobs regardless of age.'
+                : ($restarted
+                    ? 'Automatic backlog maintenance pruned safe stale jobs and sent a worker restart signal.'
+                    : 'Automatic backlog maintenance completed.'),
         ];
     }
 
@@ -565,7 +581,7 @@ class QueueControlService
 
         if ($row->reserved_at !== null) {
             $reason = 'reserved_job';
-        } elseif ($ageSeconds < ($olderThanMinutes * 60)) {
+        } elseif ($olderThanMinutes > 0 && $ageSeconds < ($olderThanMinutes * 60)) {
             $reason = 'not_stale_enough';
         } elseif (in_array($queue, $config['safe_queues'], true)) {
             $prunable = true;

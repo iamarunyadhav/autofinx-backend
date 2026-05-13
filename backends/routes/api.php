@@ -461,6 +461,7 @@ Route::prefix('v1')->group(function () {
         Route::post('workspaces/{workspace}/future-trade/test-connection', [FutureTradeBotController::class, 'testConnection'])->middleware('require.2fa');
         Route::get('workspaces/{workspace}/future-trade/trades', [FutureTradeBotController::class, 'trades']);
         Route::get('workspaces/{workspace}/future-trade/logs', [FutureTradeBotController::class, 'logs']);
+        Route::post('workspaces/{workspace}/future-trade/clear-history', [FutureTradeBotController::class, 'clearHistory'])->middleware('require.2fa');
 
         Route::match(['get', 'post', 'put', 'patch', 'delete'], 'table/{table}', [TableController::class, 'handle']);
     });
