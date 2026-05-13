@@ -11,7 +11,7 @@ use ReflectionMethod;
 
 class FutureTradeSignalScoringTest extends TestCase
 {
-    public function test_bearish_sequence_generates_sell_signal_with_strong_confidence(): void
+    public function test_sequence_only_bearish_snapshot_stays_conservative_without_structure_confirmation(): void
     {
         $service = $this->service();
         $sequence = $this->invoke($service, 'buildSequenceSnapshot', [[
@@ -38,8 +38,8 @@ class FutureTradeSignalScoringTest extends TestCase
             'timeframe' => '5m',
         ]]);
 
-        $this->assertSame('SELL', $signal['signal']);
-        $this->assertGreaterThan(0.55, $signal['confidence']);
+        $this->assertSame('WAIT', $signal['signal']);
+        $this->assertLessThan(0.75, $signal['confidence']);
     }
 
     public function test_conflicted_market_stays_wait_instead_of_forcing_buy_or_sell(): void

@@ -1410,10 +1410,16 @@ class FutureTradeBotService
         $bearishMsb = (bool) ($structure['bearishMsb'] ?? false);
         $bullishObValid = (bool) ($structure['bullishObValid'] ?? false);
         $bearishObValid = (bool) ($structure['bearishObValid'] ?? false);
+        $structureContextAvailable = $bullishMsb
+            || $bearishMsb
+            || $bullishObValid
+            || $bearishObValid
+            || in_array($structureSignal, ['BUY', 'SELL'], true);
 
         $htfBullish = isset($htf['emaBullish']) ? (bool) $htf['emaBullish'] : null;
         $htf4hBullish = isset($htf['h4EmaBullish']) ? (bool) $htf['h4EmaBullish'] : null;
         $htfEma200Bullish = isset($htf['ema200Bullish']) ? (bool) $htf['ema200Bullish'] : null;
+        $higherTimeframeContextAvailable = $htfBullish !== null || $htf4hBullish !== null || $htfEma200Bullish !== null;
         $symbolPerfAdjust = (float) ($ticker['symbolPerfAdjust'] ?? 0.0);
 
         $effectiveVwap = $sessionVwap > 0 ? $sessionVwap : $vwap;
@@ -1476,6 +1482,18 @@ class FutureTradeBotService
         $minimumVoteGap = $strictEntryGuards
             ? count($buyChecks)
             : ($isFastTimeframe ? 2 : 1);
+        if (! $strictEntryGuards) {
+            if (! $structureContextAvailable) {
+                $minimumDirectionalScore -= 2;
+            }
+            if (! $higherTimeframeContextAvailable) {
+                $minimumDirectionalScore -= 1;
+            }
+            $minimumDirectionalScore = max($isFastTimeframe ? 5 : 4, $minimumDirectionalScore);
+            if (! $structureContextAvailable && ! $higherTimeframeContextAvailable) {
+                $minimumVoteGap = 1;
+            }
+        }
 
         $signal = 'WAIT';
         if ($dominantSignal !== 'WAIT' && $dominantScore >= $minimumDirectionalScore && $voteGap >= $minimumVoteGap) {
