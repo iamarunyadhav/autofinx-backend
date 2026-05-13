@@ -1356,371 +1356,217 @@ class FutureTradeBotService
 
     private function scoreTicker(array $ticker, array $settings): array
     {
-        $price      = (float) ($ticker['lastPrice'] ?? $ticker['price'] ?? 0);
-        $change     = (float) ($ticker['priceChangePercent'] ?? 0);
+        $price = (float) ($ticker['lastPrice'] ?? $ticker['price'] ?? 0);
+        $change = (float) ($ticker['priceChangePercent'] ?? 0);
         $quoteVolume = (float) ($ticker['quoteVolume'] ?? 0);
-        $high       = (float) ($ticker['highPrice'] ?? $price);
-        $low        = (float) ($ticker['lowPrice'] ?? $price);
-        $vwap       = (float) ($ticker['weightedAvgPrice'] ?? 0);
-        $openPrice  = (float) ($ticker['openPrice'] ?? $price);
-        $sequence   = (array) ($ticker['sequence'] ?? []);
+        $high = (float) ($ticker['highPrice'] ?? $price);
+        $low = (float) ($ticker['lowPrice'] ?? $price);
+        $vwap = (float) ($ticker['weightedAvgPrice'] ?? 0);
+        $openPrice = (float) ($ticker['openPrice'] ?? $price);
+        $sequence = (array) ($ticker['sequence'] ?? []);
+        $structure = (array) ($ticker['structure'] ?? []);
+        $htf = (array) ($ticker['htf'] ?? []);
 
-        $rangePct   = $price > 0 ? (($high - $low) / $price) * 100 : 0;
-        $sequenceNetChange = (float) ($sequence['netChangePercent'] ?? 0);
-        $sequenceBullishRatio = (float) ($sequence['bullishRatio'] ?? 0);
-        $sequenceBearishRatio = (float) ($sequence['bearishRatio'] ?? 0);
-        $sequenceConsistency = (float) ($sequence['consistency'] ?? 0);
-        $sequenceVolatility = (float) ($sequence['volatilityPercent'] ?? 0);
-        $sequenceImpulse = (string) ($sequence['impulse'] ?? 'NEUTRAL');
-
-        // Indicators from sequence analysis and higher timeframes
-        $rsi14              = (float) ($sequence['rsi14'] ?? 50.0);
-        $emaBullish         = isset($sequence['emaBullish'])    ? (bool) $sequence['emaBullish']           : null;
-        $macdBullish        = isset($sequence['macdBullish'])   ? (bool) $sequence['macdBullish']          : null;
-        $macdHistGrowing    = (bool) ($sequence['macdHistogramGrowing'] ?? false);
-        $htfBullish         = isset($ticker['htf']['emaBullish'])   ? (bool) $ticker['htf']['emaBullish']   : null;  // 1h EMA50
-        $htf4hBullish       = isset($ticker['htf']['h4EmaBullish'])  ? (bool) $ticker['htf']['h4EmaBullish'] : null;  // 4h EMA50
-        $symbolPerfAdjust   = (float) ($ticker['symbolPerfAdjust'] ?? 0.0);
-        $rsiBuyBlocked      = false;
-        $rsiSellBlocked     = false;
-
-        // --- Signal Direction (replaces raw 24h change direction) ---
-        // Use VWAP cross: price above VWAP = recent buying pressure (bullish)
-        $vwapBullish = $vwap > 0 && $price > $vwap;
-
-        // Price position within 24h range: 0 = at low, 1 = at high
-        $rangePosition = ($high > $low) ? (($price - $low) / ($high - $low)) : 0.5;
-
-        // Short-term momentum: current price vs open price (intraday direction)
+        $rangePct = $price > 0 ? (($high - $low) / $price) * 100 : 0.0;
         $intradayChangePct = $openPrice > 0 ? (($price - $openPrice) / $openPrice) * 100 : $change;
-        $bullishVotes = 0.0;
-        $bearishVotes = 0.0;
+        $rangePosition = ($high > $low) ? (($price - $low) / ($high - $low)) : 0.5;
+        $tf = strtolower((string) ($settings['timeframe'] ?? '5m'));
+        $isFastTimeframe = in_array($tf, ['1m', '3m', '5m'], true);
 
-        // Signal requires BOTH VWAP confirmation AND price in upper/lower zone
-        if ($vwapBullish && $rangePosition >= 0.45 && $intradayChangePct >= 0) {
-            $rawSignal = 'BUY';
-        } elseif (! $vwapBullish && $rangePosition <= 0.55 && $intradayChangePct <= 0) {
-            $rawSignal = 'SELL';
-        } else {
-            // Conflicting signals — lower confidence, use 24h change as tiebreak
-            $rawSignal = $change >= 0 ? 'BUY' : 'SELL';
+        $sequenceNetChange = (float) ($sequence['netChangePercent'] ?? 0.0);
+        $sequenceConsistency = (float) ($sequence['consistency'] ?? 0.0);
+        $sequenceVolatility = (float) ($sequence['volatilityPercent'] ?? 0.0);
+        $sequenceImpulse = (string) ($sequence['impulse'] ?? 'NEUTRAL');
+        $rsi14 = (float) ($sequence['rsi14'] ?? 50.0);
+        $emaBullish = isset($sequence['emaBullish']) ? (bool) $sequence['emaBullish'] : null;
+        $emaStackBullish = (bool) ($sequence['emaStackBullish'] ?? false);
+        $emaStackBearish = (bool) ($sequence['emaStackBearish'] ?? false);
+        $macdBullish = isset($sequence['macdBullish']) ? (bool) $sequence['macdBullish'] : null;
+        $macdHistGrowing = (bool) ($sequence['macdHistogramGrowing'] ?? false);
+        $atrPercent = (float) ($sequence['atrPercent'] ?? 0.0);
+        $adx14 = (float) ($sequence['adx14'] ?? 0.0);
+        $sessionVwap = (float) ($sequence['sessionVwap'] ?? $vwap);
+        $volumeOk = (bool) ($sequence['volumeOk'] ?? false);
+        $extendedFromEma = (bool) ($sequence['extendedFromEma'] ?? false);
+        $extendedFromVwap = (bool) ($sequence['extendedFromVwap'] ?? false);
+        $utSignal = (string) ($sequence['utSignal'] ?? 'WAIT');
+        $utBias = (string) ($sequence['utBias'] ?? 'NEUTRAL');
+
+        $structureSignal = (string) ($structure['signal'] ?? 'WAIT');
+        $bullishMsb = (bool) ($structure['bullishMsb'] ?? false);
+        $bearishMsb = (bool) ($structure['bearishMsb'] ?? false);
+        $bullishObValid = (bool) ($structure['bullishObValid'] ?? false);
+        $bearishObValid = (bool) ($structure['bearishObValid'] ?? false);
+
+        $htfBullish = isset($htf['emaBullish']) ? (bool) $htf['emaBullish'] : null;
+        $htf4hBullish = isset($htf['h4EmaBullish']) ? (bool) $htf['h4EmaBullish'] : null;
+        $htfEma200Bullish = isset($htf['ema200Bullish']) ? (bool) $htf['ema200Bullish'] : null;
+        $symbolPerfAdjust = (float) ($ticker['symbolPerfAdjust'] ?? 0.0);
+
+        $effectiveVwap = $sessionVwap > 0 ? $sessionVwap : $vwap;
+        $vwapBullish = $effectiveVwap > 0 && $price > $effectiveVwap;
+        $adxReady = $adx14 >= 18.0;
+        $choppy = ($settings['avoidChoppyMarket'] ?? true)
+            && ($sequenceVolatility > 0.32 || $adx14 < 16.0 || (abs($sequenceNetChange) < 0.08 && $sequenceConsistency < 0.55));
+        $strongDirectionalSequence = $sequenceConsistency >= ($isFastTimeframe ? 0.58 : 0.54)
+            && abs($sequenceNetChange) >= ($isFastTimeframe ? 0.12 : 0.09)
+            && $adx14 >= ($isFastTimeframe ? 18.0 : 16.0)
+            && $volumeOk;
+
+        $buyReasons = [];
+        $sellReasons = [];
+        $avoidReasons = [];
+
+        $buyChecks = [
+            'ut' => $utBias === 'BUY' && in_array($utSignal, ['BUY', 'WAIT'], true),
+            'msb' => $bullishMsb,
+            'ob' => $bullishObValid,
+            'structure' => $structureSignal === 'BUY',
+            'vwap' => $vwapBullish,
+            'ema' => $emaStackBullish,
+            'htf' => $htfBullish === true && $htfEma200Bullish === true,
+            'macro' => $htf4hBullish !== false,
+            'rsi' => $rsi14 >= 50.0 && $rsi14 <= 70.0,
+            'macd' => $macdBullish === true,
+            'volume' => $volumeOk,
+            'extension' => ! $extendedFromEma && ! $extendedFromVwap,
+            'adx' => $adxReady,
+            'sequence' => $strongDirectionalSequence && in_array($sequenceImpulse, ['BUY', 'NEUTRAL'], true),
+        ];
+
+        $sellChecks = [
+            'ut' => $utBias === 'SELL' && in_array($utSignal, ['SELL', 'WAIT'], true),
+            'msb' => $bearishMsb,
+            'ob' => $bearishObValid,
+            'structure' => $structureSignal === 'SELL',
+            'vwap' => ! $vwapBullish,
+            'ema' => $emaStackBearish,
+            'htf' => $htfBullish === false && $htfEma200Bullish === false,
+            'macro' => $htf4hBullish !== true,
+            'rsi' => $rsi14 >= 30.0 && $rsi14 <= 50.0,
+            'macd' => $macdBullish === false,
+            'volume' => $volumeOk,
+            'extension' => ! $extendedFromEma && ! $extendedFromVwap,
+            'adx' => $adxReady,
+            'sequence' => $strongDirectionalSequence && in_array($sequenceImpulse, ['SELL', 'NEUTRAL'], true),
+        ];
+
+        $buyScore = count(array_filter($buyChecks));
+        $sellScore = count(array_filter($sellChecks));
+        $dominantSignal = $buyScore > $sellScore ? 'BUY' : ($sellScore > $buyScore ? 'SELL' : 'WAIT');
+        $voteGap = abs($buyScore - $sellScore);
+        $conflicted = $buyScore >= 5 && $sellScore >= 5;
+
+        $signal = 'WAIT';
+        if ($buyScore === count($buyChecks)) {
+            $signal = 'BUY';
+        } elseif ($sellScore === count($sellChecks)) {
+            $signal = 'SELL';
         }
 
-        // RSI extreme filter: block overbought BUY and oversold SELL entries
-        if ($rawSignal === 'BUY' && $rsi14 >= 72.0) {
-            $rawSignal = 'WAIT';
-            $rsiBuyBlocked = true;
-        }
-        if ($rawSignal === 'SELL' && $rsi14 <= 28.0) {
-            $rawSignal = 'WAIT';
-            $rsiSellBlocked = true;
-        }
-
-        // --- Confidence Scoring (no hardcoded base) ---
-        // Volume quality: how significant is the market activity
-        $volumeScore = min(0.30, log10(max($quoteVolume, 1)) / 35);
-
-        // Momentum strength: intraday change magnitude (not raw 24h)
-        $momentumScore = min(0.35, abs($intradayChangePct) / 10);
-
-        // Range quality: moderate range preferred — too tight = no opportunity, too wide = choppy
-        $rangeScore = $rangePct >= 0.5 && $rangePct <= 6
-            ? min(0.20, $rangePct / 15)
-            : ($rangePct > 6 ? max(0.0, 0.20 - ($rangePct - 6) * 0.02) : 0.05);
-
-        // VWAP alignment bonus
-        $alignmentBonus = ($vwapBullish && $rawSignal === 'BUY') || (! $vwapBullish && $rawSignal === 'SELL') ? 0.12 : 0.0;
-
-        // Direction consistency: intraday and 24h change pointing same way
-        $consistencyBonus = (($rawSignal === 'BUY' && $change >= 0 && $intradayChangePct >= 0) ||
-                             ($rawSignal === 'SELL' && $change <= 0 && $intradayChangePct <= 0)) ? 0.08 : 0.0;
-
-        $confidence = round(min(0.99, $volumeScore + $momentumScore + $rangeScore + $alignmentBonus + $consistencyBonus), 4);
-
-        // Choppy: large range, tiny net move — avoid regardless
-        $choppy  = $rangePct > 9 && abs($change) < 1.5;
-        $signal  = $choppy && ($settings['avoidChoppyMarket'] ?? true) ? 'WAIT' : $rawSignal;
-
-        if ($vwapBullish) {
-            $bullishVotes += 1.0;
-        } else {
-            $bearishVotes += 1.0;
-        }
-
-        if ($intradayChangePct >= 0.10) {
-            $bullishVotes += 1.1;
-        } elseif ($intradayChangePct <= -0.10) {
-            $bearishVotes += 1.1;
-        }
-
-        if ($change >= 0.25) {
-            $bullishVotes += 0.8;
-        } elseif ($change <= -0.25) {
-            $bearishVotes += 0.8;
-        }
-
-        if ($rangePosition >= 0.60) {
-            $bullishVotes += 0.7;
-        } elseif ($rangePosition <= 0.40) {
-            $bearishVotes += 0.7;
-        }
-
-        if ($sequenceNetChange >= 0.12) {
-            $bullishVotes += 1.6;
-        } elseif ($sequenceNetChange <= -0.12) {
-            $bearishVotes += 1.6;
-        }
-
-        if ($sequenceBullishRatio >= 0.58) {
-            $bullishVotes += 1.0;
-        }
-        if ($sequenceBearishRatio >= 0.58) {
-            $bearishVotes += 1.0;
-        }
-
-        if ($sequenceImpulse === 'BUY') {
-            $bullishVotes += 0.9;
-        } elseif ($sequenceImpulse === 'SELL') {
-            $bearishVotes += 0.9;
-        }
-
-        // EMA(9/21) crossover vote — fast EMA above slow = trending up
-        if ($emaBullish === true) {
-            $bullishVotes += 0.9;
-        } elseif ($emaBullish === false) {
-            $bearishVotes += 0.9;
-        }
-
-        // RSI momentum zone vote — 52-70 bullish momentum, 30-48 bearish momentum
-        if ($rsi14 >= 52 && $rsi14 < 70) {
-            $bullishVotes += 0.4;
-        } elseif ($rsi14 <= 48 && $rsi14 > 30) {
-            $bearishVotes += 0.4;
-        }
-
-        // 1h EMA50 trend
-        if ($htfBullish === true) {
-            $bullishVotes += 1.0;
-        } elseif ($htfBullish === false) {
-            $bearishVotes += 1.0;
-        }
-
-        // 4h EMA50 macro trend (strongest timeframe — higher weight)
-        if ($htf4hBullish === true) {
-            $bullishVotes += 1.4;
-        } elseif ($htf4hBullish === false) {
-            $bearishVotes += 1.4;
-        }
-
-        // MACD(12,26,9) signal — MACD above signal line + growing histogram = strong momentum
-        if ($macdBullish === true) {
-            $bullishVotes += $macdHistGrowing ? 1.2 : 0.7;
-        } elseif ($macdBullish === false) {
-            $bearishVotes += $macdHistGrowing ? 1.2 : 0.7;
-        }
-
-        $voteGap = abs($bullishVotes - $bearishVotes);
-        $dominantSignal = $bullishVotes > $bearishVotes ? 'BUY' : ($bearishVotes > $bullishVotes ? 'SELL' : 'WAIT');
-        $isFastTimeframe = in_array(strtolower((string) ($settings['timeframe'] ?? '5m')), ['1m', '3m', '5m'], true);
-        $strongDirectionalSequence = $sequenceConsistency >= ($isFastTimeframe ? 0.50 : 0.44) && abs($sequenceNetChange) >= ($isFastTimeframe ? 0.10 : 0.06);
-        $conflicted = $voteGap < ($isFastTimeframe ? 1.05 : 0.80)
-            || ($dominantSignal === 'BUY' && ($sequenceNetChange < -0.18 || ($sequenceImpulse === 'SELL' && $sequenceBearishRatio >= 0.60)))
-            || ($dominantSignal === 'SELL' && ($sequenceNetChange > 0.18 || ($sequenceImpulse === 'BUY' && $sequenceBullishRatio >= 0.60)));
-        $microChoppy = $sequenceVolatility > 0.30 && abs($sequenceNetChange) < 0.06;
-        $choppy = $choppy || $microChoppy;
-
-        $sequenceBiasAligned = ($dominantSignal === 'BUY' && ($sequenceNetChange >= 0 || $sequenceImpulse === 'BUY' || $sequenceBullishRatio >= 0.52))
-            || ($dominantSignal === 'SELL' && ($sequenceNetChange <= 0 || $sequenceImpulse === 'SELL' || $sequenceBearishRatio >= 0.52));
-        $tickerBiasAligned = ($dominantSignal === 'BUY' && ($vwapBullish || $intradayChangePct > 0 || $rangePosition >= 0.55))
-            || ($dominantSignal === 'SELL' && (! $vwapBullish || $intradayChangePct < 0 || $rangePosition <= 0.45));
-        $cleanOverride = ! $choppy
-            && $dominantSignal !== 'WAIT'
-            && $voteGap >= 1.55
-            && $sequenceConsistency >= 0.46
-            && $tickerBiasAligned
-            && $sequenceBiasAligned;
-        $macroCounterTrend = ($dominantSignal === 'BUY' && ($htfBullish === false || $htf4hBullish === false))
-            || ($dominantSignal === 'SELL' && ($htfBullish === true || $htf4hBullish === true));
-        $macdCounterTrend = $macdBullish !== null
-            && (($dominantSignal === 'BUY' && ! $macdBullish) || ($dominantSignal === 'SELL' && $macdBullish));
         $fiveMinuteWeakSetup = $isFastTimeframe && (
-            $conflicted
-            || ! $strongDirectionalSequence
-            || $macroCounterTrend
-            || $macdCounterTrend
-            || ($dominantSignal === 'BUY' && $rsi14 >= 68.0)
-            || ($dominantSignal === 'SELL' && $rsi14 <= 32.0)
+            ! $strongDirectionalSequence
+            || $conflicted
+            || $choppy
+            || $voteGap < 4
+            || ($dominantSignal === 'BUY' && ($utBias !== 'BUY' || ! $bullishMsb || ! $bullishObValid))
+            || ($dominantSignal === 'SELL' && ($utBias !== 'SELL' || ! $bearishMsb || ! $bearishObValid))
         );
 
-        $signal = $dominantSignal;
-        if ($fiveMinuteWeakSetup) {
-            $signal = 'WAIT';
-        } elseif (($settings['avoidChoppyMarket'] ?? true) && ($choppy || (($conflicted || ! $strongDirectionalSequence) && ! $cleanOverride))) {
+        if ($fiveMinuteWeakSetup || (($settings['avoidChoppyMarket'] ?? true) && $choppy)) {
             $signal = 'WAIT';
         }
 
-        $volumeScore = min(0.20, log10(max($quoteVolume, 1)) / 50);
-        $intradayScore = min(0.18, abs($intradayChangePct) / 5);
-        $sequenceScore = min(0.22, abs($sequenceNetChange) / 1.2);
-        $consistencyScore = min(0.18, $sequenceConsistency * 0.18);
-        $rangeScore = $rangePct >= 0.45 && $rangePct <= 5.5
-            ? min(0.12, $rangePct / 25)
-            : ($rangePct > 5.5 ? max(0.02, 0.12 - (($rangePct - 5.5) * 0.02)) : 0.03);
-        $directionalBonus = $strongDirectionalSequence ? 0.12 : 0.04;
-        $alignmentBonus = ($signal === 'BUY' && $vwapBullish && $sequenceNetChange > 0 && $intradayChangePct > 0)
-            || ($signal === 'SELL' && ! $vwapBullish && $sequenceNetChange < 0 && $intradayChangePct < 0)
-            ? 0.12
-            : 0.0;
-        $penalty = 0.0;
-        if ($conflicted) {
-            $penalty += 0.18;
-        }
-        if ($choppy) {
-            $penalty += 0.16;
-        }
-        if (! $strongDirectionalSequence) {
-            $penalty += 0.12;
-        }
-
-        // EMA crossover alignment bonus
-        $emaCrossBonus = (($dominantSignal === 'BUY' && $emaBullish === true) || ($dominantSignal === 'SELL' && $emaBullish === false)) ? 0.07 : 0.0;
-
-        // 1h EMA50: bonus with-trend, penalty counter-trend
-        $htfBonus = 0.0;
-        $htfPenalty = 0.0;
-        if ($htfBullish !== null) {
-            if (($dominantSignal === 'BUY' && $htfBullish) || ($dominantSignal === 'SELL' && ! $htfBullish)) {
-                $htfBonus = 0.06;
-            } elseif (($dominantSignal === 'BUY' && ! $htfBullish) || ($dominantSignal === 'SELL' && $htfBullish)) {
-                $htfPenalty = 0.12;
+        if ($signal === 'BUY') {
+            $buyReasons[] = 'UT Bot bullish trigger aligned';
+            $buyReasons[] = '15m bullish MSB and order block confirmed';
+            $buyReasons[] = 'Price above VWAP and EMA stack bullish';
+            $buyReasons[] = '1h trend filter aligned above EMA50 and EMA200';
+            $buyReasons[] = sprintf('RSI %.1f / ADX %.1f / MACD bullish / volume confirmed', $rsi14, $adx14);
+        } elseif ($signal === 'SELL') {
+            $sellReasons[] = 'UT Bot bearish trigger aligned';
+            $sellReasons[] = '15m bearish MSB and order block confirmed';
+            $sellReasons[] = 'Price below VWAP and EMA stack bearish';
+            $sellReasons[] = '1h trend filter aligned below EMA50 and EMA200';
+            $sellReasons[] = sprintf('RSI %.1f / ADX %.1f / MACD bearish / volume confirmed', $rsi14, $adx14);
+        } else {
+            if (! $buyChecks['ut'] && ! $sellChecks['ut']) {
+                $avoidReasons[] = 'UT Bot main trigger not aligned';
             }
-        }
-
-        // 4h EMA50: stronger macro trend filter — bigger bonus/penalty
-        $htf4hBonus = 0.0;
-        $htf4hPenalty = 0.0;
-        if ($htf4hBullish !== null) {
-            if (($dominantSignal === 'BUY' && $htf4hBullish) || ($dominantSignal === 'SELL' && ! $htf4hBullish)) {
-                $htf4hBonus = 0.08;
-            } elseif (($dominantSignal === 'BUY' && ! $htf4hBullish) || ($dominantSignal === 'SELL' && $htf4hBullish)) {
-                $htf4hPenalty = 0.16; // macro counter-trend — strong penalty
+            if (! $bullishMsb && ! $bearishMsb) {
+                $avoidReasons[] = '15m market structure breakout not confirmed';
             }
-        }
-
-        // MACD confirmation bonus
-        $macdBonus = 0.0;
-        $macdPenalty = 0.0;
-        if ($macdBullish !== null) {
-            $macdAligned = ($dominantSignal === 'BUY' && $macdBullish) || ($dominantSignal === 'SELL' && ! $macdBullish);
-            if ($macdAligned) {
-                $macdBonus = $macdHistGrowing ? 0.09 : 0.05; // stronger when momentum accelerating
-            } else {
-                $macdPenalty = $macdHistGrowing ? 0.10 : 0.05; // divergence — penalize
+            if (! $bullishObValid && ! $bearishObValid) {
+                $avoidReasons[] = 'Order block confirmation missing';
             }
-        }
-
-        // Symbol historical performance adjustment (from DB trade records)
-        $confidence = round($this->clamp(
-            $volumeScore + $intradayScore + $sequenceScore + $consistencyScore + $rangeScore
-            + $directionalBonus + $alignmentBonus + $emaCrossBonus
-            + $htfBonus + $htf4hBonus + $macdBonus
-            - $penalty - $htfPenalty - $htf4hPenalty - $macdPenalty
-            + $symbolPerfAdjust,
-            0.01, 0.99
-        ), 4);
-
-        if ($signal === 'WAIT' && $cleanOverride && $confidence >= 0.58) {
-            $signal = $dominantSignal;
-        }
-
-        // Hard RSI extreme block — applies after cleanOverride, cannot be bypassed
-        if ($signal === 'BUY' && $rsi14 >= 72.0) {
-            $signal = 'WAIT';
-            $rsiBuyBlocked = true;
-        } elseif ($signal === 'SELL' && $rsi14 <= 28.0) {
-            $signal = 'WAIT';
-            $rsiSellBlocked = true;
-        }
-
-        $reasonParts = [];
-        $tf = $settings['timeframe'] ?? '5m';
-        if ($signal === 'WAIT') {
-            if ($rsiBuyBlocked) {
-                $reasonParts[] = sprintf('RSI(14) %.1f — overbought, BUY entry blocked', $rsi14);
+            if ($conflicted) {
+                $avoidReasons[] = sprintf('Direction conflict between ticker and %s candle sequence', $tf);
             }
-            if ($rsiSellBlocked) {
-                $reasonParts[] = sprintf('RSI(14) %.1f — oversold, SELL entry blocked', $rsi14);
+            if (! $strongDirectionalSequence) {
+                $avoidReasons[] = sprintf('%s sequence not strong enough for breakout entry', $tf);
             }
             if ($choppy) {
-                $reasonParts[] = 'Choppy futures market avoided';
+                $avoidReasons[] = 'Low-clarity or choppy market avoided';
             }
-            if ($conflicted ?? false) {
-                $reasonParts[] = sprintf('Direction conflict between ticker and %s candle sequence', $tf);
+            if (($dominantSignal === 'BUY' && ($rsi14 > 70.0 || $extendedFromEma || $extendedFromVwap))
+                || ($dominantSignal === 'SELL' && ($rsi14 < 30.0 || $extendedFromEma || $extendedFromVwap))) {
+                $avoidReasons[] = 'Entry too extended from EMA or VWAP';
             }
-            if (! ($strongDirectionalSequence ?? false)) {
-                $reasonParts[] = sprintf('%s sequence not strong enough for entry', $tf);
+            if (! $volumeOk) {
+                $avoidReasons[] = 'Volume below required breakout participation';
             }
-            if ($fiveMinuteWeakSetup) {
-                $reasonParts[] = sprintf('%s weak setup rejected: stronger sequence and HTF alignment required', $tf);
+            if (! $adxReady) {
+                $avoidReasons[] = 'ADX strength too low';
             }
-            if ($htfBullish !== null && (($dominantSignal === 'BUY' && ! $htfBullish) || ($dominantSignal === 'SELL' && $htfBullish))) {
-                $reasonParts[] = sprintf('1h EMA50 %s — counter-trend', $htfBullish ? 'bullish' : 'bearish');
-            }
-            if ($htf4hBullish !== null && (($dominantSignal === 'BUY' && ! $htf4hBullish) || ($dominantSignal === 'SELL' && $htf4hBullish))) {
-                $reasonParts[] = sprintf('4h EMA50 %s — macro counter-trend', $htf4hBullish ? 'bullish' : 'bearish');
-            }
-            if ($macdBullish !== null && (($dominantSignal === 'BUY' && ! $macdBullish) || ($dominantSignal === 'SELL' && $macdBullish))) {
-                $reasonParts[] = 'MACD divergence from signal direction';
-            }
-        } else {
-            $reasonParts[] = $vwapBullish ? 'Price above VWAP (bullish)' : 'Price below VWAP (bearish)';
-            $reasonParts[] = sprintf('%s sequence %.2f%%', $tf, $sequenceNetChange);
-            $reasonParts[] = sprintf('RSI(14) %.1f', $rsi14);
-            if ($macdBullish !== null) {
-                $hist = $sequence['macdHistogram'] ?? 0.0;
-                $reasonParts[] = sprintf('MACD %s%s', $macdBullish ? '▲' : '▼', $macdHistGrowing ? '+' : '');
-            }
-            if ($emaBullish !== null) {
-                $reasonParts[] = $emaBullish ? 'EMA9>EMA21 ↑' : 'EMA9<EMA21 ↓';
-            }
-            if ($htfBullish !== null) {
-                $reasonParts[] = $htfBullish ? '1h EMA50 ▲' : '1h EMA50 ▼';
-            }
-            if ($htf4hBullish !== null) {
-                $reasonParts[] = $htf4hBullish ? '4h EMA50 ▲' : '4h EMA50 ▼';
-            }
-            if ($symbolPerfAdjust !== 0.0) {
-                $reasonParts[] = sprintf('Symbol perf adj %+.0f%%', $symbolPerfAdjust * 100);
-            }
-            if ($cleanOverride && ($conflicted || ! $strongDirectionalSequence)) {
-                $reasonParts[] = 'High-conviction override accepted';
+            if (($dominantSignal === 'BUY' && ($htfBullish !== true || $htfEma200Bullish !== true))
+                || ($dominantSignal === 'SELL' && ($htfBullish !== false || $htfEma200Bullish !== false))) {
+                $avoidReasons[] = '1h trend filter disagrees with breakout direction';
             }
         }
 
+        $confidenceBase = max($buyScore, $sellScore) / max(1, count($buyChecks));
+        $confidence = $this->clamp(
+            ($confidenceBase * 0.82)
+            + ($strongDirectionalSequence ? 0.08 : 0.0)
+            + ($volumeOk ? 0.03 : 0.0)
+            + ($macdHistGrowing ? 0.02 : 0.0)
+            + $symbolPerfAdjust,
+            0.01,
+            0.99
+        );
+        if ($signal === 'WAIT') {
+            $confidence = min($confidence, 0.74);
+        }
+
+        $reasonParts = $signal === 'BUY'
+            ? $buyReasons
+            : ($signal === 'SELL' ? $sellReasons : $avoidReasons);
+
         return [
-            'symbol'          => (string) ($ticker['symbol'] ?? 'BTCUSDT'),
-            'signal'          => $signal,
-            'price'           => $price,
-            'changePercent'   => round($change, 4),
-            'intradayChange'  => round($intradayChangePct, 4),
-            'volume'          => $quoteVolume,
-            'rangePercent'    => round($rangePct, 4),
-            'rangePosition'   => round($rangePosition, 4),
-            'vwapBullish'     => $vwapBullish,
-            'sequence'        => $sequence,
-            'confidence'      => $confidence,
-            'timeframe'       => $settings['timeframe'] ?? '5m',
-            'rsi14'           => round($rsi14, 2),
-            'emaBullish'      => $emaBullish,
-            'macdBullish'     => $macdBullish,
+            'symbol' => (string) ($ticker['symbol'] ?? 'BTCUSDT'),
+            'signal' => $signal,
+            'price' => $price,
+            'changePercent' => round($change, 4),
+            'intradayChange' => round($intradayChangePct, 4),
+            'volume' => $quoteVolume,
+            'rangePercent' => round($rangePct, 4),
+            'rangePosition' => round($rangePosition, 4),
+            'vwapBullish' => $vwapBullish,
+            'sequence' => $sequence,
+            'structure' => $structure,
+            'confidence' => round($confidence, 4),
+            'timeframe' => $settings['timeframe'] ?? '5m',
+            'rsi14' => round($rsi14, 2),
+            'emaBullish' => $emaBullish,
+            'macdBullish' => $macdBullish,
             'macdHistGrowing' => $macdHistGrowing,
-            'htfBullish'      => $htfBullish,
-            'htf4hBullish'    => $htf4hBullish,
-            'symbolPerfAdj'   => round($symbolPerfAdjust, 4),
-            'conflicted'      => $conflicted,
-            'strongSequence'  => $strongDirectionalSequence,
+            'htfBullish' => $htfBullish,
+            'htf4hBullish' => $htf4hBullish,
+            'symbolPerfAdj' => round($symbolPerfAdjust, 4),
+            'conflicted' => $conflicted,
+            'strongSequence' => $strongDirectionalSequence,
             'fastTimeframeWeakSetup' => $fiveMinuteWeakSetup,
-            'reason'          => implode(' | ', $reasonParts),
+            'reason' => implode(' | ', $reasonParts),
         ];
     }
 
@@ -1742,14 +1588,16 @@ class FutureTradeBotService
 
             $rows = Http::timeout(7)->get($dataBase . '/fapi/v1/ticker/24hr')->throw()->json();
             $sequenceSnapshots = $this->sequenceSnapshots($symbols, $settings, $dataBase);
+            $structureSnapshots = $this->structureSnapshots($symbols, $dataBase);
             $htfSnapshots = $this->higherTfSnapshots($symbols, $settings, $dataBase);
             $configId = (string) $config->id;
             $result = collect($rows)
                 ->filter(fn ($row) => in_array((string) ($row['symbol'] ?? ''), $symbols, true))
-                ->map(function (array $row) use ($sequenceSnapshots, $htfSnapshots, $configId) {
+                ->map(function (array $row) use ($sequenceSnapshots, $structureSnapshots, $htfSnapshots, $configId) {
                     $symbol = (string) ($row['symbol'] ?? '');
                     $row['sequence'] = $sequenceSnapshots[$symbol] ?? $this->emptySequenceSnapshot();
-                    $row['htf'] = $htfSnapshots[$symbol] ?? ['emaBullish' => null, 'h4EmaBullish' => null, 'ema50_1h' => 0.0, 'ema50_4h' => 0.0];
+                    $row['structure'] = $structureSnapshots[$symbol] ?? $this->emptyStructureSnapshot();
+                    $row['htf'] = $htfSnapshots[$symbol] ?? ['emaBullish' => null, 'h4EmaBullish' => null, 'ema200Bullish' => null, 'ema50_1h' => 0.0, 'ema50_4h' => 0.0, 'ema200_1h' => 0.0];
                     $row['symbolPerfAdjust'] = $this->symbolPerformanceAdjustment($symbol, $configId);
 
                     return $row;
@@ -1843,21 +1691,30 @@ class FutureTradeBotService
 
         $opens = [];
         $closes = [];
+        $highs = [];
+        $lows = [];
+        $volumes = [];
 
         foreach ($candles as $row) {
-            if (! is_array($row) || count($row) < 5) {
+            if (! is_array($row) || count($row) < 6) {
                 continue;
             }
 
             $open = (float) ($row[1] ?? 0);
+            $high = (float) ($row[2] ?? 0);
+            $low = (float) ($row[3] ?? 0);
             $close = (float) ($row[4] ?? 0);
+            $volume = (float) ($row[5] ?? 0);
 
-            if ($open <= 0 || $close <= 0) {
+            if ($open <= 0 || $high <= 0 || $low <= 0 || $close <= 0) {
                 continue;
             }
 
             $opens[] = $open;
+            $highs[] = $high;
+            $lows[] = $low;
             $closes[] = $close;
+            $volumes[] = max(0.0, $volume);
         }
 
         if (count($closes) < 3) {
@@ -1903,16 +1760,36 @@ class FutureTradeBotService
         // RSI(14) — requires 15+ candles
         $rsi14 = count($closes) >= 15 ? $this->calcRsi($closes, 14) : 50.0;
 
-        // EMA(9)/EMA(21) crossover — requires 21+ candles
+        // EMA stack and crossover
         $emaBullish = null;
+        $ema9 = 0.0;
+        $ema21 = 0.0;
+        $ema50 = 0.0;
+        $emaStackBullish = false;
+        $emaStackBearish = false;
         if (count($closes) >= 21) {
-            $ema9  = $this->calcEma($closes, 9);
+            $ema9 = $this->calcEma($closes, 9);
             $ema21 = $this->calcEma($closes, 21);
             $emaBullish = $ema9 > $ema21;
+            if (count($closes) >= 50) {
+                $ema50 = $this->calcEma($closes, 50);
+                $emaStackBullish = $ema9 > $ema21 && $ema21 > $ema50;
+                $emaStackBearish = $ema9 < $ema21 && $ema21 < $ema50;
+            }
         }
 
         // MACD(12,26,9) — requires 35+ candles
         $macd = count($closes) >= 35 ? $this->calcMacd($closes) : ['bullish' => null, 'histogram' => 0.0, 'histogramGrowing' => false];
+        $atr14 = count($closes) >= 15 ? $this->calcAtr($highs, $lows, $closes, 14) : 0.0;
+        $atrPercent = $last > 0 ? ($atr14 / $last) * 100 : 0.0;
+        $sessionVwap = $this->calcSessionVwap($highs, $lows, $closes, $volumes);
+        $volMa20 = count($volumes) >= 20 ? array_sum(array_slice($volumes, -20)) / 20 : (count($volumes) ? array_sum($volumes) / count($volumes) : 0.0);
+        $lastVolume = (float) (end($volumes) ?: 0.0);
+        $volumeOk = $volMa20 > 0 ? $lastVolume > ($volMa20 * 1.05) : false;
+        $adx14 = count($closes) >= 20 ? $this->calcAdx($highs, $lows, $closes, 14) : 0.0;
+        $extendedFromEma = $atr14 > 0 && $ema9 > 0 ? abs($last - $ema9) >= ($atr14 * 1.2) : false;
+        $extendedFromVwap = $atr14 > 0 && $sessionVwap > 0 ? abs($last - $sessionVwap) >= ($atr14 * 1.4) : false;
+        $utBot = count($closes) >= 12 ? $this->calcUtBot($closes, 10, 3.0) : ['signal' => 'WAIT', 'bias' => 'NEUTRAL', 'stop' => 0.0];
 
         return [
             'netChangePercent' => round($netChange, 4),
@@ -1923,9 +1800,26 @@ class FutureTradeBotService
             'impulse' => $impulse,
             'rsi14' => round($rsi14, 2),
             'emaBullish' => $emaBullish,
+            'ema9' => round($ema9, 6),
+            'ema21' => round($ema21, 6),
+            'ema50' => round($ema50, 6),
+            'emaStackBullish' => $emaStackBullish,
+            'emaStackBearish' => $emaStackBearish,
             'macdBullish' => $macd['bullish'],
             'macdHistogram' => round($macd['histogram'], 8),
             'macdHistogramGrowing' => $macd['histogramGrowing'],
+            'atr14' => round($atr14, 8),
+            'atrPercent' => round($atrPercent, 4),
+            'adx14' => round($adx14, 4),
+            'sessionVwap' => round($sessionVwap, 8),
+            'volumeOk' => $volumeOk,
+            'lastVolume' => round($lastVolume, 4),
+            'volumeMa20' => round($volMa20, 4),
+            'extendedFromEma' => $extendedFromEma,
+            'extendedFromVwap' => $extendedFromVwap,
+            'utSignal' => (string) ($utBot['signal'] ?? 'WAIT'),
+            'utBias' => (string) ($utBot['bias'] ?? 'NEUTRAL'),
+            'utStop' => round((float) ($utBot['stop'] ?? 0.0), 8),
         ];
     }
 
@@ -1940,9 +1834,26 @@ class FutureTradeBotService
             'impulse' => 'NEUTRAL',
             'rsi14' => 50.0,
             'emaBullish' => null,
+            'ema9' => 0.0,
+            'ema21' => 0.0,
+            'ema50' => 0.0,
+            'emaStackBullish' => false,
+            'emaStackBearish' => false,
             'macdBullish' => null,
             'macdHistogram' => 0.0,
             'macdHistogramGrowing' => false,
+            'atr14' => 0.0,
+            'atrPercent' => 0.0,
+            'adx14' => 0.0,
+            'sessionVwap' => 0.0,
+            'volumeOk' => false,
+            'lastVolume' => 0.0,
+            'volumeMa20' => 0.0,
+            'extendedFromEma' => false,
+            'extendedFromVwap' => false,
+            'utSignal' => 'WAIT',
+            'utBias' => 'NEUTRAL',
+            'utStop' => 0.0,
         ];
     }
 
@@ -2032,6 +1943,320 @@ class FutureTradeBotService
         return round(100 - (100 / (1 + $avgGain / $avgLoss)), 2);
     }
 
+    private function calcAtr(array $highs, array $lows, array $closes, int $period = 14): float
+    {
+        if (count($closes) < $period + 1 || count($highs) !== count($closes) || count($lows) !== count($closes)) {
+            return 0.0;
+        }
+
+        $trs = [];
+        for ($i = 1; $i < count($closes); $i++) {
+            $trs[] = max(
+                $highs[$i] - $lows[$i],
+                abs($highs[$i] - $closes[$i - 1]),
+                abs($lows[$i] - $closes[$i - 1])
+            );
+        }
+
+        if (count($trs) < $period) {
+            return 0.0;
+        }
+
+        $atr = array_sum(array_slice($trs, 0, $period)) / $period;
+        for ($i = $period; $i < count($trs); $i++) {
+            $atr = (($atr * ($period - 1)) + $trs[$i]) / $period;
+        }
+
+        return $atr;
+    }
+
+    private function calcAdx(array $highs, array $lows, array $closes, int $period = 14): float
+    {
+        $count = count($closes);
+        if ($count < ($period * 2) || count($highs) !== $count || count($lows) !== $count) {
+            return 0.0;
+        }
+
+        $trs = [];
+        $plusDm = [];
+        $minusDm = [];
+
+        for ($i = 1; $i < $count; $i++) {
+            $upMove = $highs[$i] - $highs[$i - 1];
+            $downMove = $lows[$i - 1] - $lows[$i];
+            $plusDm[] = ($upMove > $downMove && $upMove > 0) ? $upMove : 0.0;
+            $minusDm[] = ($downMove > $upMove && $downMove > 0) ? $downMove : 0.0;
+            $trs[] = max(
+                $highs[$i] - $lows[$i],
+                abs($highs[$i] - $closes[$i - 1]),
+                abs($lows[$i] - $closes[$i - 1])
+            );
+        }
+
+        if (count($trs) < $period + 1) {
+            return 0.0;
+        }
+
+        $tr14 = array_sum(array_slice($trs, 0, $period));
+        $plus14 = array_sum(array_slice($plusDm, 0, $period));
+        $minus14 = array_sum(array_slice($minusDm, 0, $period));
+        $dxValues = [];
+
+        for ($i = $period; $i < count($trs); $i++) {
+            $tr14 = $tr14 - ($tr14 / $period) + $trs[$i];
+            $plus14 = $plus14 - ($plus14 / $period) + $plusDm[$i];
+            $minus14 = $minus14 - ($minus14 / $period) + $minusDm[$i];
+            if ($tr14 <= 0) {
+                continue;
+            }
+
+            $plusDi = 100 * ($plus14 / $tr14);
+            $minusDi = 100 * ($minus14 / $tr14);
+            $sum = $plusDi + $minusDi;
+            if ($sum <= 0) {
+                continue;
+            }
+
+            $dxValues[] = 100 * abs($plusDi - $minusDi) / $sum;
+        }
+
+        if (count($dxValues) < $period) {
+            return count($dxValues) ? (float) end($dxValues) : 0.0;
+        }
+
+        $adx = array_sum(array_slice($dxValues, 0, $period)) / $period;
+        for ($i = $period; $i < count($dxValues); $i++) {
+            $adx = (($adx * ($period - 1)) + $dxValues[$i]) / $period;
+        }
+
+        return $adx;
+    }
+
+    private function calcSessionVwap(array $highs, array $lows, array $closes, array $volumes): float
+    {
+        $weighted = 0.0;
+        $volumeTotal = 0.0;
+
+        for ($i = 0; $i < count($closes); $i++) {
+            $price = (($highs[$i] ?? 0.0) + ($lows[$i] ?? 0.0) + ($closes[$i] ?? 0.0)) / 3;
+            $volume = (float) ($volumes[$i] ?? 0.0);
+            $weighted += $price * $volume;
+            $volumeTotal += $volume;
+        }
+
+        if ($volumeTotal <= 0) {
+            return (float) (end($closes) ?: 0.0);
+        }
+
+        return $weighted / $volumeTotal;
+    }
+
+    private function calcUtBot(array $closes, int $atrPeriod = 10, float $keyValue = 3.0): array
+    {
+        if (count($closes) < max($atrPeriod + 2, 12)) {
+            return ['signal' => 'WAIT', 'bias' => 'NEUTRAL', 'stop' => 0.0];
+        }
+
+        $trs = [];
+        for ($i = 1; $i < count($closes); $i++) {
+            $trs[] = abs($closes[$i] - $closes[$i - 1]);
+        }
+
+        $seed = array_sum(array_slice($trs, 0, min($atrPeriod, count($trs)))) / max(1, min($atrPeriod, count($trs)));
+        $atr = $seed;
+        foreach ($trs as $tr) {
+            $atr = (($atr * ($atrPeriod - 1)) + $tr) / $atrPeriod;
+        }
+
+        $nLoss = $keyValue * $atr;
+        $stop = (float) $closes[0];
+        $prevStop = $stop;
+        $prevClose = (float) $closes[0];
+        $signal = 'WAIT';
+        $bias = 'NEUTRAL';
+
+        for ($i = 1; $i < count($closes); $i++) {
+            $src = (float) $closes[$i];
+            $prevStop = $stop;
+            if ($src > $stop && $prevClose > $stop) {
+                $stop = max($stop, $src - $nLoss);
+            } elseif ($src < $stop && $prevClose < $stop) {
+                $stop = min($stop, $src + $nLoss);
+            } elseif ($src > $stop) {
+                $stop = $src - $nLoss;
+            } else {
+                $stop = $src + $nLoss;
+            }
+
+            if ($prevClose < $prevStop && $src > $stop) {
+                $signal = 'BUY';
+                $bias = 'BUY';
+            } elseif ($prevClose > $prevStop && $src < $stop) {
+                $signal = 'SELL';
+                $bias = 'SELL';
+            } else {
+                $bias = $src >= $stop ? 'BUY' : 'SELL';
+                if ($i < count($closes) - 1) {
+                    $signal = 'WAIT';
+                }
+            }
+
+            $prevClose = $src;
+        }
+
+        return ['signal' => $signal, 'bias' => $bias, 'stop' => $stop];
+    }
+
+    private function structureSnapshots(array $symbols, string $base): array
+    {
+        $cacheKey = 'future_trade_structure_v1_' . md5(implode(',', $symbols));
+        $cached = Cache::get($cacheKey);
+        if (is_array($cached)) {
+            return $cached;
+        }
+
+        $snapshots = [];
+        try {
+            $responses = Http::pool(function (Pool $pool) use ($symbols, $base) {
+                $requests = [];
+                foreach ($symbols as $symbol) {
+                    $requests[$symbol . '_15m'] = $pool->as($symbol . '_15m')->timeout(6)
+                        ->get($base . '/fapi/v1/klines', ['symbol' => $symbol, 'interval' => '15m', 'limit' => 80]);
+                }
+                return $requests;
+            });
+
+            foreach ($symbols as $symbol) {
+                try {
+                    $payload = $responses[$symbol . '_15m']?->json();
+                    $snapshots[$symbol] = $this->buildStructureSnapshot(is_array($payload) ? $payload : []);
+                } catch (Throwable) {
+                    $snapshots[$symbol] = $this->emptyStructureSnapshot();
+                }
+            }
+
+            if (! empty($snapshots)) {
+                Cache::put($cacheKey, $snapshots, 120);
+            }
+        } catch (Throwable) {
+            foreach ($symbols as $symbol) {
+                $snapshots[$symbol] = $this->emptyStructureSnapshot();
+            }
+        }
+
+        return $snapshots;
+    }
+
+    private function buildStructureSnapshot(array $candles): array
+    {
+        if (count($candles) < 20) {
+            return $this->emptyStructureSnapshot();
+        }
+
+        $opens = [];
+        $highs = [];
+        $lows = [];
+        $closes = [];
+
+        foreach ($candles as $row) {
+            if (! is_array($row) || count($row) < 5) {
+                continue;
+            }
+
+            $open = (float) ($row[1] ?? 0.0);
+            $high = (float) ($row[2] ?? 0.0);
+            $low = (float) ($row[3] ?? 0.0);
+            $close = (float) ($row[4] ?? 0.0);
+            if ($open <= 0 || $high <= 0 || $low <= 0 || $close <= 0) {
+                continue;
+            }
+
+            $opens[] = $open;
+            $highs[] = $high;
+            $lows[] = $low;
+            $closes[] = $close;
+        }
+
+        $count = count($closes);
+        if ($count < 20) {
+            return $this->emptyStructureSnapshot();
+        }
+
+        $lastClose = (float) $closes[$count - 1];
+        $lastHigh = (float) $highs[$count - 1];
+        $lastLow = (float) $lows[$count - 1];
+        $prevClose = (float) $closes[$count - 2];
+        $lookback = min(18, $count - 3);
+        $historyHighs = array_slice($highs, -($lookback + 3), $lookback + 1);
+        $historyLows = array_slice($lows, -($lookback + 3), $lookback + 1);
+        $pivotHigh = count($historyHighs) ? max($historyHighs) : $lastHigh;
+        $pivotLow = count($historyLows) ? min($historyLows) : $lastLow;
+
+        $bullishBreakout = $lastHigh > $pivotHigh && $lastClose > $pivotHigh && $lastClose > $prevClose;
+        $bearishBreakout = $lastLow < $pivotLow && $lastClose < $pivotLow && $lastClose < $prevClose;
+
+        $bullishObTop = 0.0;
+        $bullishObBottom = 0.0;
+        $bullishObFound = false;
+        if ($bullishBreakout) {
+            for ($i = max(0, $count - 12); $i < $count - 1; $i++) {
+                if ($opens[$i] > $closes[$i]) {
+                    $bullishObTop = $highs[$i];
+                    $bullishObBottom = $lows[$i];
+                    $bullishObFound = true;
+                }
+            }
+        }
+
+        $bearishObTop = 0.0;
+        $bearishObBottom = 0.0;
+        $bearishObFound = false;
+        if ($bearishBreakout) {
+            for ($i = max(0, $count - 12); $i < $count - 1; $i++) {
+                if ($opens[$i] < $closes[$i]) {
+                    $bearishObTop = $highs[$i];
+                    $bearishObBottom = $lows[$i];
+                    $bearishObFound = true;
+                }
+            }
+        }
+
+        $bullishObValid = $bullishObFound && $lastClose >= $bullishObBottom;
+        $bearishObValid = $bearishObFound && $lastClose <= $bearishObTop;
+        $signal = $bullishBreakout && $bullishObValid ? 'BUY' : ($bearishBreakout && $bearishObValid ? 'SELL' : 'WAIT');
+
+        return [
+            'signal' => $signal,
+            'bullishMsb' => $bullishBreakout,
+            'bearishMsb' => $bearishBreakout,
+            'bullishObValid' => $bullishObValid,
+            'bearishObValid' => $bearishObValid,
+            'pivotHigh' => round($pivotHigh, 8),
+            'pivotLow' => round($pivotLow, 8),
+            'bullishObTop' => round($bullishObTop, 8),
+            'bullishObBottom' => round($bullishObBottom, 8),
+            'bearishObTop' => round($bearishObTop, 8),
+            'bearishObBottom' => round($bearishObBottom, 8),
+        ];
+    }
+
+    private function emptyStructureSnapshot(): array
+    {
+        return [
+            'signal' => 'WAIT',
+            'bullishMsb' => false,
+            'bearishMsb' => false,
+            'bullishObValid' => false,
+            'bearishObValid' => false,
+            'pivotHigh' => 0.0,
+            'pivotLow' => 0.0,
+            'bullishObTop' => 0.0,
+            'bullishObBottom' => 0.0,
+            'bearishObTop' => 0.0,
+            'bearishObBottom' => 0.0,
+        ];
+    }
+
     private function higherTfSnapshots(array $symbols, array $settings, string $base): array
     {
         $cacheKey = 'future_trade_htf_v2_' . md5(implode(',', $symbols));
@@ -2046,7 +2271,7 @@ class FutureTradeBotService
                 $requests = [];
                 foreach ($symbols as $symbol) {
                     $requests[$symbol . '_1h'] = $pool->as($symbol . '_1h')->timeout(6)
-                        ->get($base . '/fapi/v1/klines', ['symbol' => $symbol, 'interval' => '1h', 'limit' => 55]);
+                        ->get($base . '/fapi/v1/klines', ['symbol' => $symbol, 'interval' => '1h', 'limit' => 220]);
                     $requests[$symbol . '_4h'] = $pool->as($symbol . '_4h')->timeout(6)
                         ->get($base . '/fapi/v1/klines', ['symbol' => $symbol, 'interval' => '4h', 'limit' => 55]);
                 }
@@ -2059,15 +2284,18 @@ class FutureTradeBotService
                     $last1h = end($closes1h) ?: 0.0;
                     $last4h = end($closes4h) ?: 0.0;
                     $ema50_1h = count($closes1h) >= 50 ? $this->calcEma($closes1h, 50) : 0.0;
+                    $ema200_1h = count($closes1h) >= 200 ? $this->calcEma($closes1h, 200) : 0.0;
                     $ema50_4h = count($closes4h) >= 50 ? $this->calcEma($closes4h, 50) : 0.0;
                     $snapshots[$symbol] = [
                         'emaBullish'   => $ema50_1h > 0 ? $last1h > $ema50_1h : null,  // 1h EMA50
                         'h4EmaBullish' => $ema50_4h > 0 ? $last4h > $ema50_4h : null,  // 4h EMA50
+                        'ema200Bullish' => $ema200_1h > 0 ? $last1h > $ema200_1h : null, // 1h EMA200
                         'ema50_1h'     => round($ema50_1h, 4),
                         'ema50_4h'     => round($ema50_4h, 4),
+                        'ema200_1h'    => round($ema200_1h, 4),
                     ];
                 } catch (Throwable) {
-                    $snapshots[$symbol] = ['emaBullish' => null, 'h4EmaBullish' => null, 'ema50_1h' => 0.0, 'ema50_4h' => 0.0];
+                    $snapshots[$symbol] = ['emaBullish' => null, 'h4EmaBullish' => null, 'ema200Bullish' => null, 'ema50_1h' => 0.0, 'ema50_4h' => 0.0, 'ema200_1h' => 0.0];
                 }
             }
             if (! empty($snapshots)) {
@@ -2075,7 +2303,7 @@ class FutureTradeBotService
             }
         } catch (Throwable) {
             foreach ($symbols as $symbol) {
-                $snapshots[$symbol] = ['emaBullish' => null, 'h4EmaBullish' => null, 'ema50_1h' => 0.0, 'ema50_4h' => 0.0];
+                $snapshots[$symbol] = ['emaBullish' => null, 'h4EmaBullish' => null, 'ema200Bullish' => null, 'ema50_1h' => 0.0, 'ema50_4h' => 0.0, 'ema200_1h' => 0.0];
             }
         }
         return $snapshots;
@@ -3511,3 +3739,4 @@ class FutureTradeBotService
         return str_contains($message, '-2022') || str_contains($message, 'ReduceOnly Order is rejected');
     }
 }
+
