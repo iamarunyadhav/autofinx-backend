@@ -1222,23 +1222,37 @@ class FutureTradeBotService
             'newClientOrderId' => substr('ft-entry-' . Str::uuid(), 0, 36),
             'positionSide' => 'BOTH',
         ]);
-
-        $entry = (float) ($response['avgPrice'] ?? 0) ?: $price;
+        $exchange = $this->exchangePositionSnapshot($client, $symbol);
+        $confirmedOpen = (float) ($exchange['quantity'] ?? 0) > 0
+            && (($exchange['position_side'] ?? null) === $positionSide);
+        $entry = (float) ($exchange['entry_price'] ?? 0)
+            ?: (float) ($response['avgPrice'] ?? 0)
+            ?: $price;
 
         $state = $this->state($config);
-        $this->persistState($state, [
-            'state' => 'LIVE_IN_POSITION',
-            'current_symbol' => $symbol,
-            'position_side' => $positionSide,
-            'entry_price' => $entry,
-            'quantity' => (float) $qty,
-            'peak_price' => $entry,
-            'bottom_price' => $entry,
-            'current_signal' => $signal['signal'] . '_LIVE_EXECUTED',
-            'trade_count_today' => (int) $state->trade_count_today + 1,
-            'status' => 'Running',
-            'connection_status' => 'Connected',
-        ]);
+        if ($confirmedOpen) {
+            $this->persistState($state, [
+                'state' => 'LIVE_IN_POSITION',
+                'current_symbol' => $symbol,
+                'position_side' => $positionSide,
+                'entry_price' => $entry,
+                'quantity' => (float) ($exchange['quantity'] ?? $qty),
+                'peak_price' => $entry,
+                'bottom_price' => $entry,
+                'current_signal' => $signal['signal'] . '_LIVE_EXECUTED',
+                'trade_count_today' => (int) $state->trade_count_today + 1,
+                'status' => 'Running',
+                'connection_status' => 'Connected',
+            ]);
+        } else {
+            $this->persistState($state, [
+                'state' => 'SCANNING',
+                'current_symbol' => $symbol,
+                'current_signal' => $signal['signal'] . '_LIVE_SUBMITTED',
+                'status' => 'Running',
+                'connection_status' => 'Pending exchange fill',
+            ]);
+        }
 
         $config->trades()->create([
             'symbol' => $symbol,
@@ -1249,9 +1263,10 @@ class FutureTradeBotService
             'fees' => $entry * (float) $qty * 0.0004,
             'reason' => 'LIVE_' . $signal['signal'] . '_SIGNAL',
             'mode' => $settings['forceTestnet'] ?? true ? 'LIVE_TESTNET' : 'LIVE',
-            'status' => 'OPEN',
+            'status' => $confirmedOpen ? 'OPEN' : 'SUBMITTED',
             'meta' => [
                 'entry_order' => $response,
+                'exchange_snapshot' => $exchange,
                 'exit_management' => 'BOT_MANAGED_MARKET_CLOSE',
                 'signal' => $signal,
                 'dynamic' => $dynamic['public'],
@@ -1261,12 +1276,14 @@ class FutureTradeBotService
         ]);
         $this->log(
             $config->fresh('state'),
-            'LIVE_' . $signal['signal'] . '_EXECUTED',
+            $confirmedOpen ? 'LIVE_' . $signal['signal'] . '_EXECUTED' : 'LIVE_ENTRY_SUBMITTED',
             $symbol,
             $signal['signal'],
             (float) $signal['confidence'],
-            'Live futures entry submitted. TP/SL/trailing are managed by the bot loop.',
-            $this->runtimeContext($dynamic, ['status' => 'OPEN', 'side' => $positionSide, 'entryPrice' => $entry, 'quantity' => (float) $qty, 'mode' => $settings['forceTestnet'] ?? true ? 'LIVE_TESTNET' : 'LIVE'])
+            $confirmedOpen
+                ? 'Live futures entry confirmed from Binance position snapshot. TP/SL/trailing are managed by the bot loop.'
+                : 'Live futures entry submitted, but Binance has not yet confirmed an open position snapshot.',
+            $this->runtimeContext($dynamic, ['status' => $confirmedOpen ? 'OPEN' : 'SUBMITTED', 'side' => $positionSide, 'entryPrice' => $entry, 'quantity' => (float) ($exchange['quantity'] ?? $qty), 'mode' => $settings['forceTestnet'] ?? true ? 'LIVE_TESTNET' : 'LIVE'])
         );
     }
 
@@ -1331,6 +1348,9 @@ class FutureTradeBotService
             throw $e;
         }
 
+        $postCloseExchange = $this->exchangePositionSnapshot($client, $symbol);
+        $positionClosed = (float) ($postCloseExchange['quantity'] ?? 0) <= 0;
+
         $direction = $state->position_side === 'LONG' ? 1 : -1;
         $entry = (float) $state->entry_price;
         $gross = ($price - $entry) * (float) $state->quantity * $direction;
@@ -1349,38 +1369,51 @@ class FutureTradeBotService
             'net_pnl' => $net,
             'reason' => $reason,
             'mode' => $settings['forceTestnet'] ?? true ? 'LIVE_TESTNET' : 'LIVE',
-            'status' => 'SUBMITTED',
-            'meta' => ['close_order' => $response, 'dynamic' => $dynamic['public'], 'algorithm_mode' => $dynamic['mode']],
+            'status' => $positionClosed ? 'FILLED' : 'SUBMITTED',
+            'meta' => ['close_order' => $response, 'exchange_snapshot' => $postCloseExchange, 'dynamic' => $dynamic['public'], 'algorithm_mode' => $dynamic['mode']],
         ]);
 
-        $this->persistState($state, [
-            'state' => 'COOLDOWN',
-            'position_side' => null,
-            'entry_price' => null,
-            'quantity' => 0,
-            'unrealized_pnl' => 0,
-            'unrealized_pnl_percent' => 0,
-            'realized_pnl' => (float) $state->realized_pnl + $net,
-            'daily_profit' => $net > 0 ? (float) $state->daily_profit + $net : (float) $state->daily_profit,
-            'daily_loss' => $net < 0 ? (float) $state->daily_loss + abs($net) : (float) $state->daily_loss,
-            'wins' => $net > 0 ? (int) $state->wins + 1 : (int) $state->wins,
-            'losses' => $net < 0 ? (int) $state->losses + 1 : (int) $state->losses,
-            'cooldown_until' => now()->addSeconds((int) ($settings['cooldownSeconds'] ?? 10)),
-            'current_signal' => $reason,
-            'status' => 'Running',
-            'connection_status' => 'Connected',
-        ]);
+        if ($positionClosed) {
+            $this->persistState($state, [
+                'state' => 'COOLDOWN',
+                'position_side' => null,
+                'entry_price' => null,
+                'quantity' => 0,
+                'unrealized_pnl' => 0,
+                'unrealized_pnl_percent' => 0,
+                'realized_pnl' => (float) $state->realized_pnl + $net,
+                'daily_profit' => $net > 0 ? (float) $state->daily_profit + $net : (float) $state->daily_profit,
+                'daily_loss' => $net < 0 ? (float) $state->daily_loss + abs($net) : (float) $state->daily_loss,
+                'wins' => $net > 0 ? (int) $state->wins + 1 : (int) $state->wins,
+                'losses' => $net < 0 ? (int) $state->losses + 1 : (int) $state->losses,
+                'cooldown_until' => now()->addSeconds((int) ($settings['cooldownSeconds'] ?? 10)),
+                'current_signal' => $reason,
+                'status' => 'Running',
+                'connection_status' => 'Connected',
+            ]);
+        } else {
+            $this->persistState($state, [
+                'state' => 'LIVE_IN_POSITION',
+                'status' => 'Running',
+                'current_signal' => 'LIVE_CLOSE_SUBMITTED',
+                'connection_status' => 'Waiting for Binance close confirmation',
+            ]);
+        }
         $this->log(
             $config->fresh('state'),
-            'LIVE_' . $reason,
+            $positionClosed ? 'LIVE_' . $reason : 'LIVE_CLOSE_SUBMITTED',
             $state->current_symbol,
             'CLOSE',
             1,
-            'Live futures reduce-only close submitted.',
-            $this->runtimeContext($dynamic, ['status' => $reason, 'side' => $state->position_side, 'entryPrice' => $entry, 'exitPrice' => $price, 'netPnl' => $net, 'mode' => $settings['forceTestnet'] ?? true ? 'LIVE_TESTNET' : 'LIVE'])
+            $positionClosed
+                ? 'Live futures close confirmed from Binance position snapshot.'
+                : 'Live futures reduce-only close submitted and is waiting for Binance confirmation.',
+            $this->runtimeContext($dynamic, ['status' => $positionClosed ? $reason : 'SUBMITTED', 'side' => $state->position_side, 'entryPrice' => $entry, 'exitPrice' => $price, 'netPnl' => $net, 'mode' => $settings['forceTestnet'] ?? true ? 'LIVE_TESTNET' : 'LIVE'])
         );
-        $freshConfig = $config->fresh('state');
-        $this->applyDailyLossLock($freshConfig, $this->state($freshConfig));
+        if ($positionClosed) {
+            $freshConfig = $config->fresh('state');
+            $this->applyDailyLossLock($freshConfig, $this->state($freshConfig));
+        }
     }
 
     private function closePaperPosition(FutureTradeBotConfig $config, float $price, string $reason): void
@@ -1478,9 +1511,6 @@ class FutureTradeBotService
         $volumeOk = (bool) ($sequence['volumeOk'] ?? false);
         $extendedFromEma = (bool) ($sequence['extendedFromEma'] ?? false);
         $extendedFromVwap = (bool) ($sequence['extendedFromVwap'] ?? false);
-        $utSignal = (string) ($sequence['utSignal'] ?? 'WAIT');
-        $utBias = (string) ($sequence['utBias'] ?? 'NEUTRAL');
-
         $structureSignal = (string) ($structure['signal'] ?? 'WAIT');
         $bullishMsb = (bool) ($structure['bullishMsb'] ?? false);
         $bearishMsb = (bool) ($structure['bearishMsb'] ?? false);
@@ -1516,7 +1546,6 @@ class FutureTradeBotService
         $avoidReasons = [];
 
         $buyChecks = [
-            'ut' => $utBias === 'BUY' && in_array($utSignal, ['BUY', 'WAIT'], true),
             'msb' => $bullishMsb,
             'ob' => $bullishObValid,
             'structure' => $structureSignal === 'BUY',
@@ -1533,7 +1562,6 @@ class FutureTradeBotService
         ];
 
         $sellChecks = [
-            'ut' => $utBias === 'SELL' && in_array($utSignal, ['SELL', 'WAIT'], true),
             'msb' => $bearishMsb,
             'ob' => $bearishObValid,
             'structure' => $structureSignal === 'SELL',
@@ -1549,43 +1577,58 @@ class FutureTradeBotService
             'sequence' => $strongDirectionalSequence && in_array($sequenceImpulse, ['SELL', 'NEUTRAL'], true),
         ];
 
-        $buyScore = count(array_filter($buyChecks));
-        $sellScore = count(array_filter($sellChecks));
-        $dominantSignal = $buyScore > $sellScore ? 'BUY' : ($sellScore > $buyScore ? 'SELL' : 'WAIT');
-        $dominantScore = max($buyScore, $sellScore);
-        $voteGap = abs($buyScore - $sellScore);
-        $conflicted = $buyScore >= 5 && $sellScore >= 5;
+        $buyCoreChecks = [
+            'vwap' => $buyChecks['vwap'],
+            'ema' => $buyChecks['ema'],
+            'adx' => $buyChecks['adx'],
+            'macd' => $buyChecks['macd'],
+        ];
+        $sellCoreChecks = [
+            'vwap' => $sellChecks['vwap'],
+            'ema' => $sellChecks['ema'],
+            'adx' => $sellChecks['adx'],
+            'macd' => $sellChecks['macd'],
+        ];
+        $buyCoreScore = count(array_filter($buyCoreChecks));
+        $sellCoreScore = count(array_filter($sellCoreChecks));
+        $buyScore = ($buyCoreScore * 2) + count(array_filter($buyChecks));
+        $sellScore = ($sellCoreScore * 2) + count(array_filter($sellChecks));
+        $dominantSignal = $buyCoreScore > $sellCoreScore
+            ? 'BUY'
+            : ($sellCoreScore > $buyCoreScore
+                ? 'SELL'
+                : ($buyScore > $sellScore ? 'BUY' : ($sellScore > $buyScore ? 'SELL' : 'WAIT')));
+        $dominantScore = max($buyCoreScore, $sellCoreScore);
+        $voteGap = abs($buyCoreScore - $sellCoreScore);
+        $conflicted = $buyCoreScore >= 3 && $sellCoreScore >= 3;
         $coreBuyAligned = count(array_filter([
-            $buyChecks['ut'] ?? false,
             $buyChecks['vwap'] ?? false,
             $buyChecks['ema'] ?? false,
             $buyChecks['adx'] ?? false,
+            $buyChecks['macd'] ?? false,
         ])) >= 3;
         $coreSellAligned = count(array_filter([
-            $sellChecks['ut'] ?? false,
             $sellChecks['vwap'] ?? false,
             $sellChecks['ema'] ?? false,
             $sellChecks['adx'] ?? false,
+            $sellChecks['macd'] ?? false,
         ])) >= 3;
         $configuredDirectionalScore = (int) ($settings['directionalMinScore5m'] ?? 5);
         $configuredVoteGap = (int) ($settings['directionalMinVoteGap5m'] ?? 1);
         $minimumDirectionalScore = $strictEntryGuards
-            ? count($buyChecks)
-            : ($isFastTimeframe ? max(4, $configuredDirectionalScore) : 5);
+            ? 4
+            : ($isFastTimeframe ? max(3, min(4, $configuredDirectionalScore)) : 3);
         $minimumVoteGap = $strictEntryGuards
-            ? count($buyChecks)
-            : ($isFastTimeframe ? max(0, $configuredVoteGap) : 1);
+            ? 2
+            : ($isFastTimeframe ? max(1, $configuredVoteGap) : 1);
         if (! $strictEntryGuards) {
             if (! $structureContextAvailable) {
-                $minimumDirectionalScore -= 2;
+                $minimumDirectionalScore -= 0;
             }
             if (! $higherTimeframeContextAvailable) {
-                $minimumDirectionalScore -= 1;
+                $minimumDirectionalScore -= 0;
             }
-            $minimumDirectionalScore = max($isFastTimeframe ? 4 : 3, $minimumDirectionalScore);
-            if (! $structureContextAvailable && ! $higherTimeframeContextAvailable) {
-                $minimumVoteGap = 0;
-            }
+            $minimumDirectionalScore = max(3, $minimumDirectionalScore);
         }
 
         $signal = 'WAIT';
@@ -1595,7 +1638,7 @@ class FutureTradeBotService
             ! $strictEntryGuards
             && $dominantSignal !== 'WAIT'
             && $voteGap >= 1
-            && $dominantScore >= 4
+            && $dominantScore >= 3
             && (
                 ($dominantSignal === 'BUY' && $coreBuyAligned)
                 || ($dominantSignal === 'SELL' && $coreSellAligned)
@@ -1608,9 +1651,9 @@ class FutureTradeBotService
             ! $strongDirectionalSequence
             || $conflicted
             || (($settings['avoidChoppyMarket'] ?? true) && $choppy && ! $volumeOk)
-            || $voteGap < 2
-            || ($dominantSignal === 'BUY' && ($utBias !== 'BUY' || ! $bullishMsb || ! $bullishObValid))
-            || ($dominantSignal === 'SELL' && ($utBias !== 'SELL' || ! $bearishMsb || ! $bearishObValid))
+            || ($dominantScore < 3)
+            || ($voteGap < 1)
+            || (($extendedFromEma || $extendedFromVwap) && ! $volumeOk)
         );
 
         if ($strictEntryGuards && ($fiveMinuteWeakSetup || (($settings['avoidChoppyMarket'] ?? true) && $choppy))) {
@@ -1630,9 +1673,6 @@ class FutureTradeBotService
                 'timeframe' => $tf,
             ]);
         } else {
-            if (! $buyChecks['ut'] && ! $sellChecks['ut']) {
-                $avoidReasons[] = 'UT Bot main trigger not aligned';
-            }
             if (! $bullishMsb && ! $bearishMsb) {
                 $avoidReasons[] = '15m market structure breakout not confirmed';
             }
@@ -1957,6 +1997,7 @@ class FutureTradeBotService
         $bearishRatio = $downCandles / $directionalCandles;
         $consistency = max($bullishRatio, $bearishRatio);
         $volatility = count($moves) ? array_sum($moves) / count($moves) : 0.0;
+        $volatility = $this->clamp($volatility, 0.0, 12.0);
 
         $recent = array_slice($closes, -3);
         $impulse = 'NEUTRAL';
@@ -2601,9 +2642,6 @@ class FutureTradeBotService
         $prefix = $side === 'BUY' ? 'bullish' : 'bearish';
         $tf = strtoupper((string) ($metrics['timeframe'] ?? '5m'));
 
-        if (($checks['ut'] ?? false) === true) {
-            $reasons[] = sprintf('UT Bot %s trigger aligned', $prefix);
-        }
         if (($checks['msb'] ?? false) === true || ($checks['ob'] ?? false) === true || ($checks['structure'] ?? false) === true) {
             $reasons[] = sprintf('15m %s structure confirmation present', $prefix);
         }
@@ -2640,7 +2678,6 @@ class FutureTradeBotService
         $positiveFactors = [];
         $negativeFactors = [];
         $labelMap = [
-            'ut' => 'UT Bot trigger',
             'msb' => '15m MSB',
             'ob' => '15m order block',
             'structure' => '15m structure signal',
@@ -2671,7 +2708,6 @@ class FutureTradeBotService
         $sequenceImpulse = (string) ($meta['sequenceImpulse'] ?? 'NEUTRAL');
         $directionalImpulseAligned = in_array($sequenceImpulse, [$side, 'NEUTRAL'], true);
 
-        $componentScores['ut'] = ($checks['ut'] ?? false) ? 0.22 : 0.0;
         $componentScores['structure'] = match (true) {
             $structureHits >= 3 => 0.05,
             $structureHits === 2 => 0.03,
@@ -2894,17 +2930,17 @@ class FutureTradeBotService
                 ->first();
         });
         if (! $stats || (int) $stats->total < 10) {
-            return 0.0; // insufficient data — no adjustment
+            return 0.0;
         }
         $winRate = (int) $stats->wins / (int) $stats->total;
         if ($winRate < 0.28) {
-            return -0.14; // very poor symbol — strongly penalize
+            return -0.04;
         }
         if ($winRate < 0.40) {
-            return -0.07; // below average
+            return -0.02;
         }
         if ($winRate >= 0.65) {
-            return +0.05; // proven good performer — slight bonus
+            return +0.04;
         }
         return 0.0;
     }
@@ -2951,7 +2987,7 @@ class FutureTradeBotService
             [$floor, $ceiling] = [$ceiling, $floor];
         }
 
-        $analysis = $this->trendAnalysis($state, $signals, $best, $settings);
+        $analysis = $this->trendAnalysis($config, $state, $signals, $best, $settings);
         $effective = $base;
         $adjustments = [];
         $next = $settings;
@@ -2966,6 +3002,7 @@ class FutureTradeBotService
             if ($mode === 'semi_dynamic') {
                 $winRate = (float) ($analysis['winRate'] ?? 0);
                 $sampleWeight = $this->clamp((float) ($analysis['winRateSampleWeight'] ?? 0), 0.0, 1.0);
+                $signalQuality = (float) ($analysis['signalQuality'] ?? 0.0);
                 if ($winRate > 0 && $sampleWeight >= 0.05) {
                     if ($winRate < 42) {
                         $effective += 0.008 + (0.018 * $sampleWeight);
@@ -2976,6 +3013,13 @@ class FutureTradeBotService
                         $adjustments[] = sprintf('Semi-dynamic: healthy recent accuracy over %d closes allows a small threshold reduction.', (int) ($analysis['totalTrades'] ?? 0));
                     }
                 }
+                if ($signalQuality < 0.42) {
+                    $effective += 0.018;
+                    $adjustments[] = 'Semi-dynamic: weak signal quality asks for slightly cleaner entries.';
+                } elseif ($signalQuality >= 0.68) {
+                    $effective -= 0.01;
+                    $adjustments[] = 'Semi-dynamic: strong live signal quality allows a small threshold reduction.';
+                }
                 if (($analysis['lastTradeReason'] ?? null) && str_contains((string) $analysis['lastTradeReason'], 'LOSS')) {
                     $effective += 0.015;
                     $next['cooldownSeconds'] = max($baseCooldown, 75);
@@ -2985,6 +3029,7 @@ class FutureTradeBotService
                     $adjustments[] = 'Semi-dynamic: recent take profit keeps a small re-entry buffer.';
                 }
             } else {
+                $signalQuality = (float) ($analysis['signalQuality'] ?? 0.0);
                 if ($analysis['choppy']) {
                     $effective += 0.02;
                     $next['takeProfitPercent'] = max(0.55, $baseTakeProfit * 0.82);
@@ -2998,6 +3043,13 @@ class FutureTradeBotService
                 } else {
                     $effective += $isFastTimeframe ? 0.003 : 0.005;
                     $adjustments[] = 'Mixed signal: keep entry slightly stricter.';
+                }
+                if ($signalQuality < 0.40) {
+                    $effective += 0.02;
+                    $adjustments[] = 'Low signal quality: raise confidence until the scanner quality improves.';
+                } elseif ($signalQuality >= 0.72) {
+                    $effective -= 0.015;
+                    $adjustments[] = 'High signal quality: allow earlier entries on strong live alignment.';
                 }
 
                 if ($strictEntryGuards && $analysis['confidenceGap'] < 0.025) {
@@ -3213,12 +3265,17 @@ class FutureTradeBotService
         return implode(' ', array_values(array_filter($parts)));
     }
 
-    private function trendAnalysis(FutureTradeBotState $state, array $signals, ?array $best, array $settings): array
+    private function trendAnalysis(FutureTradeBotConfig $config, FutureTradeBotState $state, array $signals, ?array $best, array $settings): array
     {
         $scanInterval = max(1, (int) ($settings['scanIntervalSeconds'] ?? 3));
         $lookbackMinutes = max(1, min(10, (int) ($settings['dynamicLookbackMinutes'] ?? 10)));
         $limit = max(8, min(120, (int) ceil(($lookbackMinutes * 60) / $scanInterval)));
-        $points = array_slice((array) ($state->chart_points ?? []), -$limit);
+        $referenceSymbol = strtoupper((string) ($best['symbol'] ?? $state->current_symbol ?? ''));
+        $allPoints = array_values((array) ($state->chart_points ?? []));
+        $filteredPoints = $referenceSymbol !== ''
+            ? array_values(array_filter($allPoints, fn (array $row) => strtoupper((string) ($row['symbol'] ?? '')) === $referenceSymbol))
+            : $allPoints;
+        $points = array_slice($filteredPoints !== [] ? $filteredPoints : $allPoints, -$limit);
         $prices = array_values(array_filter(array_map(fn ($row) => (float) ($row['price'] ?? 0), $points), fn ($value) => $value > 0));
         $first = $prices[0] ?? 0;
         $last = $prices[count($prices) - 1] ?? 0;
@@ -3259,10 +3316,14 @@ class FutureTradeBotService
         $stateSignal = (string) ($state->current_signal ?? '');
         $stateExitReasons = ['TAKE_PROFIT_HIT', 'TRAILING_PROFIT_HIT', 'STOP_LOSS_HIT', 'LOSS_ROLLBACK_TRIGGERED'];
         $stateReason = in_array($stateSignal, $stateExitReasons, true) ? $stateSignal : null;
-        $stateConfig = $state->relationLoaded('config') ? $state->getRelation('config') : null;
-        $lastTrade = (! $stateReason && $stateConfig) ? $stateConfig->trades()->where('status', 'FILLED')->orderByDesc('created_at')->first() : null;
-        $wins = (int) $state->wins;
-        $losses = (int) $state->losses;
+        $lookbackTrades = max(6, min(50, (int) ($settings['recentAccuracyLookbackTrades'] ?? 20)));
+        $recentTrades = $config->trades()
+            ->whereNotNull('net_pnl')
+            ->orderByDesc('created_at')
+            ->limit($lookbackTrades)
+            ->get(['net_pnl', 'reason']);
+        $wins = $recentTrades->filter(fn ($trade) => (float) $trade->net_pnl > 0)->count();
+        $losses = $recentTrades->filter(fn ($trade) => (float) $trade->net_pnl < 0)->count();
         $totalTrades = $wins + $losses;
         $winRate = $totalTrades > 0 ? round(($wins / $totalTrades) * 100, 2) : 0.0;
         $winRateSampleWeight = $this->clamp(($totalTrades - 3) / 12, 0, 1);
@@ -3292,7 +3353,7 @@ class FutureTradeBotService
             'choppy' => $choppy,
             'regime' => $regime,
             'bestConfidence' => round($bestConfidence, 4),
-            'lastTradeReason' => $stateReason ?: $lastTrade?->reason,
+            'lastTradeReason' => $stateReason ?: $recentTrades->first()?->reason,
             'winRate' => $winRate,
             'totalTrades' => $totalTrades,
             'winRateSampleWeight' => round($winRateSampleWeight, 4),
@@ -3334,7 +3395,7 @@ class FutureTradeBotService
         $chartAtr = count($moves) > 0 ? array_sum($moves) / count($moves) : 0.0;
         $signalRange = max(0.0, (float) ($best['rangePercent'] ?? 0));
 
-        return max($chartAtr * 1.35, $signalRange * 0.22, $chartAtr > 0 ? 0.08 : 0.12);
+        return $this->clamp(max($chartAtr * 1.35, $signalRange * 0.22, $chartAtr > 0 ? 0.08 : 0.12), 0.08, 15.0);
     }
 
     private function minimumSafeTradeAmountUsdt(float $baseTradeAmountUsdt, int $leverage, float $price, array $filters): ?float
