@@ -41,6 +41,11 @@ class FutureTradeBotConfig extends BaseModel
             $settings = array_merge($settings, (array) $presets[$preset], (array) $this->settings);
         }
 
+        $settings['indicatorInfluence'] = array_merge(
+            (array) config('future_trade.defaults.indicatorInfluence', []),
+            (array) ($settings['indicatorInfluence'] ?? [])
+        );
+
         return $settings;
     }
 

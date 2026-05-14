@@ -55,6 +55,8 @@ class FutureTradeBotService
 
     public function updateConfig(FutureTradeBotConfig $config, array $payload): FutureTradeBotConfig
     {
+        $beforeSettings = $config->mergedSettings();
+        $beforeNotes = (string) ($config->algorithm_notes ?? '');
         $settings = array_merge($config->mergedSettings(), (array) ($payload['settings'] ?? []));
         $liveRequested = (bool) ($settings['liveTrading'] ?? false);
         $forceTestnet = array_key_exists('forceTestnet', $settings)
@@ -72,16 +74,49 @@ class FutureTradeBotService
         $settings['liveTrading'] = $liveAllowed;
         $settings['paperTrading'] = ! $liveAllowed;
         $settings['forceTestnet'] = $forceTestnet;
+        $settings['indicatorInfluence'] = array_merge(
+            (array) config('future_trade.defaults.indicatorInfluence', []),
+            (array) ($settings['indicatorInfluence'] ?? [])
+        );
+
+        $newNotes = (string) ($payload['algorithm_notes'] ?? $config->algorithm_notes ?? '');
+        $auditChanges = $this->settingsDiff($beforeSettings, $settings);
+        if ($beforeNotes !== $newNotes) {
+            $auditChanges['algorithm_notes'] = [
+                'old' => $beforeNotes,
+                'new' => $newNotes,
+            ];
+        }
 
         $config->update([
             'paper_trading' => ! $liveAllowed,
             'enable_live_trading' => $liveAllowed,
             'settings' => $settings,
-            'algorithm_notes' => $payload['algorithm_notes'] ?? $config->algorithm_notes,
+            'algorithm_notes' => $newNotes,
         ]);
 
         if ($liveRequested && ! $liveAllowed) {
             $this->log($config->fresh('state'), 'LIVE_GUARD_BLOCKED', null, null, 0, 'Another live bot is already active for this workspace/account. Future Trade stays in paper mode.');
+        }
+
+        $auditUser = auth()->user();
+        if ($auditChanges !== []) {
+            $this->log(
+                $config->fresh('state'),
+                'CONFIG_AUDIT',
+                null,
+                null,
+                0,
+                'Future Trade Bot settings updated.',
+                [
+                    'changedFields' => array_keys($auditChanges),
+                    'changes' => $auditChanges,
+                    'userId' => $auditUser?->id,
+                    'userName' => $auditUser?->name,
+                    'userEmail' => $auditUser?->email,
+                    'updatedAt' => now()->toIso8601String(),
+                ]
+            );
         }
 
         $this->log($config->fresh('state'), 'CONFIG_UPDATED', null, null, 0, $liveAllowed ? 'Future Trade Bot config saved. ' . ($forceTestnet ? 'Testnet futures enabled.' : 'Live futures enabled.') : 'Future Trade Bot config saved. Paper trading active.');
@@ -813,7 +848,7 @@ class FutureTradeBotService
                 $signal['signal'],
                 (float) ($signal['confidence'] ?? 0),
                 'Outside configured trading hours (UTC).',
-                $this->runtimeContext($dynamic, ['status' => 'BLOCKED_HOURS']),
+                $this->runtimeContext($dynamic, ['status' => 'BLOCKED_HOURS'], $signal, ['outside_trading_hours']),
                 300
             );
             return;
@@ -827,7 +862,7 @@ class FutureTradeBotService
                 $signal['signal'],
                 (float) ($signal['confidence'] ?? 0),
                 'Emergency stop is enabled in algorithm config.',
-                $this->runtimeContext($dynamic, ['status' => 'BLOCKED']),
+                $this->runtimeContext($dynamic, ['status' => 'BLOCKED'], $signal, ['emergency_stop']),
                 30
             );
             return;
@@ -841,7 +876,7 @@ class FutureTradeBotService
                 $signal['signal'],
                 (float) ($signal['confidence'] ?? 0),
                 (string) ($signal['reason'] ?? 'Strategy returned WAIT.'),
-                $this->runtimeContext($dynamic, ['status' => 'SKIPPED']),
+                $this->runtimeContext($dynamic, ['status' => 'SKIPPED'], $signal, ['strategy_wait_signal']),
                 30
             );
             return;
@@ -855,7 +890,7 @@ class FutureTradeBotService
                 $signal['signal'],
                 $signal['confidence'],
                 'Confidence below dynamic threshold: needs ' . round((float) $settings['minConfidence'], 4),
-                $this->runtimeContext($dynamic, ['status' => 'SKIPPED'])
+                $this->runtimeContext($dynamic, ['status' => 'SKIPPED'], $signal, ['confidence_below_threshold'])
             );
             return;
         }
@@ -875,7 +910,7 @@ class FutureTradeBotService
                 $signal['signal'],
                 (float) ($signal['confidence'] ?? 0),
                 'Weak 5m setup rejected before execution.',
-                $this->runtimeContext($dynamic, ['status' => 'SKIPPED']),
+                $this->runtimeContext($dynamic, ['status' => 'SKIPPED'], $signal, ['weak_setup_hard_block']),
                 45
             );
             return;
@@ -889,7 +924,7 @@ class FutureTradeBotService
                 $signal['signal'],
                 (float) ($signal['confidence'] ?? 0),
                 'Trend-strength gate blocked entry: runtime trend strength is below 45%.',
-                $this->runtimeContext($dynamic, ['status' => 'SKIPPED']),
+                $this->runtimeContext($dynamic, ['status' => 'SKIPPED'], $signal, ['trend_strength_too_low']),
                 45
             );
             return;
@@ -907,7 +942,7 @@ class FutureTradeBotService
                 $signal['signal'],
                 (float) ($signal['confidence'] ?? 0),
                 sprintf('Poor regime guard blocked entry: %.2f%% win rate across %d closed trades.', (float) ($analysis['winRate'] ?? 0), (int) ($analysis['totalTrades'] ?? 0)),
-                $this->runtimeContext($dynamic, ['status' => 'SKIPPED']),
+                $this->runtimeContext($dynamic, ['status' => 'SKIPPED'], $signal, ['poor_regime_guard']),
                 60
             );
             return;
@@ -923,7 +958,7 @@ class FutureTradeBotService
                 $signal['signal'],
                 (float) ($signal['confidence'] ?? 0),
                 sprintf('R:R gate: TP %.2f%% < rollback %.2f%% × 1.8 — insufficient reward for risk.', $rrTp, $rrRollback),
-                $this->runtimeContext($dynamic, ['status' => 'BLOCKED']),
+                $this->runtimeContext($dynamic, ['status' => 'BLOCKED'], $signal, ['risk_reward_guard']),
                 60
             );
             return;
@@ -937,7 +972,7 @@ class FutureTradeBotService
                 $signal['signal'],
                 (float) ($signal['confidence'] ?? 0),
                 sprintf('Cooldown active until %s.', $state->cooldown_until->timezone(config('app.timezone'))->format('H:i:s')),
-                $this->runtimeContext($dynamic, ['status' => 'BLOCKED']),
+                $this->runtimeContext($dynamic, ['status' => 'BLOCKED'], $signal, ['cooldown_active']),
                 30
             );
             return;
@@ -951,7 +986,7 @@ class FutureTradeBotService
                 $signal['signal'],
                 $signal['confidence'],
                 'Max trades per day reached.',
-                $this->runtimeContext($dynamic, ['status' => 'BLOCKED'])
+                $this->runtimeContext($dynamic, ['status' => 'BLOCKED'], $signal, ['max_trades_per_day'])
             );
             return;
         }
@@ -964,7 +999,7 @@ class FutureTradeBotService
                 $signal['signal'],
                 $signal['confidence'],
                 'Daily loss guard active.',
-                $this->runtimeContext($dynamic, ['status' => 'BLOCKED'])
+                $this->runtimeContext($dynamic, ['status' => 'BLOCKED'], $signal, ['daily_loss_guard'])
             );
             return;
         }
@@ -985,7 +1020,7 @@ class FutureTradeBotService
                     $signal['signal'],
                     (float) ($signal['confidence'] ?? 0),
                     $e->getMessage(),
-                    $this->runtimeContext($dynamic, ['status' => 'ERROR']),
+                    $this->runtimeContext($dynamic, ['status' => 'ERROR'], $signal),
                     30
                 );
             }
@@ -1032,7 +1067,7 @@ class FutureTradeBotService
             $signal['signal'],
             $signal['confidence'],
             'Paper futures position opened.',
-            $this->runtimeContext($dynamic, ['status' => 'OPEN', 'side' => $side, 'entryPrice' => $price, 'quantity' => $qty, 'mode' => 'PAPER'])
+            $this->runtimeContext($dynamic, ['status' => 'OPEN', 'side' => $side, 'entryPrice' => $price, 'quantity' => $qty, 'mode' => 'PAPER'], $signal)
         );
         $allowedBecause = ['paper_entry_allowed'];
         if (($settings['weakSetupAction'] ?? 'reduce_size') === 'reduce_size' && (bool) ($signal['fastTimeframeWeakSetup'] ?? false)) {
@@ -1130,7 +1165,7 @@ class FutureTradeBotService
                     'status' => 'BLOCKED',
                     'availableBalance' => $availableBalance,
                     'requiredTradeAmountUsdt' => $requiredTradeAmountUsdt,
-                ])
+                ], $signal, ['insufficient_wallet_balance'])
             );
 
             return;
@@ -1177,7 +1212,7 @@ class FutureTradeBotService
                     'quantity' => $qtyFloat,
                     'stepSize' => $sizing['stepSize'],
                     'recommendedTradeAmountUsdt' => $this->minimumSafeTradeAmountUsdt((float) ($settings['tradeAmountUsdt'] ?? 25), $leverage, $price, $filters),
-                ])
+                ], $signal, ['rounded_quantity_zero'])
             );
 
             return;
@@ -1206,7 +1241,7 @@ class FutureTradeBotService
                     'leverage' => $leverage,
                     'stepSize' => $sizing['stepSize'],
                     'recommendedTradeAmountUsdt' => $this->minimumSafeTradeAmountUsdt((float) ($settings['tradeAmountUsdt'] ?? 25), $leverage, $price, $filters),
-                ])
+                ], $signal, ['min_notional_invalid'])
             );
 
             return;
@@ -1283,7 +1318,7 @@ class FutureTradeBotService
             $confirmedOpen
                 ? 'Live futures entry confirmed from Binance position snapshot. TP/SL/trailing are managed by the bot loop.'
                 : 'Live futures entry submitted, but Binance has not yet confirmed an open position snapshot.',
-            $this->runtimeContext($dynamic, ['status' => $confirmedOpen ? 'OPEN' : 'SUBMITTED', 'side' => $positionSide, 'entryPrice' => $entry, 'quantity' => (float) ($exchange['quantity'] ?? $qty), 'mode' => $settings['forceTestnet'] ?? true ? 'LIVE_TESTNET' : 'LIVE'])
+            $this->runtimeContext($dynamic, ['status' => $confirmedOpen ? 'OPEN' : 'SUBMITTED', 'side' => $positionSide, 'entryPrice' => $entry, 'quantity' => (float) ($exchange['quantity'] ?? $qty), 'mode' => $settings['forceTestnet'] ?? true ? 'LIVE_TESTNET' : 'LIVE'], $signal)
         );
     }
 
@@ -1591,6 +1626,7 @@ class FutureTradeBotService
         ];
         $buyCoreScore = count(array_filter($buyCoreChecks));
         $sellCoreScore = count(array_filter($sellCoreChecks));
+        $corePassRule = $this->resolveCorePassRule($settings['corePassRule'] ?? 3);
         $buyScore = ($buyCoreScore * 2) + count(array_filter($buyChecks));
         $sellScore = ($sellCoreScore * 2) + count(array_filter($sellChecks));
         $dominantSignal = $buyCoreScore > $sellCoreScore
@@ -1601,18 +1637,8 @@ class FutureTradeBotService
         $dominantScore = max($buyCoreScore, $sellCoreScore);
         $voteGap = abs($buyCoreScore - $sellCoreScore);
         $conflicted = $buyCoreScore >= 3 && $sellCoreScore >= 3;
-        $coreBuyAligned = count(array_filter([
-            $buyChecks['vwap'] ?? false,
-            $buyChecks['ema'] ?? false,
-            $buyChecks['adx'] ?? false,
-            $buyChecks['macd'] ?? false,
-        ])) >= 3;
-        $coreSellAligned = count(array_filter([
-            $sellChecks['vwap'] ?? false,
-            $sellChecks['ema'] ?? false,
-            $sellChecks['adx'] ?? false,
-            $sellChecks['macd'] ?? false,
-        ])) >= 3;
+        $coreBuyAligned = $buyCoreScore >= $corePassRule;
+        $coreSellAligned = $sellCoreScore >= $corePassRule;
         $configuredDirectionalScore = (int) ($settings['directionalMinScore5m'] ?? 5);
         $configuredVoteGap = (int) ($settings['directionalMinVoteGap5m'] ?? 1);
         $minimumDirectionalScore = $strictEntryGuards
@@ -1632,13 +1658,18 @@ class FutureTradeBotService
         }
 
         $signal = 'WAIT';
-        if ($dominantSignal !== 'WAIT' && $dominantScore >= $minimumDirectionalScore && $voteGap >= $minimumVoteGap) {
+        if (
+            $dominantSignal !== 'WAIT'
+            && $dominantScore >= $minimumDirectionalScore
+            && $dominantScore >= $corePassRule
+            && $voteGap >= $minimumVoteGap
+        ) {
             $signal = $dominantSignal;
         } elseif (
             ! $strictEntryGuards
             && $dominantSignal !== 'WAIT'
             && $voteGap >= 1
-            && $dominantScore >= 3
+            && $dominantScore >= $corePassRule
             && (
                 ($dominantSignal === 'BUY' && $coreBuyAligned)
                 || ($dominantSignal === 'SELL' && $coreSellAligned)
@@ -1738,6 +1769,9 @@ class FutureTradeBotService
                 'fiveMinuteWeakSetup' => $fiveMinuteWeakSetup,
                 'coreBuyAligned' => $coreBuyAligned,
                 'coreSellAligned' => $coreSellAligned,
+                'corePassRule' => $corePassRule,
+                'buyCoreChecks' => $buyCoreChecks,
+                'sellCoreChecks' => $sellCoreChecks,
                 'adx14' => $adx14,
                 'rsi14' => $rsi14,
                 'vwapBullish' => $vwapBullish,
@@ -1751,6 +1785,7 @@ class FutureTradeBotService
                 'symbolPerfAdjust' => $symbolPerfAdjust,
                 'sequenceLastCandleTime' => $sequenceLastCandleTime,
                 'htfLastCandleTime' => $htfLastCandleTime,
+                'influenceWeights' => (array) ($settings['indicatorInfluence'] ?? []),
             ]
         );
         $confidence = $this->clamp((float) ($componentDebug['finalConfidence'] ?? 0.01), 0.01, 0.99);
@@ -2675,8 +2710,10 @@ class FutureTradeBotService
     private function signalComponentDebug(string $side, array $checks, array $meta): array
     {
         $componentScores = [];
+        $componentBreakdown = [];
         $positiveFactors = [];
         $negativeFactors = [];
+        $influenceWeights = (array) ($meta['influenceWeights'] ?? []);
         $labelMap = [
             'msb' => '15m MSB',
             'ob' => '15m order block',
@@ -2708,53 +2745,77 @@ class FutureTradeBotService
         $sequenceImpulse = (string) ($meta['sequenceImpulse'] ?? 'NEUTRAL');
         $directionalImpulseAligned = in_array($sequenceImpulse, [$side, 'NEUTRAL'], true);
 
-        $componentScores['structure'] = match (true) {
-            $structureHits >= 3 => 0.05,
-            $structureHits === 2 => 0.03,
-            $structureHits === 1 => 0.01,
-            default => 0.0,
-        };
-        $componentScores['vwap'] = ($checks['vwap'] ?? false) ? 0.09 : 0.0;
-        $componentScores['ema'] = ($checks['ema'] ?? false) ? 0.09 : 0.0;
-        $componentScores['htf'] = ($checks['htf'] ?? false) ? 0.03 : 0.0;
-        $componentScores['macro'] = ($checks['macro'] ?? false) ? 0.02 : 0.0;
-        $componentScores['rsi'] = ($checks['rsi'] ?? false) ? 0.03 : 0.0;
-        $componentScores['macd'] = ($checks['macd'] ?? false) ? 0.03 : 0.0;
-        $componentScores['extension'] = ($checks['extension'] ?? false) ? 0.02 : 0.0;
-        $componentScores['adx'] = match (true) {
-            $adx >= 22.0 => 0.08,
-            $adx >= 18.0 => 0.06,
-            $adx >= 15.0 => 0.04,
-            default => 0.0,
-        };
-        $componentScores['volume'] = match (true) {
-            $volumeRatio >= 1.10 => 0.03,
-            $volumeRatio >= 0.95 => 0.02,
-            $volumeRatio >= 0.85 => 0.01,
-            default => 0.0,
-        };
-        $componentScores['sequence'] = match (true) {
-            ($meta['strongDirectionalSequence'] ?? false) === true => 0.05,
-            $directionalImpulseAligned && $sequenceConsistency >= ($isFastTimeframe ? 0.52 : 0.5) && $sequenceNetChange >= ($isFastTimeframe ? 0.08 : 0.06) => 0.02,
-            default => 0.0,
-        };
-        $componentScores['macdHistogramBonus'] = ($meta['macdHistGrowing'] ?? false) ? 0.02 : 0.0;
-        $componentScores['directionalSignalBonus'] = (($meta['signal'] ?? 'WAIT') !== 'WAIT' && ! ($meta['strictEntryGuards'] ?? false)) ? 0.08 : 0.0;
-        $componentScores['trendContinuationBonus'] = (
-            (($meta['signal'] ?? 'WAIT') !== 'WAIT')
-            && ($checks['vwap'] ?? false)
-            && ($checks['ema'] ?? false)
-            && ($checks['adx'] ?? false)
-        ) ? 0.05 : 0.0;
-        $componentScores['symbolPerfAdjust'] = round((float) ($meta['symbolPerfAdjust'] ?? 0.0), 4);
-        $componentScores['volumePenalty'] = ! ($checks['volume'] ?? false) ? -0.03 : 0.0;
-        $componentScores['macdPenalty'] = ! ($checks['macd'] ?? false) ? -0.03 : 0.0;
-        $componentScores['htfPenalty'] = ! ($checks['htf'] ?? false) ? -0.04 : 0.0;
-        $componentScores['structurePenalty'] = $componentScores['structure'] > 0 ? 0.0 : -0.03;
-        $componentScores['extensionPenalty'] = (($meta['extendedFromEma'] ?? false) === true || ($meta['extendedFromVwap'] ?? false) === true) ? -0.04 : 0.0;
-        $componentScores['rsiPenalty'] = ! ($checks['rsi'] ?? false) ? -0.02 : 0.0;
-        $componentScores['choppyPenalty'] = (($meta['choppy'] ?? false) === true) ? -0.02 : 0.0;
-        $componentScores['weakSetupPenalty'] = (($meta['fiveMinuteWeakSetup'] ?? false) === true) ? -0.02 : 0.0;
+        $components = [
+            'structure' => $this->weightedComponent(
+                'structurePositive',
+                match (true) {
+                    $structureHits >= 3 => 0.05,
+                    $structureHits === 2 => 0.03,
+                    $structureHits === 1 => 0.01,
+                    default => 0.0,
+                },
+                $influenceWeights,
+                '15m structure context',
+                'positive',
+                ['structure']
+            ),
+            'vwap' => $this->weightedComponent('vwapPositive', ($checks['vwap'] ?? false) ? 0.09 : 0.0, $influenceWeights, 'VWAP alignment', 'positive', ['vwap']),
+            'ema' => $this->weightedComponent('emaPositive', ($checks['ema'] ?? false) ? 0.09 : 0.0, $influenceWeights, '5m EMA(9/21/50) stack', 'positive', ['ema']),
+            'htf' => $this->weightedComponent('htfPositive', ($checks['htf'] ?? false) ? 0.03 : 0.0, $influenceWeights, '1h EMA50/200 filter', 'positive', ['htf']),
+            'macro' => $this->weightedComponent('macroPositive', ($checks['macro'] ?? false) ? 0.02 : 0.0, $influenceWeights, '4h EMA50 filter', 'positive', ['macro']),
+            'rsi' => $this->weightedComponent('rsiPositive', ($checks['rsi'] ?? false) ? 0.03 : 0.0, $influenceWeights, 'RSI window', 'positive', ['rsi']),
+            'macd' => $this->weightedComponent('macdPositive', ($checks['macd'] ?? false) ? 0.03 : 0.0, $influenceWeights, 'MACD direction', 'positive', ['macd']),
+            'extension' => $this->weightedComponent('extensionPositive', ($checks['extension'] ?? false) ? 0.02 : 0.0, $influenceWeights, 'Not overextended', 'positive', ['extension']),
+            'adx' => $this->weightedComponent('adxPositive', match (true) {
+                $adx >= 22.0 => 0.08,
+                $adx >= 18.0 => 0.06,
+                $adx >= 15.0 => 0.04,
+                default => 0.0,
+            }, $influenceWeights, 'ADX readiness', 'positive', ['adx']),
+            'volume' => $this->weightedComponent('volumePositive', match (true) {
+                $volumeRatio >= 1.10 => 0.03,
+                $volumeRatio >= 0.95 => 0.02,
+                $volumeRatio >= 0.85 => 0.01,
+                default => 0.0,
+            }, $influenceWeights, 'Volume confirmation', 'positive', ['volume']),
+            'sequence' => $this->weightedComponent('sequencePositive', match (true) {
+                ($meta['strongDirectionalSequence'] ?? false) === true => 0.05,
+                $directionalImpulseAligned && $sequenceConsistency >= ($isFastTimeframe ? 0.52 : 0.5) && $sequenceNetChange >= ($isFastTimeframe ? 0.08 : 0.06) => 0.02,
+                default => 0.0,
+            }, $influenceWeights, '5m directional sequence', 'positive', ['sequence']),
+            'macdHistogramBonus' => $this->weightedComponent('macdHistogramBonus', ($meta['macdHistGrowing'] ?? false) ? 0.02 : 0.0, $influenceWeights, 'MACD histogram bonus', 'positive'),
+            'directionalSignalBonus' => $this->weightedComponent('directionalSignalBonus', (($meta['signal'] ?? 'WAIT') !== 'WAIT' && ! ($meta['strictEntryGuards'] ?? false)) ? 0.08 : 0.0, $influenceWeights, 'Directional signal bonus', 'positive'),
+            'trendContinuationBonus' => $this->weightedComponent('trendContinuationBonus', (
+                (($meta['signal'] ?? 'WAIT') !== 'WAIT')
+                && ($checks['vwap'] ?? false)
+                && ($checks['ema'] ?? false)
+                && ($checks['adx'] ?? false)
+            ) ? 0.05 : 0.0, $influenceWeights, 'Trend continuation bonus', 'positive'),
+        ];
+
+        $symbolPerfAdjust = round((float) ($meta['symbolPerfAdjust'] ?? 0.0), 4);
+        $components['symbolPerfAdjust'] = $this->weightedComponent(
+            $symbolPerfAdjust >= 0 ? 'symbolPerfPositive' : 'symbolPerfPenalty',
+            $symbolPerfAdjust,
+            $influenceWeights,
+            'Symbol performance adjustment',
+            $symbolPerfAdjust >= 0 ? 'positive' : 'negative',
+            ['symbolPerfAdjust']
+        );
+
+        $components['volumePenalty'] = $this->weightedComponent('volumePenalty', ! ($checks['volume'] ?? false) ? -0.03 : 0.0, $influenceWeights, 'Volume confirmation penalty', 'negative');
+        $components['macdPenalty'] = $this->weightedComponent('macdPenalty', ! ($checks['macd'] ?? false) ? -0.03 : 0.0, $influenceWeights, 'MACD direction penalty', 'negative');
+        $components['htfPenalty'] = $this->weightedComponent('htfPenalty', ! ($checks['htf'] ?? false) ? -0.04 : 0.0, $influenceWeights, '1h filter penalty', 'negative');
+        $components['structurePenalty'] = $this->weightedComponent('structurePenalty', ($components['structure']['score'] ?? 0) > 0 ? 0.0 : -0.03, $influenceWeights, 'Structure penalty', 'negative');
+        $components['extensionPenalty'] = $this->weightedComponent('extensionPenalty', (($meta['extendedFromEma'] ?? false) === true || ($meta['extendedFromVwap'] ?? false) === true) ? -0.04 : 0.0, $influenceWeights, 'Entry extension penalty', 'negative');
+        $components['rsiPenalty'] = $this->weightedComponent('rsiPenalty', ! ($checks['rsi'] ?? false) ? -0.02 : 0.0, $influenceWeights, 'RSI penalty', 'negative');
+        $components['choppyPenalty'] = $this->weightedComponent('choppyPenalty', (($meta['choppy'] ?? false) === true) ? -0.02 : 0.0, $influenceWeights, 'Choppy market penalty', 'negative');
+        $components['weakSetupPenalty'] = $this->weightedComponent('weakSetupPenalty', (($meta['fiveMinuteWeakSetup'] ?? false) === true) ? -0.02 : 0.0, $influenceWeights, 'Weak setup penalty', 'negative');
+
+        foreach ($components as $key => $payload) {
+            $componentScores[$key] = $payload['score'];
+            $componentBreakdown[$key] = $payload['breakdown'];
+        }
 
         foreach ($labelMap as $key => $label) {
             if ($key === 'msb' || $key === 'ob' || $key === 'structure') {
@@ -2821,11 +2882,26 @@ class FutureTradeBotService
                 'minimumDirectionalScore' => (int) ($meta['minimumDirectionalScore'] ?? 0),
                 'voteGap' => (int) ($meta['voteGap'] ?? 0),
                 'minimumVoteGap' => (int) ($meta['minimumVoteGap'] ?? 0),
+                'corePassRule' => (int) ($meta['corePassRule'] ?? 3),
             ],
             'timing' => [
                 'sequenceLastCandleTime' => $meta['sequenceLastCandleTime'] ?? null,
                 'higherTimeframeLastCandleTime' => $meta['htfLastCandleTime'] ?? null,
             ],
+            'checks' => [
+                'vwapAligned' => (bool) ($checks['vwap'] ?? false),
+                'emaAligned' => (bool) ($checks['ema'] ?? false),
+                'adxValue' => round((float) ($meta['adx14'] ?? 0), 2),
+                'macdDirection' => (bool) ($checks['macd'] ?? false),
+                'rsiValue' => round((float) ($meta['rsi14'] ?? 0), 2),
+                'volumeAligned' => (bool) ($checks['volume'] ?? false),
+                'volumeRatio' => round($volumeRatio, 4),
+                'htfAligned' => (bool) ($checks['htf'] ?? false),
+                'corePassRule' => (int) ($meta['corePassRule'] ?? 3),
+                'buyCoreChecks' => (array) ($meta['buyCoreChecks'] ?? []),
+                'sellCoreChecks' => (array) ($meta['sellCoreChecks'] ?? []),
+            ],
+            'componentBreakdown' => $componentBreakdown,
         ];
     }
 
@@ -2837,14 +2913,7 @@ class FutureTradeBotService
         array $hardBlockers = [],
         array $allowedBecause = []
     ): void {
-        $negativeFactors = array_values((array) data_get($signal, 'debug.negativeFactors', []));
-        $softPenalties = array_values(array_filter($negativeFactors, function (string $factor): bool {
-            $normalized = strtolower($factor);
-
-            return ! str_contains($normalized, 'confidence below')
-                && ! str_contains($normalized, 'directional gate not cleared')
-                && ! str_contains($normalized, 'weak-setup guard active');
-        }));
+        $softPenalties = $this->softPenaltiesFromSignal($signal);
 
         $this->safeDebugLog('[TRADE DECISION DEBUG]', [
             'workspaceId' => (string) $config->workspace_id,
@@ -2860,6 +2929,93 @@ class FutureTradeBotService
             'allowedBecause' => array_values($allowedBecause),
             'finalDecision' => $finalDecision,
         ]);
+    }
+
+    private function softPenaltiesFromSignal(array $signal): array
+    {
+        $negativeFactors = array_values((array) data_get($signal, 'debug.negativeFactors', []));
+
+        return array_values(array_filter($negativeFactors, function (string $factor): bool {
+            $normalized = strtolower($factor);
+
+            return ! str_contains($normalized, 'confidence below')
+                && ! str_contains($normalized, 'directional gate not cleared')
+                && ! str_contains($normalized, 'weak-setup guard active');
+        }));
+    }
+
+    private function influenceScore(string $key, float $base, array $weights = [], array $fallbackKeys = []): float
+    {
+        $multiplier = $this->influenceMultiplier($key, $weights, $fallbackKeys);
+
+        return round($base * $multiplier, 4);
+    }
+
+    private function influenceMultiplier(string $key, array $weights = [], array $fallbackKeys = []): float
+    {
+        $candidates = array_values(array_unique(array_merge([$key], $fallbackKeys)));
+        foreach ($candidates as $candidate) {
+            if (! array_key_exists($candidate, $weights)) {
+                continue;
+            }
+
+            $raw = (float) $weights[$candidate];
+            $normalized = $raw > 2.0 ? ($raw / 5.0) : $raw;
+
+            return $this->clamp($normalized, 0.0, 2.0);
+        }
+
+        return 1.0;
+    }
+
+    private function weightedComponent(
+        string $key,
+        float $base,
+        array $weights,
+        string $label,
+        string $impact,
+        array $fallbackKeys = []
+    ): array {
+        $multiplier = $this->influenceMultiplier($key, $weights, $fallbackKeys);
+        $score = round($base * $multiplier, 4);
+
+        return [
+            'score' => $score,
+            'breakdown' => [
+                'key' => $key,
+                'label' => $label,
+                'rawScore' => round($base, 4),
+                'influenceLevel' => round($multiplier, 4),
+                'finalContribution' => $score,
+                'impact' => $impact,
+            ],
+        ];
+    }
+
+    private function resolveCorePassRule(mixed $value): int
+    {
+        return (int) $this->clamp((float) ((int) $value ?: 3), 2.0, 4.0);
+    }
+
+    private function settingsDiff(array $before, array $after): array
+    {
+        $changes = [];
+        $keys = array_unique(array_merge(array_keys(Arr::dot($before)), array_keys(Arr::dot($after))));
+
+        foreach ($keys as $key) {
+            $oldValue = data_get($before, $key);
+            $newValue = data_get($after, $key);
+            if ($oldValue === $newValue) {
+                continue;
+            }
+
+            $changes[$key] = [
+                'old' => $oldValue,
+                'new' => $newValue,
+            ];
+        }
+
+        return $changes;
     }
 
     private function liveStatusPayload(FutureTradeBotConfig $config, FutureTradeBotState $state, ?array $bestSignal, array $signals, array $settings): array
@@ -2997,6 +3153,11 @@ class FutureTradeBotService
         $baseRollback = (float) ($settings['rollbackLossPercent'] ?? 0.18);
         $baseCooldown = max(10, (int) ($settings['cooldownSeconds'] ?? 60));
         $baseTradeAmount = max(25.0, (float) ($settings['tradeAmountUsdt'] ?? 25));
+        $dynamicWeights = (array) ($settings['indicatorInfluence'] ?? []);
+        $recentAccuracyWeight = $this->influenceMultiplier('recentAccuracyWeight', $dynamicWeights);
+        $lossStreakWeight = $this->influenceMultiplier('lossStreakWeight', $dynamicWeights);
+        $atrWeight = $this->influenceMultiplier('atrWeight', $dynamicWeights);
+        $volatilityWeight = $this->influenceMultiplier('volatilityWeight', $dynamicWeights);
 
         if ($mode !== 'fixed') {
             if ($mode === 'semi_dynamic') {
@@ -3005,11 +3166,11 @@ class FutureTradeBotService
                 $signalQuality = (float) ($analysis['signalQuality'] ?? 0.0);
                 if ($winRate > 0 && $sampleWeight >= 0.05) {
                     if ($winRate < 42) {
-                        $effective += 0.008 + (0.018 * $sampleWeight);
+                        $effective += (0.008 + (0.018 * $sampleWeight)) * $recentAccuracyWeight;
                         $next['tradeAmountUsdt'] = max(25, $baseTradeAmount * (1 - (0.05 + (0.10 * $sampleWeight))));
                         $adjustments[] = sprintf('Semi-dynamic: weak recent accuracy over %d closes raises confidence slightly.', (int) ($analysis['totalTrades'] ?? 0));
                     } elseif ($winRate >= 58) {
-                        $effective -= 0.004 + (0.012 * $sampleWeight);
+                        $effective -= (0.004 + (0.012 * $sampleWeight)) * $recentAccuracyWeight;
                         $adjustments[] = sprintf('Semi-dynamic: healthy recent accuracy over %d closes allows a small threshold reduction.', (int) ($analysis['totalTrades'] ?? 0));
                     }
                 }
@@ -3021,8 +3182,8 @@ class FutureTradeBotService
                     $adjustments[] = 'Semi-dynamic: strong live signal quality allows a small threshold reduction.';
                 }
                 if (($analysis['lastTradeReason'] ?? null) && str_contains((string) $analysis['lastTradeReason'], 'LOSS')) {
-                    $effective += 0.015;
-                    $next['cooldownSeconds'] = max($baseCooldown, 75);
+                    $effective += 0.015 * $lossStreakWeight;
+                    $next['cooldownSeconds'] = max($baseCooldown, (int) round(75 * max(0.8, $lossStreakWeight)));
                     $adjustments[] = 'Semi-dynamic: recent loss applies a mild confidence and cooldown increase.';
                 } elseif (($analysis['lastTradeReason'] ?? null) && str_contains((string) $analysis['lastTradeReason'], 'TAKE_PROFIT')) {
                     $effective += (float) ($settings['dynamicReentryBuffer'] ?? 0.02) * 0.5;
@@ -3070,8 +3231,8 @@ class FutureTradeBotService
                 }
 
                 if ($analysis['lastTradeReason'] && str_contains($analysis['lastTradeReason'], 'LOSS')) {
-                    $effective += 0.045;
-                    $next['cooldownSeconds'] = max($baseCooldown, 120);
+                    $effective += 0.045 * $lossStreakWeight;
+                    $next['cooldownSeconds'] = max($baseCooldown, (int) round(120 * max(0.8, $lossStreakWeight)));
                     $adjustments[] = 'Recent loss: raise threshold and extend cooldown.';
                 } elseif ($analysis['lastTradeReason'] && str_contains($analysis['lastTradeReason'], 'TAKE_PROFIT')) {
                     $effective += (float) ($settings['dynamicReentryBuffer'] ?? 0.02) * 0.7;
@@ -3086,11 +3247,11 @@ class FutureTradeBotService
                 }
 
                 if ($winRate > 0 && $winRate < 45 && $sampleWeight >= 0.05) {
-                    $effective += 0.006 + (0.012 * $sampleWeight);
+                    $effective += (0.006 + (0.012 * $sampleWeight)) * $recentAccuracyWeight;
                     $next['tradeAmountUsdt'] = max(25, $baseTradeAmount * (1 - (0.10 + (0.15 * $sampleWeight))));
                     $adjustments[] = sprintf('Weak win rate over %d closed trades: reduce size and demand cleaner entries.', $totalTrades);
                 } elseif ($winRate >= 62 && $analysis['trendStrength'] >= 0.55 && $sampleWeight >= 0.35) {
-                    $effective -= 0.006 + (0.014 * $sampleWeight);
+                    $effective -= (0.006 + (0.014 * $sampleWeight)) * $recentAccuracyWeight;
                     $adjustments[] = sprintf('Healthy win rate over %d closed trades with trend support: modestly loosen entry.', $totalTrades);
                 }
 
@@ -3109,6 +3270,7 @@ class FutureTradeBotService
                     'range' => $atrPercent * 0.60,
                     default => $atrPercent * 0.66,
                 };
+                $atrStop *= max(0.6, $atrWeight);
                 $dynamicStop = $this->clamp(max($stopFloor, $atrStop), $stopFloor, $stopCeiling);
                 $rewardMultiple = match ($regime) {
                     'trend' => 2.3,
@@ -3124,7 +3286,7 @@ class FutureTradeBotService
                     'range' => max($baseCooldown, 90),
                     default => max($baseCooldown, 75),
                 };
-                $volatilityCooldown = (int) round($volatilityPercent * 160);
+                $volatilityCooldown = (int) round($volatilityPercent * 160 * max(0.6, $volatilityWeight));
                 $dynamicCooldown = (int) $this->clamp((float) max($cooldownBase, $volatilityCooldown), 45.0, 180.0);
                 if ($analysis['lastTradeReason'] && str_contains($analysis['lastTradeReason'], 'LOSS')) {
                     $dynamicCooldown = max($dynamicCooldown, 120);
@@ -4005,16 +4167,21 @@ class FutureTradeBotService
         };
     }
 
-    private function runtimeContext(?array $dynamic, array $extra = []): array
+    private function runtimeContext(?array $dynamic, array $extra = [], ?array $signal = null, array $hardBlockers = []): array
     {
         $public = (array) ($dynamic['public'] ?? $dynamic ?? []);
         $recommended = (array) ($public['recommended'] ?? []);
         $analysis = (array) ($public['analysis'] ?? []);
+        $signalDebug = (array) (($signal['debug'] ?? []));
+        $componentScores = (array) ($signalDebug['componentScores'] ?? []);
+        $softPenalties = $signal ? $this->softPenaltiesFromSignal($signal) : [];
+        $checks = (array) ($signalDebug['checks'] ?? []);
 
         return array_filter(array_merge([
             'algorithmMode' => $public['mode'] ?? null,
             'algorithmFlag' => isset($public['mode']) ? $this->algorithmFlag((string) $public['mode']) : null,
             'effectiveMinConfidence' => $public['effectiveMinConfidence'] ?? null,
+            'activeConfidenceMin' => $public['effectiveMinConfidence'] ?? null,
             'activeTakeProfitPercent' => $recommended['takeProfitPercent'] ?? null,
             'activeStopLossPercent' => $recommended['stopLossPercent'] ?? null,
             'activeTrailingTakeProfitPercent' => $recommended['trailingTakeProfitPercent'] ?? null,
@@ -4023,6 +4190,22 @@ class FutureTradeBotService
             'trendStrength' => $analysis['trendStrength'] ?? null,
             'directionAgreement' => $analysis['directionAgreement'] ?? null,
             'choppy' => $analysis['choppy'] ?? null,
+            'vwapAligned' => $checks['vwapAligned'] ?? null,
+            'emaAligned' => $checks['emaAligned'] ?? null,
+            'adxValue' => $checks['adxValue'] ?? null,
+            'macdDirection' => $checks['macdDirection'] ?? null,
+            'rsiValue' => $checks['rsiValue'] ?? null,
+            'volumeAligned' => $checks['volumeAligned'] ?? null,
+            'volumeRatio' => $checks['volumeRatio'] ?? null,
+            'htfAligned' => $checks['htfAligned'] ?? null,
+            'softPenaltyCount' => count($softPenalties),
+            'softPenalties' => $softPenalties ?: null,
+            'hardBlocker' => $hardBlockers[0] ?? null,
+            'hardBlockers' => $hardBlockers ?: null,
+            'positiveFactors' => $signalDebug['positiveFactors'] ?? null,
+            'negativeFactors' => $signalDebug['negativeFactors'] ?? null,
+            'componentScores' => $componentScores ?: null,
+            'componentBreakdown' => $signalDebug['componentBreakdown'] ?? null,
         ], $extra), static fn ($value) => $value !== null);
     }
 
