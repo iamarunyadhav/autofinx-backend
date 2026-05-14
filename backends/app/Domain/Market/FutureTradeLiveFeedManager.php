@@ -50,11 +50,13 @@ class FutureTradeLiveFeedManager
 
         return [
             'running' => $running,
+            'startSupported' => $this->canSpawnDaemon(),
             'pid' => $pid > 0 ? $pid : null,
             'mode' => $mode,
             'dataSource' => $running ? 'BINANCE_FUTURES_WEBSOCKET' : 'BINANCE_FUTURES_REST_FALLBACK',
             'startedAt' => $meta['started_at'] ?? null,
             'command' => $meta['command'] ?? $this->commandLine($desiredSymbols),
+            'manualCommand' => $this->manualStartCommand($desiredSymbols),
             'logPath' => $meta['log_path'] ?? $this->outLogPath(),
             'errorLogPath' => $meta['error_log_path'] ?? $this->errLogPath(),
             'workspaceScope' => 'global_shared',
@@ -69,7 +71,9 @@ class FutureTradeLiveFeedManager
                 ? ($symbolSetInSync
                     ? ($isFresh ? 'Shared futures websocket feed is live.' : 'Daemon is running, waiting for a fresh futures tick.')
                     : 'Daemon is running, but symbol list changed. Restart recommended.')
-                : 'Daemon is offline. UI is using REST fallback.',
+                : ($this->canSpawnDaemon()
+                    ? 'Daemon is offline. UI is using REST fallback.'
+                    : 'Daemon is offline. shell_exec is disabled on this server, so start it manually from terminal.'),
         ];
     }
 
@@ -77,6 +81,12 @@ class FutureTradeLiveFeedManager
     {
         $status = $this->status();
         if ($status['running']) {
+            return $status;
+        }
+        if (! $this->canSpawnDaemon()) {
+            $status['message'] = 'shell_exec is disabled on this server. Start the daemon manually using the provided command.';
+            $status['manualRequired'] = true;
+
             return $status;
         }
 
@@ -192,7 +202,7 @@ class FutureTradeLiveFeedManager
 
         $script = "\$p = Start-Process -FilePath '{$php}' -ArgumentList {$argList} -WorkingDirectory '" . str_replace("'", "''", base_path()) . "' -WindowStyle Hidden -RedirectStandardOutput '{$outLog}' -RedirectStandardError '{$errLog}' -PassThru; \$p.Id";
         $command = 'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "' . str_replace('"', '\"', $script) . '"';
-        $output = shell_exec($command);
+        $output = $this->runShellCommand($command);
 
         return (int) trim((string) $output);
     }
@@ -210,7 +220,7 @@ class FutureTradeLiveFeedManager
         $cwd = escapeshellarg(base_path());
 
         $command = "cd {$cwd} && nohup {$php} {$artisan} future-trade:live-feed --symbols={$symbolsArg} --streams=" . escapeshellarg(self::STREAMS) . " --reconnect-sleep=2 >> {$outLog} 2>> {$errLog} & echo $!";
-        $output = shell_exec("bash -lc " . escapeshellarg($command));
+        $output = $this->runShellCommand("bash -lc " . escapeshellarg($command));
 
         return (int) trim((string) $output);
     }
@@ -218,7 +228,7 @@ class FutureTradeLiveFeedManager
     private function terminate(int $pid): void
     {
         if (PHP_OS_FAMILY === 'Windows') {
-            shell_exec('taskkill /PID ' . $pid . ' /T /F');
+            $this->runShellCommand('taskkill /PID ' . $pid . ' /T /F');
 
             return;
         }
@@ -233,7 +243,7 @@ class FutureTradeLiveFeedManager
             return;
         }
 
-        shell_exec('kill -TERM ' . $pid);
+        $this->runShellCommand('kill -TERM ' . $pid);
     }
 
     private function isProcessRunning(int $pid): bool
@@ -243,7 +253,7 @@ class FutureTradeLiveFeedManager
         }
 
         if (PHP_OS_FAMILY === 'Windows') {
-            $output = shell_exec('tasklist /FI "PID eq ' . $pid . '" /FO CSV /NH');
+            $output = $this->runShellCommand('tasklist /FI "PID eq ' . $pid . '" /FO CSV /NH');
 
             return is_string($output) && str_contains($output, '"' . $pid . '"');
         }
@@ -252,9 +262,23 @@ class FutureTradeLiveFeedManager
             return @posix_kill($pid, 0);
         }
 
-        $output = shell_exec('ps -p ' . $pid . ' -o pid=');
+        $output = $this->runShellCommand('ps -p ' . $pid . ' -o pid=');
 
         return trim((string) $output) !== '';
+    }
+
+    private function canSpawnDaemon(): bool
+    {
+        return \function_exists('shell_exec');
+    }
+
+    private function runShellCommand(string $command): ?string
+    {
+        if (! \function_exists('shell_exec')) {
+            return null;
+        }
+
+        return \shell_exec($command);
     }
 
     private function ensureRuntimePaths(): void
@@ -319,6 +343,27 @@ class FutureTradeLiveFeedManager
             base_path('artisan'),
             implode(',', $symbols),
             self::STREAMS
+        ));
+    }
+
+    /**
+     * @param  string[]  $symbols
+     */
+    private function manualStartCommand(array $symbols): string
+    {
+        if (PHP_OS_FAMILY === 'Windows') {
+            return $this->commandLine($symbols);
+        }
+
+        return trim(sprintf(
+            'cd %s && nohup %s %s future-trade:live-feed --symbols=%s --streams=%s --reconnect-sleep=2 >> %s 2>> %s &',
+            base_path(),
+            $this->phpBinary(),
+            base_path('artisan'),
+            implode(',', $symbols),
+            self::STREAMS,
+            $this->outLogPath(),
+            $this->errLogPath()
         ));
     }
 
