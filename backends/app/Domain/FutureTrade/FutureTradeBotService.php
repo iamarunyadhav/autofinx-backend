@@ -3,14 +3,17 @@
 namespace App\Domain\FutureTrade;
 
 use App\Domain\Exchange\BinanceFuturesClient;
+use App\Domain\Market\MarketPriceCacheService;
 use App\Domain\Ops\OperationalHealthService;
 use App\Domain\Portfolio\LivePortfolioGuardService;
 use App\Domain\Trading\FuturesOrderSizingService;
 use App\Models\FutureTradeBotConfig;
 use App\Models\FutureTradeBotState;
+use App\Models\MarketOhlc;
 use App\Models\SchedulerRun;
 use Illuminate\Http\Client\Pool;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
@@ -458,6 +461,7 @@ class FutureTradeBotService
             'winRate' => round(($wins / $total) * 100, 2),
             'tradeCountToday' => (int) $state->trade_count_today,
             'lastScanAt' => optional($state->last_scan_at)->toIso8601String(),
+            'liveStatus' => $this->liveStatusPayload($state, $bestSignal, $signals, $settings),
             'settings' => $settings,
             'dynamic' => $dynamic['public'],
             'paperTrading' => ! $this->isLiveMode($config),
@@ -507,6 +511,7 @@ class FutureTradeBotService
             'chart' => $state->chart_points ?? [],
             'marketChart' => $this->marketChartPayload($marketChartSymbol, $marketTimeframe, 180, $marketCandles),
             'indicatorSuite' => $this->indicatorSuitePayload($marketCandles, $bestSignal, $effectiveSettings, $marketTimeframe),
+            'signalDebug' => $bestSignal['debug'] ?? null,
             'levels' => [
                 'entry' => $entry ?: null,
 	                'stopLoss' => $entry ? $this->stopLossPrice($entry, (string) $state->position_side, $effectiveSettings) : null,
@@ -1421,15 +1426,17 @@ class FutureTradeBotService
         $htfEma200Bullish = isset($htf['ema200Bullish']) ? (bool) $htf['ema200Bullish'] : null;
         $higherTimeframeContextAvailable = $htfBullish !== null || $htf4hBullish !== null || $htfEma200Bullish !== null;
         $symbolPerfAdjust = (float) ($ticker['symbolPerfAdjust'] ?? 0.0);
+        $sequenceLastCandleTime = $sequence['lastCandleTime'] ?? null;
+        $htfLastCandleTime = $htf['lastCandleTime_1h'] ?? null;
 
         $effectiveVwap = $sessionVwap > 0 ? $sessionVwap : $vwap;
         $vwapBullish = $effectiveVwap > 0 && $price > $effectiveVwap;
-        $adxReady = $adx14 >= 18.0;
+        $adxReady = $adx14 >= ($isFastTimeframe ? 17.0 : 16.0);
         $choppy = ($settings['avoidChoppyMarket'] ?? true)
-            && ($sequenceVolatility > 0.32 || $adx14 < 16.0 || (abs($sequenceNetChange) < 0.08 && $sequenceConsistency < 0.55));
+            && ($sequenceVolatility > 0.32 || $adx14 < 15.0 || (abs($sequenceNetChange) < 0.08 && $sequenceConsistency < 0.55));
         $strongDirectionalSequence = $sequenceConsistency >= ($isFastTimeframe ? 0.58 : 0.54)
             && abs($sequenceNetChange) >= ($isFastTimeframe ? 0.12 : 0.09)
-            && $adx14 >= ($isFastTimeframe ? 18.0 : 16.0)
+            && $adx14 >= ($isFastTimeframe ? 17.0 : 16.0)
             && $volumeOk;
 
         $buyReasons = [];
@@ -1514,17 +1521,17 @@ class FutureTradeBotService
         }
 
         if ($signal === 'BUY') {
-            $buyReasons[] = 'UT Bot bullish trigger aligned';
-            $buyReasons[] = '15m bullish MSB and order block confirmed';
-            $buyReasons[] = 'Price above VWAP and EMA stack bullish';
-            $buyReasons[] = '1h trend filter aligned above EMA50 and EMA200';
-            $buyReasons[] = sprintf('RSI %.1f / ADX %.1f / MACD bullish / volume confirmed', $rsi14, $adx14);
+            $buyReasons = $this->directionalReasons('BUY', $buyChecks, [
+                'rsi14' => $rsi14,
+                'adx14' => $adx14,
+                'timeframe' => $tf,
+            ]);
         } elseif ($signal === 'SELL') {
-            $sellReasons[] = 'UT Bot bearish trigger aligned';
-            $sellReasons[] = '15m bearish MSB and order block confirmed';
-            $sellReasons[] = 'Price below VWAP and EMA stack bearish';
-            $sellReasons[] = '1h trend filter aligned below EMA50 and EMA200';
-            $sellReasons[] = sprintf('RSI %.1f / ADX %.1f / MACD bearish / volume confirmed', $rsi14, $adx14);
+            $sellReasons = $this->directionalReasons('SELL', $sellChecks, [
+                'rsi14' => $rsi14,
+                'adx14' => $adx14,
+                'timeframe' => $tf,
+            ]);
         } else {
             if (! $buyChecks['ut'] && ! $sellChecks['ut']) {
                 $avoidReasons[] = 'UT Bot main trigger not aligned';
@@ -1560,29 +1567,75 @@ class FutureTradeBotService
             }
         }
 
-        $confidenceBase = max($buyScore, $sellScore) / max(1, count($buyChecks));
-        $directionalSignalBonus = $signal !== 'WAIT' && ! $strictEntryGuards ? 0.12 : 0.0;
-        $structureBonus = $signal === 'BUY' && ($bullishMsb || $bullishObValid || $structureSignal === 'BUY')
-            ? 0.03
-            : ($signal === 'SELL' && ($bearishMsb || $bearishObValid || $structureSignal === 'SELL') ? 0.03 : 0.0);
-        $confidence = $this->clamp(
-            ($confidenceBase * 0.82)
-            + ($strongDirectionalSequence ? 0.08 : 0.0)
-            + ($volumeOk ? 0.03 : 0.0)
-            + ($macdHistGrowing ? 0.02 : 0.0)
-            + $directionalSignalBonus
-            + $structureBonus
-            + $symbolPerfAdjust,
-            0.01,
-            0.99
+        $directionForBreakdown = $signal !== 'WAIT'
+            ? $signal
+            : ($dominantSignal !== 'WAIT' ? $dominantSignal : ($change >= 0 ? 'BUY' : 'SELL'));
+        $activeChecks = $directionForBreakdown === 'SELL' ? $sellChecks : $buyChecks;
+        $componentDebug = $this->signalComponentDebug(
+            $directionForBreakdown,
+            $activeChecks,
+            [
+                'strictEntryGuards' => $strictEntryGuards,
+                'signal' => $signal,
+                'dominantSignal' => $dominantSignal,
+                'dominantScore' => $dominantScore,
+                'voteGap' => $voteGap,
+                'minimumDirectionalScore' => $minimumDirectionalScore,
+                'minimumVoteGap' => $minimumVoteGap,
+                'strongDirectionalSequence' => $strongDirectionalSequence,
+                'volumeOk' => $volumeOk,
+                'macdHistGrowing' => $macdHistGrowing,
+                'lastVolume' => (float) ($sequence['lastVolume'] ?? 0.0),
+                'volumeMa20' => (float) ($sequence['volumeMa20'] ?? 0.0),
+                'sequenceConsistency' => $sequenceConsistency,
+                'sequenceNetChange' => $sequenceNetChange,
+                'sequenceImpulse' => $sequenceImpulse,
+                'isFastTimeframe' => $isFastTimeframe,
+                'structureSignal' => $structureSignal,
+                'bullishMsb' => $bullishMsb,
+                'bearishMsb' => $bearishMsb,
+                'bullishObValid' => $bullishObValid,
+                'bearishObValid' => $bearishObValid,
+                'choppy' => $choppy,
+                'conflicted' => $conflicted,
+                'fiveMinuteWeakSetup' => $fiveMinuteWeakSetup,
+                'adx14' => $adx14,
+                'rsi14' => $rsi14,
+                'vwapBullish' => $vwapBullish,
+                'emaStackBullish' => $emaStackBullish,
+                'emaStackBearish' => $emaStackBearish,
+                'htfBullish' => $htfBullish,
+                'htfEma200Bullish' => $htfEma200Bullish,
+                'htf4hBullish' => $htf4hBullish,
+                'extendedFromEma' => $extendedFromEma,
+                'extendedFromVwap' => $extendedFromVwap,
+                'symbolPerfAdjust' => $symbolPerfAdjust,
+                'sequenceLastCandleTime' => $sequenceLastCandleTime,
+                'htfLastCandleTime' => $htfLastCandleTime,
+            ]
         );
+        $confidence = $this->clamp((float) ($componentDebug['finalConfidence'] ?? 0.01), 0.01, 0.99);
         if ($signal === 'WAIT') {
-            $confidence = min($confidence, 0.74);
+            $confidence = min($confidence, 0.78);
+            $componentDebug['finalConfidence'] = round($confidence, 4);
         }
 
         $reasonParts = $signal === 'BUY'
             ? $buyReasons
             : ($signal === 'SELL' ? $sellReasons : $avoidReasons);
+
+        $this->safeDebugLog('[CONFIDENCE DEBUG]', [
+            'symbol' => (string) ($ticker['symbol'] ?? 'BTCUSDT'),
+            'timeframe' => $settings['timeframe'] ?? '5m',
+            'price' => $price,
+            'candleTime' => $sequenceLastCandleTime,
+            'finalConfidence' => round($confidence, 4),
+            'signal' => $signal,
+            'dominantSignal' => $dominantSignal,
+            'componentScores' => $componentDebug['componentScores'],
+            'positiveFactors' => $componentDebug['positiveFactors'],
+            'negativeFactors' => $componentDebug['negativeFactors'],
+        ]);
 
         return [
             'symbol' => (string) ($ticker['symbol'] ?? 'BTCUSDT'),
@@ -1608,6 +1661,10 @@ class FutureTradeBotService
             'conflicted' => $conflicted,
             'strongSequence' => $strongDirectionalSequence,
             'fastTimeframeWeakSetup' => $fiveMinuteWeakSetup,
+            'positiveFactors' => $componentDebug['positiveFactors'],
+            'negativeFactors' => $componentDebug['negativeFactors'],
+            'componentScores' => $componentDebug['componentScores'],
+            'debug' => $componentDebug,
             'reason' => implode(' | ', $reasonParts),
         ];
     }
@@ -1637,9 +1694,14 @@ class FutureTradeBotService
                 ->filter(fn ($row) => in_array((string) ($row['symbol'] ?? ''), $symbols, true))
                 ->map(function (array $row) use ($sequenceSnapshots, $structureSnapshots, $htfSnapshots, $configId) {
                     $symbol = (string) ($row['symbol'] ?? '');
+                    $feedPrice = $this->cachedLatestPrice($symbol);
+                    if ($feedPrice !== null && (float) ($feedPrice['price'] ?? 0) > 0) {
+                        $row['lastPrice'] = (string) $feedPrice['price'];
+                        $row['price'] = (string) $feedPrice['price'];
+                    }
                     $row['sequence'] = $sequenceSnapshots[$symbol] ?? $this->emptySequenceSnapshot();
                     $row['structure'] = $structureSnapshots[$symbol] ?? $this->emptyStructureSnapshot();
-                    $row['htf'] = $htfSnapshots[$symbol] ?? ['emaBullish' => null, 'h4EmaBullish' => null, 'ema200Bullish' => null, 'ema50_1h' => 0.0, 'ema50_4h' => 0.0, 'ema200_1h' => 0.0];
+                    $row['htf'] = $htfSnapshots[$symbol] ?? ['emaBullish' => null, 'h4EmaBullish' => null, 'ema200Bullish' => null, 'ema50_1h' => 0.0, 'ema50_4h' => 0.0, 'ema200_1h' => 0.0, 'lastCandleTime_1h' => null, 'lastCandleTime_4h' => null];
                     $row['symbolPerfAdjust'] = $this->symbolPerformanceAdjustment($symbol, $configId);
 
                     return $row;
@@ -1647,7 +1709,7 @@ class FutureTradeBotService
                 ->values()
                 ->all();
             if (! empty($result)) {
-                \Illuminate\Support\Facades\Cache::put($cacheKey, $result, 60);
+                \Illuminate\Support\Facades\Cache::put($cacheKey, $result, max(3, min(10, (int) ($settings['scanIntervalSeconds'] ?? 3) * 2)));
             }
             return $result;
         } catch (Throwable $e) {
@@ -1675,12 +1737,17 @@ class FutureTradeBotService
     {
         $lookbackMinutes = max(6, min(15, (int) ($settings['dynamicLookbackMinutes'] ?? 10)));
         $limit = max(60, $lookbackMinutes + 2); // 60+ for MACD(12,26,9) warmup
-        $cacheTtlSeconds = max(15, min(45, (int) ($settings['scanIntervalSeconds'] ?? 3) * 8));
+        $cacheTtlSeconds = max(3, min(12, (int) ($settings['scanIntervalSeconds'] ?? 3) * 2));
         $snapshots = [];
         $missing = [];
         $timeframe = (string) ($settings['timeframe'] ?? '5m');
 
         foreach ($symbols as $symbol) {
+            $cachedCandles = $this->cachedOhlcKlines($symbol, $timeframe, $limit);
+            if (count($cachedCandles) >= 20) {
+                $snapshots[$symbol] = $this->buildSequenceSnapshot($cachedCandles);
+                continue;
+            }
             $cacheKey = 'future_trade_sequence_' . md5($symbol . '|' . $limit . '|' . $timeframe);
             $cached = \Illuminate\Support\Facades\Cache::get($cacheKey);
 
@@ -1736,12 +1803,14 @@ class FutureTradeBotService
         $highs = [];
         $lows = [];
         $volumes = [];
+        $closeTimes = [];
 
         foreach ($candles as $row) {
             if (! is_array($row) || count($row) < 6) {
                 continue;
             }
 
+            $closeTime = (int) ($row[6] ?? 0);
             $open = (float) ($row[1] ?? 0);
             $high = (float) ($row[2] ?? 0);
             $low = (float) ($row[3] ?? 0);
@@ -1757,6 +1826,7 @@ class FutureTradeBotService
             $lows[] = $low;
             $closes[] = $close;
             $volumes[] = max(0.0, $volume);
+            $closeTimes[] = $closeTime;
         }
 
         if (count($closes) < 3) {
@@ -1862,6 +1932,9 @@ class FutureTradeBotService
             'utSignal' => (string) ($utBot['signal'] ?? 'WAIT'),
             'utBias' => (string) ($utBot['bias'] ?? 'NEUTRAL'),
             'utStop' => round((float) ($utBot['stop'] ?? 0.0), 8),
+            'lastCandleTime' => ! empty($closeTimes) && end($closeTimes) > 0
+                ? Carbon::createFromTimestampMs((int) end($closeTimes))->toIso8601String()
+                : null,
         ];
     }
 
@@ -1896,6 +1969,7 @@ class FutureTradeBotService
             'utSignal' => 'WAIT',
             'utBias' => 'NEUTRAL',
             'utStop' => 0.0,
+            'lastCandleTime' => null,
         ];
     }
 
@@ -2159,16 +2233,29 @@ class FutureTradeBotService
 
         $snapshots = [];
         try {
-            $responses = Http::pool(function (Pool $pool) use ($symbols, $base) {
+            foreach ($symbols as $symbol) {
+                $cachedCandles = $this->cachedOhlcKlines($symbol, '15m', 80);
+                if (count($cachedCandles) >= 20) {
+                    $snapshots[$symbol] = $this->buildStructureSnapshot($cachedCandles);
+                }
+            }
+
+            $missingSymbols = array_values(array_filter($symbols, fn (string $symbol) => ! isset($snapshots[$symbol])));
+            if ($missingSymbols === []) {
+                Cache::put($cacheKey, $snapshots, 45);
+                return $snapshots;
+            }
+
+            $responses = Http::pool(function (Pool $pool) use ($missingSymbols, $base) {
                 $requests = [];
-                foreach ($symbols as $symbol) {
+                foreach ($missingSymbols as $symbol) {
                     $requests[$symbol . '_15m'] = $pool->as($symbol . '_15m')->timeout(6)
                         ->get($base . '/fapi/v1/klines', ['symbol' => $symbol, 'interval' => '15m', 'limit' => 80]);
                 }
                 return $requests;
             });
 
-            foreach ($symbols as $symbol) {
+            foreach ($missingSymbols as $symbol) {
                 try {
                     $payload = $responses[$symbol . '_15m']?->json();
                     $snapshots[$symbol] = $this->buildStructureSnapshot(is_array($payload) ? $payload : []);
@@ -2178,7 +2265,7 @@ class FutureTradeBotService
             }
 
             if (! empty($snapshots)) {
-                Cache::put($cacheKey, $snapshots, 120);
+                Cache::put($cacheKey, $snapshots, 45);
             }
         } catch (Throwable) {
             foreach ($symbols as $symbol) {
@@ -2308,10 +2395,38 @@ class FutureTradeBotService
         }
         $snapshots = [];
         try {
+            foreach ($symbols as $symbol) {
+                $closes1h = $this->extractClosesFromCachedOhlc($symbol, '1h', 220);
+                $closes4h = $this->extractClosesFromCachedOhlc($symbol, '4h', 55);
+                if (count($closes1h) >= 50 && count($closes4h) >= 20) {
+                    $last1h = end($closes1h) ?: 0.0;
+                    $last4h = end($closes4h) ?: 0.0;
+                    $ema50_1h = count($closes1h) >= 50 ? $this->calcEma($closes1h, 50) : 0.0;
+                    $ema200_1h = count($closes1h) >= 200 ? $this->calcEma($closes1h, 200) : 0.0;
+                    $ema50_4h = count($closes4h) >= 50 ? $this->calcEma($closes4h, 50) : 0.0;
+                    $snapshots[$symbol] = [
+                        'emaBullish'   => $ema50_1h > 0 ? $last1h > $ema50_1h : null,
+                        'h4EmaBullish' => $ema50_4h > 0 ? $last4h > $ema50_4h : null,
+                        'ema200Bullish' => $ema200_1h > 0 ? $last1h > $ema200_1h : null,
+                        'ema50_1h'     => round($ema50_1h, 4),
+                        'ema50_4h'     => round($ema50_4h, 4),
+                        'ema200_1h'    => round($ema200_1h, 4),
+                        'lastCandleTime_1h' => $this->extractLastCandleTimeFromCachedOhlc($symbol, '1h'),
+                        'lastCandleTime_4h' => $this->extractLastCandleTimeFromCachedOhlc($symbol, '4h'),
+                    ];
+                }
+            }
+
+            $missingSymbols = array_values(array_filter($symbols, fn (string $symbol) => ! isset($snapshots[$symbol])));
+            if ($missingSymbols === []) {
+                Cache::put($cacheKey, $snapshots, 60);
+                return $snapshots;
+            }
+
             // Fetch 1h and 4h candles in one parallel pool for efficiency
-            $responses = Http::pool(function (Pool $pool) use ($symbols, $base) {
+            $responses = Http::pool(function (Pool $pool) use ($missingSymbols, $base) {
                 $requests = [];
-                foreach ($symbols as $symbol) {
+                foreach ($missingSymbols as $symbol) {
                     $requests[$symbol . '_1h'] = $pool->as($symbol . '_1h')->timeout(6)
                         ->get($base . '/fapi/v1/klines', ['symbol' => $symbol, 'interval' => '1h', 'limit' => 220]);
                     $requests[$symbol . '_4h'] = $pool->as($symbol . '_4h')->timeout(6)
@@ -2319,7 +2434,7 @@ class FutureTradeBotService
                 }
                 return $requests;
             });
-            foreach ($symbols as $symbol) {
+            foreach ($missingSymbols as $symbol) {
                 try {
                     $closes1h = $this->extractCloses($responses[$symbol . '_1h'] ?? null);
                     $closes4h = $this->extractCloses($responses[$symbol . '_4h'] ?? null);
@@ -2335,17 +2450,19 @@ class FutureTradeBotService
                         'ema50_1h'     => round($ema50_1h, 4),
                         'ema50_4h'     => round($ema50_4h, 4),
                         'ema200_1h'    => round($ema200_1h, 4),
+                        'lastCandleTime_1h' => $this->extractLastCandleTime($responses[$symbol . '_1h'] ?? null),
+                        'lastCandleTime_4h' => $this->extractLastCandleTime($responses[$symbol . '_4h'] ?? null),
                     ];
                 } catch (Throwable) {
-                    $snapshots[$symbol] = ['emaBullish' => null, 'h4EmaBullish' => null, 'ema200Bullish' => null, 'ema50_1h' => 0.0, 'ema50_4h' => 0.0, 'ema200_1h' => 0.0];
+                    $snapshots[$symbol] = ['emaBullish' => null, 'h4EmaBullish' => null, 'ema200Bullish' => null, 'ema50_1h' => 0.0, 'ema50_4h' => 0.0, 'ema200_1h' => 0.0, 'lastCandleTime_1h' => null, 'lastCandleTime_4h' => null];
                 }
             }
             if (! empty($snapshots)) {
-                Cache::put($cacheKey, $snapshots, 300); // 5-min cache for HTF data
+                Cache::put($cacheKey, $snapshots, 60);
             }
         } catch (Throwable) {
             foreach ($symbols as $symbol) {
-                $snapshots[$symbol] = ['emaBullish' => null, 'h4EmaBullish' => null, 'ema200Bullish' => null, 'ema50_1h' => 0.0, 'ema50_4h' => 0.0, 'ema200_1h' => 0.0];
+                $snapshots[$symbol] = ['emaBullish' => null, 'h4EmaBullish' => null, 'ema200Bullish' => null, 'ema50_1h' => 0.0, 'ema50_4h' => 0.0, 'ema200_1h' => 0.0, 'lastCandleTime_1h' => null, 'lastCandleTime_4h' => null];
             }
         }
         return $snapshots;
@@ -2364,6 +2481,243 @@ class FutureTradeBotService
             }
         }
         return $closes;
+    }
+
+    private function extractLastCandleTime($response): ?string
+    {
+        if (! $response || ! method_exists($response, 'successful') || ! $response->successful()) {
+            return null;
+        }
+
+        $payload = $response->json();
+        $last = is_array($payload) ? end($payload) : null;
+        $closeTime = is_array($last) ? (int) ($last[6] ?? 0) : 0;
+
+        return $closeTime > 0 ? Carbon::createFromTimestampMs($closeTime)->toIso8601String() : null;
+    }
+
+    private function directionalReasons(string $side, array $checks, array $metrics): array
+    {
+        $reasons = [];
+        $prefix = $side === 'BUY' ? 'bullish' : 'bearish';
+        $tf = strtoupper((string) ($metrics['timeframe'] ?? '5m'));
+
+        if (($checks['ut'] ?? false) === true) {
+            $reasons[] = sprintf('UT Bot %s trigger aligned', $prefix);
+        }
+        if (($checks['msb'] ?? false) === true || ($checks['ob'] ?? false) === true || ($checks['structure'] ?? false) === true) {
+            $reasons[] = sprintf('15m %s structure confirmation present', $prefix);
+        }
+        if (($checks['vwap'] ?? false) === true || ($checks['ema'] ?? false) === true) {
+            $reasons[] = sprintf(
+                '%s scanner filter: VWAP %s, EMA(9/21/50) stack %s',
+                $tf,
+                ($checks['vwap'] ?? false) ? 'aligned' : 'not aligned',
+                ($checks['ema'] ?? false) ? 'aligned' : 'not aligned'
+            );
+        }
+        if (($checks['htf'] ?? false) === true || ($checks['macro'] ?? false) === true) {
+            $reasons[] = sprintf(
+                'Higher timeframe filters: 1h EMA50/200 %s, 4h EMA50 %s',
+                ($checks['htf'] ?? false) ? 'aligned' : 'mixed',
+                ($checks['macro'] ?? false) ? 'supportive' : 'mixed'
+            );
+        }
+
+        $reasons[] = sprintf(
+            'RSI %.1f / ADX %.1f / MACD %s / volume %s',
+            (float) ($metrics['rsi14'] ?? 0),
+            (float) ($metrics['adx14'] ?? 0),
+            (($checks['macd'] ?? false) ? $prefix : 'mixed'),
+            (($checks['volume'] ?? false) ? 'confirmed' : 'weak')
+        );
+
+        return $reasons;
+    }
+
+    private function signalComponentDebug(string $side, array $checks, array $meta): array
+    {
+        $componentScores = [];
+        $positiveFactors = [];
+        $negativeFactors = [];
+        $labelMap = [
+            'ut' => 'UT Bot trigger',
+            'msb' => '15m MSB',
+            'ob' => '15m order block',
+            'structure' => '15m structure signal',
+            'vwap' => 'VWAP alignment',
+            'ema' => '5m EMA(9/21/50) stack',
+            'htf' => '1h EMA50/200 filter',
+            'macro' => '4h EMA50 filter',
+            'rsi' => 'RSI window',
+            'macd' => 'MACD direction',
+            'volume' => 'Volume confirmation',
+            'extension' => 'Not overextended',
+            'adx' => 'ADX readiness',
+            'sequence' => '5m directional sequence',
+        ];
+
+        $structureHits = array_sum([
+            ($checks['msb'] ?? false) ? 1 : 0,
+            ($checks['ob'] ?? false) ? 1 : 0,
+            ($checks['structure'] ?? false) ? 1 : 0,
+        ]);
+        $volumeRatio = ($meta['volumeMa20'] ?? 0) > 0
+            ? ((float) ($meta['lastVolume'] ?? 0) / (float) $meta['volumeMa20'])
+            : 0.0;
+        $adx = (float) ($meta['adx14'] ?? 0.0);
+        $isFastTimeframe = (bool) ($meta['isFastTimeframe'] ?? false);
+        $sequenceConsistency = (float) ($meta['sequenceConsistency'] ?? 0.0);
+        $sequenceNetChange = abs((float) ($meta['sequenceNetChange'] ?? 0.0));
+        $sequenceImpulse = (string) ($meta['sequenceImpulse'] ?? 'NEUTRAL');
+        $directionalImpulseAligned = in_array($sequenceImpulse, [$side, 'NEUTRAL'], true);
+
+        $componentScores['ut'] = ($checks['ut'] ?? false) ? 0.14 : 0.0;
+        $componentScores['structure'] = match (true) {
+            $structureHits >= 3 => 0.08,
+            $structureHits === 2 => 0.055,
+            $structureHits === 1 => 0.025,
+            default => 0.0,
+        };
+        $componentScores['vwap'] = ($checks['vwap'] ?? false) ? 0.06 : 0.0;
+        $componentScores['ema'] = ($checks['ema'] ?? false) ? 0.06 : 0.0;
+        $componentScores['htf'] = ($checks['htf'] ?? false) ? 0.07 : 0.0;
+        $componentScores['macro'] = ($checks['macro'] ?? false) ? 0.03 : 0.0;
+        $componentScores['rsi'] = ($checks['rsi'] ?? false) ? 0.05 : 0.0;
+        $componentScores['macd'] = ($checks['macd'] ?? false) ? 0.06 : 0.0;
+        $componentScores['extension'] = ($checks['extension'] ?? false) ? 0.05 : 0.0;
+        $componentScores['adx'] = match (true) {
+            $adx >= 22.0 => 0.06,
+            $adx >= 18.0 => 0.05,
+            $adx >= 15.0 => 0.03,
+            default => 0.0,
+        };
+        $componentScores['volume'] = match (true) {
+            $volumeRatio >= 1.10 => 0.07,
+            $volumeRatio >= 0.95 => 0.04,
+            $volumeRatio >= 0.85 => 0.015,
+            default => 0.0,
+        };
+        $componentScores['sequence'] = match (true) {
+            ($meta['strongDirectionalSequence'] ?? false) === true => 0.10,
+            $directionalImpulseAligned && $sequenceConsistency >= ($isFastTimeframe ? 0.52 : 0.5) && $sequenceNetChange >= ($isFastTimeframe ? 0.08 : 0.06) => 0.04,
+            default => 0.0,
+        };
+        $componentScores['macdHistogramBonus'] = ($meta['macdHistGrowing'] ?? false) ? 0.02 : 0.0;
+        $componentScores['directionalSignalBonus'] = (($meta['signal'] ?? 'WAIT') !== 'WAIT' && ! ($meta['strictEntryGuards'] ?? false)) ? 0.14 : 0.0;
+        $componentScores['trendContinuationBonus'] = (
+            (($meta['signal'] ?? 'WAIT') !== 'WAIT')
+            && ($checks['vwap'] ?? false)
+            && ($checks['ema'] ?? false)
+            && (($checks['htf'] ?? false) || ($checks['macro'] ?? false))
+        ) ? 0.05 : 0.0;
+        $componentScores['symbolPerfAdjust'] = round((float) ($meta['symbolPerfAdjust'] ?? 0.0), 4);
+
+        foreach ($labelMap as $key => $label) {
+            if ($key === 'msb' || $key === 'ob' || $key === 'structure') {
+                continue;
+            }
+            if (($componentScores[$key] ?? 0) > 0) {
+                $positiveFactors[] = $label;
+            } else {
+                $negativeFactors[] = $label;
+            }
+        }
+        if ($componentScores['structure'] > 0) {
+            $positiveFactors[] = '15m structure context';
+        } else {
+            $negativeFactors[] = '15m structure context';
+        }
+
+        if (($meta['signal'] ?? 'WAIT') === 'WAIT') {
+            $negativeFactors[] = sprintf(
+                'Directional gate not cleared (%d/%d votes, gap %d/%d)',
+                (int) ($meta['dominantScore'] ?? 0),
+                (int) ($meta['minimumDirectionalScore'] ?? 0),
+                (int) ($meta['voteGap'] ?? 0),
+                (int) ($meta['minimumVoteGap'] ?? 0)
+            );
+        }
+        if (($meta['fiveMinuteWeakSetup'] ?? false) === true) {
+            $negativeFactors[] = '5m weak-setup guard active';
+        }
+        if (($meta['choppy'] ?? false) === true) {
+            $negativeFactors[] = 'Choppy market filter active';
+        }
+        if (($meta['conflicted'] ?? false) === true) {
+            $negativeFactors[] = 'Buy/sell vote conflict';
+        }
+        if (($meta['extendedFromEma'] ?? false) === true || ($meta['extendedFromVwap'] ?? false) === true) {
+            $negativeFactors[] = 'Entry extended from EMA/VWAP';
+        }
+        if ($adx < 15.0) {
+            $negativeFactors[] = sprintf('ADX weak at %.2f', (float) ($meta['adx14'] ?? 0));
+        } elseif ($adx < 18.0) {
+            $negativeFactors[] = sprintf('ADX cautious at %.2f', (float) ($meta['adx14'] ?? 0));
+        }
+        if ($side === 'BUY' && (($meta['htfBullish'] ?? null) !== true || ($meta['htfEma200Bullish'] ?? null) !== true)) {
+            $negativeFactors[] = '1h trend filter not fully bullish';
+        }
+        if ($side === 'SELL' && (($meta['htfBullish'] ?? null) !== false || ($meta['htfEma200Bullish'] ?? null) !== false)) {
+            $negativeFactors[] = '1h trend filter not fully bearish';
+        }
+
+        $finalConfidence = round(array_sum($componentScores), 4);
+
+        return [
+            'decision' => ($meta['signal'] ?? 'WAIT') === 'WAIT' ? 'WAIT' : $meta['signal'],
+            'decisionStatus' => ($meta['signal'] ?? 'WAIT') === 'WAIT' ? 'BLOCKED' : 'ELIGIBLE',
+            'signalSide' => $side,
+            'finalConfidence' => $finalConfidence,
+            'positiveFactors' => array_values(array_unique($positiveFactors)),
+            'negativeFactors' => array_values(array_unique($negativeFactors)),
+            'componentScores' => $componentScores,
+            'voteSummary' => [
+                'dominantSignal' => $meta['dominantSignal'] ?? 'WAIT',
+                'dominantScore' => (int) ($meta['dominantScore'] ?? 0),
+                'minimumDirectionalScore' => (int) ($meta['minimumDirectionalScore'] ?? 0),
+                'voteGap' => (int) ($meta['voteGap'] ?? 0),
+                'minimumVoteGap' => (int) ($meta['minimumVoteGap'] ?? 0),
+            ],
+            'timing' => [
+                'sequenceLastCandleTime' => $meta['sequenceLastCandleTime'] ?? null,
+                'higherTimeframeLastCandleTime' => $meta['htfLastCandleTime'] ?? null,
+            ],
+        ];
+    }
+
+    private function liveStatusPayload(FutureTradeBotState $state, ?array $bestSignal, array $signals, array $settings): array
+    {
+        $lastChartPoint = Arr::last((array) ($state->chart_points ?? []));
+        $ageSeconds = $state->last_scan_at ? now()->diffInSeconds($state->last_scan_at) : null;
+        $feedPrice = $state->current_symbol ? $this->cachedLatestPrice((string) $state->current_symbol) : null;
+        $hasSharedFeed = $feedPrice !== null;
+
+        $this->safeDebugLog('[LIVE DATA UPDATE]', [
+            'symbol' => $state->current_symbol,
+            'timeframe' => $settings['timeframe'] ?? '5m',
+            'lastCandleTime' => data_get($bestSignal, 'debug.timing.sequenceLastCandleTime'),
+            'lastPrice' => (float) ($state->current_price ?? 0),
+            'updatedAt' => now()->toIso8601String(),
+            'confidence' => (float) ($bestSignal['confidence'] ?? $state->confidence ?? 0),
+        ]);
+
+        return [
+            'mode' => $hasSharedFeed ? 'SHARED_FEED_CACHE' : 'REST_POLLING',
+            'priceUpdateMode' => 'SCAN_LOOP',
+            'indicatorMode' => 'FORMING_CANDLE',
+            'lastUpdateTime' => optional($state->last_scan_at)->toIso8601String(),
+            'lastChartPointTime' => $lastChartPoint['time'] ?? null,
+            'lastCandleTime' => data_get($bestSignal, 'debug.timing.sequenceLastCandleTime'),
+            'higherTimeframeLastCandleTime' => data_get($bestSignal, 'debug.timing.higherTimeframeLastCandleTime'),
+            'ageSeconds' => $ageSeconds,
+            'scanIntervalSeconds' => (int) ($settings['scanIntervalSeconds'] ?? 3),
+            'isStale' => $ageSeconds !== null && $ageSeconds > max(6, (int) ($settings['scanIntervalSeconds'] ?? 3) * 3),
+            'scannerSnapshotCount' => count($signals),
+            'dataSource' => $hasSharedFeed
+                ? (string) ($feedPrice['source'] ?? 'shared-feed')
+                : (($settings['useLiveDataFeed'] ?? true) ? 'BINANCE_LIVE_REST' : 'BINANCE_EXECUTION_REST'),
+        ];
     }
 
     private function symbolPerformanceAdjustment(string $symbol, string $configId): float
@@ -2417,6 +2771,8 @@ class FutureTradeBotService
         if (! in_array($mode, ['fixed', 'semi_dynamic', 'fully_dynamic'], true)) {
             $mode = 'fixed';
         }
+        $timeframe = strtolower((string) ($settings['timeframe'] ?? '5m'));
+        $isFastTimeframe = in_array($timeframe, ['1m', '3m', '5m'], true);
 
         $base = (float) ($settings['minConfidence'] ?? 0.72);
         $floor = (float) ($settings['dynamicMinConfidenceFloor'] ?? 0.68);
@@ -2448,13 +2804,27 @@ class FutureTradeBotService
                 $next['trailingTakeProfitPercent'] = $baseTrailing * ($mode === 'fully_dynamic' ? 1.08 : 1.03);
                 $adjustments[] = 'Strong aligned trend: allow earlier entry and let target breathe.';
             } else {
-                $effective += $mode === 'fully_dynamic' ? 0.01 : 0.005;
+                $effective += $isFastTimeframe
+                    ? ($mode === 'fully_dynamic' ? 0.008 : 0.003)
+                    : ($mode === 'fully_dynamic' ? 0.01 : 0.005);
                 $adjustments[] = 'Mixed signal: keep entry slightly stricter.';
             }
 
             if ($analysis['confidenceGap'] < 0.025) {
                 $effective += $mode === 'fully_dynamic' ? 0.018 : 0.01;
                 $adjustments[] = 'Top signals are close together: avoid weak ranking edge.';
+            }
+
+            if (
+                $isFastTimeframe
+                && ($analysis['lastTradeReason'] ?? null) === null
+                && (int) ($analysis['totalTrades'] ?? 0) === 0
+                && (float) ($analysis['bestConfidence'] ?? 0) >= 0.58
+                && (float) ($analysis['trendStrength'] ?? 0) >= 0.5
+                && (float) ($analysis['directionAgreement'] ?? 0) >= 0.55
+            ) {
+                $effective -= $mode === 'fully_dynamic' ? 0.012 : 0.008;
+                $adjustments[] = '5m scalp relief: aligned momentum allows a modest threshold reduction.';
             }
 
             if ($analysis['lastTradeReason'] && str_contains($analysis['lastTradeReason'], 'LOSS')) {
@@ -2575,6 +2945,20 @@ class FutureTradeBotService
         $next['tradeAmountUsdt'] = $this->clamp((float) ($next['tradeAmountUsdt'] ?? $baseTradeAmount), 25.0, max(25.0, $baseTradeAmount));
 
         $suggestion = $this->dynamicSuggestionText($mode, $analysis, $base, $next, $adjustments);
+
+        $this->safeDebugLog('[ACTIVE MINIMUM DEBUG]', [
+            'mode' => $mode,
+            'baseMinimum' => round($base, 4),
+            'floor' => round($floor, 4),
+            'ceiling' => round($ceiling, 4),
+            'adjustments' => $adjustments,
+            'trendStrength' => $analysis['trendStrength'] ?? null,
+            'directionAgreement' => $analysis['directionAgreement'] ?? null,
+            'choppy' => $analysis['choppy'] ?? null,
+            'winRate' => $analysis['winRate'] ?? null,
+            'lastTradeReason' => $analysis['lastTradeReason'] ?? null,
+            'finalActiveMinimum' => round($effective, 4),
+        ]);
 
         return [
             'mode' => $mode,
@@ -2843,6 +3227,12 @@ class FutureTradeBotService
             return $cached;
         }
 
+        $feedCandles = $this->cachedOhlcCandles($symbol, $interval, $safeLimit);
+        if (count($feedCandles) >= min(20, $safeLimit)) {
+            Cache::put($cacheKey, $feedCandles, now()->addSeconds(4));
+            return $feedCandles;
+        }
+
         try {
             $base = rtrim((string) config('services.binance.futures.base_url', 'https://fapi.binance.com'), '/');
             $response = Http::timeout(5)->get($base . '/fapi/v1/klines', [
@@ -2896,6 +3286,100 @@ class FutureTradeBotService
             '1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '12h', '1d' => $candidate,
             default => '5m',
         };
+    }
+
+    private function cachedLatestPrice(string $symbol): ?array
+    {
+        try {
+            $cache = app(MarketPriceCacheService::class);
+            $latest = $cache->getLatestPrice('binance_futures', $symbol);
+            if (! is_array($latest)) {
+                return null;
+            }
+            $timestampMs = (int) ($latest['timestamp_ms'] ?? 0);
+            $ageMs = $timestampMs > 0 ? ((int) floor(microtime(true) * 1000) - $timestampMs) : PHP_INT_MAX;
+
+            return $ageMs <= 15000 ? $latest : null;
+        } catch (Throwable) {
+            return null;
+        }
+    }
+
+    private function cachedOhlcCandles(string $symbol, string $timeframe, int $limit): array
+    {
+        try {
+            $interval = $this->normalizeKlineInterval($timeframe);
+            $rows = MarketOhlc::query()
+                ->where('exchange', 'binance_futures')
+                ->where('symbol', strtoupper($symbol))
+                ->where('timeframe', $interval)
+                ->orderByDesc('ts')
+                ->limit(max(1, $limit))
+                ->get(['ts', 'open', 'high', 'low', 'close', 'volume'])
+                ->reverse()
+                ->values();
+
+            if ($rows->isEmpty()) {
+                return [];
+            }
+
+            $lastTs = optional($rows->last()->ts);
+            $maxAgeSeconds = max(30, min(14400, $this->timeframeMinutes($interval) * 60 * 3));
+            if (! $lastTs || $lastTs->diffInSeconds(now()) > $maxAgeSeconds) {
+                return [];
+            }
+
+            return $rows->map(fn (MarketOhlc $row) => [
+                'time' => $row->ts?->toIso8601String(),
+                'open' => (float) $row->open,
+                'high' => (float) $row->high,
+                'low' => (float) $row->low,
+                'close' => (float) $row->close,
+                'volume' => (float) $row->volume,
+            ])->all();
+        } catch (Throwable) {
+            return [];
+        }
+    }
+
+    private function cachedOhlcKlines(string $symbol, string $timeframe, int $limit): array
+    {
+        $candles = $this->cachedOhlcCandles($symbol, $timeframe, $limit);
+        if ($candles === []) {
+            return [];
+        }
+
+        $tfMinutes = $this->timeframeMinutes($timeframe);
+
+        return array_map(function (array $candle) use ($tfMinutes) {
+            $openMs = isset($candle['time']) ? Carbon::parse((string) $candle['time'])->getTimestampMs() : 0;
+            $closeMs = $openMs > 0 ? $openMs + ($tfMinutes * 60 * 1000) - 1 : 0;
+
+            return [
+                $openMs,
+                (string) ($candle['open'] ?? 0),
+                (string) ($candle['high'] ?? 0),
+                (string) ($candle['low'] ?? 0),
+                (string) ($candle['close'] ?? 0),
+                (string) ($candle['volume'] ?? 0),
+                $closeMs,
+            ];
+        }, $candles);
+    }
+
+    private function extractClosesFromCachedOhlc(string $symbol, string $timeframe, int $limit): array
+    {
+        return array_map(
+            static fn (array $row) => (float) ($row['close'] ?? 0),
+            $this->cachedOhlcCandles($symbol, $timeframe, $limit)
+        );
+    }
+
+    private function extractLastCandleTimeFromCachedOhlc(string $symbol, string $timeframe): ?string
+    {
+        $candles = $this->cachedOhlcCandles($symbol, $timeframe, 1);
+
+        return $candles[0]['time'] ?? null;
     }
 
     private function indicatorSuitePayload(array $candles, ?array $bestSignal, array $settings, string $timeframe): array
@@ -3779,6 +4263,17 @@ class FutureTradeBotService
         $message = $e->getMessage();
 
         return str_contains($message, '-2022') || str_contains($message, 'ReduceOnly Order is rejected');
+    }
+
+    private function safeDebugLog(string $message, array $context = []): void
+    {
+        try {
+            if (function_exists('app') && app()->bound('log')) {
+                app('log')->info($message, $context);
+            }
+        } catch (Throwable) {
+            // Debug logging should never break scoring or tests.
+        }
     }
 }
 

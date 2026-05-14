@@ -63,6 +63,11 @@ Schedule::command('market:ws-consume --once --store-ohlc')
     ->withoutOverlapping()
     ->runInBackground();
 
+Schedule::command('market:ws-consume --once --market-type=futures --store-ohlc --ohlc-intervals=1m,5m,15m,1h,4h')
+    ->everySecond()
+    ->withoutOverlapping()
+    ->runInBackground();
+
 Schedule::command('metals:poll-prices --once')
     ->everyFiveSeconds()
     ->withoutOverlapping()

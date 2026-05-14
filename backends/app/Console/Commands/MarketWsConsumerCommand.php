@@ -23,6 +23,7 @@ class MarketWsConsumerCommand extends Command
         {--testnet : Use Binance testnet websocket base when available}
         {--once}
         {--store-ohlc}
+        {--ohlc-intervals=1m : Comma-separated OHLC intervals to persist during --once polling fallback}
         {--no-dispatch : Do not dispatch ratio bot evaluations on feed updates}';
 
     protected $description = 'Consume Binance market websocket streams, with REST polling fallback for --once runs.';
@@ -152,7 +153,7 @@ class MarketWsConsumerCommand extends Command
                     ], $marketType, $dispatchEvaluations);
 
                     if ($storeOhlc) {
-                        $this->persistLatestMinuteCandle($feeds, $apiBase, $marketType, $symbol, $dispatchEvaluations);
+                        $this->persistLatestCandles($feeds, $apiBase, $marketType, $symbol, $dispatchEvaluations);
                     }
                 } catch (\Throwable $e) {
                     $this->warn("Feed refresh failed for {$symbol}: {$e->getMessage()}");
@@ -169,43 +170,50 @@ class MarketWsConsumerCommand extends Command
         return self::SUCCESS;
     }
 
-    private function persistLatestMinuteCandle(
+    private function persistLatestCandles(
         RealtimeMarketFeedService $feeds,
         string $apiBase,
         string $marketType,
         string $symbol,
         bool $dispatchEvaluations,
     ): void {
-        $klines = Http::timeout(10)->get($apiBase . $this->klinePath($marketType), [
-            'symbol' => $symbol,
-            'interval' => '1m',
-            'limit' => 1,
-        ]);
-        if ($klines->failed()) {
-            return;
-        }
+        $intervals = array_values(array_filter(array_map(
+            static fn (string $interval) => trim(strtolower($interval)),
+            explode(',', (string) $this->option('ohlc-intervals'))
+        )));
 
-        $row = $klines->json('0');
-        if (! is_array($row) || count($row) < 6) {
-            return;
-        }
+        foreach ($intervals as $interval) {
+            $klines = Http::timeout(10)->get($apiBase . $this->klinePath($marketType), [
+                'symbol' => $symbol,
+                'interval' => $interval,
+                'limit' => 1,
+            ]);
+            if ($klines->failed()) {
+                continue;
+            }
 
-        $feeds->ingest([
-            'e' => 'kline',
-            's' => $symbol,
-            'E' => (int) ($row[6] ?? floor(microtime(true) * 1000)),
-            'k' => [
-                't' => (int) $row[0],
-                'T' => (int) ($row[6] ?? $row[0]),
-                'i' => '1m',
-                'o' => (string) $row[1],
-                'h' => (string) $row[2],
-                'l' => (string) $row[3],
-                'c' => (string) $row[4],
-                'v' => (string) $row[5],
-                'x' => true,
-            ],
-        ], $marketType, $dispatchEvaluations);
+            $row = $klines->json('0');
+            if (! is_array($row) || count($row) < 6) {
+                continue;
+            }
+
+            $feeds->ingest([
+                'e' => 'kline',
+                's' => $symbol,
+                'E' => (int) ($row[6] ?? floor(microtime(true) * 1000)),
+                'k' => [
+                    't' => (int) $row[0],
+                    'T' => (int) ($row[6] ?? $row[0]),
+                    'i' => $interval,
+                    'o' => (string) $row[1],
+                    'h' => (string) $row[2],
+                    'l' => (string) $row[3],
+                    'c' => (string) $row[4],
+                    'v' => (string) $row[5],
+                    'x' => true,
+                ],
+            ], $marketType, $dispatchEvaluations);
+        }
     }
 
     /**
