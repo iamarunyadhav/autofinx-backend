@@ -309,7 +309,7 @@ class QueueControlService
                 ->select('queue')
                 ->selectRaw('COUNT(*) as pending')
                 ->selectRaw('SUM(CASE WHEN reserved_at IS NOT NULL THEN 1 ELSE 0 END) as reserved')
-                ->selectRaw('SUM(CASE WHEN reserved_at IS NULL AND available_at > ? THEN 1 ELSE 0 END) as delayed', [time()])
+                ->selectRaw('SUM(CASE WHEN reserved_at IS NULL AND available_at > ? THEN 1 ELSE 0 END) as delayed_count', [time()])
                 ->groupBy('queue')
                 ->get()
                 ->each(function ($row) use ($configured) {
@@ -327,7 +327,7 @@ class QueueControlService
                     ]);
                     $current['pending'] = (int) $row->pending;
                     $current['reserved'] = (int) $row->reserved;
-                    $current['delayed'] = (int) $row->delayed;
+                    $current['delayed'] = (int) $row->delayed_count;
                     $configured->put($name, $current);
                 });
         }
