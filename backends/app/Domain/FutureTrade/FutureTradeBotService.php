@@ -1529,6 +1529,22 @@ class FutureTradeBotService
         $tf = strtolower((string) ($settings['timeframe'] ?? '5m'));
         $isFastTimeframe = in_array($tf, ['1m', '3m', '5m'], true);
         $strictEntryGuards = (bool) ($settings['strictEntryGuards'] ?? false);
+        $classicSimpleMode = (bool) ($settings['classicSimpleMode'] ?? false);
+
+        if ($classicSimpleMode) {
+            return $this->scoreTickerClassic($ticker, $settings, [
+                'price' => $price,
+                'change' => $change,
+                'quoteVolume' => $quoteVolume,
+                'high' => $high,
+                'low' => $low,
+                'openPrice' => $openPrice,
+                'rangePct' => $rangePct,
+                'intradayChangePct' => $intradayChangePct,
+                'rangePosition' => $rangePosition,
+                'sequence' => $sequence,
+            ]);
+        }
 
         $sequenceNetChange = (float) ($sequence['netChangePercent'] ?? 0.0);
         $sequenceConsistency = (float) ($sequence['consistency'] ?? 0.0);
@@ -1840,6 +1856,165 @@ class FutureTradeBotService
             'componentScores' => $componentDebug['componentScores'],
             'debug' => $componentDebug,
             'reason' => implode(' | ', $reasonParts),
+        ];
+    }
+
+    private function scoreTickerClassic(array $ticker, array $settings, array $snapshot): array
+    {
+        $price = (float) ($snapshot['price'] ?? 0.0);
+        $change = (float) ($snapshot['change'] ?? 0.0);
+        $quoteVolume = (float) ($snapshot['quoteVolume'] ?? 0.0);
+        $rangePct = (float) ($snapshot['rangePct'] ?? 0.0);
+        $intradayChangePct = (float) ($snapshot['intradayChangePct'] ?? 0.0);
+        $rangePosition = (float) ($snapshot['rangePosition'] ?? 0.5);
+        $openPrice = (float) ($snapshot['openPrice'] ?? $price);
+        $sequence = (array) ($snapshot['sequence'] ?? []);
+        $sequenceLastCandleTime = $sequence['lastCandleTime'] ?? null;
+
+        $simpleScore = 0.0;
+        if ($intradayChangePct >= 0.04) {
+            $simpleScore += 1.0;
+        } elseif ($intradayChangePct <= -0.04) {
+            $simpleScore -= 1.0;
+        }
+        if ($change >= 0.08) {
+            $simpleScore += 1.0;
+        } elseif ($change <= -0.08) {
+            $simpleScore -= 1.0;
+        }
+        if ($rangePosition >= 0.58) {
+            $simpleScore += 1.0;
+        } elseif ($rangePosition <= 0.42) {
+            $simpleScore -= 1.0;
+        }
+        if ($price > $openPrice) {
+            $simpleScore += 0.5;
+        } elseif ($price < $openPrice) {
+            $simpleScore -= 0.5;
+        }
+
+        $signal = 'WAIT';
+        if ($simpleScore >= 1.5) {
+            $signal = 'BUY';
+        } elseif ($simpleScore <= -1.5) {
+            $signal = 'SELL';
+        }
+
+        $moveStrength = min(
+            0.45,
+            (abs($intradayChangePct) * 0.45)
+            + (abs($change) * 0.04)
+            + (abs($rangePosition - 0.5) * 0.55)
+        );
+        $confidence = $this->clamp(0.42 + $moveStrength, 0.05, 0.95);
+        if ($signal === 'WAIT') {
+            $confidence = min($confidence, 0.49);
+        }
+
+        $bias = $signal === 'WAIT' ? ($simpleScore >= 0 ? 'BUY' : 'SELL') : $signal;
+        $componentDebug = [
+            'decision' => $signal,
+            'decisionStatus' => $signal === 'WAIT' ? 'BLOCKED' : 'ELIGIBLE',
+            'signalSide' => $bias,
+            'finalConfidence' => round($confidence, 4),
+            'positiveFactors' => array_values(array_filter([
+                'Classic simple mode enabled',
+                $price >= $openPrice ? 'Price trading above open' : 'Price trading below open',
+                $rangePosition >= 0.5 ? 'Price holding upper half of range' : 'Price holding lower half of range',
+            ])),
+            'negativeFactors' => $signal === 'WAIT'
+                ? ['Classic simple mode: price action not strong enough yet']
+                : [],
+            'componentScores' => [
+                'classicSimpleSignal' => round($confidence, 4),
+            ],
+            'voteSummary' => [
+                'dominantSignal' => $bias,
+                'dominantScore' => (int) round(abs($simpleScore)),
+                'minimumDirectionalScore' => 1,
+                'voteGap' => (int) round(abs($simpleScore)),
+                'minimumVoteGap' => 0,
+                'corePassRule' => 0,
+            ],
+            'timing' => [
+                'sequenceLastCandleTime' => $sequenceLastCandleTime,
+                'higherTimeframeLastCandleTime' => null,
+            ],
+            'checks' => [
+                'vwapAligned' => null,
+                'emaAligned' => null,
+                'adxValue' => null,
+                'macdDirection' => null,
+                'rsiValue' => null,
+                'volumeAligned' => null,
+                'volumeRatio' => null,
+                'htfAligned' => null,
+                'corePassRule' => 0,
+                'buyCoreChecks' => [],
+                'sellCoreChecks' => [],
+                'classicSimpleMode' => true,
+            ],
+            'componentBreakdown' => [
+                'classicSimpleSignal' => [
+                    'key' => 'classicSimpleSignal',
+                    'label' => 'Classic simple graph signal',
+                    'rawScore' => round($confidence, 4),
+                    'influenceLevel' => 1.0,
+                    'finalContribution' => round($confidence, 4),
+                    'impact' => $bias === 'SELL' ? 'negative' : 'positive',
+                ],
+            ],
+        ];
+
+        $reason = match ($signal) {
+            'BUY' => 'Classic simple mode: bullish graph/price-action signal',
+            'SELL' => 'Classic simple mode: bearish graph/price-action signal',
+            default => 'Classic simple mode: waiting for clearer graph direction',
+        };
+
+        $this->safeDebugLog('[CONFIDENCE DEBUG]', [
+            'symbol' => (string) ($ticker['symbol'] ?? 'BTCUSDT'),
+            'timeframe' => $settings['timeframe'] ?? '5m',
+            'price' => $price,
+            'candleTime' => $sequenceLastCandleTime,
+            'finalConfidence' => round($confidence, 4),
+            'signal' => $signal,
+            'dominantSignal' => $bias,
+            'componentScores' => $componentDebug['componentScores'],
+            'positiveFactors' => $componentDebug['positiveFactors'],
+            'negativeFactors' => $componentDebug['negativeFactors'],
+        ]);
+
+        return [
+            'symbol' => (string) ($ticker['symbol'] ?? 'BTCUSDT'),
+            'signal' => $signal,
+            'price' => $price,
+            'changePercent' => round($change, 4),
+            'intradayChange' => round($intradayChangePct, 4),
+            'volume' => $quoteVolume,
+            'rangePercent' => round($rangePct, 4),
+            'rangePosition' => round($rangePosition, 4),
+            'vwapBullish' => null,
+            'sequence' => $sequence,
+            'structure' => [],
+            'confidence' => round($confidence, 4),
+            'timeframe' => $settings['timeframe'] ?? '5m',
+            'rsi14' => null,
+            'emaBullish' => null,
+            'macdBullish' => null,
+            'macdHistGrowing' => null,
+            'htfBullish' => null,
+            'htf4hBullish' => null,
+            'symbolPerfAdj' => 0.0,
+            'conflicted' => false,
+            'strongSequence' => abs($simpleScore) >= 1.5,
+            'fastTimeframeWeakSetup' => $signal === 'WAIT',
+            'positiveFactors' => $componentDebug['positiveFactors'],
+            'negativeFactors' => $componentDebug['negativeFactors'],
+            'componentScores' => $componentDebug['componentScores'],
+            'debug' => $componentDebug,
+            'reason' => $reason,
+            'classicSimpleMode' => true,
         ];
     }
 
@@ -3127,6 +3302,10 @@ class FutureTradeBotService
         if (! in_array($mode, ['fixed', 'semi_dynamic', 'fully_dynamic'], true)) {
             $mode = 'fixed';
         }
+        $classicSimpleMode = (bool) ($settings['classicSimpleMode'] ?? false);
+        if ($classicSimpleMode) {
+            $mode = 'fixed';
+        }
         $strictEntryGuards = (bool) ($settings['strictEntryGuards'] ?? false);
         $timeframe = strtolower((string) ($settings['timeframe'] ?? '5m'));
         $isFastTimeframe = in_array($timeframe, ['1m', '3m', '5m'], true);
@@ -3134,6 +3313,11 @@ class FutureTradeBotService
         $base = (float) ($settings['minConfidence'] ?? 0.72);
         $floor = (float) ($settings['dynamicMinConfidenceFloor'] ?? 0.68);
         $ceiling = (float) ($settings['dynamicMinConfidenceCeiling'] ?? 0.88);
+        if ($classicSimpleMode) {
+            $base = min($base, 0.50);
+            $floor = min($floor, 0.45);
+            $ceiling = min($ceiling, 0.55);
+        }
         if (! $strictEntryGuards) {
             $base = min($base, 0.58);
             $floor = min($floor, 0.52);
@@ -3335,6 +3519,9 @@ class FutureTradeBotService
                 );
             }
         } else {
+            if ($classicSimpleMode) {
+                $adjustments[] = 'Classic simple mode: indicators, soft penalties, and dynamic inflation are bypassed for graph-based signals.';
+            }
             $adjustments[] = 'Fixed mode: using the manual minConfidence without automatic adjustment.';
         }
 

@@ -42,6 +42,7 @@ return [
         'leverage' => 3,
         'marginMode' => 'isolated',
         'tradeAmountUsdt' => 25,
+        'classicSimpleMode' => false,
         // Higher confidence threshold — only enter on strong signals
         'minConfidence' => 0.58,
         // TP at 1.2% with 3x leverage = 3.6% on notional — worthwhile
