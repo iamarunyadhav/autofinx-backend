@@ -3,6 +3,7 @@
 namespace App\Domain\FutureTrade;
 
 use App\Domain\Exchange\BinanceFuturesClient;
+use App\Domain\Market\FutureTradeLiveFeedManager;
 use App\Domain\Market\MarketPriceCacheService;
 use App\Domain\Ops\OperationalHealthService;
 use App\Domain\Portfolio\LivePortfolioGuardService;
@@ -25,6 +26,7 @@ class FutureTradeBotService
         private readonly LivePortfolioGuardService $liveGuard,
         private readonly OperationalHealthService $operationalHealth,
         private readonly FuturesOrderSizingService $orderSizing,
+        private readonly FutureTradeLiveFeedManager $liveFeedManager,
     ) {}
 
     public function getOrCreateConfig(string $workspaceId): FutureTradeBotConfig
@@ -461,7 +463,7 @@ class FutureTradeBotService
             'winRate' => round(($wins / $total) * 100, 2),
             'tradeCountToday' => (int) $state->trade_count_today,
             'lastScanAt' => optional($state->last_scan_at)->toIso8601String(),
-            'liveStatus' => $this->liveStatusPayload($state, $bestSignal, $signals, $settings),
+            'liveStatus' => $this->liveStatusPayload($config, $state, $bestSignal, $signals, $settings),
             'settings' => $settings,
             'dynamic' => $dynamic['public'],
             'paperTrading' => ! $this->isLiveMode($config),
@@ -2686,12 +2688,14 @@ class FutureTradeBotService
         ];
     }
 
-    private function liveStatusPayload(FutureTradeBotState $state, ?array $bestSignal, array $signals, array $settings): array
+    private function liveStatusPayload(FutureTradeBotConfig $config, FutureTradeBotState $state, ?array $bestSignal, array $signals, array $settings): array
     {
         $lastChartPoint = Arr::last((array) ($state->chart_points ?? []));
         $ageSeconds = $state->last_scan_at ? now()->diffInSeconds($state->last_scan_at) : null;
         $feedPrice = $state->current_symbol ? $this->cachedLatestPrice((string) $state->current_symbol) : null;
         $hasSharedFeed = $feedPrice !== null;
+        $daemonStatus = $this->liveFeedManager->status((string) $config->workspace_id);
+        $trueWebsocketLive = (bool) ($daemonStatus['running'] ?? false) && (bool) ($daemonStatus['isFresh'] ?? false);
 
         $this->safeDebugLog('[LIVE DATA UPDATE]', [
             'symbol' => $state->current_symbol,
@@ -2703,7 +2707,9 @@ class FutureTradeBotService
         ]);
 
         return [
-            'mode' => $hasSharedFeed ? 'SHARED_FEED_CACHE' : 'REST_POLLING',
+            'mode' => $trueWebsocketLive
+                ? 'TRUE_WEBSOCKET_CACHE_LIVE'
+                : ($hasSharedFeed ? 'SHARED_FEED_CACHE' : 'REST_POLLING'),
             'priceUpdateMode' => 'SCAN_LOOP',
             'indicatorMode' => 'FORMING_CANDLE',
             'lastUpdateTime' => optional($state->last_scan_at)->toIso8601String(),
@@ -2714,9 +2720,20 @@ class FutureTradeBotService
             'scanIntervalSeconds' => (int) ($settings['scanIntervalSeconds'] ?? 3),
             'isStale' => $ageSeconds !== null && $ageSeconds > max(6, (int) ($settings['scanIntervalSeconds'] ?? 3) * 3),
             'scannerSnapshotCount' => count($signals),
-            'dataSource' => $hasSharedFeed
-                ? (string) ($feedPrice['source'] ?? 'shared-feed')
-                : (($settings['useLiveDataFeed'] ?? true) ? 'BINANCE_LIVE_REST' : 'BINANCE_EXECUTION_REST'),
+            'dataSource' => $trueWebsocketLive
+                ? 'BINANCE_FUTURES_WEBSOCKET_CACHE'
+                : ($hasSharedFeed
+                    ? (string) ($feedPrice['source'] ?? 'shared-feed')
+                    : (($settings['useLiveDataFeed'] ?? true) ? 'BINANCE_LIVE_REST' : 'BINANCE_EXECUTION_REST')),
+            'daemon' => [
+                'running' => (bool) ($daemonStatus['running'] ?? false),
+                'pid' => $daemonStatus['pid'] ?? null,
+                'startedAt' => $daemonStatus['startedAt'] ?? null,
+                'lastTickAt' => $daemonStatus['lastTickAt'] ?? null,
+                'feedAgeSeconds' => $daemonStatus['ageSeconds'] ?? null,
+                'restartRecommended' => (bool) ($daemonStatus['restartRecommended'] ?? false),
+                'symbolSetInSync' => (bool) ($daemonStatus['symbolSetInSync'] ?? true),
+            ],
         ];
     }
 

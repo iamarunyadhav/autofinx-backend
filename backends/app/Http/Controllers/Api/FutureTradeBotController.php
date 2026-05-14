@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Domain\FutureTrade\FutureTradeBotService;
+use App\Domain\Market\FutureTradeLiveFeedManager;
 use App\Http\Controllers\Controller;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -11,6 +12,7 @@ class FutureTradeBotController extends Controller
 {
     public function __construct(
         private readonly FutureTradeBotService $bot,
+        private readonly FutureTradeLiveFeedManager $liveFeedManager,
     ) {}
 
     public function status(string $workspace): JsonResponse
@@ -21,6 +23,26 @@ class FutureTradeBotController extends Controller
     public function dashboard(string $workspace): JsonResponse
     {
         return response()->json($this->bot->dashboardPayload($this->bot->getOrCreateConfig($workspace)));
+    }
+
+    public function liveFeedStatus(string $workspace): JsonResponse
+    {
+        return response()->json($this->liveFeedManager->status($workspace));
+    }
+
+    public function startLiveFeed(string $workspace): JsonResponse
+    {
+        return response()->json($this->liveFeedManager->start());
+    }
+
+    public function stopLiveFeed(string $workspace): JsonResponse
+    {
+        return response()->json($this->liveFeedManager->stop());
+    }
+
+    public function restartLiveFeed(string $workspace): JsonResponse
+    {
+        return response()->json($this->liveFeedManager->restart());
     }
 
     public function start(string $workspace): JsonResponse

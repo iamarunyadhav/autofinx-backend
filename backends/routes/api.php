@@ -448,6 +448,10 @@ Route::prefix('v1')->group(function () {
         // ---- Future Trade Bot ----------------------------------------------
         Route::get('workspaces/{workspace}/future-trade/status', [FutureTradeBotController::class, 'status']);
         Route::get('workspaces/{workspace}/future-trade/dashboard', [FutureTradeBotController::class, 'dashboard']);
+        Route::get('workspaces/{workspace}/future-trade/live-feed', [FutureTradeBotController::class, 'liveFeedStatus']);
+        Route::post('workspaces/{workspace}/future-trade/live-feed/start', [FutureTradeBotController::class, 'startLiveFeed'])->middleware('require.2fa');
+        Route::post('workspaces/{workspace}/future-trade/live-feed/stop', [FutureTradeBotController::class, 'stopLiveFeed'])->middleware('require.2fa');
+        Route::post('workspaces/{workspace}/future-trade/live-feed/restart', [FutureTradeBotController::class, 'restartLiveFeed'])->middleware('require.2fa');
         Route::post('workspaces/{workspace}/future-trade/start', [FutureTradeBotController::class, 'start'])->middleware('require.2fa');
         Route::post('workspaces/{workspace}/future-trade/stop', [FutureTradeBotController::class, 'stop'])->middleware('require.2fa');
         Route::post('workspaces/{workspace}/future-trade/emergency-stop', [FutureTradeBotController::class, 'emergencyStop'])->middleware('require.2fa');
