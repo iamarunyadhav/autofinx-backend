@@ -26,7 +26,7 @@ class FutureTradeBotService
         private readonly LivePortfolioGuardService $liveGuard,
         private readonly OperationalHealthService $operationalHealth,
         private readonly FuturesOrderSizingService $orderSizing,
-        private readonly FutureTradeLiveFeedManager $liveFeedManager,
+        private readonly ?FutureTradeLiveFeedManager $liveFeedManager = null,
     ) {}
 
     public function getOrCreateConfig(string $workspaceId): FutureTradeBotConfig
@@ -92,6 +92,7 @@ class FutureTradeBotService
     {
         $config->update(['enabled' => true, 'paper_trading' => true, 'enable_live_trading' => false]);
         $settings = $config->mergedSettings();
+        $this->autoEnsureLiveFeedStarted($config, $settings);
         if ((bool) ($settings['liveTrading'] ?? false) && $this->environmentTradingReady((bool) ($settings['forceTestnet'] ?? true), $settings)) {
             $guard = $this->liveGuard->canActivate($config->workspace_id, 'future_trade');
             if ($guard['allowed']) {
@@ -142,6 +143,52 @@ class FutureTradeBotService
         );
         $this->scan($startedConfig, true);
         return $state->exists ? $state->fresh() : $state;
+    }
+
+    private function autoEnsureLiveFeedStarted(FutureTradeBotConfig $config, array $settings): void
+    {
+        if (! ($settings['useLiveDataFeed'] ?? true)) {
+            return;
+        }
+
+        if ($this->liveFeedManager === null) {
+            return;
+        }
+
+        try {
+            $status = $this->liveFeedManager->status((string) $config->workspace_id);
+            if (! (bool) ($status['running'] ?? false)) {
+                $started = $this->liveFeedManager->start();
+                $this->log(
+                    $config->fresh('state'),
+                    'LIVE_FEED_DAEMON_STARTED',
+                    null,
+                    null,
+                    0,
+                    (bool) ($started['running'] ?? false)
+                        ? 'Shared futures websocket feed daemon started automatically.'
+                        : 'Attempted to start shared futures websocket feed daemon; REST fallback remains active.'
+                );
+            } elseif ((bool) ($status['restartRecommended'] ?? false)) {
+                $this->log(
+                    $config->fresh('state'),
+                    'LIVE_FEED_RESTART_RECOMMENDED',
+                    null,
+                    null,
+                    0,
+                    'Shared futures websocket feed is running, but symbol list changed. Restart feed from UI for best coverage.'
+                );
+            }
+        } catch (Throwable $e) {
+            $this->log(
+                $config->fresh('state'),
+                'LIVE_FEED_AUTOSTART_FAILED',
+                null,
+                null,
+                0,
+                'Websocket daemon auto-start failed: ' . $e->getMessage() . '. REST fallback remains active.'
+            );
+        }
     }
 
     public function stop(FutureTradeBotConfig $config): FutureTradeBotState
@@ -2694,7 +2741,16 @@ class FutureTradeBotService
         $ageSeconds = $state->last_scan_at ? now()->diffInSeconds($state->last_scan_at) : null;
         $feedPrice = $state->current_symbol ? $this->cachedLatestPrice((string) $state->current_symbol) : null;
         $hasSharedFeed = $feedPrice !== null;
-        $daemonStatus = $this->liveFeedManager->status((string) $config->workspace_id);
+        $daemonStatus = $this->liveFeedManager?->status((string) $config->workspace_id) ?? [
+            'running' => false,
+            'isFresh' => false,
+            'pid' => null,
+            'startedAt' => null,
+            'lastTickAt' => null,
+            'ageSeconds' => null,
+            'restartRecommended' => false,
+            'symbolSetInSync' => true,
+        ];
         $trueWebsocketLive = (bool) ($daemonStatus['running'] ?? false) && (bool) ($daemonStatus['isFresh'] ?? false);
 
         $this->safeDebugLog('[LIVE DATA UPDATE]', [
