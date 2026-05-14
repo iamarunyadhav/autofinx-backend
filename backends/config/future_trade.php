@@ -14,6 +14,23 @@ return [
         'APTUSDT', 'ARBUSDT', 'OPUSDT', 'SUIUSDT', 'SEIUSDT',
     ],
 
+    'presets' => [
+        'balanced_live_test' => [
+            'minConfidence' => 0.52,
+            'confidenceMode' => 'fixed',
+            'dynamicMinConfidenceFloor' => 0.50,
+            'dynamicMinConfidenceCeiling' => 0.62,
+            'strictEntryGuards' => false,
+            'avoidChoppyMarket' => true,
+            'weakSetupAction' => 'reduce_size',
+            'directionalMinScore5m' => 5,
+            'directionalMinVoteGap5m' => 1,
+            'symbolPerfAdjustCap' => 0.04,
+            'cooldownSeconds' => 60,
+            'tradeAmountUsdt' => 25,
+        ],
+    ],
+
     'defaults' => [
         // Scan these 6 coins by default — diversified across sectors
         'symbols' => ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'AVAXUSDT'],
@@ -25,7 +42,7 @@ return [
         'marginMode' => 'isolated',
         'tradeAmountUsdt' => 25,
         // Higher confidence threshold — only enter on strong signals
-        'minConfidence' => 0.74,
+        'minConfidence' => 0.58,
         // TP at 1.2% with 3x leverage = 3.6% on notional — worthwhile
         'takeProfitPercent' => 1.2,
         // Tighter SL: 0.4% stop, keeping R:R at 3:1
@@ -36,21 +53,26 @@ return [
         'maxDailyLossPercent' => 2,
         'maxOpenPositions' => 1,
         // Fewer high-quality trades rather than many low-quality ones
-        'maxTradesPerDay' => 10,
+        'maxTradesPerDay' => 25,
         'maxLeverage' => 5,
         'maxSpreadPercent' => 0.12,
         // Longer cooldown prevents chasing failed trades
-        'cooldownSeconds' => 45,
+        'cooldownSeconds' => 15,
         'scanIntervalSeconds' => 3,
-        'confidenceMode' => 'semi_dynamic',
+        'confidenceMode' => 'fixed',
         'dynamicLookbackMinutes' => 10,
-        'dynamicMinConfidenceFloor' => 0.64,
-        'dynamicMinConfidenceCeiling' => 0.88,
-        'dynamicReentryBuffer' => 0.015,
-        'dynamicSuggestionEnabled' => true,
+        'dynamicMinConfidenceFloor' => 0.52,
+        'dynamicMinConfidenceCeiling' => 0.64,
+        'dynamicReentryBuffer' => 0.005,
+        'dynamicSuggestionEnabled' => false,
         'autoExecutePaperSignals' => true,
-        'avoidChoppyMarket' => true,
+        'avoidChoppyMarket' => false,
         'strictEntryGuards' => false,
+        'weakSetupAction' => 'reduce_size',
+        'directionalMinScore5m' => 5,
+        'directionalMinVoteGap5m' => 1,
+        'symbolPerfAdjustCap' => 0.04,
+        'preset' => 'balanced_live_test',
         'emergencyStop' => false,
     ],
 ];

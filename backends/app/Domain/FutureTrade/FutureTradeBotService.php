@@ -801,9 +801,11 @@ class FutureTradeBotService
         $settings = $dynamic['settings'];
         $analysis = (array) ($dynamic['public']['analysis'] ?? []);
         if ((string) $state->state === 'IN_POSITION' || (float) $state->quantity > 0) {
+            $this->emitTradeDecisionDebug($config, $signal, $dynamic, 'BLOCKED', ['open_position_exists']);
             return;
         }
         if (! $this->isWithinTradingHours($settings)) {
+            $this->emitTradeDecisionDebug($config, $signal, $dynamic, 'BLOCKED', ['outside_trading_hours']);
             $this->logThrottled(
                 $config,
                 'TRADE_BLOCKED',
@@ -817,6 +819,7 @@ class FutureTradeBotService
             return;
         }
         if (($settings['emergencyStop'] ?? false)) {
+            $this->emitTradeDecisionDebug($config, $signal, $dynamic, 'BLOCKED', ['emergency_stop']);
             $this->logThrottled(
                 $config,
                 'TRADE_BLOCKED',
@@ -830,6 +833,7 @@ class FutureTradeBotService
             return;
         }
         if ($signal['signal'] === 'WAIT') {
+            $this->emitTradeDecisionDebug($config, $signal, $dynamic, 'WAIT', ['strategy_wait_signal']);
             $this->logThrottled(
                 $config,
                 'SIGNAL_SKIPPED',
@@ -843,6 +847,7 @@ class FutureTradeBotService
             return;
         }
         if ((float) $signal['confidence'] < (float) ($settings['minConfidence'] ?? 0.68)) {
+            $this->emitTradeDecisionDebug($config, $signal, $dynamic, 'BLOCKED', ['confidence_below_threshold']);
             $this->log(
                 $config,
                 'SIGNAL_SKIPPED',
@@ -862,6 +867,7 @@ class FutureTradeBotService
                 || ! (bool) ($signal['strongSequence'] ?? true)
             )
         ) {
+            $this->emitTradeDecisionDebug($config, $signal, $dynamic, 'BLOCKED', ['weak_setup_hard_block']);
             $this->logThrottled(
                 $config,
                 'SIGNAL_SKIPPED',
@@ -875,6 +881,7 @@ class FutureTradeBotService
             return;
         }
         if ($strictEntryGuards && (float) ($analysis['trendStrength'] ?? 0) < 0.45) {
+            $this->emitTradeDecisionDebug($config, $signal, $dynamic, 'BLOCKED', ['trend_strength_too_low']);
             $this->logThrottled(
                 $config,
                 'SIGNAL_SKIPPED',
@@ -892,6 +899,7 @@ class FutureTradeBotService
             && (int) ($analysis['totalTrades'] ?? 0) >= 6
             && (float) ($analysis['winRate'] ?? 100) < 35
         ) {
+            $this->emitTradeDecisionDebug($config, $signal, $dynamic, 'BLOCKED', ['poor_regime_guard']);
             $this->logThrottled(
                 $config,
                 'SIGNAL_SKIPPED',
@@ -907,6 +915,7 @@ class FutureTradeBotService
         $rrTp = (float) ($settings['takeProfitPercent'] ?? 0.45);
         $rrRollback = (float) ($settings['rollbackLossPercent'] ?? 0.18);
         if ($rrTp < $rrRollback * 1.8) {
+            $this->emitTradeDecisionDebug($config, $signal, $dynamic, 'BLOCKED', ['risk_reward_guard']);
             $this->logThrottled(
                 $config,
                 'TRADE_BLOCKED',
@@ -920,6 +929,7 @@ class FutureTradeBotService
             return;
         }
         if ($state->cooldown_until && $state->cooldown_until->isFuture()) {
+            $this->emitTradeDecisionDebug($config, $signal, $dynamic, 'BLOCKED', ['cooldown_active']);
             $this->logThrottled(
                 $config,
                 'TRADE_BLOCKED',
@@ -933,6 +943,7 @@ class FutureTradeBotService
             return;
         }
         if ((int) $state->trade_count_today >= (int) ($settings['maxTradesPerDay'] ?? 25)) {
+            $this->emitTradeDecisionDebug($config, $signal, $dynamic, 'BLOCKED', ['max_trades_per_day']);
             $this->log(
                 $config,
                 'TRADE_BLOCKED',
@@ -945,6 +956,7 @@ class FutureTradeBotService
             return;
         }
         if ((float) $state->daily_loss >= (float) ($settings['maxDailyLossPercent'] ?? 2)) {
+            $this->emitTradeDecisionDebug($config, $signal, $dynamic, 'BLOCKED', ['daily_loss_guard']);
             $this->log(
                 $config,
                 'TRADE_BLOCKED',
@@ -958,6 +970,7 @@ class FutureTradeBotService
         }
 
         if ($this->isLiveMode($config)) {
+            $this->emitTradeDecisionDebug($config, $signal, $dynamic, 'OPEN', [], ['live_entry_allowed']);
             try {
                 $this->openLivePosition($config, $signal);
             } catch (Throwable $e) {
@@ -981,7 +994,11 @@ class FutureTradeBotService
 
         $side = $signal['signal'] === 'BUY' ? 'LONG' : 'SHORT';
         $price = (float) $signal['price'];
-        $qty = ((float) ($settings['tradeAmountUsdt'] ?? 25) * (float) ($settings['leverage'] ?? 3)) / max($price, 0.00000001);
+        $tradeAmountUsdt = (float) ($settings['tradeAmountUsdt'] ?? 25);
+        if (($settings['weakSetupAction'] ?? 'reduce_size') === 'reduce_size' && (bool) ($signal['fastTimeframeWeakSetup'] ?? false)) {
+            $tradeAmountUsdt *= 0.5;
+        }
+        $qty = ($tradeAmountUsdt * (float) ($settings['leverage'] ?? 3)) / max($price, 0.00000001);
         $this->persistState($state, [
             'state' => 'IN_POSITION',
             'current_symbol' => $signal['symbol'],
@@ -1017,6 +1034,11 @@ class FutureTradeBotService
             'Paper futures position opened.',
             $this->runtimeContext($dynamic, ['status' => 'OPEN', 'side' => $side, 'entryPrice' => $price, 'quantity' => $qty, 'mode' => 'PAPER'])
         );
+        $allowedBecause = ['paper_entry_allowed'];
+        if (($settings['weakSetupAction'] ?? 'reduce_size') === 'reduce_size' && (bool) ($signal['fastTimeframeWeakSetup'] ?? false)) {
+            $allowedBecause[] = 'weak_setup_allowed_with_reduced_size';
+        }
+        $this->emitTradeDecisionDebug($config, $signal, $dynamic, 'OPEN', [], $allowedBecause);
     }
 
     private function manageOpenPosition(FutureTradeBotConfig $config, float $price): void
@@ -1474,7 +1496,8 @@ class FutureTradeBotService
         $htf4hBullish = isset($htf['h4EmaBullish']) ? (bool) $htf['h4EmaBullish'] : null;
         $htfEma200Bullish = isset($htf['ema200Bullish']) ? (bool) $htf['ema200Bullish'] : null;
         $higherTimeframeContextAvailable = $htfBullish !== null || $htf4hBullish !== null || $htfEma200Bullish !== null;
-        $symbolPerfAdjust = (float) ($ticker['symbolPerfAdjust'] ?? 0.0);
+        $symbolPerfAdjustCap = max(0.0, (float) ($settings['symbolPerfAdjustCap'] ?? 0.04));
+        $symbolPerfAdjust = $this->clamp((float) ($ticker['symbolPerfAdjust'] ?? 0.0), -$symbolPerfAdjustCap, $symbolPerfAdjustCap);
         $sequenceLastCandleTime = $sequence['lastCandleTime'] ?? null;
         $htfLastCandleTime = $htf['lastCandleTime_1h'] ?? null;
 
@@ -1532,12 +1555,26 @@ class FutureTradeBotService
         $dominantScore = max($buyScore, $sellScore);
         $voteGap = abs($buyScore - $sellScore);
         $conflicted = $buyScore >= 5 && $sellScore >= 5;
+        $coreBuyAligned = count(array_filter([
+            $buyChecks['ut'] ?? false,
+            $buyChecks['vwap'] ?? false,
+            $buyChecks['ema'] ?? false,
+            $buyChecks['adx'] ?? false,
+        ])) >= 3;
+        $coreSellAligned = count(array_filter([
+            $sellChecks['ut'] ?? false,
+            $sellChecks['vwap'] ?? false,
+            $sellChecks['ema'] ?? false,
+            $sellChecks['adx'] ?? false,
+        ])) >= 3;
+        $configuredDirectionalScore = (int) ($settings['directionalMinScore5m'] ?? 5);
+        $configuredVoteGap = (int) ($settings['directionalMinVoteGap5m'] ?? 1);
         $minimumDirectionalScore = $strictEntryGuards
             ? count($buyChecks)
-            : ($isFastTimeframe ? 8 : 7);
+            : ($isFastTimeframe ? max(4, $configuredDirectionalScore) : 5);
         $minimumVoteGap = $strictEntryGuards
             ? count($buyChecks)
-            : ($isFastTimeframe ? 2 : 1);
+            : ($isFastTimeframe ? max(0, $configuredVoteGap) : 1);
         if (! $strictEntryGuards) {
             if (! $structureContextAvailable) {
                 $minimumDirectionalScore -= 2;
@@ -1545,22 +1582,33 @@ class FutureTradeBotService
             if (! $higherTimeframeContextAvailable) {
                 $minimumDirectionalScore -= 1;
             }
-            $minimumDirectionalScore = max($isFastTimeframe ? 5 : 4, $minimumDirectionalScore);
+            $minimumDirectionalScore = max($isFastTimeframe ? 4 : 3, $minimumDirectionalScore);
             if (! $structureContextAvailable && ! $higherTimeframeContextAvailable) {
-                $minimumVoteGap = 1;
+                $minimumVoteGap = 0;
             }
         }
 
         $signal = 'WAIT';
         if ($dominantSignal !== 'WAIT' && $dominantScore >= $minimumDirectionalScore && $voteGap >= $minimumVoteGap) {
             $signal = $dominantSignal;
+        } elseif (
+            ! $strictEntryGuards
+            && $dominantSignal !== 'WAIT'
+            && $voteGap >= 1
+            && $dominantScore >= 4
+            && (
+                ($dominantSignal === 'BUY' && $coreBuyAligned)
+                || ($dominantSignal === 'SELL' && $coreSellAligned)
+            )
+        ) {
+            $signal = $dominantSignal;
         }
 
         $fiveMinuteWeakSetup = $isFastTimeframe && (
             ! $strongDirectionalSequence
             || $conflicted
-            || $choppy
-            || $voteGap < 4
+            || (($settings['avoidChoppyMarket'] ?? true) && $choppy && ! $volumeOk)
+            || $voteGap < 2
             || ($dominantSignal === 'BUY' && ($utBias !== 'BUY' || ! $bullishMsb || ! $bullishObValid))
             || ($dominantSignal === 'SELL' && ($utBias !== 'SELL' || ! $bearishMsb || ! $bearishObValid))
         );
@@ -1648,6 +1696,8 @@ class FutureTradeBotService
                 'choppy' => $choppy,
                 'conflicted' => $conflicted,
                 'fiveMinuteWeakSetup' => $fiveMinuteWeakSetup,
+                'coreBuyAligned' => $coreBuyAligned,
+                'coreSellAligned' => $coreSellAligned,
                 'adx14' => $adx14,
                 'rsi14' => $rsi14,
                 'vwapBullish' => $vwapBullish,
@@ -2621,46 +2671,54 @@ class FutureTradeBotService
         $sequenceImpulse = (string) ($meta['sequenceImpulse'] ?? 'NEUTRAL');
         $directionalImpulseAligned = in_array($sequenceImpulse, [$side, 'NEUTRAL'], true);
 
-        $componentScores['ut'] = ($checks['ut'] ?? false) ? 0.14 : 0.0;
+        $componentScores['ut'] = ($checks['ut'] ?? false) ? 0.22 : 0.0;
         $componentScores['structure'] = match (true) {
-            $structureHits >= 3 => 0.08,
-            $structureHits === 2 => 0.055,
-            $structureHits === 1 => 0.025,
+            $structureHits >= 3 => 0.05,
+            $structureHits === 2 => 0.03,
+            $structureHits === 1 => 0.01,
             default => 0.0,
         };
-        $componentScores['vwap'] = ($checks['vwap'] ?? false) ? 0.06 : 0.0;
-        $componentScores['ema'] = ($checks['ema'] ?? false) ? 0.06 : 0.0;
-        $componentScores['htf'] = ($checks['htf'] ?? false) ? 0.07 : 0.0;
-        $componentScores['macro'] = ($checks['macro'] ?? false) ? 0.03 : 0.0;
-        $componentScores['rsi'] = ($checks['rsi'] ?? false) ? 0.05 : 0.0;
-        $componentScores['macd'] = ($checks['macd'] ?? false) ? 0.06 : 0.0;
-        $componentScores['extension'] = ($checks['extension'] ?? false) ? 0.05 : 0.0;
+        $componentScores['vwap'] = ($checks['vwap'] ?? false) ? 0.09 : 0.0;
+        $componentScores['ema'] = ($checks['ema'] ?? false) ? 0.09 : 0.0;
+        $componentScores['htf'] = ($checks['htf'] ?? false) ? 0.03 : 0.0;
+        $componentScores['macro'] = ($checks['macro'] ?? false) ? 0.02 : 0.0;
+        $componentScores['rsi'] = ($checks['rsi'] ?? false) ? 0.03 : 0.0;
+        $componentScores['macd'] = ($checks['macd'] ?? false) ? 0.03 : 0.0;
+        $componentScores['extension'] = ($checks['extension'] ?? false) ? 0.02 : 0.0;
         $componentScores['adx'] = match (true) {
-            $adx >= 22.0 => 0.06,
-            $adx >= 18.0 => 0.05,
-            $adx >= 15.0 => 0.03,
+            $adx >= 22.0 => 0.08,
+            $adx >= 18.0 => 0.06,
+            $adx >= 15.0 => 0.04,
             default => 0.0,
         };
         $componentScores['volume'] = match (true) {
-            $volumeRatio >= 1.10 => 0.07,
-            $volumeRatio >= 0.95 => 0.04,
-            $volumeRatio >= 0.85 => 0.015,
+            $volumeRatio >= 1.10 => 0.03,
+            $volumeRatio >= 0.95 => 0.02,
+            $volumeRatio >= 0.85 => 0.01,
             default => 0.0,
         };
         $componentScores['sequence'] = match (true) {
-            ($meta['strongDirectionalSequence'] ?? false) === true => 0.10,
-            $directionalImpulseAligned && $sequenceConsistency >= ($isFastTimeframe ? 0.52 : 0.5) && $sequenceNetChange >= ($isFastTimeframe ? 0.08 : 0.06) => 0.04,
+            ($meta['strongDirectionalSequence'] ?? false) === true => 0.05,
+            $directionalImpulseAligned && $sequenceConsistency >= ($isFastTimeframe ? 0.52 : 0.5) && $sequenceNetChange >= ($isFastTimeframe ? 0.08 : 0.06) => 0.02,
             default => 0.0,
         };
         $componentScores['macdHistogramBonus'] = ($meta['macdHistGrowing'] ?? false) ? 0.02 : 0.0;
-        $componentScores['directionalSignalBonus'] = (($meta['signal'] ?? 'WAIT') !== 'WAIT' && ! ($meta['strictEntryGuards'] ?? false)) ? 0.14 : 0.0;
+        $componentScores['directionalSignalBonus'] = (($meta['signal'] ?? 'WAIT') !== 'WAIT' && ! ($meta['strictEntryGuards'] ?? false)) ? 0.08 : 0.0;
         $componentScores['trendContinuationBonus'] = (
             (($meta['signal'] ?? 'WAIT') !== 'WAIT')
             && ($checks['vwap'] ?? false)
             && ($checks['ema'] ?? false)
-            && (($checks['htf'] ?? false) || ($checks['macro'] ?? false))
+            && ($checks['adx'] ?? false)
         ) ? 0.05 : 0.0;
         $componentScores['symbolPerfAdjust'] = round((float) ($meta['symbolPerfAdjust'] ?? 0.0), 4);
+        $componentScores['volumePenalty'] = ! ($checks['volume'] ?? false) ? -0.03 : 0.0;
+        $componentScores['macdPenalty'] = ! ($checks['macd'] ?? false) ? -0.03 : 0.0;
+        $componentScores['htfPenalty'] = ! ($checks['htf'] ?? false) ? -0.04 : 0.0;
+        $componentScores['structurePenalty'] = $componentScores['structure'] > 0 ? 0.0 : -0.03;
+        $componentScores['extensionPenalty'] = (($meta['extendedFromEma'] ?? false) === true || ($meta['extendedFromVwap'] ?? false) === true) ? -0.04 : 0.0;
+        $componentScores['rsiPenalty'] = ! ($checks['rsi'] ?? false) ? -0.02 : 0.0;
+        $componentScores['choppyPenalty'] = (($meta['choppy'] ?? false) === true) ? -0.02 : 0.0;
+        $componentScores['weakSetupPenalty'] = (($meta['fiveMinuteWeakSetup'] ?? false) === true) ? -0.02 : 0.0;
 
         foreach ($labelMap as $key => $label) {
             if ($key === 'msb' || $key === 'ob' || $key === 'structure') {
@@ -2711,7 +2769,7 @@ class FutureTradeBotService
             $negativeFactors[] = '1h trend filter not fully bearish';
         }
 
-        $finalConfidence = round(array_sum($componentScores), 4);
+        $finalConfidence = round($this->clamp(array_sum($componentScores), 0.01, 0.99), 4);
 
         return [
             'decision' => ($meta['signal'] ?? 'WAIT') === 'WAIT' ? 'WAIT' : $meta['signal'],
@@ -2733,6 +2791,39 @@ class FutureTradeBotService
                 'higherTimeframeLastCandleTime' => $meta['htfLastCandleTime'] ?? null,
             ],
         ];
+    }
+
+    private function emitTradeDecisionDebug(
+        FutureTradeBotConfig $config,
+        array $signal,
+        array $dynamic,
+        string $finalDecision,
+        array $hardBlockers = [],
+        array $allowedBecause = []
+    ): void {
+        $negativeFactors = array_values((array) data_get($signal, 'debug.negativeFactors', []));
+        $softPenalties = array_values(array_filter($negativeFactors, function (string $factor): bool {
+            $normalized = strtolower($factor);
+
+            return ! str_contains($normalized, 'confidence below')
+                && ! str_contains($normalized, 'directional gate not cleared')
+                && ! str_contains($normalized, 'weak-setup guard active');
+        }));
+
+        $this->safeDebugLog('[TRADE DECISION DEBUG]', [
+            'workspaceId' => (string) $config->workspace_id,
+            'symbol' => (string) ($signal['symbol'] ?? ''),
+            'timeframe' => (string) ($signal['timeframe'] ?? data_get($dynamic, 'settings.timeframe', '5m')),
+            'signal' => (string) ($signal['signal'] ?? 'WAIT'),
+            'dominantSignal' => (string) ($signal['debug.voteSummary.dominantSignal'] ?? $signal['signal'] ?? 'WAIT'),
+            'finalConfidence' => round((float) ($signal['confidence'] ?? 0), 4),
+            'activeMinimum' => round((float) ($dynamic['effectiveMinConfidence'] ?? data_get($dynamic, 'settings.minConfidence', 0)), 4),
+            'blocked' => in_array($finalDecision, ['BLOCKED', 'WAIT'], true),
+            'hardBlockers' => array_values($hardBlockers),
+            'softPenalties' => $softPenalties,
+            'allowedBecause' => array_values($allowedBecause),
+            'finalDecision' => $finalDecision,
+        ]);
     }
 
     private function liveStatusPayload(FutureTradeBotConfig $config, FutureTradeBotState $state, ?array $bestSignal, array $signals, array $settings): array
@@ -2844,12 +2935,18 @@ class FutureTradeBotService
         if (! in_array($mode, ['fixed', 'semi_dynamic', 'fully_dynamic'], true)) {
             $mode = 'fixed';
         }
+        $strictEntryGuards = (bool) ($settings['strictEntryGuards'] ?? false);
         $timeframe = strtolower((string) ($settings['timeframe'] ?? '5m'));
         $isFastTimeframe = in_array($timeframe, ['1m', '3m', '5m'], true);
 
         $base = (float) ($settings['minConfidence'] ?? 0.72);
         $floor = (float) ($settings['dynamicMinConfidenceFloor'] ?? 0.68);
         $ceiling = (float) ($settings['dynamicMinConfidenceCeiling'] ?? 0.88);
+        if (! $strictEntryGuards) {
+            $base = min($base, 0.58);
+            $floor = min($floor, 0.52);
+            $ceiling = min($ceiling, 0.64);
+        }
         if ($floor > $ceiling) {
             [$floor, $ceiling] = [$ceiling, $floor];
         }
@@ -2866,50 +2963,69 @@ class FutureTradeBotService
         $baseTradeAmount = max(25.0, (float) ($settings['tradeAmountUsdt'] ?? 25));
 
         if ($mode !== 'fixed') {
-            if ($analysis['choppy']) {
-                $effective += $mode === 'fully_dynamic' ? 0.06 : 0.04;
-                $next['takeProfitPercent'] = max(0.55, $baseTakeProfit * ($mode === 'fully_dynamic' ? 0.82 : 0.90));
-                $next['trailingTakeProfitPercent'] = max(0.03, $baseTrailing * 0.85);
-                $adjustments[] = 'Choppy market: require stronger confidence and take faster profit.';
-            } elseif ($analysis['trendStrength'] >= 0.68 && $analysis['directionAgreement'] >= 0.58) {
-                $effective -= $mode === 'fully_dynamic' ? 0.045 : 0.028;
-                $next['takeProfitPercent'] = $baseTakeProfit * ($mode === 'fully_dynamic' ? 1.20 : 1.10);
-                $next['trailingTakeProfitPercent'] = $baseTrailing * ($mode === 'fully_dynamic' ? 1.08 : 1.03);
-                $adjustments[] = 'Strong aligned trend: allow earlier entry and let target breathe.';
+            if ($mode === 'semi_dynamic') {
+                $winRate = (float) ($analysis['winRate'] ?? 0);
+                $sampleWeight = $this->clamp((float) ($analysis['winRateSampleWeight'] ?? 0), 0.0, 1.0);
+                if ($winRate > 0 && $sampleWeight >= 0.05) {
+                    if ($winRate < 42) {
+                        $effective += 0.008 + (0.018 * $sampleWeight);
+                        $next['tradeAmountUsdt'] = max(25, $baseTradeAmount * (1 - (0.05 + (0.10 * $sampleWeight))));
+                        $adjustments[] = sprintf('Semi-dynamic: weak recent accuracy over %d closes raises confidence slightly.', (int) ($analysis['totalTrades'] ?? 0));
+                    } elseif ($winRate >= 58) {
+                        $effective -= 0.004 + (0.012 * $sampleWeight);
+                        $adjustments[] = sprintf('Semi-dynamic: healthy recent accuracy over %d closes allows a small threshold reduction.', (int) ($analysis['totalTrades'] ?? 0));
+                    }
+                }
+                if (($analysis['lastTradeReason'] ?? null) && str_contains((string) $analysis['lastTradeReason'], 'LOSS')) {
+                    $effective += 0.015;
+                    $next['cooldownSeconds'] = max($baseCooldown, 75);
+                    $adjustments[] = 'Semi-dynamic: recent loss applies a mild confidence and cooldown increase.';
+                } elseif (($analysis['lastTradeReason'] ?? null) && str_contains((string) $analysis['lastTradeReason'], 'TAKE_PROFIT')) {
+                    $effective += (float) ($settings['dynamicReentryBuffer'] ?? 0.02) * 0.5;
+                    $adjustments[] = 'Semi-dynamic: recent take profit keeps a small re-entry buffer.';
+                }
             } else {
-                $effective += $isFastTimeframe
-                    ? ($mode === 'fully_dynamic' ? 0.008 : 0.003)
-                    : ($mode === 'fully_dynamic' ? 0.01 : 0.005);
-                $adjustments[] = 'Mixed signal: keep entry slightly stricter.';
-            }
+                if ($analysis['choppy']) {
+                    $effective += 0.02;
+                    $next['takeProfitPercent'] = max(0.55, $baseTakeProfit * 0.82);
+                    $next['trailingTakeProfitPercent'] = max(0.03, $baseTrailing * 0.85);
+                    $adjustments[] = 'Choppy market: require stronger confidence and take faster profit.';
+                } elseif ($analysis['trendStrength'] >= 0.68 && $analysis['directionAgreement'] >= 0.58) {
+                    $effective -= 0.045;
+                    $next['takeProfitPercent'] = $baseTakeProfit * 1.20;
+                    $next['trailingTakeProfitPercent'] = $baseTrailing * 1.08;
+                    $adjustments[] = 'Strong aligned trend: allow earlier entry and let target breathe.';
+                } else {
+                    $effective += $isFastTimeframe ? 0.003 : 0.005;
+                    $adjustments[] = 'Mixed signal: keep entry slightly stricter.';
+                }
 
-            if ($analysis['confidenceGap'] < 0.025) {
-                $effective += $mode === 'fully_dynamic' ? 0.018 : 0.01;
-                $adjustments[] = 'Top signals are close together: avoid weak ranking edge.';
-            }
+                if ($strictEntryGuards && $analysis['confidenceGap'] < 0.025) {
+                    $effective += 0.018;
+                    $adjustments[] = 'Top signals are close together: avoid weak ranking edge.';
+                }
 
-            if (
-                $isFastTimeframe
-                && ($analysis['lastTradeReason'] ?? null) === null
-                && (int) ($analysis['totalTrades'] ?? 0) === 0
-                && (float) ($analysis['bestConfidence'] ?? 0) >= 0.58
-                && (float) ($analysis['trendStrength'] ?? 0) >= 0.5
-                && (float) ($analysis['directionAgreement'] ?? 0) >= 0.55
-            ) {
-                $effective -= $mode === 'fully_dynamic' ? 0.012 : 0.008;
-                $adjustments[] = '5m scalp relief: aligned momentum allows a modest threshold reduction.';
-            }
+                if (
+                    $isFastTimeframe
+                    && ($analysis['lastTradeReason'] ?? null) === null
+                    && (int) ($analysis['totalTrades'] ?? 0) === 0
+                    && (float) ($analysis['bestConfidence'] ?? 0) >= 0.58
+                    && (float) ($analysis['trendStrength'] ?? 0) >= 0.5
+                    && (float) ($analysis['directionAgreement'] ?? 0) >= 0.55
+                ) {
+                    $effective -= 0.012;
+                    $adjustments[] = '5m scalp relief: aligned momentum allows a modest threshold reduction.';
+                }
 
-            if ($analysis['lastTradeReason'] && str_contains($analysis['lastTradeReason'], 'LOSS')) {
-                $effective += $mode === 'fully_dynamic' ? 0.045 : 0.03;
-                $next['cooldownSeconds'] = max($baseCooldown, $mode === 'fully_dynamic' ? 120 : 90);
-                $adjustments[] = 'Recent loss: raise threshold and extend cooldown.';
-            } elseif ($analysis['lastTradeReason'] && str_contains($analysis['lastTradeReason'], 'TAKE_PROFIT')) {
-                $effective += (float) ($settings['dynamicReentryBuffer'] ?? 0.02) * 0.7;
-                $adjustments[] = 'Recent take profit: require a re-entry buffer to avoid chasing.';
-            }
+                if ($analysis['lastTradeReason'] && str_contains($analysis['lastTradeReason'], 'LOSS')) {
+                    $effective += 0.045;
+                    $next['cooldownSeconds'] = max($baseCooldown, 120);
+                    $adjustments[] = 'Recent loss: raise threshold and extend cooldown.';
+                } elseif ($analysis['lastTradeReason'] && str_contains($analysis['lastTradeReason'], 'TAKE_PROFIT')) {
+                    $effective += (float) ($settings['dynamicReentryBuffer'] ?? 0.02) * 0.7;
+                    $adjustments[] = 'Recent take profit: require a re-entry buffer to avoid chasing.';
+                }
 
-            if ($mode === 'fully_dynamic') {
                 $winRate = $analysis['winRate'];
                 $totalTrades = max(0, (int) ($analysis['totalTrades'] ?? 0));
                 $sampleWeight = $this->clamp((float) ($analysis['winRateSampleWeight'] ?? 0), 0.0, 1.0);
@@ -2918,7 +3034,7 @@ class FutureTradeBotService
                 }
 
                 if ($winRate > 0 && $winRate < 45 && $sampleWeight >= 0.05) {
-                    $effective += 0.012 + (0.028 * $sampleWeight);
+                    $effective += 0.006 + (0.012 * $sampleWeight);
                     $next['tradeAmountUsdt'] = max(25, $baseTradeAmount * (1 - (0.10 + (0.15 * $sampleWeight))));
                     $adjustments[] = sprintf('Weak win rate over %d closed trades: reduce size and demand cleaner entries.', $totalTrades);
                 } elseif ($winRate >= 62 && $analysis['trendStrength'] >= 0.55 && $sampleWeight >= 0.35) {
@@ -2961,14 +3077,14 @@ class FutureTradeBotService
                 if ($analysis['lastTradeReason'] && str_contains($analysis['lastTradeReason'], 'LOSS')) {
                     $dynamicCooldown = max($dynamicCooldown, 120);
                 }
-                if ($totalTrades >= 6 && $winRate < 35) {
-                    $effective = max($effective, 0.78);
+                if ($strictEntryGuards && $totalTrades >= 6 && $winRate < 35) {
+                    $effective = max($effective, 0.64);
                     $dynamicCooldown = max($dynamicCooldown, 180);
                     $next['tradeAmountUsdt'] = max(25, $baseTradeAmount * 0.8);
                     $adjustments[] = sprintf('Poor regime: %.2f%% win rate across %d trades forces stricter confidence and slower re-entry.', $winRate, $totalTrades);
                 }
-                if ((float) ($analysis['trendStrength'] ?? 0) < 0.45) {
-                    $effective = max($effective, 0.78);
+                if ($strictEntryGuards && (float) ($analysis['trendStrength'] ?? 0) < 0.45) {
+                    $effective = max($effective, 0.62);
                     $dynamicCooldown = max($dynamicCooldown, 180);
                     $adjustments[] = 'Weak trend strength: require 78%+ confidence and slower re-entry.';
                 }
@@ -3132,6 +3248,14 @@ class FutureTradeBotService
         $range = (float) ($best['rangePercent'] ?? 0);
         $choppy = ($range > 7.5 && abs($priceChangePct) < 0.35) || ($volatility > 0.18 && abs($priceChangePct) < 0.18);
         $trendStrength = $this->clamp((abs($priceChangePct) / 1.2) + ($agreement * 0.35) + min(0.25, $gap * 2), 0, 1);
+        $signalQuality = $this->clamp(
+            ($bestConfidence * 0.55)
+            + ($agreement * 0.20)
+            + min(0.12, $gap * 1.6)
+            + min(0.13, max(0.0, $trendStrength - 0.25)),
+            0.0,
+            1.0
+        );
         $stateSignal = (string) ($state->current_signal ?? '');
         $stateExitReasons = ['TAKE_PROFIT_HIT', 'TRAILING_PROFIT_HIT', 'STOP_LOSS_HIT', 'LOSS_ROLLBACK_TRIGGERED'];
         $stateReason = in_array($stateSignal, $stateExitReasons, true) ? $stateSignal : null;
@@ -3164,6 +3288,7 @@ class FutureTradeBotService
             'directionAgreement' => round($agreement, 4),
             'confidenceGap' => round($gap, 4),
             'trendStrength' => round($trendStrength, 4),
+            'signalQuality' => round($signalQuality, 4),
             'choppy' => $choppy,
             'regime' => $regime,
             'bestConfidence' => round($bestConfidence, 4),

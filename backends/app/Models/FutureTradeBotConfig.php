@@ -33,7 +33,15 @@ class FutureTradeBotConfig extends BaseModel
 
     public function mergedSettings(): array
     {
-        return array_merge(config('future_trade.defaults', []), (array) $this->settings);
+        $settings = array_merge(config('future_trade.defaults', []), (array) $this->settings);
+        $preset = strtolower(trim((string) ($settings['preset'] ?? '')));
+        $presets = (array) config('future_trade.presets', []);
+
+        if ($preset !== '' && array_key_exists($preset, $presets)) {
+            $settings = array_merge($settings, (array) $presets[$preset], (array) $this->settings);
+        }
+
+        return $settings;
     }
 
     public function executionMode(): string
