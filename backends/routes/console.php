@@ -133,3 +133,10 @@ Schedule::command('future-trade:diagnostics --persist')
     ->runInBackground()
     ->before(fn () => $markRunStart('future-trade:diagnostics'))
     ->after(fn () => $markRunEnd('future-trade:diagnostics'));
+
+Schedule::command('future-trade:audit-missed-signals --limit=100')
+    ->everyFiveMinutes()
+    ->withoutOverlapping()
+    ->runInBackground()
+    ->before(fn () => $markRunStart('future-trade:audit-missed-signals'))
+    ->after(fn () => $markRunEnd('future-trade:audit-missed-signals'));

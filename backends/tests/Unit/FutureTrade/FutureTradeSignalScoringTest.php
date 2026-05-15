@@ -5,6 +5,8 @@ namespace Tests\Unit\FutureTrade;
 use App\Domain\FutureTrade\FutureTradeBotService;
 use App\Domain\Ops\OperationalHealthService;
 use App\Domain\Portfolio\LivePortfolioGuardService;
+use App\Domain\Signals\IndicatorIntelligenceService;
+use App\Domain\Signals\StrategyResearchLabService;
 use App\Domain\Trading\FuturesOrderSizingService;
 use PHPUnit\Framework\TestCase;
 use ReflectionMethod;
@@ -118,6 +120,8 @@ class FutureTradeSignalScoringTest extends TestCase
             new LivePortfolioGuardService(),
             $this->createMock(OperationalHealthService::class),
             new FuturesOrderSizingService(),
+            new IndicatorIntelligenceService(),
+            new StrategyResearchLabService(),
         );
     }
 }

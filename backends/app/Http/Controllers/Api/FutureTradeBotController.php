@@ -75,6 +75,28 @@ class FutureTradeBotController extends Controller
         return response()->json($this->bot->clearHistory($this->bot->getOrCreateConfig($workspace)));
     }
 
+    public function importScript(Request $request, string $workspace): JsonResponse
+    {
+        $data = $request->validate([
+            'name' => 'nullable|string|max:255',
+            'source' => 'nullable|string|max:50',
+            'script' => 'required|string|max:120000',
+        ]);
+
+        return response()->json($this->bot->importResearchScript($this->bot->getOrCreateConfig($workspace), $data));
+    }
+
+    public function importTrades(Request $request, string $workspace): JsonResponse
+    {
+        $data = $request->validate([
+            'name' => 'nullable|string|max:255',
+            'format' => 'required|string|in:csv,json',
+            'payload' => 'required|string|max:300000',
+        ]);
+
+        return response()->json($this->bot->importResearchTrades($this->bot->getOrCreateConfig($workspace), $data));
+    }
+
     public function recover(Request $request, string $workspace): JsonResponse
     {
         $data = $request->validate([
@@ -109,6 +131,11 @@ class FutureTradeBotController extends Controller
         ]);
 
         return response()->json($this->bot->updateConfig($this->bot->getOrCreateConfig($workspace), $data));
+    }
+
+    public function generateTuningPlan(string $workspace): JsonResponse
+    {
+        return response()->json($this->bot->generateTuningPlanPreview($this->bot->getOrCreateConfig($workspace)));
     }
 
     public function envConfig(string $workspace): JsonResponse

@@ -20,7 +20,7 @@ class BinanceFuturesClient
 
     public function ping(): array
     {
-        $response = Http::get($this->url('/fapi/v1/ping'));
+        $response = $this->request('GET', '/fapi/v1/ping');
         $this->assertSuccess($response, 'Failed to ping Binance futures.');
 
         return (array) $response->json();
@@ -33,7 +33,7 @@ class BinanceFuturesClient
             $params['symbol'] = BinanceSymbolNormalizer::normalize($symbol);
         }
 
-        $response = Http::get($this->url('/fapi/v1/exchangeInfo'), $params);
+        $response = $this->request('GET', '/fapi/v1/exchangeInfo', $params);
         $this->assertSuccess($response, 'Failed to fetch Binance futures exchange info.');
 
         return (array) $response->json();
@@ -41,7 +41,7 @@ class BinanceFuturesClient
 
     public function fetchMarkPrice(string $symbol): array
     {
-        $response = Http::get($this->url('/fapi/v1/premiumIndex'), [
+        $response = $this->request('GET', '/fapi/v1/premiumIndex', [
             'symbol' => BinanceSymbolNormalizer::normalize($symbol),
         ]);
         $this->assertSuccess($response, 'Failed to fetch Binance futures mark price.');
@@ -189,11 +189,7 @@ class BinanceFuturesClient
     {
         $signedPayload = $this->sign($params);
 
-        $response = match (strtoupper($method)) {
-            'GET' => Http::withHeaders($this->apiHeaders())->get($this->url($path), $signedPayload),
-            'DELETE' => Http::withHeaders($this->apiHeaders())->delete($this->url($path), $signedPayload),
-            default => Http::withHeaders($this->apiHeaders())->asForm()->post($this->url($path), $signedPayload),
-        };
+        $response = $this->request($method, $path, $signedPayload, true);
 
         if ($throw) {
             $this->assertSuccess($response, 'Binance futures signed request failed.');
@@ -204,12 +200,7 @@ class BinanceFuturesClient
 
     private function keyedRequest(string $method, string $path, array $params = [], bool $throw = true): Response
     {
-        $response = match (strtoupper($method)) {
-            'GET' => Http::withHeaders($this->apiHeaders())->get($this->url($path), $params),
-            'PUT' => Http::withHeaders($this->apiHeaders())->asForm()->put($this->url($path), $params),
-            'DELETE' => Http::withHeaders($this->apiHeaders())->delete($this->url($path), $params),
-            default => Http::withHeaders($this->apiHeaders())->asForm()->post($this->url($path), $params),
-        };
+        $response = $this->request($method, $path, $params, true);
 
         if ($throw) {
             $this->assertSuccess($response, 'Binance futures keyed request failed.');
@@ -247,5 +238,63 @@ class BinanceFuturesClient
     private function url(string $path): string
     {
         return rtrim($this->baseUrl, '/') . $path;
+    }
+
+    private function request(string $method, string $path, array $params = [], bool $authenticated = false): Response
+    {
+        $delaysMs = [0, 250, 750, 1500];
+        $lastException = null;
+
+        foreach ($delaysMs as $index => $delayMs) {
+            if ($delayMs > 0) {
+                usleep($delayMs * 1000);
+            }
+
+            try {
+                $pending = Http::withHeaders($authenticated ? $this->apiHeaders() : [])
+                    ->timeout(12)
+                    ->connectTimeout(5);
+
+                return match (strtoupper($method)) {
+                    'GET' => $pending->get($this->url($path), $params),
+                    'PUT' => $pending->asForm()->put($this->url($path), $params),
+                    'DELETE' => $pending->delete($this->url($path), $params),
+                    default => $pending->asForm()->post($this->url($path), $params),
+                };
+            } catch (\Throwable $exception) {
+                $lastException = $exception;
+                if (! $this->isRetryableException($exception) || $index === array_key_last($delaysMs)) {
+                    throw $exception;
+                }
+            }
+        }
+
+        throw $lastException instanceof \Throwable
+            ? $lastException
+            : new RuntimeException('Binance futures request failed without a response.');
+    }
+
+    private function isRetryableException(\Throwable $exception): bool
+    {
+        $message = strtolower($exception->getMessage());
+
+        foreach ([
+            'curl error 6',
+            'getaddrinfo',
+            'could not resolve host',
+            'timed out',
+            'connection refused',
+            'connection reset',
+            'failed to connect',
+            'temporary failure',
+            'name or service not known',
+            'network is unreachable',
+        ] as $needle) {
+            if (str_contains($message, $needle)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 }

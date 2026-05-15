@@ -460,11 +460,14 @@ Route::prefix('v1')->group(function () {
         Route::post('workspaces/{workspace}/future-trade/recover', [FutureTradeBotController::class, 'recover'])->middleware('require.2fa');
         Route::get('workspaces/{workspace}/future-trade/config', [FutureTradeBotController::class, 'config']);
         Route::put('workspaces/{workspace}/future-trade/config', [FutureTradeBotController::class, 'updateConfig'])->middleware('require.2fa');
+        Route::post('workspaces/{workspace}/future-trade/generate-tuning-plan', [FutureTradeBotController::class, 'generateTuningPlan'])->middleware('require.2fa');
         Route::get('workspaces/{workspace}/future-trade/env-config', [FutureTradeBotController::class, 'envConfig'])->middleware('require.2fa');
         Route::put('workspaces/{workspace}/future-trade/env-config', [FutureTradeBotController::class, 'updateEnvConfig'])->middleware('require.2fa');
         Route::post('workspaces/{workspace}/future-trade/test-connection', [FutureTradeBotController::class, 'testConnection'])->middleware('require.2fa');
         Route::get('workspaces/{workspace}/future-trade/trades', [FutureTradeBotController::class, 'trades']);
         Route::get('workspaces/{workspace}/future-trade/logs', [FutureTradeBotController::class, 'logs']);
+        Route::post('workspaces/{workspace}/future-trade/import-script', [FutureTradeBotController::class, 'importScript'])->middleware('require.2fa');
+        Route::post('workspaces/{workspace}/future-trade/import-trades', [FutureTradeBotController::class, 'importTrades'])->middleware('require.2fa');
         Route::post('workspaces/{workspace}/future-trade/clear-history', [FutureTradeBotController::class, 'clearHistory'])->middleware('require.2fa');
 
         Route::match(['get', 'post', 'put', 'patch', 'delete'], 'table/{table}', [TableController::class, 'handle']);

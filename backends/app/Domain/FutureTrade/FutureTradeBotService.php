@@ -7,8 +7,12 @@ use App\Domain\Market\FutureTradeLiveFeedManager;
 use App\Domain\Market\MarketPriceCacheService;
 use App\Domain\Ops\OperationalHealthService;
 use App\Domain\Portfolio\LivePortfolioGuardService;
+use App\Domain\Signals\IndicatorIntelligenceService;
+use App\Domain\Signals\StrategyResearchLabService;
 use App\Domain\Trading\FuturesOrderSizingService;
 use App\Models\FutureTradeBotConfig;
+use App\Models\FutureTradeConfigVersion;
+use App\Models\FutureTradeMissedSignalAudit;
 use App\Models\FutureTradeBotState;
 use App\Models\MarketOhlc;
 use App\Models\SchedulerRun;
@@ -17,6 +21,7 @@ use Illuminate\Support\Carbon;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Throwable;
 
@@ -26,6 +31,8 @@ class FutureTradeBotService
         private readonly LivePortfolioGuardService $liveGuard,
         private readonly OperationalHealthService $operationalHealth,
         private readonly FuturesOrderSizingService $orderSizing,
+        private readonly IndicatorIntelligenceService $indicatorIntelligence,
+        private readonly StrategyResearchLabService $researchLab,
         private readonly ?FutureTradeLiveFeedManager $liveFeedManager = null,
     ) {}
 
@@ -55,9 +62,9 @@ class FutureTradeBotService
 
     public function updateConfig(FutureTradeBotConfig $config, array $payload): FutureTradeBotConfig
     {
-        $beforeSettings = $config->mergedSettings();
+        $beforeSettings = $this->normalizeFutureTradeSettings($config->mergedSettings());
         $beforeNotes = (string) ($config->algorithm_notes ?? '');
-        $settings = array_merge($config->mergedSettings(), (array) ($payload['settings'] ?? []));
+        $settings = $this->normalizeFutureTradeSettings(array_merge($config->mergedSettings(), (array) ($payload['settings'] ?? [])));
         $liveRequested = (bool) ($settings['liveTrading'] ?? false);
         $forceTestnet = array_key_exists('forceTestnet', $settings)
             ? (bool) $settings['forceTestnet']
@@ -74,11 +81,6 @@ class FutureTradeBotService
         $settings['liveTrading'] = $liveAllowed;
         $settings['paperTrading'] = ! $liveAllowed;
         $settings['forceTestnet'] = $forceTestnet;
-        $settings['indicatorInfluence'] = array_merge(
-            (array) config('future_trade.defaults.indicatorInfluence', []),
-            (array) ($settings['indicatorInfluence'] ?? [])
-        );
-
         $newNotes = (string) ($payload['algorithm_notes'] ?? $config->algorithm_notes ?? '');
         $auditChanges = $this->settingsDiff($beforeSettings, $settings);
         if ($beforeNotes !== $newNotes) {
@@ -101,6 +103,7 @@ class FutureTradeBotService
 
         $auditUser = auth()->user();
         if ($auditChanges !== []) {
+            $this->emitConfigAuditLogs($config, $auditChanges, $auditUser?->id);
             $this->log(
                 $config->fresh('state'),
                 'CONFIG_AUDIT',
@@ -120,13 +123,51 @@ class FutureTradeBotService
         }
 
         $this->log($config->fresh('state'), 'CONFIG_UPDATED', null, null, 0, $liveAllowed ? 'Future Trade Bot config saved. ' . ($forceTestnet ? 'Testnet futures enabled.' : 'Live futures enabled.') : 'Future Trade Bot config saved. Paper trading active.');
+        $this->storeConfigVersion($config->fresh('state'), $settings, $newNotes, 'manual_update', [
+            'changedFields' => array_keys($auditChanges),
+            'liveAllowed' => $liveAllowed,
+        ], $auditUser?->id);
         return $config->fresh('state');
+    }
+
+    public function importResearchScript(FutureTradeBotConfig $config, array $payload): array
+    {
+        $settings = $this->normalizeFutureTradeSettings($config->mergedSettings());
+        $lab = (array) ($settings['researchLab'] ?? []);
+        $scripts = array_values((array) ($lab['scripts'] ?? []));
+        $scripts[] = $this->researchLab->importScript(
+            (string) ($payload['name'] ?? ''),
+            (string) ($payload['script'] ?? ''),
+            (string) ($payload['source'] ?? 'pine')
+        );
+        $lab['scripts'] = array_slice($scripts, -20);
+        $settings['researchLab'] = $lab;
+        $config->update(['settings' => $settings]);
+
+        return $this->researchLabPayload($config->fresh(), $settings);
+    }
+
+    public function importResearchTrades(FutureTradeBotConfig $config, array $payload): array
+    {
+        $settings = $this->normalizeFutureTradeSettings($config->mergedSettings());
+        $lab = (array) ($settings['researchLab'] ?? []);
+        $datasets = array_values((array) ($lab['datasets'] ?? []));
+        $datasets[] = $this->researchLab->importTradeDataset(
+            (string) ($payload['name'] ?? ''),
+            (string) ($payload['payload'] ?? ''),
+            (string) ($payload['format'] ?? 'csv')
+        );
+        $lab['datasets'] = array_slice($datasets, -12);
+        $settings['researchLab'] = $lab;
+        $config->update(['settings' => $settings]);
+
+        return $this->researchLabPayload($config->fresh(), $settings);
     }
 
     public function start(FutureTradeBotConfig $config): FutureTradeBotState
     {
         $config->update(['enabled' => true, 'paper_trading' => true, 'enable_live_trading' => false]);
-        $settings = $config->mergedSettings();
+        $settings = $this->normalizeFutureTradeSettings($config->mergedSettings());
         $this->autoEnsureLiveFeedStarted($config, $settings);
         if ((bool) ($settings['liveTrading'] ?? false) && $this->environmentTradingReady((bool) ($settings['forceTestnet'] ?? true), $settings)) {
             $guard = $this->liveGuard->canActivate($config->workspace_id, 'future_trade');
@@ -509,7 +550,7 @@ class FutureTradeBotService
         $this->applyDailyLossLock($config, $state);
         $config = $config->fresh('state');
         $state = $this->state($config);
-        $settings = $config->mergedSettings();
+        $settings = $this->normalizeFutureTradeSettings($config->mergedSettings());
         $signals = array_slice((array) ($state->scanner_snapshot ?? []), 0, 20);
         $bestSignal = $signals[0] ?? null;
         $dynamic = $this->dynamicDecision($config, $state, $signals, $bestSignal, $settings);
@@ -577,7 +618,7 @@ class FutureTradeBotService
         $this->applyDailyLossLock($config, $state);
         $config = $config->fresh('state');
         $state = $this->state($config);
-        $settings = $config->mergedSettings();
+        $settings = $this->normalizeFutureTradeSettings($config->mergedSettings());
         $signals = array_slice((array) ($state->scanner_snapshot ?? []), 0, 20);
         $bestSignal = $signals[0] ?? null;
         $dynamic = $this->dynamicDecision($config, $state, $signals, $bestSignal, $settings);
@@ -596,6 +637,9 @@ class FutureTradeBotService
             'marketChart' => $this->marketChartPayload($marketChartSymbol, $marketTimeframe, 180, $marketCandles),
             'indicatorSuite' => $this->indicatorSuitePayload($marketCandles, $bestSignal, $effectiveSettings, $marketTimeframe),
             'signalDebug' => $bestSignal['debug'] ?? null,
+            'indicatorIntelligence' => $this->indicatorIntelligencePayload($config, $effectiveSettings, $bestSignal),
+            'researchLab' => $this->researchLabPayload($config, $effectiveSettings),
+            'missedTradeAudit' => $this->missedTradeAuditPayload($config, $effectiveSettings),
             'levels' => [
                 'entry' => $entry ?: null,
 	                'stopLoss' => $entry ? $this->stopLossPrice($entry, (string) $state->position_side, $effectiveSettings) : null,
@@ -623,7 +667,7 @@ class FutureTradeBotService
         $this->applyDailyLossLock($config, $state);
         $config = $config->fresh('state');
         $state = $this->state($config);
-        $settings = $config->mergedSettings();
+        $settings = $this->normalizeFutureTradeSettings($config->mergedSettings());
         $signals = array_slice((array) ($state->scanner_snapshot ?? []), 0, 20);
         $bestSignal = $signals[0] ?? null;
         $dynamic = $this->dynamicDecision($config, $state, $signals, $bestSignal, $settings);
@@ -717,7 +761,11 @@ class FutureTradeBotService
             ? 'Live wallet balance is being monitored.'
             : 'Paper mode uses ledger-only balance and does not check Binance futures wallet.';
 
-        if ($account['balanceSource'] === 'BINANCE_UNAVAILABLE') {
+        if (in_array($account['balanceSource'], ['BINANCE_TEMPORARILY_UNAVAILABLE', 'BINANCE_CACHE_STALE'], true)) {
+            $walletState = 'warning';
+            $walletMessage = (string) ($account['balanceWarning'] ?? $account['balanceError'] ?? 'Binance futures balance sync is temporarily degraded.');
+            $botWarnings[] = 'wallet_balance_sync_degraded';
+        } elseif ($account['balanceSource'] === 'BINANCE_UNAVAILABLE') {
             $walletState = 'blocked';
             $walletMessage = (string) ($account['balanceError'] ?? 'Binance futures balance is unavailable.');
             $botBlockers[] = 'wallet_balance_unavailable';
@@ -733,7 +781,7 @@ class FutureTradeBotService
         }
 
         $latestAlert = $config->logs()
-            ->whereIn('event', ['SCAN_FAILED', 'MARKET_SNAPSHOT_FAILED', 'LIVE_ENTRY_FAILED', 'BALANCE_SYNC_FAILED', 'TRADE_BLOCKED', 'SIGNAL_SKIPPED', 'LIVE_GUARD_BLOCKED', 'DAILY_LOSS_LIMIT_HIT'])
+            ->whereIn('event', ['SCAN_FAILED', 'MARKET_SNAPSHOT_FAILED', 'LIVE_ENTRY_FAILED', 'BALANCE_SYNC_FAILED', 'BALANCE_SYNC_WARNING', 'TRADE_BLOCKED', 'SIGNAL_SKIPPED', 'LIVE_GUARD_BLOCKED', 'DAILY_LOSS_LIMIT_HIT'])
             ->orderByDesc('occurred_at')
             ->first();
 
@@ -812,25 +860,129 @@ class FutureTradeBotService
 
     public function configPayload(FutureTradeBotConfig $config): array
     {
+        $settings = $this->normalizeFutureTradeSettings($config->mergedSettings());
+
         return [
             'id' => $config->id,
-            'settings' => $config->mergedSettings(),
+            'settings' => $settings,
             'algorithm_notes' => $config->algorithm_notes,
             'paper_trading' => $config->paper_trading,
             'enable_live_trading' => $config->enable_live_trading,
-            'live_env_enabled' => $this->environmentTradingReady((bool) ($config->mergedSettings()['forceTestnet'] ?? true), $config->mergedSettings()),
-            'testnet_env_enabled' => $this->environmentTradingEnabled(true, $config->mergedSettings()),
-            'real_env_enabled' => $this->environmentTradingEnabled(false, $config->mergedSettings()),
-            'testnet_credentials_configured' => $this->hasFuturesCredentials(true, $config->mergedSettings()),
-            'real_credentials_configured' => $this->hasFuturesCredentials(false, $config->mergedSettings()),
+            'live_env_enabled' => $this->environmentTradingReady((bool) ($settings['forceTestnet'] ?? true), $settings),
+            'testnet_env_enabled' => $this->environmentTradingEnabled(true, $settings),
+            'real_env_enabled' => $this->environmentTradingEnabled(false, $settings),
+            'testnet_credentials_configured' => $this->hasFuturesCredentials(true, $settings),
+            'real_credentials_configured' => $this->hasFuturesCredentials(false, $settings),
             'available_symbols' => config('future_trade.available_symbols', []),
+            'config_versions' => $this->configVersionsPayload($config),
+        ];
+    }
+
+    public function generateTuningPlanPreview(FutureTradeBotConfig $config): array
+    {
+        $settings = $this->normalizeFutureTradeSettings($config->mergedSettings());
+        $auditPayload = $this->missedTradeAuditPayload($config, $settings);
+        $modeSummary = collect((array) ($auditPayload['modeComparison'] ?? []));
+        $recommendedMode = $this->recommendedModeFromAuditSummary($modeSummary, $settings);
+        $reviewedAudits = $config->missedSignalAudits()
+            ->where('status', 'REVIEWED')
+            ->latest('signal_time')
+            ->limit(120)
+            ->get();
+
+        $missedWins = $reviewedAudits->where('would_have_result', 'MISSED_WIN');
+        $avgGap = $missedWins->count() > 0 ? abs((float) $missedWins->avg('confidence_gap')) : 0.0;
+        $currentMin = (float) ($settings['minConfidence'] ?? 0.52);
+        $recommendedMin = $this->clamp(
+            $currentMin - min(0.05, max(0.0, $avgGap * 0.65)),
+            0.45,
+            0.60
+        );
+
+        $sampleCount = (int) ($auditPayload['reviewedSignals'] ?? 0);
+        $recommendedConfidenceMode = $sampleCount >= 50 && $recommendedMode !== 'CLASSIC_SIMPLE_LIVE_SIGNAL'
+            ? 'semi_dynamic'
+            : 'fixed';
+
+        $topBlockers = collect((array) ($auditPayload['topBlockers'] ?? []))
+            ->filter(fn (array $item) => (int) ($item['recommendedWeight'] ?? $item['currentWeight'] ?? 0) !== (int) ($item['currentWeight'] ?? 0))
+            ->take(8)
+            ->values()
+            ->all();
+
+        $recommendedSettings = $settings;
+        $recommendedSettings['strictEntryGuards'] = false;
+        $recommendedSettings['minConfidence'] = round($recommendedMin, 4);
+        $recommendedSettings['confidenceMode'] = $recommendedConfidenceMode;
+        $recommendedSettings['classicSimpleMode'] = $recommendedMode === 'CLASSIC_SIMPLE_LIVE_SIGNAL';
+        $recommendedSettings['coreOnlyMode'] = $recommendedMode === 'CORE_ONLY';
+
+        foreach ($topBlockers as $blocker) {
+            $factor = (string) ($blocker['factor'] ?? '');
+            if ($factor === '') {
+                continue;
+            }
+            $recommendedSettings['indicatorInfluence'][$factor] = (int) ($blocker['recommendedWeight'] ?? 0);
+            $recommendedSettings['indicatorControls'][$factor] = array_merge(
+                (array) ($recommendedSettings['indicatorControls'][$factor] ?? []),
+                [
+                    'weight' => (int) ($blocker['recommendedWeight'] ?? 0),
+                    'enabled' => (int) ($blocker['recommendedWeight'] ?? 0) > 0,
+                ]
+            );
+        }
+
+        $currentMode = $this->resolveStrategyMode($settings);
+        $currentSummary = $modeSummary->firstWhere('mode', $currentMode) ?? [];
+        $recommendedSummary = $modeSummary->firstWhere('mode', $recommendedMode) ?? [];
+
+        return [
+            'analysisOnly' => true,
+            'autoApply' => false,
+            'generatedAt' => now()->toIso8601String(),
+            'current' => [
+                'mode' => $currentMode,
+                'minConfidence' => round($currentMin, 4),
+                'confidenceMode' => (string) ($settings['confidenceMode'] ?? 'fixed'),
+                'strictEntryGuards' => (bool) ($settings['strictEntryGuards'] ?? false),
+            ],
+            'recommended' => [
+                'mode' => $recommendedMode,
+                'minConfidence' => round($recommendedMin, 4),
+                'confidenceMode' => $recommendedConfidenceMode,
+                'strictEntryGuards' => false,
+                'weightChanges' => array_map(fn (array $item) => [
+                    'factor' => (string) ($item['factor'] ?? ''),
+                    'currentWeight' => (int) ($item['currentWeight'] ?? 0),
+                    'recommendedWeight' => (int) ($item['recommendedWeight'] ?? 0),
+                    'reason' => (string) ($item['reason'] ?? ''),
+                ], $topBlockers),
+            ],
+            'previewImpact' => [
+                'currentWouldTrade' => (int) ($currentSummary['wouldTrade'] ?? 0),
+                'recommendedWouldTrade' => (int) ($recommendedSummary['wouldTrade'] ?? 0),
+                'capturedMissedWinsDelta' => (int) (($recommendedSummary['capturedMissedWins'] ?? 0) - ($currentSummary['capturedMissedWins'] ?? 0)),
+                'allowedBadSignalsDelta' => (int) (($recommendedSummary['allowedBadSignals'] ?? 0) - ($currentSummary['allowedBadSignals'] ?? 0)),
+                'netWouldHavePnlDelta' => round((float) (($recommendedSummary['netWouldHavePnlPercent'] ?? 0) - ($currentSummary['netWouldHavePnlPercent'] ?? 0)), 4),
+            ],
+            'forwardValidation' => [
+                'reviewedSamples' => $sampleCount,
+                'currentModeSummary' => $currentSummary,
+                'recommendedModeSummary' => $recommendedSummary,
+                'recommendation' => (string) ($recommendedSummary['recommendation'] ?? 'Collect more data'),
+            ],
+            'notes' => [
+                'Preview only. No config was saved or applied.',
+                'Hard blockers remain unchanged.',
+                'Use config versions before applying any tuning manually.',
+            ],
         ];
     }
 
     private function maybeEnterPaperPosition(FutureTradeBotConfig $config, array $signal): void
     {
         $state = $this->state($config);
-        $settings = $config->mergedSettings();
+        $settings = $this->normalizeFutureTradeSettings($config->mergedSettings());
         $strictEntryGuards = (bool) ($settings['strictEntryGuards'] ?? false);
         $dynamic = $this->dynamicDecision($config, $state, (array) ($state->scanner_snapshot ?? []), $signal, $settings);
         $settings = $dynamic['settings'];
@@ -868,6 +1020,7 @@ class FutureTradeBotService
             return;
         }
         if ($signal['signal'] === 'WAIT') {
+            $this->recordMissedTradeAudit($config, $signal, $dynamic, ['strategy_wait_signal']);
             $this->emitTradeDecisionDebug($config, $signal, $dynamic, 'WAIT', ['strategy_wait_signal']);
             $this->logThrottled(
                 $config,
@@ -882,6 +1035,7 @@ class FutureTradeBotService
             return;
         }
         if ((float) $signal['confidence'] < (float) ($settings['minConfidence'] ?? 0.68)) {
+            $this->recordMissedTradeAudit($config, $signal, $dynamic, ['confidence_below_threshold']);
             $this->emitTradeDecisionDebug($config, $signal, $dynamic, 'BLOCKED', ['confidence_below_threshold']);
             $this->log(
                 $config,
@@ -902,6 +1056,7 @@ class FutureTradeBotService
                 || ! (bool) ($signal['strongSequence'] ?? true)
             )
         ) {
+            $this->recordMissedTradeAudit($config, $signal, $dynamic, ['weak_setup_hard_block']);
             $this->emitTradeDecisionDebug($config, $signal, $dynamic, 'BLOCKED', ['weak_setup_hard_block']);
             $this->logThrottled(
                 $config,
@@ -916,6 +1071,7 @@ class FutureTradeBotService
             return;
         }
         if ($strictEntryGuards && (float) ($analysis['trendStrength'] ?? 0) < 0.45) {
+            $this->recordMissedTradeAudit($config, $signal, $dynamic, ['trend_strength_too_low']);
             $this->emitTradeDecisionDebug($config, $signal, $dynamic, 'BLOCKED', ['trend_strength_too_low']);
             $this->logThrottled(
                 $config,
@@ -934,6 +1090,7 @@ class FutureTradeBotService
             && (int) ($analysis['totalTrades'] ?? 0) >= 6
             && (float) ($analysis['winRate'] ?? 100) < 35
         ) {
+            $this->recordMissedTradeAudit($config, $signal, $dynamic, ['poor_regime_guard']);
             $this->emitTradeDecisionDebug($config, $signal, $dynamic, 'BLOCKED', ['poor_regime_guard']);
             $this->logThrottled(
                 $config,
@@ -1079,7 +1236,7 @@ class FutureTradeBotService
     private function manageOpenPosition(FutureTradeBotConfig $config, float $price): void
     {
         $state = $this->state($config);
-        $settings = $config->mergedSettings();
+        $settings = $this->normalizeFutureTradeSettings($config->mergedSettings());
         $dynamic = $this->dynamicDecision($config, $state, (array) ($state->scanner_snapshot ?? []), null, $settings);
         $settings = $dynamic['settings'];
         $entry = (float) $state->entry_price;
@@ -1134,7 +1291,7 @@ class FutureTradeBotService
             return;
         }
 
-        $settings = $config->mergedSettings();
+            $settings = $this->normalizeFutureTradeSettings($config->mergedSettings());
         $state = $this->state($config);
         $dynamic = $this->dynamicDecision($config, $state, (array) ($state->scanner_snapshot ?? []), null, $settings);
         $settings = $dynamic['settings'];
@@ -1329,7 +1486,7 @@ class FutureTradeBotService
             return;
         }
 
-        $settings = $config->mergedSettings();
+        $settings = $this->normalizeFutureTradeSettings($config->mergedSettings());
         $dynamic = $this->dynamicDecision($config, $state, (array) ($state->scanner_snapshot ?? []), null, $settings);
         $client = $this->liveClient($settings);
         $symbol = (string) $state->current_symbol;
@@ -1454,7 +1611,7 @@ class FutureTradeBotService
     private function closePaperPosition(FutureTradeBotConfig $config, float $price, string $reason): void
     {
         $state = $this->state($config);
-        $settings = $config->mergedSettings();
+        $settings = $this->normalizeFutureTradeSettings($config->mergedSettings());
         $dynamic = $this->dynamicDecision($config, $state, (array) ($state->scanner_snapshot ?? []), null, $settings);
         $side = (string) $state->position_side;
         $direction = $side === 'LONG' ? 1 : -1;
@@ -1512,6 +1669,7 @@ class FutureTradeBotService
 
     private function scoreTicker(array $ticker, array $settings): array
     {
+        $settings = $this->normalizeFutureTradeSettings($settings);
         $price = (float) ($ticker['lastPrice'] ?? $ticker['price'] ?? 0);
         $change = (float) ($ticker['priceChangePercent'] ?? 0);
         $quoteVolume = (float) ($ticker['quoteVolume'] ?? 0);
@@ -1707,6 +1865,17 @@ class FutureTradeBotService
             $signal = 'WAIT';
         }
 
+        if ($strictEntryGuards && $signal !== 'WAIT') {
+            $directionChecks = $signal === 'SELL' ? $sellChecks : $buyChecks;
+            $utAligned = (bool) ($directionChecks['ut'] ?? false);
+            $structureAligned = (bool) ($directionChecks['structure'] ?? false);
+            $orderBlockAligned = (bool) ($directionChecks['ob'] ?? false);
+
+            if (! $utAligned || (! $structureAligned && ! $orderBlockAligned)) {
+                $signal = 'WAIT';
+            }
+        }
+
         if ($signal === 'BUY') {
             $buyReasons = $this->directionalReasons('BUY', $buyChecks, [
                 'rsi14' => $rsi14,
@@ -1720,6 +1889,9 @@ class FutureTradeBotService
                 'timeframe' => $tf,
             ]);
         } else {
+            if (! ($buyChecks['ut'] ?? false) && ! ($sellChecks['ut'] ?? false)) {
+                $avoidReasons[] = 'UT Bot trigger not aligned';
+            }
             if (! $bullishMsb && ! $bearishMsb) {
                 $avoidReasons[] = '15m market structure breakout not confirmed';
             }
@@ -1803,6 +1975,15 @@ class FutureTradeBotService
                 'htfLastCandleTime' => $htfLastCandleTime,
                 'influenceWeights' => (array) ($settings['indicatorInfluence'] ?? []),
             ]
+        );
+        $componentDebug['componentBreakdown'] = $this->indicatorIntelligence->annotateBreakdown(
+            IndicatorIntelligenceService::PROFILE_FUTURE_TRADE,
+            (array) ($componentDebug['componentBreakdown'] ?? []),
+            $settings
+        );
+        $componentDebug['indicatorControls'] = $this->indicatorIntelligence->controls(
+            IndicatorIntelligenceService::PROFILE_FUTURE_TRADE,
+            $settings
         );
         $confidence = $this->clamp((float) ($componentDebug['finalConfidence'] ?? 0.01), 0.01, 0.99);
         if ($signal === 'WAIT') {
@@ -3172,6 +3353,346 @@ class FutureTradeBotService
         return (int) $this->clamp((float) ((int) $value ?: 3), 2.0, 4.0);
     }
 
+    private function normalizeFutureTradeSettings(array $settings): array
+    {
+        return $this->indicatorIntelligence->normalizeSettings(
+            IndicatorIntelligenceService::PROFILE_FUTURE_TRADE,
+            $settings
+        );
+    }
+
+    private function indicatorIntelligencePayload(FutureTradeBotConfig $config, array $settings, ?array $bestSignal): array
+    {
+        $settings = $this->normalizeFutureTradeSettings($settings);
+        $controls = array_values($this->indicatorIntelligence->controls(
+            IndicatorIntelligenceService::PROFILE_FUTURE_TRADE,
+            $settings
+        ));
+        $currentBreakdown = array_values($this->indicatorIntelligence->annotateBreakdown(
+            IndicatorIntelligenceService::PROFILE_FUTURE_TRADE,
+            (array) data_get($bestSignal, 'debug.componentBreakdown', []),
+            $settings
+        ));
+        usort($currentBreakdown, fn (array $left, array $right): int => abs((float) ($right['finalContribution'] ?? 0.0)) <=> abs((float) ($left['finalContribution'] ?? 0.0)));
+        $trackerLogs = $this->cacheRemember(
+            sprintf('future-trade:%s:indicator-tracker-logs', (string) $config->id),
+            10,
+            fn () => $config->logs()
+                ->whereIn('event', ['BUY_EXECUTED', 'SELL_EXECUTED', 'LIVE_BUY_EXECUTED', 'LIVE_SELL_EXECUTED', 'SIGNAL_SKIPPED', 'TRADE_BLOCKED'])
+                ->orderByDesc('occurred_at')
+                ->limit(240)
+                ->get(['event', 'context', 'occurred_at'])
+        );
+
+        $performance = $this->cacheRemember(
+            sprintf('future-trade:%s:indicator-intelligence', (string) $config->id),
+            15,
+            fn () => $this->indicatorIntelligence->performance(
+                IndicatorIntelligenceService::PROFILE_FUTURE_TRADE,
+                $config->trades()
+                    ->whereNotNull('net_pnl')
+                    ->orderByDesc('created_at')
+                    ->limit(120)
+                    ->get(['net_pnl', 'meta', 'created_at']),
+                $settings,
+                $trackerLogs
+            )
+        );
+        $validation = $this->indicatorValidationSnapshot($config, $settings, $bestSignal, $performance);
+
+        return [
+            'profile' => IndicatorIntelligenceService::PROFILE_FUTURE_TRADE,
+            'controls' => $controls,
+            'hardBlockers' => $this->indicatorIntelligence->hardBlockers(IndicatorIntelligenceService::PROFILE_FUTURE_TRADE),
+            'currentBreakdown' => $currentBreakdown,
+            'performance' => $performance,
+            'validation' => $validation,
+            'suggestions' => $this->indicatorIntelligence->suggestions(
+                IndicatorIntelligenceService::PROFILE_FUTURE_TRADE,
+                $settings,
+                $performance
+            ),
+            'integrationReadiness' => [
+                'pineScriptImportReady' => true,
+                'note' => 'Indicator keys and contribution metadata are now normalized, so future Pine Script adapters can map imported outputs into this control system.',
+            ],
+        ];
+    }
+
+    private function researchLabPayload(FutureTradeBotConfig $config, array $settings): array
+    {
+        $lab = (array) ($settings['researchLab'] ?? []);
+        $scripts = array_values((array) ($lab['scripts'] ?? []));
+        $datasets = array_values((array) ($lab['datasets'] ?? []));
+        $importedStats = $this->researchLab->summarizeImportedDatasets($datasets);
+        $localPerformance = $this->cacheRemember(
+            sprintf('future-trade:%s:research-local-performance', (string) $config->id),
+            20,
+            fn () => $this->indicatorIntelligence->performance(
+                IndicatorIntelligenceService::PROFILE_FUTURE_TRADE,
+                $config->trades()
+                    ->whereNotNull('net_pnl')
+                    ->orderByDesc('created_at')
+                    ->limit(120)
+                    ->get(['net_pnl', 'meta', 'created_at']),
+                $settings
+            )
+        );
+
+        $trainingSuggestions = [];
+        foreach (array_slice($importedStats, 0, 8) as $item) {
+            if (($item['samples'] ?? 0) < 4 || ! isset($item['winRate'])) {
+                continue;
+            }
+            if ((float) $item['winRate'] >= 0.62) {
+                $trainingSuggestions[] = [
+                    'key' => (string) $item['key'],
+                    'title' => sprintf('Imported data supports %s', strtoupper((string) $item['key'])),
+                    'reason' => sprintf('Imported trades show %.0f%% win rate across %d samples when %s was active.', (float) $item['winRate'] * 100, (int) $item['samples'], strtoupper((string) $item['key'])),
+                    'action' => 'consider_strengthen',
+                ];
+            } elseif ((float) $item['winRate'] <= 0.4) {
+                $trainingSuggestions[] = [
+                    'key' => (string) $item['key'],
+                    'title' => sprintf('Imported data questions %s', strtoupper((string) $item['key'])),
+                    'reason' => sprintf('Imported trades show only %.0f%% win rate across %d samples when %s was active.', (float) $item['winRate'] * 100, (int) $item['samples'], strtoupper((string) $item['key'])),
+                    'action' => 'consider_reduce',
+                ];
+            }
+        }
+
+        $overlayHintGroups = array_map(
+            fn (array $script): array => array_map(
+                fn (array $hint): string => (string) ($hint['label'] ?? ''),
+                (array) ($script['overlayHints'] ?? [])
+            ),
+            $scripts
+        );
+        $overlayHints = [];
+        foreach ($overlayHintGroups as $group) {
+            $overlayHints = array_merge($overlayHints, $group);
+        }
+
+        return [
+            'scripts' => $scripts,
+            'datasets' => array_map(fn (array $dataset): array => Arr::except($dataset, ['rows']), $datasets),
+            'importedIndicatorStats' => $importedStats,
+            'trainingSuggestions' => $trainingSuggestions,
+            'localTradeSampleCount' => count($localPerformance),
+            'overlayHints' => array_values(array_unique(array_filter($overlayHints))),
+        ];
+    }
+
+    public function reviewPendingMissedSignalAudits(?string $workspaceId = null, ?int $reviewWindow = null, int $limit = 100): array
+    {
+        $query = FutureTradeMissedSignalAudit::query()
+            ->with('config')
+            ->where('status', 'PENDING_REVIEW')
+            ->where('review_due_at', '<=', now())
+            ->orderBy('review_due_at')
+            ->limit(max(1, min(1000, $limit)));
+
+        if ($workspaceId) {
+            $query->where('workspace_id', $workspaceId);
+        }
+
+        if ($reviewWindow !== null && $reviewWindow > 0) {
+            $query->where('review_window_minutes', $reviewWindow);
+        }
+
+        $audits = $query->get();
+        $reviewed = 0;
+        $results = [];
+
+        foreach ($audits as $audit) {
+            $evaluation = $this->evaluateMissedTradeAudit($audit);
+            if ($evaluation === null) {
+                continue;
+            }
+
+            $audit->forceFill($evaluation + [
+                'status' => 'REVIEWED',
+                'reviewed_at' => now(),
+            ])->save();
+
+            $resultKey = (string) ($evaluation['would_have_result'] ?? 'UNKNOWN');
+            $results[$resultKey] = ($results[$resultKey] ?? 0) + 1;
+            $reviewed++;
+
+            Log::info('[MISSED TRADE AUDIT REVIEWED]', [
+                'workspace_id' => $audit->workspace_id,
+                'symbol' => $audit->symbol,
+                'side' => $audit->side,
+                'window' => $audit->review_window_minutes,
+                'result' => $evaluation['would_have_result'] ?? null,
+                'pnl_percent' => $evaluation['would_have_pnl_percent'] ?? null,
+            ]);
+        }
+
+        return [
+            'reviewed' => $reviewed,
+            'results' => $results,
+            'pending' => FutureTradeMissedSignalAudit::query()
+                ->when($workspaceId, fn ($q) => $q->where('workspace_id', $workspaceId))
+                ->where('status', 'PENDING_REVIEW')
+                ->count(),
+        ];
+    }
+
+    private function missedTradeAuditPayload(FutureTradeBotConfig $config, array $settings): array
+    {
+        $rows = $config->missedSignalAudits()
+            ->latest('signal_time')
+            ->limit(120)
+            ->get();
+
+        $reviewed = $rows->where('status', 'REVIEWED');
+        $missedWins = $reviewed->where('would_have_result', 'MISSED_WIN')->count();
+        $correctSkips = $reviewed->where('would_have_result', 'CORRECT_SKIP')->count();
+        $avoidedLosses = $reviewed->where('would_have_result', 'AVOIDED_LOSS')->count();
+        $neutral = $reviewed->where('would_have_result', 'NEUTRAL')->count();
+        $badSignals = $reviewed->where('would_have_result', 'BAD_SIGNAL')->count();
+
+        $blockerRows = [];
+        foreach ($rows as $audit) {
+            $blockers = array_values(array_filter(array_map(
+                static fn ($value) => is_scalar($value) ? (string) $value : null,
+                (array) ($audit->top_3_blockers ?? [])
+            )));
+
+            foreach ($blockers as $blocker) {
+                $key = Str::slug($blocker, '_');
+                $control = $this->resolveAuditBlockerControl($blocker, $settings);
+                $blockerRows[$key] ??= [
+                    'key' => $key,
+                    'label' => $blocker,
+                    'factor' => $control['factor'],
+                    'currentWeight' => $control['currentWeight'],
+                    'totalSkips' => 0,
+                    'missedWins' => 0,
+                    'correctSkips' => 0,
+                    'avoidedLosses' => 0,
+                    'neutral' => 0,
+                ];
+                $blockerRows[$key]['totalSkips']++;
+                $result = (string) ($audit->would_have_result ?? '');
+                if ($result === 'MISSED_WIN') {
+                    $blockerRows[$key]['missedWins']++;
+                } elseif ($result === 'CORRECT_SKIP') {
+                    $blockerRows[$key]['correctSkips']++;
+                } elseif ($result === 'AVOIDED_LOSS') {
+                    $blockerRows[$key]['avoidedLosses']++;
+                } elseif ($result === 'NEUTRAL') {
+                    $blockerRows[$key]['neutral']++;
+                }
+            }
+        }
+
+        $analytics = array_values(array_map(function (array $row) {
+            $reviewedCount = $row['missedWins'] + $row['correctSkips'] + $row['avoidedLosses'] + $row['neutral'];
+            $missedWinRate = $reviewedCount > 0 ? $row['missedWins'] / $reviewedCount : 0.0;
+            $protectiveRate = $reviewedCount > 0 ? ($row['correctSkips'] + $row['avoidedLosses']) / $reviewedCount : 0.0;
+            $avoidedLossRate = $reviewedCount > 0 ? $row['avoidedLosses'] / $reviewedCount : 0.0;
+            $sampleQuality = $row['totalSkips'] < 20 ? 'LOW' : ($row['totalSkips'] < 50 ? 'MEDIUM' : 'HIGH');
+            $currentWeight = (int) ($row['currentWeight'] ?? 0);
+            $recommendedWeight = $currentWeight;
+            $reason = 'Mixed result; keep current';
+            $recommendation = 'KEEP_CURRENT';
+
+            if ($row['totalSkips'] < 20) {
+                $recommendation = 'NEED_MORE_DATA';
+                $reason = sprintf('%s has only %d samples.', $row['label'], $row['totalSkips']);
+            } elseif ($missedWinRate > 0.60) {
+                $recommendedWeight = max(0, $currentWeight - 2);
+                $recommendation = 'REDUCE_BY_2';
+                $reason = sprintf('%s caused %.0f%% missed wins over %d samples.', $row['label'], $missedWinRate * 100, $row['totalSkips']);
+            } elseif ($missedWinRate >= 0.45) {
+                $recommendedWeight = max(0, $currentWeight - 1);
+                $recommendation = 'REDUCE_BY_1';
+                $reason = sprintf('%s caused %.0f%% missed wins over %d samples.', $row['label'], $missedWinRate * 100, $row['totalSkips']);
+            } elseif ($protectiveRate > 0.65) {
+                $recommendedWeight = min(10, $currentWeight + 1);
+                $recommendation = 'KEEP_OR_INCREASE';
+                $reason = sprintf('%s correctly protected %.0f%% of reviewed skips.', $row['label'], $protectiveRate * 100);
+            } elseif ($avoidedLossRate > 0.35) {
+                $recommendation = 'KEEP_PROTECTION';
+                $reason = sprintf('%s avoided losses in %.0f%% of reviewed skips.', $row['label'], $avoidedLossRate * 100);
+            }
+
+            return $row + [
+                'accuracy' => round($protectiveRate, 4),
+                'missedWinRate' => round($missedWinRate, 4),
+                'correctSkipRate' => round($protectiveRate, 4),
+                'avoidedLossRate' => round($avoidedLossRate, 4),
+                'sampleSizeQuality' => $sampleQuality,
+                'recommendation' => $recommendation,
+                'recommendedWeight' => $recommendedWeight,
+                'reason' => $reason,
+            ];
+        }, $blockerRows));
+
+        usort($analytics, static fn (array $a, array $b) => ($b['missedWins'] <=> $a['missedWins']) ?: ($b['totalSkips'] <=> $a['totalSkips']));
+
+        return [
+            'reviewWindows' => array_values((array) ($settings['missedTradeAuditReviewWindows'] ?? [5, 10, 15, 30])),
+            'defaultWindowMinutes' => (int) ($settings['missedTradeAuditWindowMinutes'] ?? 15),
+            'totalSkippedSignals' => $rows->count(),
+            'pendingReview' => $rows->where('status', 'PENDING_REVIEW')->count(),
+            'reviewedSignals' => $reviewed->count(),
+            'missedWins' => $missedWins,
+            'correctSkips' => $correctSkips,
+            'avoidedLosses' => $avoidedLosses,
+            'neutral' => $neutral,
+            'badSignals' => $badSignals,
+            'missedWinRate' => $reviewed->count() > 0 ? round($missedWins / $reviewed->count(), 4) : null,
+            'modeComparison' => $this->summarizeAuditModeComparisons($rows),
+            'topBlockers' => array_slice($analytics, 0, 8),
+            'recent' => $rows->take(12)->map(fn (FutureTradeMissedSignalAudit $audit) => [
+                'id' => $audit->id,
+                'symbol' => $audit->symbol,
+                'side' => $audit->side,
+                'signalTime' => optional($audit->signal_time)?->toIso8601String(),
+                'finalConfidence' => (float) $audit->final_confidence,
+                'activeMinimum' => (float) $audit->active_minimum,
+                'confidenceGap' => (float) $audit->confidence_gap,
+                'topSkipReason' => $audit->top_skip_reason,
+                'topBlockers' => $audit->top_3_blockers ?? [],
+                'status' => $audit->status,
+                'reviewWindowMinutes' => (int) $audit->review_window_minutes,
+                'firstHit' => $audit->first_hit,
+                'wouldHaveResult' => $audit->would_have_result,
+                'grossWouldHavePnlPercent' => $audit->gross_would_have_pnl_percent !== null ? (float) $audit->gross_would_have_pnl_percent : null,
+                'netWouldHavePnlPercent' => $audit->net_would_have_pnl_percent !== null ? (float) $audit->net_would_have_pnl_percent : null,
+                'wouldHavePnlPercent' => $audit->would_have_pnl_percent !== null ? (float) $audit->would_have_pnl_percent : null,
+                'modeComparison' => $audit->mode_comparison_json ?? [],
+            ])->values()->all(),
+        ];
+    }
+
+    private function indicatorValidationSnapshot(FutureTradeBotConfig $config, array $settings, ?array $bestSignal, array $performance): array
+    {
+        $blockers = [];
+        if (($settings['classicSimpleMode'] ?? false) === true) {
+            $blockers[] = 'Indicators-off mode active: weighted indicators are intentionally bypassed.';
+        }
+        if (($bestSignal['signal'] ?? 'WAIT') === 'WAIT' && (float) ($bestSignal['confidence'] ?? 0) < 0.01) {
+            $blockers[] = 'No usable ranked signal is present right now.';
+        }
+
+        $trackerAligned = count(array_filter($performance, fn (array $item): bool => ((float) ($item['trackerAlignmentRate'] ?? 0.0)) >= 0.55));
+        $highRated = count(array_filter($performance, fn (array $item): bool => in_array((string) ($item['rating'] ?? 'E'), ['A', 'B'], true)));
+
+        return [
+            'classicSimpleMode' => (bool) ($settings['classicSimpleMode'] ?? false),
+            'normalGraphModeWorks' => true,
+            'liveSignalFlowDetected' => $bestSignal !== null,
+            'blockers' => $blockers,
+            'trackerAlignedIndicators' => $trackerAligned,
+            'highRatedIndicators' => $highRated,
+            'overallReadinessScore' => max(0, min(100, (int) round(($trackerAligned * 6) + ($highRated * 8) + ($bestSignal ? 18 : 0) + ((($settings['classicSimpleMode'] ?? false) ? 12 : 18)) - (count($blockers) * 10)))),
+        ];
+    }
+
     private function settingsDiff(array $before, array $after): array
     {
         $changes = [];
@@ -3298,6 +3819,7 @@ class FutureTradeBotService
 
     private function dynamicDecision(FutureTradeBotConfig $config, FutureTradeBotState $state, array $signals, ?array $best, array $settings): array
     {
+        $settings = $this->normalizeFutureTradeSettings($settings);
         $mode = strtolower((string) ($settings['confidenceMode'] ?? 'fixed'));
         if (! in_array($mode, ['fixed', 'semi_dynamic', 'fully_dynamic'], true)) {
             $mode = 'fixed';
@@ -3674,6 +4196,11 @@ class FutureTradeBotService
         $wins = $recentTrades->filter(fn ($trade) => (float) $trade->net_pnl > 0)->count();
         $losses = $recentTrades->filter(fn ($trade) => (float) $trade->net_pnl < 0)->count();
         $totalTrades = $wins + $losses;
+        if ($totalTrades === 0) {
+            $wins = max(0, (int) ($state->wins ?? 0));
+            $losses = max(0, (int) ($state->losses ?? 0));
+            $totalTrades = $wins + $losses;
+        }
         $winRate = $totalTrades > 0 ? round(($wins / $totalTrades) * 100, 2) : 0.0;
         $winRateSampleWeight = $this->clamp(($totalTrades - 3) / 12, 0, 1);
         $atrPercent = $this->atrPercentProxy($points, $best);
@@ -4468,7 +4995,7 @@ class FutureTradeBotService
 
     private function applyDailyLossLock(FutureTradeBotConfig $config, FutureTradeBotState $state): bool
     {
-        $settings = $config->mergedSettings();
+        $settings = $this->normalizeFutureTradeSettings($config->mergedSettings());
         $limit = max(0.0, (float) ($settings['maxDailyLossPercent'] ?? 0));
 
         if ($limit <= 0 || (float) $state->quantity > 0) {
@@ -4554,6 +5081,8 @@ class FutureTradeBotService
             'balanceSource' => $this->isLiveMode($config) ? 'BINANCE_FUTURES' : 'PAPER_LEDGER',
             'accountAsset' => 'USDT',
             'balanceError' => null,
+            'balanceWarning' => null,
+            'balanceTransient' => false,
         ];
 
         if (! $this->isLiveMode($config)) {
@@ -4562,8 +5091,13 @@ class FutureTradeBotService
 
         try {
             $cacheKey = 'future_trade_account_summary:' . $config->workspace_id . ':' . ($config->executionMode());
-            $account = Cache::remember($cacheKey, now()->addSeconds(10), function () use ($config) {
-                return $this->liveClient($config->mergedSettings())->fetchAccountInfo();
+            $staleCacheKey = $cacheKey . ':stale';
+            $transientMarkerKey = $cacheKey . ':transient_warning';
+            $account = $this->cacheRemember($cacheKey, 10, function () use ($config, $staleCacheKey) {
+                $fresh = $this->liveClient($config->mergedSettings())->fetchAccountInfo();
+                $this->cachePut($staleCacheKey, $fresh, 300);
+
+                return $fresh;
             });
             $asset = collect((array) ($account['assets'] ?? []))
                 ->first(fn ($row) => strtoupper((string) ($row['asset'] ?? '')) === 'USDT');
@@ -4578,18 +5112,58 @@ class FutureTradeBotService
                 ? (float) $account['totalMarginBalance']
                 : (isset($asset['marginBalance']) ? (float) $asset['marginBalance'] : null);
             $summary['accountAsset'] = strtoupper((string) ($asset['asset'] ?? 'USDT')) ?: 'USDT';
+            if ($this->cachePull($transientMarkerKey)) {
+                $this->logThrottled(
+                    $config->fresh('state'),
+                    'BALANCE_SYNC_RECOVERED',
+                    $config->state?->current_symbol,
+                    null,
+                    0,
+                    'Binance futures balance sync recovered after transient network error.',
+                    ['status' => 'RECOVERED'],
+                    300
+                );
+            }
         } catch (Throwable $e) {
-            $summary['balanceSource'] = 'BINANCE_UNAVAILABLE';
+            $cacheKey = 'future_trade_account_summary:' . $config->workspace_id . ':' . ($config->executionMode());
+            $staleAccount = $this->cacheGet($cacheKey . ':stale');
+            $isTransient = $this->isTransientNetworkException($e);
+            $summary['balanceTransient'] = $isTransient;
             $summary['balanceError'] = $e->getMessage();
+            if (is_array($staleAccount) && $staleAccount !== []) {
+                $asset = collect((array) ($staleAccount['assets'] ?? []))
+                    ->first(fn ($row) => strtoupper((string) ($row['asset'] ?? '')) === 'USDT');
+
+                $summary['walletBalance'] = isset($staleAccount['totalWalletBalance'])
+                    ? (float) $staleAccount['totalWalletBalance']
+                    : (isset($asset['walletBalance']) ? (float) $asset['walletBalance'] : null);
+                $summary['availableBalance'] = isset($staleAccount['availableBalance'])
+                    ? (float) $staleAccount['availableBalance']
+                    : (isset($asset['availableBalance']) ? (float) $asset['availableBalance'] : null);
+                $summary['marginBalance'] = isset($staleAccount['totalMarginBalance'])
+                    ? (float) $staleAccount['totalMarginBalance']
+                    : (isset($asset['marginBalance']) ? (float) $asset['marginBalance'] : null);
+                $summary['accountAsset'] = strtoupper((string) ($asset['asset'] ?? 'USDT')) ?: 'USDT';
+                $summary['balanceSource'] = 'BINANCE_CACHE_STALE';
+                $summary['balanceWarning'] = 'Using cached Binance futures balance due to temporary network/DNS issue.';
+            } else {
+                $summary['balanceSource'] = $isTransient ? 'BINANCE_TEMPORARILY_UNAVAILABLE' : 'BINANCE_UNAVAILABLE';
+                $summary['balanceWarning'] = $isTransient ? 'Temporary Binance balance sync issue. Auto-retry will continue.' : null;
+            }
+
+            if ($isTransient) {
+                $this->cachePut($cacheKey . ':transient_warning', true, 600);
+            }
+
             $this->logThrottled(
                 $config->fresh('state'),
-                'BALANCE_SYNC_FAILED',
+                $isTransient ? 'BALANCE_SYNC_WARNING' : 'BALANCE_SYNC_FAILED',
                 $config->state?->current_symbol,
                 null,
                 0,
                 $e->getMessage(),
-                ['status' => 'ERROR'],
-                60
+                ['status' => $isTransient ? 'WARNING' : 'ERROR', 'transient' => $isTransient, 'balanceSource' => $summary['balanceSource']],
+                $isTransient ? 180 : 60
             );
         }
 
@@ -4628,6 +5202,66 @@ class FutureTradeBotService
             apiSecret: (string) $apiSecret,
             baseUrl: (string) $baseUrl,
         );
+    }
+
+    private function isTransientNetworkException(Throwable $e): bool
+    {
+        $message = strtolower($e->getMessage());
+
+        foreach ([
+            'curl error 6',
+            'getaddrinfo',
+            'could not resolve host',
+            'temporary failure',
+            'timed out',
+            'connection refused',
+            'connection reset',
+            'failed to connect',
+            'network is unreachable',
+            'name or service not known',
+        ] as $needle) {
+            if (str_contains($message, $needle)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function cacheRemember(string $key, int $ttlSeconds, callable $callback): mixed
+    {
+        if (Cache::getFacadeRoot() === null) {
+            return $callback();
+        }
+
+        return Cache::remember($key, now()->addSeconds(max(1, $ttlSeconds)), $callback);
+    }
+
+    private function cacheGet(string $key, mixed $default = null): mixed
+    {
+        if (Cache::getFacadeRoot() === null) {
+            return $default;
+        }
+
+        return Cache::get($key, $default);
+    }
+
+    private function cachePut(string $key, mixed $value, int $ttlSeconds): void
+    {
+        if (Cache::getFacadeRoot() === null) {
+            return;
+        }
+
+        Cache::put($key, $value, now()->addSeconds(max(1, $ttlSeconds)));
+    }
+
+    private function cachePull(string $key, mixed $default = null): mixed
+    {
+        if (Cache::getFacadeRoot() === null) {
+            return $default;
+        }
+
+        return Cache::pull($key, $default);
     }
 
     private function environmentTradingEnabled(bool $forceTestnet, array $settings): bool
@@ -4689,6 +5323,43 @@ class FutureTradeBotService
             'context' => $context,
             'occurred_at' => now(),
         ]);
+    }
+
+    private function emitConfigAuditLogs(FutureTradeBotConfig $config, array $changes, ?int $userId): void
+    {
+        foreach ($this->flattenAuditChanges($changes) as $entry) {
+            Log::info('[FUTURE TRADE CONFIG UPDATED]', [
+                'workspace_id' => $config->workspace_id,
+                'setting_key' => $entry['key'],
+                'old_value' => $entry['old'],
+                'new_value' => $entry['new'],
+                'timestamp' => now()->toIso8601String(),
+                'user_id' => $userId,
+            ]);
+        }
+    }
+
+    private function flattenAuditChanges(array $changes, string $prefix = ''): array
+    {
+        $flattened = [];
+
+        foreach ($changes as $key => $value) {
+            $path = $prefix !== '' ? $prefix . '.' . $key : (string) $key;
+            if (is_array($value) && array_key_exists('old', $value) && array_key_exists('new', $value)) {
+                $flattened[] = [
+                    'key' => $path,
+                    'old' => $value['old'],
+                    'new' => $value['new'],
+                ];
+                continue;
+            }
+
+            if (is_array($value)) {
+                $flattened = array_merge($flattened, $this->flattenAuditChanges($value, $path));
+            }
+        }
+
+        return $flattened;
     }
 
     private function logThrottled(FutureTradeBotConfig $config, string $event, ?string $symbol, ?string $signal, float $confidence, string $reason, array $context = [], int $ttlSeconds = 60): void
@@ -4892,6 +5563,561 @@ class FutureTradeBotService
         $message = $e->getMessage();
 
         return str_contains($message, '-2022') || str_contains($message, 'ReduceOnly Order is rejected');
+    }
+
+    private function recordMissedTradeAudit(FutureTradeBotConfig $config, array $signal, array $dynamic, array $hardBlockers = []): void
+    {
+        try {
+            $settings = (array) ($dynamic['settings'] ?? $this->normalizeFutureTradeSettings($config->mergedSettings()));
+            $snapshot = $this->runtimeContext($dynamic, ['status' => 'SKIPPED_AUDIT'], $signal, $hardBlockers);
+            $blockers = $this->auditBlockersFromSignal($signal, $hardBlockers);
+            $signalTime = $this->auditSignalTime($signal);
+            $reviewWindow = max(1, (int) ($settings['missedTradeAuditWindowMinutes'] ?? 15));
+            $confidence = (float) ($signal['confidence'] ?? 0);
+            $activeMinimum = (float) ($dynamic['effectiveMinConfidence'] ?? ($settings['minConfidence'] ?? 0));
+
+            FutureTradeMissedSignalAudit::query()->updateOrCreate(
+                [
+                    'future_trade_bot_config_id' => $config->id,
+                    'symbol' => strtoupper((string) ($signal['symbol'] ?? '')),
+                    'side' => strtoupper((string) ($signal['signal'] ?? 'WAIT')),
+                    'signal_time' => $signalTime,
+                ],
+                [
+                    'workspace_id' => $config->workspace_id,
+                    'timeframe' => (string) ($signal['timeframe'] ?? ($settings['timeframe'] ?? '5m')),
+                    'entry_reference_price' => (float) ($signal['price'] ?? 0),
+                    'final_confidence' => $confidence,
+                    'active_minimum' => $activeMinimum,
+                    'confidence_gap' => round($confidence - $activeMinimum, 4),
+                    'strategy_mode' => $this->resolveStrategyMode($settings),
+                    'confidence_mode' => (string) ($dynamic['mode'] ?? ($settings['confidenceMode'] ?? 'fixed')),
+                    'strict_entry_guards' => (bool) ($settings['strictEntryGuards'] ?? false),
+                    'core_entry_passed' => (bool) data_get($signal, 'debug.checks.coreEntryPassed', false),
+                    'core_passed_count' => (int) data_get($signal, 'debug.checks.corePassedCount', 0),
+                    'review_window_minutes' => $reviewWindow,
+                    'top_skip_reason' => $blockers[0] ?? (string) ($signal['reason'] ?? 'Skipped'),
+                    'top_3_blockers' => array_slice($blockers, 0, 3),
+                    'soft_penalties_json' => $this->softPenaltiesFromSignal($signal),
+                    'hard_blockers_json' => $hardBlockers,
+                    'component_scores_json' => (array) data_get($signal, 'debug.componentScores', []),
+                    'component_breakdown_json' => (array) data_get($signal, 'debug.componentBreakdown', []),
+                    'indicator_influence_json' => (array) data_get($signal, 'debug.indicatorControls', []),
+                    'market_snapshot_json' => [
+                        'price' => (float) ($signal['price'] ?? 0),
+                        'timeframe' => (string) ($signal['timeframe'] ?? ($settings['timeframe'] ?? '5m')),
+                        'config' => [
+                            'missedTradeAuditFeePercentPerSide' => (float) ($settings['missedTradeAuditFeePercentPerSide'] ?? 0.04),
+                            'missedTradeAuditRoundTripFeePercent' => (float) ($settings['missedTradeAuditRoundTripFeePercent'] ?? (($settings['missedTradeAuditEstimatedFeePercent'] ?? 0.08))),
+                            'missedTradeAuditSlippagePercentPerSide' => (float) ($settings['missedTradeAuditSlippagePercentPerSide'] ?? 0.015),
+                            'missedTradeAuditRoundTripSlippagePercent' => (float) ($settings['missedTradeAuditRoundTripSlippagePercent'] ?? (($settings['missedTradeAuditEstimatedSlippagePercent'] ?? 0.03))),
+                            'missedTradeAuditRoundTripCostPercent' => (float) ($settings['missedTradeAuditRoundTripCostPercent'] ?? (($settings['missedTradeAuditEstimatedFeePercent'] ?? 0.08) + ($settings['missedTradeAuditEstimatedSlippagePercent'] ?? 0.03))),
+                            'missedTradeAuditEstimatedFeePercent' => (float) ($settings['missedTradeAuditEstimatedFeePercent'] ?? 0.08),
+                            'missedTradeAuditEstimatedSlippagePercent' => (float) ($settings['missedTradeAuditEstimatedSlippagePercent'] ?? 0.03),
+                            'missedTradeAuditMinNetProfitPercent' => (float) ($settings['missedTradeAuditMinNetProfitPercent'] ?? 0.05),
+                        ],
+                        'timing' => (array) data_get($signal, 'debug.timing', []),
+                        'context' => $snapshot,
+                    ],
+                    'status' => 'PENDING_REVIEW',
+                    'review_due_at' => $signalTime->copy()->addMinutes($reviewWindow),
+                ]
+            );
+
+            Log::info('[MISSED TRADE AUDIT CREATED]', [
+                'workspace_id' => $config->workspace_id,
+                'symbol' => strtoupper((string) ($signal['symbol'] ?? '')),
+                'side' => strtoupper((string) ($signal['signal'] ?? 'WAIT')),
+                'review_window_minutes' => $reviewWindow,
+                'confidence' => $confidence,
+                'active_minimum' => $activeMinimum,
+                'top_blockers' => array_slice($blockers, 0, 3),
+            ]);
+        } catch (Throwable $e) {
+            $this->safeDebugLog('[MISSED TRADE AUDIT CREATE FAILED]', [
+                'workspace_id' => $config->workspace_id,
+                'symbol' => $signal['symbol'] ?? null,
+                'reason' => $e->getMessage(),
+            ]);
+        }
+    }
+
+    private function evaluateMissedTradeAudit(FutureTradeMissedSignalAudit $audit): ?array
+    {
+        $start = $audit->signal_time;
+        if (! $start) {
+            return null;
+        }
+
+        $end = $start->copy()->addMinutes(max(1, (int) $audit->review_window_minutes));
+        $candles = MarketOhlc::query()
+            ->where('exchange', 'binance_futures')
+            ->where('symbol', strtoupper((string) $audit->symbol))
+            ->where('timeframe', '1m')
+            ->whereBetween('ts', [$start, $end])
+            ->orderBy('ts')
+            ->get(['ts', 'high', 'low', 'close']);
+
+        if ($candles->isEmpty()) {
+            return null;
+        }
+
+        $entry = (float) $audit->entry_reference_price;
+        if ($entry <= 0) {
+            return null;
+        }
+
+        $side = strtoupper((string) $audit->side) === 'SELL' ? 'SHORT' : 'LONG';
+        $settings = [
+            'stopLossPercent' => (float) data_get($audit->market_snapshot_json, 'context.activeStopLossPercent', 0.28),
+            'takeProfitPercent' => (float) data_get($audit->market_snapshot_json, 'context.activeTakeProfitPercent', 0.8),
+        ];
+        $feePercent = $this->resolveAuditRoundTripFeePercent($audit);
+        $slippagePercent = $this->resolveAuditRoundTripSlippagePercent($audit);
+        $minNetProfit = (float) data_get($audit->market_snapshot_json, 'config.missedTradeAuditMinNetProfitPercent', 0.05);
+        $tpPrice = $this->takeProfitPrice($entry, $side, $settings);
+        $slPrice = $this->stopLossPrice($entry, $side, $settings);
+
+        $maxHigh = (float) $candles->max('high');
+        $minLow = (float) $candles->min('low');
+        $lastClose = (float) optional($candles->last())->close;
+
+        if ($side === 'LONG') {
+            $favorableMove = (($maxHigh - $entry) / $entry) * 100;
+            $adverseMove = (($entry - $minLow) / $entry) * 100;
+        } else {
+            $favorableMove = (($entry - $minLow) / $entry) * 100;
+            $adverseMove = (($maxHigh - $entry) / $entry) * 100;
+        }
+
+        $hitTpFirst = false;
+        $hitSlFirst = false;
+        $tpHitTime = null;
+        $slHitTime = null;
+        $firstHit = 'NONE';
+        foreach ($candles as $candle) {
+            $high = (float) $candle->high;
+            $low = (float) $candle->low;
+            if ($side === 'LONG') {
+                $tpHit = $high >= $tpPrice;
+                $slHit = $low <= $slPrice;
+            } else {
+                $tpHit = $low <= $tpPrice;
+                $slHit = $high >= $slPrice;
+            }
+
+            if ($tpHit && ! $slHit) {
+                $hitTpFirst = true;
+                $tpHitTime = optional($candle->ts)?->toIso8601String();
+                $firstHit = 'TP';
+                break;
+            }
+            if ($slHit && ! $tpHit) {
+                $hitSlFirst = true;
+                $slHitTime = optional($candle->ts)?->toIso8601String();
+                $firstHit = 'SL';
+                break;
+            }
+            if ($tpHit && $slHit) {
+                $tpHitTime = optional($candle->ts)?->toIso8601String();
+                $slHitTime = optional($candle->ts)?->toIso8601String();
+                $firstHit = 'AMBIGUOUS_SAME_CANDLE';
+                break;
+            }
+        }
+
+        $grossPnlPercent = $side === 'LONG'
+            ? (($lastClose - $entry) / $entry) * 100
+            : (($entry - $lastClose) / $entry) * 100;
+        $netPnlPercent = $grossPnlPercent - $feePercent - $slippagePercent;
+
+        $result = 'NEUTRAL';
+        if ($firstHit === 'TP' && $netPnlPercent >= $minNetProfit) {
+            $result = 'MISSED_WIN';
+        } elseif ($firstHit === 'AMBIGUOUS_SAME_CANDLE') {
+            $result = 'AMBIGUOUS_SAME_CANDLE';
+        } elseif ($firstHit === 'SL') {
+            $result = $adverseMove > 0.05 ? 'AVOIDED_LOSS' : 'CORRECT_SKIP';
+        } elseif (abs($netPnlPercent) < $minNetProfit) {
+            $result = 'NEUTRAL';
+        } elseif ($netPnlPercent > 0) {
+            $result = 'BAD_SIGNAL';
+        } elseif ($netPnlPercent < 0) {
+            $result = 'CORRECT_SKIP';
+        }
+
+        $baseResult = [
+            'max_favorable_move_percent' => round($favorableMove, 4),
+            'max_adverse_move_percent' => round($adverseMove, 4),
+            'take_profit_price' => round($tpPrice, 8),
+            'stop_loss_price' => round($slPrice, 8),
+            'tp_hit_time' => $tpHitTime,
+            'sl_hit_time' => $slHitTime,
+            'first_hit' => $firstHit,
+            'would_hit_take_profit' => $hitTpFirst || $firstHit === 'AMBIGUOUS_SAME_CANDLE',
+            'would_hit_stop_loss' => $hitSlFirst || $firstHit === 'AMBIGUOUS_SAME_CANDLE',
+            'would_have_result' => $result,
+            'estimated_fee_percent' => round($feePercent, 4),
+            'estimated_slippage_percent' => round($slippagePercent, 4),
+            'gross_would_have_pnl_percent' => round($grossPnlPercent, 4),
+            'net_would_have_pnl_percent' => round($netPnlPercent, 4),
+            'would_have_pnl_percent' => round($netPnlPercent, 4),
+        ];
+
+        $baseResult['mode_comparison_json'] = $this->buildAuditModeComparison($audit, $baseResult);
+
+        return $baseResult;
+    }
+
+    private function auditBlockersFromSignal(array $signal, array $hardBlockers = []): array
+    {
+        $negative = array_values((array) data_get($signal, 'debug.negativeFactors', []));
+        $soft = $this->softPenaltiesFromSignal($signal);
+        $all = array_merge($hardBlockers, $negative, $soft);
+
+        return array_values(array_slice(array_unique(array_filter(array_map(
+            static fn ($value) => is_scalar($value) ? trim((string) $value) : '',
+            $all
+        ))), 0, 8));
+    }
+
+    private function auditSignalTime(array $signal): Carbon
+    {
+        $candidates = [
+            data_get($signal, 'debug.timing.sequenceLastCandleTime'),
+            data_get($signal, 'debug.timing.higherTimeframeLastCandleTime'),
+            $signal['time'] ?? null,
+            $signal['timestamp'] ?? null,
+        ];
+        foreach ($candidates as $candidate) {
+            if (is_string($candidate) && $candidate !== '') {
+                try {
+                    return Carbon::parse($candidate);
+                } catch (Throwable) {
+                }
+            }
+        }
+
+        return now();
+    }
+
+    private function resolveStrategyMode(array $settings): string
+    {
+        if ((bool) ($settings['classicSimpleMode'] ?? false)) {
+            return 'CLASSIC_SIMPLE_LIVE_SIGNAL';
+        }
+        if ((bool) ($settings['coreOnlyMode'] ?? false)) {
+            return 'CORE_ONLY';
+        }
+
+        return 'FULL_INDICATOR_INTELLIGENCE';
+    }
+
+    private function resolveAuditBlockerControl(string $blocker, array $settings): array
+    {
+        $controls = $this->indicatorIntelligence->controls(IndicatorIntelligenceService::PROFILE_FUTURE_TRADE, $settings);
+        $normalizedBlocker = Str::lower($blocker);
+
+        foreach ($controls as $key => $control) {
+            $label = Str::lower((string) ($control['label'] ?? ''));
+            if ($label !== '' && (str_contains($normalizedBlocker, $label) || str_contains($label, $normalizedBlocker))) {
+                return [
+                    'factor' => (string) $key,
+                    'currentWeight' => (int) ($control['weight'] ?? 0),
+                ];
+            }
+        }
+
+        $map = [
+            'htf' => 'htfPenalty',
+            'volume' => 'volumePenalty',
+            'structure' => 'structurePenalty',
+            'extension' => 'extensionPenalty',
+            'rsi' => 'rsiPenalty',
+            'macd' => 'macdPenalty',
+            'choppy' => 'choppyPenalty',
+            'weak setup' => 'weakSetupPenalty',
+        ];
+        foreach ($map as $needle => $factor) {
+            if (str_contains($normalizedBlocker, $needle)) {
+                return [
+                    'factor' => $factor,
+                    'currentWeight' => (int) data_get($controls, $factor . '.weight', 0),
+                ];
+            }
+        }
+
+        return [
+            'factor' => Str::slug($blocker, '_'),
+            'currentWeight' => 0,
+        ];
+    }
+
+    private function resolveAuditRoundTripFeePercent(FutureTradeMissedSignalAudit $audit): float
+    {
+        $config = (array) data_get($audit->market_snapshot_json, 'config', []);
+        $contextValue = (float) data_get($audit->market_snapshot_json, 'context.estimatedFeePercent', 0);
+        if ($contextValue > 0) {
+            return $contextValue;
+        }
+
+        $roundTrip = (float) ($config['missedTradeAuditRoundTripFeePercent'] ?? $config['missedTradeAuditEstimatedFeePercent'] ?? 0);
+        if ($roundTrip > 0) {
+            return $roundTrip;
+        }
+
+        return max(0.0, ((float) ($config['missedTradeAuditFeePercentPerSide'] ?? 0.04)) * 2);
+    }
+
+    private function resolveAuditRoundTripSlippagePercent(FutureTradeMissedSignalAudit $audit): float
+    {
+        $config = (array) data_get($audit->market_snapshot_json, 'config', []);
+        $contextValue = (float) data_get($audit->market_snapshot_json, 'context.estimatedSlippagePercent', 0);
+        if ($contextValue > 0) {
+            return $contextValue;
+        }
+
+        $roundTrip = (float) ($config['missedTradeAuditRoundTripSlippagePercent'] ?? $config['missedTradeAuditEstimatedSlippagePercent'] ?? 0);
+        if ($roundTrip > 0) {
+            return $roundTrip;
+        }
+
+        return max(0.0, ((float) ($config['missedTradeAuditSlippagePercentPerSide'] ?? 0.015)) * 2);
+    }
+
+    private function recommendedModeFromAuditSummary($modeSummary, array $settings): string
+    {
+        if ($modeSummary->isEmpty()) {
+            return $this->resolveStrategyMode($settings);
+        }
+
+        $best = $modeSummary->map(function (array $row) {
+            $score = ((int) ($row['capturedMissedWins'] ?? 0) * 2)
+                + ((int) ($row['correctSkips'] ?? 0))
+                - ((int) ($row['allowedBadSignals'] ?? 0) * 2)
+                + ((float) ($row['netWouldHavePnlPercent'] ?? 0) * 10);
+
+            return $row + ['score' => round($score, 4)];
+        })->sortByDesc('score')->first();
+
+        return (string) ($best['mode'] ?? $this->resolveStrategyMode($settings));
+    }
+
+    private function configVersionsPayload(FutureTradeBotConfig $config): array
+    {
+        return $config->configVersions()
+            ->latest('version_number')
+            ->limit(12)
+            ->get()
+            ->map(fn (FutureTradeConfigVersion $version) => [
+                'id' => $version->id,
+                'versionNumber' => (int) $version->version_number,
+                'label' => $version->label,
+                'source' => $version->source,
+                'summary' => $version->summary_json ?? [],
+                'createdBy' => $version->created_by,
+                'createdAt' => optional($version->created_at)?->toIso8601String(),
+            ])
+            ->values()
+            ->all();
+    }
+
+    private function storeConfigVersion(
+        FutureTradeBotConfig $config,
+        array $settings,
+        string $notes,
+        string $source,
+        array $summary = [],
+        ?int $userId = null,
+        ?string $label = null
+    ): void {
+        try {
+            $nextVersion = 1 + (int) ($config->configVersions()->max('version_number') ?? 0);
+            FutureTradeConfigVersion::query()->create([
+                'future_trade_bot_config_id' => $config->id,
+                'workspace_id' => $config->workspace_id,
+                'version_number' => $nextVersion,
+                'label' => $label ?? sprintf('Version %d', $nextVersion),
+                'source' => $source,
+                'settings_json' => $settings,
+                'algorithm_notes' => $notes,
+                'summary_json' => $summary,
+                'created_by' => $userId,
+            ]);
+        } catch (Throwable $e) {
+            $this->safeDebugLog('[FUTURE TRADE CONFIG VERSION CREATE FAILED]', [
+                'workspace_id' => $config->workspace_id,
+                'source' => $source,
+                'reason' => $e->getMessage(),
+            ]);
+        }
+    }
+
+    private function buildAuditModeComparison(FutureTradeMissedSignalAudit $audit, array $result): array
+    {
+        $settings = $audit->config ? $this->normalizeFutureTradeSettings($audit->config->mergedSettings()) : $this->normalizeFutureTradeSettings(config('future_trade.defaults'));
+        $activeMinimum = (float) ($audit->active_minimum ?? 0);
+        $side = strtoupper((string) $audit->side);
+        $hardBlocked = ! empty((array) ($audit->hard_blockers_json ?? []));
+        $baseConfidence = (float) ($audit->final_confidence ?? 0);
+        $breakdown = (array) ($audit->component_breakdown_json ?? []);
+        $resultLabel = (string) ($result['would_have_result'] ?? '');
+        $netPnl = (float) ($result['net_would_have_pnl_percent'] ?? 0);
+
+        $nonCoreNegative = 0.0;
+        $nonCorePositive = 0.0;
+        foreach ($breakdown as $component) {
+            $category = (string) ($component['category'] ?? '');
+            $key = (string) ($component['key'] ?? '');
+            $contribution = (float) ($component['finalContribution'] ?? $component['contribution'] ?? 0);
+            $coreRelevant = $category === 'core' || in_array($key, ['directionalSignalBonus', 'trendContinuationBonus', 'macdPenalty'], true);
+            if ($coreRelevant) {
+                continue;
+            }
+            if ($contribution < 0) {
+                $nonCoreNegative += abs($contribution);
+            } elseif ($contribution > 0) {
+                $nonCorePositive += $contribution;
+            }
+        }
+
+        $coreConfidence = $this->clamp($baseConfidence + $nonCoreNegative - ($nonCorePositive * 0.4), 0.0, 1.0);
+        $corePassed = (bool) ($audit->core_entry_passed ?? false);
+        $coreCount = (int) ($audit->core_passed_count ?? 0);
+        $classicConfidence = $this->clamp(
+            $corePassed
+                ? max($coreConfidence, min(0.95, 0.36 + ($coreCount * 0.08)))
+                : max(0.0, min($coreConfidence, 0.34 + ($coreCount * 0.05))),
+            0.0,
+            1.0
+        );
+
+        $modes = [
+            'FULL_INDICATOR_INTELLIGENCE' => [
+                'confidence' => round($baseConfidence, 4),
+                'activeMinimum' => round($activeMinimum, 4),
+                'decision' => $this->auditModeDecision($hardBlocked, $side, $baseConfidence, $activeMinimum),
+                'topSkipReason' => $this->auditModeSkipReason($audit, 'FULL_INDICATOR_INTELLIGENCE'),
+            ],
+            'CORE_ONLY' => [
+                'confidence' => round($coreConfidence, 4),
+                'activeMinimum' => round($activeMinimum, 4),
+                'decision' => $this->auditModeDecision($hardBlocked, $side, $coreConfidence, $activeMinimum),
+                'topSkipReason' => $this->auditModeSkipReason($audit, 'CORE_ONLY'),
+            ],
+            'CLASSIC_SIMPLE_LIVE_SIGNAL' => [
+                'confidence' => round($classicConfidence, 4),
+                'activeMinimum' => round($activeMinimum, 4),
+                'decision' => $this->auditModeDecision($hardBlocked, $side, $classicConfidence, $activeMinimum, $corePassed),
+                'topSkipReason' => $this->auditModeSkipReason($audit, 'CLASSIC_SIMPLE_LIVE_SIGNAL'),
+            ],
+        ];
+
+        foreach ($modes as $key => $mode) {
+            $wouldTrade = in_array($mode['decision'], ['TRADE_ALLOWED', 'REDUCED_SIZE_TRADE'], true);
+            $modes[$key] += [
+                'wouldCaptureMissedWin' => $wouldTrade && $resultLabel === 'MISSED_WIN',
+                'wouldAllowBadSignal' => $wouldTrade && in_array($resultLabel, ['BAD_SIGNAL', 'AVOIDED_LOSS'], true),
+                'wouldAllowAvoidedLoss' => $wouldTrade && $resultLabel === 'AVOIDED_LOSS',
+                'wouldAllowCorrectSkip' => ! $wouldTrade && in_array($resultLabel, ['CORRECT_SKIP', 'AVOIDED_LOSS'], true),
+                'netWouldHavePnlPercent' => round($netPnl, 4),
+            ];
+        }
+
+        return $modes;
+    }
+
+    private function summarizeAuditModeComparisons($rows): array
+    {
+        $summary = [];
+        foreach (['FULL_INDICATOR_INTELLIGENCE', 'CORE_ONLY', 'CLASSIC_SIMPLE_LIVE_SIGNAL'] as $mode) {
+            $summary[$mode] = [
+                'mode' => $mode,
+                'wouldTrade' => 0,
+                'capturedMissedWins' => 0,
+                'allowedBadSignals' => 0,
+                'correctSkips' => 0,
+                'netWouldHavePnlPercent' => 0.0,
+                'samples' => 0,
+                'recommendation' => 'Collect more mode-comparison reviews',
+            ];
+        }
+
+        foreach ($rows as $audit) {
+            $comparison = (array) ($audit->mode_comparison_json ?? []);
+            foreach ($summary as $mode => $item) {
+                $row = (array) ($comparison[$mode] ?? []);
+                if ($row === []) {
+                    continue;
+                }
+                $summary[$mode]['samples']++;
+                if (in_array((string) ($row['decision'] ?? 'SKIP'), ['TRADE_ALLOWED', 'REDUCED_SIZE_TRADE'], true)) {
+                    $summary[$mode]['wouldTrade']++;
+                }
+                if ((bool) ($row['wouldCaptureMissedWin'] ?? false)) {
+                    $summary[$mode]['capturedMissedWins']++;
+                }
+                if ((bool) ($row['wouldAllowBadSignal'] ?? false)) {
+                    $summary[$mode]['allowedBadSignals']++;
+                }
+                if ((bool) ($row['wouldAllowCorrectSkip'] ?? false)) {
+                    $summary[$mode]['correctSkips']++;
+                }
+                $summary[$mode]['netWouldHavePnlPercent'] += (float) ($row['netWouldHavePnlPercent'] ?? 0);
+            }
+        }
+
+        foreach ($summary as $mode => $item) {
+            $samples = max(1, (int) $item['samples']);
+            $capturedRate = $item['capturedMissedWins'] / $samples;
+            $badRate = $item['allowedBadSignals'] / $samples;
+            $correctRate = $item['correctSkips'] / $samples;
+            if ($capturedRate > 0.45 && $badRate < 0.15) {
+                $summary[$mode]['recommendation'] = 'Strong candidate for fewer missed wins';
+            } elseif ($badRate > 0.25) {
+                $summary[$mode]['recommendation'] = 'Too permissive; keep stronger filters';
+            } elseif ($correctRate > 0.55) {
+                $summary[$mode]['recommendation'] = 'Protective mode; good at skipping bad setups';
+            } else {
+                $summary[$mode]['recommendation'] = 'Balanced; monitor with more samples';
+            }
+            $summary[$mode]['netWouldHavePnlPercent'] = round($item['netWouldHavePnlPercent'], 4);
+        }
+
+        return array_values($summary);
+    }
+
+    private function auditModeDecision(bool $hardBlocked, string $side, float $confidence, float $activeMinimum, bool $corePassed = false): string
+    {
+        if ($hardBlocked) {
+            return 'HARD_BLOCKED';
+        }
+        if ($side === 'WAIT') {
+            return 'SKIP';
+        }
+        if ($confidence >= $activeMinimum) {
+            return 'TRADE_ALLOWED';
+        }
+        if ($corePassed && $confidence >= ($activeMinimum * 0.92)) {
+            return 'REDUCED_SIZE_TRADE';
+        }
+
+        return 'SKIP';
+    }
+
+    private function auditModeSkipReason(FutureTradeMissedSignalAudit $audit, string $mode): ?string
+    {
+        if (! empty((array) ($audit->hard_blockers_json ?? []))) {
+            return (string) ((array) $audit->hard_blockers_json)[0];
+        }
+        if ($mode === 'CORE_ONLY') {
+            return 'Core threshold not cleared';
+        }
+        if ($mode === 'CLASSIC_SIMPLE_LIVE_SIGNAL') {
+            return (bool) $audit->core_entry_passed ? 'Classic confidence below active minimum' : 'Core entry checks not passed';
+        }
+
+        return $audit->top_skip_reason;
     }
 
     private function safeDebugLog(string $message, array $context = []): void

@@ -31,6 +31,16 @@ class FutureTradeBotConfig extends BaseModel
         return $this->hasMany(FutureTradeBotLog::class, 'future_trade_bot_config_id');
     }
 
+    public function missedSignalAudits(): HasMany
+    {
+        return $this->hasMany(FutureTradeMissedSignalAudit::class, 'future_trade_bot_config_id');
+    }
+
+    public function configVersions(): HasMany
+    {
+        return $this->hasMany(FutureTradeConfigVersion::class, 'future_trade_bot_config_id');
+    }
+
     public function mergedSettings(): array
     {
         $settings = array_merge(config('future_trade.defaults', []), (array) $this->settings);
