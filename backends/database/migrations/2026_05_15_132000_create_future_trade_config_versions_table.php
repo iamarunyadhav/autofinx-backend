@@ -18,7 +18,7 @@ return new class extends Migration
             $table->json('settings_json');
             $table->text('algorithm_notes')->nullable();
             $table->json('summary_json')->nullable();
-            $table->unsignedBigInteger('created_by')->nullable();
+            $table->uuid('created_by')->nullable();
             $table->timestamps();
 
             $table->unique(['future_trade_bot_config_id', 'version_number'], 'future_trade_config_versions_unique');

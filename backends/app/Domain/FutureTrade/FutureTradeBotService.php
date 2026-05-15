@@ -5325,7 +5325,7 @@ class FutureTradeBotService
         ]);
     }
 
-    private function emitConfigAuditLogs(FutureTradeBotConfig $config, array $changes, ?int $userId): void
+    private function emitConfigAuditLogs(FutureTradeBotConfig $config, array $changes, string|int|null $userId): void
     {
         foreach ($this->flattenAuditChanges($changes) as $entry) {
             Log::info('[FUTURE TRADE CONFIG UPDATED]', [
@@ -5928,7 +5928,7 @@ class FutureTradeBotService
         string $notes,
         string $source,
         array $summary = [],
-        ?int $userId = null,
+        string|int|null $userId = null,
         ?string $label = null
     ): void {
         try {
