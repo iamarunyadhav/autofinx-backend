@@ -2196,11 +2196,10 @@ class FutureTradeBotService
 
         if ($strictEntryGuards && $signal !== 'WAIT') {
             $directionChecks = $signal === 'SELL' ? $sellChecks : $buyChecks;
-            $utAligned = (bool) ($directionChecks['ut'] ?? false);
             $structureAligned = (bool) ($directionChecks['structure'] ?? false);
             $orderBlockAligned = (bool) ($directionChecks['ob'] ?? false);
 
-            if (! $utAligned || (! $structureAligned && ! $orderBlockAligned)) {
+            if (! $structureAligned && ! $orderBlockAligned) {
                 $signal = 'WAIT';
             }
         }
@@ -2218,9 +2217,6 @@ class FutureTradeBotService
                 'timeframe' => $tf,
             ]);
         } else {
-            if (! ($buyChecks['ut'] ?? false) && ! ($sellChecks['ut'] ?? false)) {
-                $avoidReasons[] = 'UT Bot trigger not aligned';
-            }
             if (! $bullishMsb && ! $bearishMsb) {
                 $avoidReasons[] = '15m market structure breakout not confirmed';
             }
@@ -2248,7 +2244,7 @@ class FutureTradeBotService
             }
             if (($dominantSignal === 'BUY' && ($htfBullish !== true || $htfEma200Bullish !== true))
                 || ($dominantSignal === 'SELL' && ($htfBullish !== false || $htfEma200Bullish !== false))) {
-                $avoidReasons[] = '1h trend filter disagrees with breakout direction';
+                $avoidReasons[] = '1h trend context is mixed; confidence softened';
             }
         }
 
@@ -6597,4 +6593,3 @@ class FutureTradeBotService
         }
     }
 }
-
