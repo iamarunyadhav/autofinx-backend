@@ -32,7 +32,10 @@ use App\Console\Commands\RatioBotsEvaluateCommand;
 use App\Console\Commands\Fast2XRunCommand;
 use App\Console\Commands\FutureTradeBotRunCommand;
 use App\Console\Commands\FutureTradeDiagnosticsCommand;
+use App\Console\Commands\FutureTradeQueueCleanupCommand;
+use App\Console\Commands\FutureTradeQueueHealthCommand;
 use App\Console\Commands\FutureTradeScanAllCommand;
+use App\Console\Commands\FutureTradeTickCommand;
 use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Foundation\Console\Kernel as ConsoleKernel;
 
@@ -80,7 +83,10 @@ class Kernel extends ConsoleKernel
         Fast2XRunCommand::class,
         FutureTradeBotRunCommand::class,
         FutureTradeDiagnosticsCommand::class,
+        FutureTradeQueueCleanupCommand::class,
+        FutureTradeQueueHealthCommand::class,
         FutureTradeScanAllCommand::class,
+        FutureTradeTickCommand::class,
     ];
 
 }

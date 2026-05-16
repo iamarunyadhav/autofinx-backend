@@ -448,6 +448,9 @@ Route::prefix('v1')->group(function () {
         // ---- Future Trade Bot ----------------------------------------------
         Route::get('workspaces/{workspace}/future-trade/status', [FutureTradeBotController::class, 'status']);
         Route::get('workspaces/{workspace}/future-trade/dashboard', [FutureTradeBotController::class, 'dashboard']);
+        Route::get('workspaces/{workspace}/future-trade/live-status', [FutureTradeBotController::class, 'liveStatus']);
+        Route::get('workspaces/{workspace}/future-trade/scanner-snapshot', [FutureTradeBotController::class, 'scannerSnapshot']);
+        Route::get('workspaces/{workspace}/future-trade/chart', [FutureTradeBotController::class, 'chart']);
         Route::get('workspaces/{workspace}/future-trade/live-feed', [FutureTradeBotController::class, 'liveFeedStatus']);
         Route::post('workspaces/{workspace}/future-trade/live-feed/start', [FutureTradeBotController::class, 'startLiveFeed'])->middleware('require.2fa');
         Route::post('workspaces/{workspace}/future-trade/live-feed/stop', [FutureTradeBotController::class, 'stopLiveFeed'])->middleware('require.2fa');

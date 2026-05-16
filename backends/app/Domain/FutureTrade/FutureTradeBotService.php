@@ -14,6 +14,7 @@ use App\Models\FutureTradeBotConfig;
 use App\Models\FutureTradeConfigVersion;
 use App\Models\FutureTradeMissedSignalAudit;
 use App\Models\FutureTradeBotState;
+use App\Models\MarketFeedStatus;
 use App\Models\MarketOhlc;
 use App\Models\SchedulerRun;
 use Illuminate\Http\Client\Pool;
@@ -659,6 +660,123 @@ class FutureTradeBotService
 	            'dynamic' => $dynamic['public'],
 	        ];
 	    }
+
+    public function liveStatusLightPayload(FutureTradeBotConfig $config): array
+    {
+        $config = $config->fresh('state');
+        $state = $this->state($config);
+        $settings = $this->normalizeFutureTradeSettings($config->mergedSettings());
+        $signals = array_slice((array) ($state->scanner_snapshot ?? []), 0, 20);
+        $bestSignal = $signals[0] ?? null;
+        $dynamic = $this->dynamicDecision($config, $state, $signals, $bestSignal, $settings);
+        $feed = $this->feedFreshnessSnapshot((string) ($state->current_symbol ?: ($bestSignal['symbol'] ?? '')));
+        $lastChartPoint = Arr::last((array) ($state->chart_points ?? []));
+        $chartAt = isset($lastChartPoint['time']) ? Carbon::parse((string) $lastChartPoint['time']) : null;
+        $latestBlock = $config->logs()
+            ->whereIn('event', ['TRADE_BLOCKED', 'SIGNAL_SKIPPED'])
+            ->orderByDesc('occurred_at')
+            ->first();
+        $account = $this->cachedAccountSummaryForStatus($config);
+
+        return [
+            'workspaceId' => (string) $config->workspace_id,
+            'enabled' => (bool) $config->enabled,
+            'paperTrading' => ! $this->isLiveMode($config),
+            'liveTrading' => $this->isLiveMode($config),
+            'mode' => $this->isLiveMode($config) ? (($settings['forceTestnet'] ?? true) ? 'LIVE_TESTNET' : 'LIVE') : 'PAPER',
+            'strategyMode' => $this->strategyModeLabel($settings),
+            'classicSimpleMode' => (bool) ($settings['classicSimpleMode'] ?? false),
+            'confidenceMode' => (string) ($settings['confidenceMode'] ?? 'fixed'),
+            'minConfidence' => (float) ($settings['minConfidence'] ?? 0),
+            'activeMinimum' => round((float) ($dynamic['effectiveMinConfidence'] ?? ($settings['minConfidence'] ?? 0)), 4),
+            'strictEntryGuards' => (bool) ($settings['strictEntryGuards'] ?? false),
+            'corePassRule' => (int) ($settings['corePassRule'] ?? 3),
+            'feedMode' => $feed['feedMode'],
+            'feedFresh' => $feed['feedFresh'],
+            'tickAgeSeconds' => $feed['feedAgeSeconds'],
+            'lastTickAt' => $feed['lastTickAt'],
+            'lastTickPrice' => $feed['lastTickPrice'],
+            'lastScanAt' => optional($state->last_scan_at)->toIso8601String(),
+            'scanAgeSeconds' => $state->last_scan_at ? now()->diffInSeconds($state->last_scan_at) : null,
+            'chartUpdatedAt' => $chartAt?->toIso8601String(),
+            'chartAgeSeconds' => $chartAt ? now()->diffInSeconds($chartAt) : null,
+            'currentSymbol' => $state->current_symbol,
+            'currentPrice' => (float) ($feed['lastTickPrice'] ?? $state->current_price ?? 0),
+            'currentSignal' => $state->current_signal,
+            'currentConfidence' => (float) ($state->confidence ?? 0),
+            'lastSkipReason' => $latestBlock?->reason,
+            'positionSide' => $state->position_side ?: 'FLAT',
+            'walletBalance' => $account['walletBalance'] ?? null,
+            'availableBalance' => $account['availableBalance'] ?? null,
+            'accountAsset' => $account['accountAsset'] ?? 'USDT',
+            'minQuantityPrecheck' => $this->minimumQuantityPrecheck($config, $settings, $state, $bestSignal),
+            'updatedAt' => now()->toIso8601String(),
+        ];
+    }
+
+    public function scannerSnapshotPayload(FutureTradeBotConfig $config): array
+    {
+        $config = $config->fresh('state');
+        $state = $this->state($config);
+        $settings = $this->normalizeFutureTradeSettings($config->mergedSettings());
+        $signals = array_slice((array) ($state->scanner_snapshot ?? []), 0, 20);
+        $dynamic = $this->dynamicDecision($config, $state, $signals, $signals[0] ?? null, $settings);
+        $activeMinimum = (float) ($dynamic['effectiveMinConfidence'] ?? ($settings['minConfidence'] ?? 0));
+
+        return [
+            'updatedAt' => optional($state->last_scan_at)->toIso8601String(),
+            'scanAgeSeconds' => $state->last_scan_at ? now()->diffInSeconds($state->last_scan_at) : null,
+            'symbols' => array_map(function (array $signal) use ($activeMinimum): array {
+                return [
+                    'symbol' => (string) ($signal['symbol'] ?? ''),
+                    'price' => (float) ($signal['price'] ?? 0),
+                    'signal' => (string) ($signal['signal'] ?? 'WAIT'),
+                    'confidence' => (float) ($signal['confidence'] ?? 0),
+                    'activeMinimum' => (float) ($signal['effectiveMinConfidence'] ?? $activeMinimum),
+                    'coreEntryPassed' => (bool) data_get($signal, 'debug.checks.coreEntryPassed', false),
+                    'componentScores' => (array) data_get($signal, 'debug.componentScores', []),
+                    'positiveFactors' => (array) data_get($signal, 'debug.positiveFactors', []),
+                    'negativeFactors' => (array) data_get($signal, 'debug.negativeFactors', []),
+                    'lastSkipReason' => (string) data_get($signal, 'debug.decisionStatus', ''),
+                ];
+            }, $signals),
+        ];
+    }
+
+    public function liveChartPayload(FutureTradeBotConfig $config, ?string $symbol = null, ?string $timeframe = null, int $limit = 180): array
+    {
+        $config = $config->fresh('state');
+        $state = $this->state($config);
+        $settings = $this->normalizeFutureTradeSettings($config->mergedSettings());
+        $signals = array_slice((array) ($state->scanner_snapshot ?? []), 0, 20);
+        $bestSignal = $signals[0] ?? null;
+        $chartSymbol = strtoupper(trim((string) ($symbol ?: $this->resolveMarketChartSymbol($state, $bestSignal, $settings))));
+        $chartTimeframe = $this->normalizeKlineInterval((string) ($timeframe ?: ($settings['timeframe'] ?? '5m')));
+        $candles = $chartSymbol !== '' ? $this->fetchMarketCandles($chartSymbol, $chartTimeframe, $limit) : [];
+        $feed = $this->feedFreshnessSnapshot($chartSymbol);
+        $isForming = false;
+
+        if (($feed['feedFresh'] ?? false) && (float) ($feed['lastTickPrice'] ?? 0) > 0 && count($candles) > 0) {
+            $index = count($candles) - 1;
+            $price = (float) $feed['lastTickPrice'];
+            $candles[$index]['close'] = $price;
+            $candles[$index]['high'] = max((float) ($candles[$index]['high'] ?? $price), $price);
+            $candles[$index]['low'] = min((float) ($candles[$index]['low'] ?? $price), $price);
+            $candles[$index]['isFormingCandle'] = true;
+            $isForming = true;
+        }
+
+        return [
+            'symbol' => $chartSymbol ?: null,
+            'timeframe' => $chartTimeframe,
+            'candles' => $candles,
+            'latestTickPrice' => $feed['lastTickPrice'],
+            'latestTickAt' => $feed['lastTickAt'],
+            'chartUpdatedAt' => now()->toIso8601String(),
+            'isFormingCandle' => $isForming,
+            'dataSource' => $feed['source'],
+        ];
+    }
 
     public function diagnosticsPayload(FutureTradeBotConfig $config, bool $persist = false): array
     {
@@ -2226,8 +2344,21 @@ class FutureTradeBotService
                     $symbol = (string) ($row['symbol'] ?? '');
                     $feedPrice = $this->cachedLatestPrice($symbol);
                     if ($feedPrice !== null && (float) ($feedPrice['price'] ?? 0) > 0) {
-                        $row['lastPrice'] = (string) $feedPrice['price'];
-                        $row['price'] = (string) $feedPrice['price'];
+                        $trustedPrice = (float) ($row['lastPrice'] ?? $row['price'] ?? 0);
+                        $candidatePrice = (float) $feedPrice['price'];
+                        $deviation = $trustedPrice > 0 ? abs($candidatePrice - $trustedPrice) / $trustedPrice : 0.0;
+                        if ($trustedPrice > 0 && $deviation > 0.20) {
+                            Log::warning('[SYMBOL PRICE SANITY BLOCKED]', [
+                                'symbol' => $symbol,
+                                'candidatePrice' => $candidatePrice,
+                                'trustedPrice' => $trustedPrice,
+                                'deviationPercent' => round($deviation * 100, 4),
+                                'source' => $feedPrice['source'] ?? null,
+                            ]);
+                        } else {
+                            $row['lastPrice'] = (string) $candidatePrice;
+                            $row['price'] = (string) $candidatePrice;
+                        }
                     }
                     $row['sequence'] = $sequenceSnapshots[$symbol] ?? $this->emptySequenceSnapshot();
                     $row['structure'] = $structureSnapshots[$symbol] ?? $this->emptyStructureSnapshot();
@@ -3720,6 +3851,7 @@ class FutureTradeBotService
         $ageSeconds = $state->last_scan_at ? now()->diffInSeconds($state->last_scan_at) : null;
         $feedPrice = $state->current_symbol ? $this->cachedLatestPrice((string) $state->current_symbol) : null;
         $hasSharedFeed = $feedPrice !== null;
+        $feedFreshness = $this->feedFreshnessSnapshot((string) ($state->current_symbol ?: ($bestSignal['symbol'] ?? '')));
         $daemonStatus = $this->liveFeedManager?->status((string) $config->workspace_id) ?? [
             'running' => false,
             'isFresh' => false,
@@ -3744,7 +3876,7 @@ class FutureTradeBotService
         return [
             'mode' => $trueWebsocketLive
                 ? 'TRUE_WEBSOCKET_CACHE_LIVE'
-                : ($hasSharedFeed ? 'SHARED_FEED_CACHE' : 'REST_POLLING'),
+                : ((bool) ($feedFreshness['feedFresh'] ?? false) ? (string) ($feedFreshness['feedMode'] ?? 'SHARED_FEED_CACHE') : ($hasSharedFeed ? 'SHARED_FEED_CACHE' : 'REST_POLLING')),
             'priceUpdateMode' => 'SCAN_LOOP',
             'indicatorMode' => 'FORMING_CANDLE',
             'lastUpdateTime' => optional($state->last_scan_at)->toIso8601String(),
@@ -3769,6 +3901,86 @@ class FutureTradeBotService
                 'restartRecommended' => (bool) ($daemonStatus['restartRecommended'] ?? false),
                 'symbolSetInSync' => (bool) ($daemonStatus['symbolSetInSync'] ?? true),
             ],
+        ];
+    }
+
+    private function feedFreshnessSnapshot(?string $symbol = null): array
+    {
+        $symbol = strtoupper(trim((string) $symbol));
+        $latestPrice = $symbol !== '' ? $this->cachedLatestPrice($symbol) : null;
+        $priceAge = null;
+        if (is_array($latestPrice) && (int) ($latestPrice['timestamp_ms'] ?? 0) > 0) {
+            $priceAge = max(0, (int) floor((microtime(true) * 1000 - (int) $latestPrice['timestamp_ms']) / 1000));
+        }
+
+        $latestFeed = MarketFeedStatus::query()
+            ->where('market_type', 'futures')
+            ->when($symbol !== '', fn ($query) => $query->where('symbol', $symbol))
+            ->whereNotNull('last_tick_at')
+            ->orderByDesc('last_tick_at')
+            ->first();
+
+        $feedAge = $latestFeed?->last_tick_at ? now()->diffInSeconds($latestFeed->last_tick_at) : null;
+        $age = $priceAge !== null && $feedAge !== null ? min($priceAge, $feedAge) : ($priceAge ?? $feedAge);
+        $lastTickAt = $latestPrice && (int) ($latestPrice['timestamp_ms'] ?? 0) > 0
+            ? Carbon::createFromTimestampMs((int) $latestPrice['timestamp_ms'])->toIso8601String()
+            : $latestFeed?->last_tick_at?->toIso8601String();
+        $lastTickPrice = (float) ($latestPrice['price'] ?? $latestFeed?->last_price ?? 0) ?: null;
+        $source = (string) ($latestPrice['source'] ?? $latestFeed?->source ?? 'none');
+        $fresh10 = $age !== null && $age <= 10;
+        $fresh20 = $age !== null && $age <= 20;
+
+        return [
+            'feedMode' => $fresh10
+                ? 'TRUE_WEBSOCKET_CACHE_LIVE'
+                : ($fresh20 ? 'TRUE_WEBSOCKET_CACHE_LIVE_MANUAL' : ($age !== null && $age <= 60 ? 'REST_FALLBACK' : 'STALE')),
+            'feedFresh' => $fresh20,
+            'feedAgeSeconds' => $age,
+            'lastTickAt' => $lastTickAt,
+            'lastTickPrice' => $lastTickPrice,
+            'source' => $source,
+        ];
+    }
+
+    private function strategyModeLabel(array $settings): string
+    {
+        if ((bool) ($settings['classicSimpleMode'] ?? false)) {
+            return 'CLASSIC_SIMPLE';
+        }
+
+        return ((int) ($settings['corePassRule'] ?? 3)) <= 2 ? 'CORE_ONLY' : 'FULL_INDICATOR';
+    }
+
+    private function cachedAccountSummaryForStatus(FutureTradeBotConfig $config): array
+    {
+        return Cache::remember('future_trade_light_account_' . $config->id, 10, fn () => $this->accountSummary($config));
+    }
+
+    private function minimumQuantityPrecheck(FutureTradeBotConfig $config, array $settings, FutureTradeBotState $state, ?array $bestSignal): ?array
+    {
+        $symbol = strtoupper(trim((string) ($state->current_symbol ?: ($bestSignal['symbol'] ?? ''))));
+        $price = (float) ($state->current_price ?: ($bestSignal['price'] ?? 0));
+        if ($symbol === '' || $price <= 0) {
+            return null;
+        }
+
+        $filters = ['stepSize' => $symbol === 'BTCUSDT' ? 0.001 : 0.001, 'minNotional' => FuturesOrderSizingService::BINANCE_MIN_OPEN_NOTIONAL];
+        $leverage = max(1, min((int) ($settings['leverage'] ?? 1), (int) ($settings['maxLeverage'] ?? 5)));
+        $tradeAmount = (float) ($settings['tradeAmountUsdt'] ?? 25);
+        $sizing = $this->orderSizing->evaluate(($tradeAmount * $leverage) / max($price, 0.00000001), $price, $filters);
+        $recommended = $this->minimumSafeTradeAmountUsdt($tradeAmount, $leverage, $price, $filters);
+
+        return [
+            'symbol' => $symbol,
+            'price' => $price,
+            'stepSize' => (float) ($sizing['stepSize'] ?? $filters['stepSize']),
+            'minQty' => (float) ($sizing['stepSize'] ?? $filters['stepSize']),
+            'tradeAmountUsdt' => $tradeAmount,
+            'leverage' => $leverage,
+            'notional' => (float) ($sizing['notional'] ?? 0),
+            'minimumRequiredTradeAmountUsdt' => $recommended,
+            'recommendedTradeAmountUsdt' => $recommended,
+            'canTrade' => (float) ($sizing['quantity_float'] ?? 0) > 0 && (float) ($sizing['notional'] ?? 0) >= (float) ($sizing['minOpenNotional'] ?? 0),
         ];
     }
 

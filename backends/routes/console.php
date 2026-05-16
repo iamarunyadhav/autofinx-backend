@@ -121,22 +121,18 @@ Schedule::command('jobs:maintain-backlog')
     ->before(fn () => $markRunStart('jobs:maintain-backlog'))
     ->after(fn () => $markRunEnd('jobs:maintain-backlog'));
 
-Schedule::command('future-trade:scan-all')
-    ->everySecond()
-    ->onOneServer()
-    ->withoutOverlapping()
-    ->runInBackground();
+Schedule::command('future-trade:tick --duration=55 --sleep-ms=1000')
+    ->everyMinute()
+    ->withoutOverlapping();
 
 Schedule::command('future-trade:diagnostics --persist')
     ->everyFiveMinutes()
     ->withoutOverlapping()
-    ->runInBackground()
     ->before(fn () => $markRunStart('future-trade:diagnostics'))
     ->after(fn () => $markRunEnd('future-trade:diagnostics'));
 
 Schedule::command('future-trade:audit-missed-signals --limit=100')
     ->everyFiveMinutes()
     ->withoutOverlapping()
-    ->runInBackground()
     ->before(fn () => $markRunStart('future-trade:audit-missed-signals'))
     ->after(fn () => $markRunEnd('future-trade:audit-missed-signals'));

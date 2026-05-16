@@ -25,6 +25,26 @@ class FutureTradeBotController extends Controller
         return response()->json($this->bot->dashboardPayload($this->bot->getOrCreateConfig($workspace)));
     }
 
+    public function liveStatus(string $workspace): JsonResponse
+    {
+        return response()->json($this->bot->liveStatusLightPayload($this->bot->getOrCreateConfig($workspace)));
+    }
+
+    public function scannerSnapshot(string $workspace): JsonResponse
+    {
+        return response()->json($this->bot->scannerSnapshotPayload($this->bot->getOrCreateConfig($workspace)));
+    }
+
+    public function chart(Request $request, string $workspace): JsonResponse
+    {
+        return response()->json($this->bot->liveChartPayload(
+            $this->bot->getOrCreateConfig($workspace),
+            $request->query('symbol') ? (string) $request->query('symbol') : null,
+            $request->query('timeframe') ? (string) $request->query('timeframe') : null,
+            max(60, min(500, (int) $request->query('limit', 180))),
+        ));
+    }
+
     public function liveFeedStatus(string $workspace): JsonResponse
     {
         return response()->json($this->liveFeedManager->status($workspace));

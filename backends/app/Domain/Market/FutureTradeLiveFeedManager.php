@@ -34,7 +34,8 @@ class FutureTradeLiveFeedManager
 
         $lastTickAt = $latestFeed?->last_tick_at;
         $ageSeconds = $lastTickAt ? now()->diffInSeconds($lastTickAt) : null;
-        $isFresh = $ageSeconds !== null && $ageSeconds <= 12;
+        $lastTickPrice = $latestFeed?->last_price !== null ? (float) $latestFeed->last_price : null;
+        $isFresh = $ageSeconds !== null && $ageSeconds <= 20;
         $runningSymbols = array_values(array_filter(array_map(
             static fn ($symbol) => strtoupper(trim((string) $symbol)),
             (array) ($meta['symbols'] ?? [])
@@ -44,16 +45,27 @@ class FutureTradeLiveFeedManager
         sort($expectedSymbols);
         $symbolSetInSync = $runningSymbols === $expectedSymbols;
 
-        $mode = $running && $isFresh
+        $mode = $ageSeconds !== null && $ageSeconds <= 10
             ? 'TRUE_WEBSOCKET_CACHE_LIVE'
-            : ($running ? 'WEBSOCKET_CONNECTED_AWAITING_FRESH_TICK' : 'REST_FALLBACK');
+            : ($isFresh && ! $running
+                ? 'TRUE_WEBSOCKET_CACHE_LIVE_MANUAL'
+                : ($running ? 'WEBSOCKET_CONNECTED_AWAITING_FRESH_TICK' : ($ageSeconds !== null && $ageSeconds <= 60 ? 'REST_FALLBACK' : 'STALE')));
+        $manualFreshTick = ! $running && $isFresh;
 
         return [
             'running' => $running,
             'startSupported' => $this->canSpawnDaemon(),
+            'shellExecAvailable' => $this->canSpawnDaemon(),
             'pid' => $pid > 0 ? $pid : null,
             'mode' => $mode,
-            'dataSource' => $running ? 'BINANCE_FUTURES_WEBSOCKET' : 'BINANCE_FUTURES_REST_FALLBACK',
+            'feedMode' => $mode,
+            'feedFresh' => $isFresh,
+            'feedAgeSeconds' => $ageSeconds,
+            'lastTickPrice' => $lastTickPrice,
+            'source' => (string) ($latestFeed?->source ?? ($isFresh ? 'websocket_cache' : 'none')),
+            'daemonPidKnown' => $running,
+            'manualDaemonDetectedByFreshTicks' => $manualFreshTick,
+            'dataSource' => $isFresh ? 'BINANCE_FUTURES_WEBSOCKET_CACHE' : ($running ? 'BINANCE_FUTURES_WEBSOCKET' : 'BINANCE_FUTURES_REST_FALLBACK'),
             'startedAt' => $meta['started_at'] ?? null,
             'command' => $meta['command'] ?? $this->commandLine($desiredSymbols),
             'manualCommand' => $this->manualStartCommand($desiredSymbols),
@@ -71,9 +83,11 @@ class FutureTradeLiveFeedManager
                 ? ($symbolSetInSync
                     ? ($isFresh ? 'Shared futures websocket feed is live.' : 'Daemon is running, waiting for a fresh futures tick.')
                     : 'Daemon is running, but symbol list changed. Restart recommended.')
-                : ($this->canSpawnDaemon()
+                : ($manualFreshTick
+                    ? 'Live feed active by fresh tick detection.'
+                    : ($this->canSpawnDaemon()
                     ? 'Daemon is offline. UI is using REST fallback.'
-                    : 'Daemon is offline. shell_exec is disabled on this server, so start it manually from terminal.'),
+                    : 'Daemon control is unavailable because shell_exec is disabled. Use cron/heartbeat/manual process control.')),
         ];
     }
 

@@ -218,7 +218,8 @@ test('future trade scan command refreshes scanner snapshot and graph from fake B
 
 test('future trade scheduler command is registered without long-running loop option', function () {
     $this->artisan('schedule:list')
-        ->expectsOutputToContain('future-trade:scan-all')
+        ->expectsOutputToContain('future-trade:tick --duration=55 --sleep-ms=1000')
+        ->doesntExpectOutputToContain('future-trade:scan-all')
         ->doesntExpectOutputToContain('future-trade:scan-all --loop')
         ->assertExitCode(0);
 });
