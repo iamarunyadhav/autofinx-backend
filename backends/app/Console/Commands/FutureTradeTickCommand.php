@@ -48,9 +48,24 @@ class FutureTradeTickCommand extends Command
                 $loopCount++;
                 Log::info('[FT TICK LOOP]', ['loopCount' => $loopCount]);
 
-                $configs = $workspaceId !== ''
-                    ? collect([$bot->getOrCreateConfig($workspaceId)])
-                    : FutureTradeBotConfig::query()->with('state')->get();
+                if ($workspaceId !== '') {
+                    $primary = $bot->getOrCreateConfig($workspaceId);
+                    $bot->syncSlots($primary);
+                    $configs = FutureTradeBotConfig::query()
+                        ->with('state')
+                        ->where('workspace_id', $workspaceId)
+                        ->orderBy('slot_index')
+                        ->get();
+                } else {
+                    // Sync slots for every primary config once per loop iteration
+                    $primaries = FutureTradeBotConfig::query()
+                        ->where('slot_index', 0)
+                        ->get();
+                    foreach ($primaries as $primary) {
+                        $bot->syncSlots($primary);
+                    }
+                    $configs = FutureTradeBotConfig::query()->with('state')->orderBy('slot_index')->get();
+                }
 
                 foreach ($configs as $config) {
                     $config = $config->fresh('state');

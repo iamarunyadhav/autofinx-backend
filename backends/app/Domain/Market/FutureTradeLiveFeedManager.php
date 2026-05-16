@@ -33,7 +33,7 @@ class FutureTradeLiveFeedManager
             ->first();
 
         $lastTickAt = $latestFeed?->last_tick_at;
-        $ageSeconds = $lastTickAt ? now()->diffInSeconds($lastTickAt) : null;
+        $ageSeconds = $this->ageSecondsSince($lastTickAt);
         $lastTickPrice = $latestFeed?->last_price !== null ? (float) $latestFeed->last_price : null;
         $isFresh = $ageSeconds !== null && $ageSeconds <= 20;
         $runningSymbols = array_values(array_filter(array_map(
@@ -72,7 +72,7 @@ class FutureTradeLiveFeedManager
             'logPath' => $meta['log_path'] ?? $this->outLogPath(),
             'errorLogPath' => $meta['error_log_path'] ?? $this->errLogPath(),
             'workspaceScope' => 'global_shared',
-            'lastTickAt' => $lastTickAt?->toIso8601String(),
+            'lastTickAt' => $this->isoTimestamp($lastTickAt),
             'ageSeconds' => $ageSeconds,
             'isFresh' => $isFresh,
             'desiredSymbols' => $desiredSymbols,
@@ -384,5 +384,39 @@ class FutureTradeLiveFeedManager
     private function phpBinary(): string
     {
         return PHP_BINARY ?: 'php';
+    }
+
+    private function ageSecondsSince(mixed $timestamp): ?int
+    {
+        if ($timestamp === null || $timestamp === '') {
+            return null;
+        }
+
+        try {
+            $time = $timestamp instanceof \DateTimeInterface
+                ? Carbon::instance($timestamp)
+                : Carbon::parse((string) $timestamp, config('app.timezone'));
+        } catch (\Throwable) {
+            return null;
+        }
+
+        return max(0, now(config('app.timezone'))->getTimestamp() - $time->getTimestamp());
+    }
+
+    private function isoTimestamp(mixed $timestamp): ?string
+    {
+        if ($timestamp === null || $timestamp === '') {
+            return null;
+        }
+
+        try {
+            $time = $timestamp instanceof \DateTimeInterface
+                ? Carbon::instance($timestamp)
+                : Carbon::parse((string) $timestamp, config('app.timezone'));
+        } catch (\Throwable) {
+            return null;
+        }
+
+        return $time->timezone(config('app.timezone'))->toIso8601String();
     }
 }

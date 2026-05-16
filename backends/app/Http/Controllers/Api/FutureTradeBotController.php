@@ -5,8 +5,10 @@ namespace App\Http\Controllers\Api;
 use App\Domain\FutureTrade\FutureTradeBotService;
 use App\Domain\Market\FutureTradeLiveFeedManager;
 use App\Http\Controllers\Controller;
+use App\Models\WorkspaceMember;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
 
 class FutureTradeBotController extends Controller
 {
@@ -119,6 +121,10 @@ class FutureTradeBotController extends Controller
 
     public function recover(Request $request, string $workspace): JsonResponse
     {
+        if (! $this->authorizeRecovery($request, $workspace)) {
+            return response()->json(['message' => 'Forbidden'], 403);
+        }
+
         $data = $request->validate([
             'action' => 'nullable|string|in:auto,sync_state,cancel_reduce_only',
         ]);
@@ -136,6 +142,26 @@ class FutureTradeBotController extends Controller
                 'message' => $e->getMessage(),
             ], 422);
         }
+    }
+
+    private function authorizeRecovery(Request $request, string $workspace): bool
+    {
+        $user = $request->user();
+        $role = $user
+            ? WorkspaceMember::query()
+                ->where('workspace_id', $workspace)
+                ->where('user_id', $user->id)
+                ->value('role')
+            : null;
+        $allowed = in_array((string) $role, ['owner', 'admin', 'trader', 'member'], true);
+
+        Log::info($allowed ? '[FUTURE TRADE RECOVERY AUTHORIZED]' : '[FUTURE TRADE RECOVERY DENIED]', [
+            'workspace_id' => $workspace,
+            'user_id' => $user?->id,
+            'role' => $role,
+        ]);
+
+        return $allowed;
     }
 
     public function config(string $workspace): JsonResponse

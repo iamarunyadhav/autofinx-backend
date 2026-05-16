@@ -3,6 +3,7 @@
 use App\Models\FutureTradeBotConfig;
 use App\Models\User;
 use App\Models\Workspace;
+use App\Models\WorkspaceMember;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
@@ -53,10 +54,20 @@ function createFutureTradeLiveConfig(string $workspaceId, array $state = [], arr
     return $config->fresh('state');
 }
 
+function attachFutureTradeWorkspaceMember(Workspace $workspace, User $user, string $role = 'admin'): void
+{
+    WorkspaceMember::create([
+        'workspace_id' => $workspace->id,
+        'user_id' => $user->id,
+        'role' => $role,
+    ]);
+}
+
 test('future trade auto recovery clears stale local position and cancels reduce-only orders', function () {
     $this->withoutMiddleware('require.2fa');
     $workspace = Workspace::factory()->create();
     $user = User::factory()->create();
+    attachFutureTradeWorkspaceMember($workspace, $user);
     $config = createFutureTradeLiveConfig($workspace->id);
     $cancelled = 0;
 
@@ -109,6 +120,7 @@ test('future trade sync state adopts actual Binance open position', function () 
     $this->withoutMiddleware('require.2fa');
     $workspace = Workspace::factory()->create();
     $user = User::factory()->create();
+    attachFutureTradeWorkspaceMember($workspace, $user);
     $config = createFutureTradeLiveConfig($workspace->id, [
         'quantity' => 0.017,
         'position_side' => 'SHORT',

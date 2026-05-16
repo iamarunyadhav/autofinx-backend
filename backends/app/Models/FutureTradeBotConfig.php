@@ -10,11 +10,17 @@ class FutureTradeBotConfig extends BaseModel
     protected $table = 'future_trade_bot_configs';
 
     protected $casts = [
+        'slot_index' => 'integer',
         'paper_trading' => 'boolean',
         'enable_live_trading' => 'boolean',
         'enabled' => 'boolean',
         'settings' => 'array',
     ];
+
+    public function isPrimary(): bool
+    {
+        return (int) ($this->slot_index ?? 0) === 0;
+    }
 
     public function state(): HasOne
     {

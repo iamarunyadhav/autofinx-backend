@@ -40,7 +40,7 @@ class FutureTradeBotService
     public function getOrCreateConfig(string $workspaceId): FutureTradeBotConfig
     {
         $config = FutureTradeBotConfig::firstOrCreate(
-            ['workspace_id' => $workspaceId],
+            ['workspace_id' => $workspaceId, 'slot_index' => 0],
             [
                 'bot_name' => 'Future Trade Bot',
                 'paper_trading' => true,
@@ -59,6 +59,63 @@ class FutureTradeBotService
         ]);
 
         return $config->fresh('state');
+    }
+
+    /**
+     * Ensure the number of active slot-configs for a workspace matches maxOpenPositions.
+     * Slot 0 is always the primary (settings authority). Slots 1..N-1 are shadow positions
+     * that mirror the primary's settings and enabled/live state.
+     */
+    public function syncSlots(FutureTradeBotConfig $primary): void
+    {
+        if (! $primary->isPrimary()) {
+            return;
+        }
+
+        $settings = $primary->mergedSettings();
+        $maxSlots = max(1, (int) ($settings['maxOpenPositions'] ?? 1));
+        $workspaceId = $primary->workspace_id;
+
+        // Create missing shadow slots and initialise their state
+        for ($slot = 1; $slot < $maxSlots; $slot++) {
+            $shadow = FutureTradeBotConfig::firstOrCreate(
+                ['workspace_id' => $workspaceId, 'slot_index' => $slot],
+                [
+                    'bot_name' => ($primary->bot_name ?? 'Future Trade Bot') . ' (Slot ' . ($slot + 1) . ')',
+                    'paper_trading' => $primary->paper_trading,
+                    'enable_live_trading' => $primary->enable_live_trading,
+                    'enabled' => $primary->enabled,
+                    'settings' => $primary->settings,
+                    'algorithm_notes' => $primary->algorithm_notes,
+                ]
+            );
+            $shadow->state()->firstOrCreate([], [
+                'status' => 'Stopped',
+                'state' => 'IDLE',
+                'connection_status' => 'Disconnected',
+                'trading_day' => now()->toDateString(),
+            ]);
+        }
+
+        // Keep existing shadow slots in sync with primary settings/mode
+        if ($maxSlots > 1) {
+            FutureTradeBotConfig::query()
+                ->where('workspace_id', $workspaceId)
+                ->where('slot_index', '>', 0)
+                ->where('slot_index', '<', $maxSlots)
+                ->update([
+                    'paper_trading' => $primary->paper_trading,
+                    'enable_live_trading' => $primary->enable_live_trading,
+                    'enabled' => $primary->enabled,
+                    'settings' => json_encode($primary->settings),
+                ]);
+        }
+
+        // Disable any slots beyond the current limit
+        FutureTradeBotConfig::query()
+            ->where('workspace_id', $workspaceId)
+            ->where('slot_index', '>=', $maxSlots)
+            ->update(['enabled' => false]);
     }
 
     public function updateConfig(FutureTradeBotConfig $config, array $payload): FutureTradeBotConfig
@@ -97,6 +154,11 @@ class FutureTradeBotService
             'settings' => $settings,
             'algorithm_notes' => $newNotes,
         ]);
+
+        // Propagate live/paper mode and settings changes to all shadow slots
+        if ($config->isPrimary()) {
+            $this->syncSlots($config->fresh());
+        }
 
         if ($liveRequested && ! $liveAllowed) {
             $this->log($config->fresh('state'), 'LIVE_GUARD_BLOCKED', null, null, 0, 'Another live bot is already active for this workspace/account. Future Trade stays in paper mode.');
@@ -693,13 +755,13 @@ class FutureTradeBotService
             'corePassRule' => (int) ($settings['corePassRule'] ?? 3),
             'feedMode' => $feed['feedMode'],
             'feedFresh' => $feed['feedFresh'],
-            'tickAgeSeconds' => $feed['feedAgeSeconds'],
+            'tickAgeSeconds' => (int) ($feed['feedAgeSeconds'] ?? 0),
             'lastTickAt' => $feed['lastTickAt'],
             'lastTickPrice' => $feed['lastTickPrice'],
-            'lastScanAt' => optional($state->last_scan_at)->toIso8601String(),
-            'scanAgeSeconds' => $state->last_scan_at ? now()->diffInSeconds($state->last_scan_at) : null,
-            'chartUpdatedAt' => $chartAt?->toIso8601String(),
-            'chartAgeSeconds' => $chartAt ? now()->diffInSeconds($chartAt) : null,
+            'lastScanAt' => $this->isoTimestamp($state->last_scan_at),
+            'scanAgeSeconds' => (int) ($this->ageSecondsSince($state->last_scan_at) ?? 0),
+            'chartUpdatedAt' => $this->isoTimestamp($chartAt),
+            'chartAgeSeconds' => (int) ($this->ageSecondsSince($chartAt) ?? 0),
             'currentSymbol' => $state->current_symbol,
             'currentPrice' => (float) ($feed['lastTickPrice'] ?? $state->current_price ?? 0),
             'currentSignal' => $state->current_signal,
@@ -710,7 +772,7 @@ class FutureTradeBotService
             'availableBalance' => $account['availableBalance'] ?? null,
             'accountAsset' => $account['accountAsset'] ?? 'USDT',
             'minQuantityPrecheck' => $this->minimumQuantityPrecheck($config, $settings, $state, $bestSignal),
-            'updatedAt' => now()->toIso8601String(),
+            'updatedAt' => $this->isoTimestamp(now()),
         ];
     }
 
@@ -724,8 +786,8 @@ class FutureTradeBotService
         $activeMinimum = (float) ($dynamic['effectiveMinConfidence'] ?? ($settings['minConfidence'] ?? 0));
 
         return [
-            'updatedAt' => optional($state->last_scan_at)->toIso8601String(),
-            'scanAgeSeconds' => $state->last_scan_at ? now()->diffInSeconds($state->last_scan_at) : null,
+            'updatedAt' => $this->isoTimestamp($state->last_scan_at),
+            'scanAgeSeconds' => (int) ($this->ageSecondsSince($state->last_scan_at) ?? 0),
             'symbols' => array_map(function (array $signal) use ($activeMinimum): array {
                 return [
                     'symbol' => (string) ($signal['symbol'] ?? ''),
@@ -755,6 +817,7 @@ class FutureTradeBotService
         $candles = $chartSymbol !== '' ? $this->fetchMarketCandles($chartSymbol, $chartTimeframe, $limit) : [];
         $feed = $this->feedFreshnessSnapshot($chartSymbol);
         $isForming = false;
+        $lastCandleClose = count($candles) > 0 ? (float) ($candles[count($candles) - 1]['close'] ?? 0) : null;
 
         if (($feed['feedFresh'] ?? false) && (float) ($feed['lastTickPrice'] ?? 0) > 0 && count($candles) > 0) {
             $index = count($candles) - 1;
@@ -763,8 +826,11 @@ class FutureTradeBotService
             $candles[$index]['high'] = max((float) ($candles[$index]['high'] ?? $price), $price);
             $candles[$index]['low'] = min((float) ($candles[$index]['low'] ?? $price), $price);
             $candles[$index]['isFormingCandle'] = true;
+            $lastCandleClose = $price;
             $isForming = true;
         }
+
+        $chartUpdatedAt = $this->isoTimestamp(now());
 
         return [
             'symbol' => $chartSymbol ?: null,
@@ -772,9 +838,18 @@ class FutureTradeBotService
             'candles' => $candles,
             'latestTickPrice' => $feed['lastTickPrice'],
             'latestTickAt' => $feed['lastTickAt'],
-            'chartUpdatedAt' => now()->toIso8601String(),
+            'chartUpdatedAt' => $chartUpdatedAt,
+            'chartAgeSeconds' => 0,
+            'tickAgeSeconds' => (int) ($feed['feedAgeSeconds'] ?? 0),
+            'lastCandleClose' => $lastCandleClose,
             'isFormingCandle' => $isForming,
             'dataSource' => $feed['source'],
+            'debug' => [
+                'latestTickPrice' => $feed['lastTickPrice'],
+                'chartUpdatedAt' => $chartUpdatedAt,
+                'lastCandleClose' => $lastCandleClose,
+                'isFormingCandle' => $isForming,
+            ],
         ];
     }
 
@@ -1403,6 +1478,31 @@ class FutureTradeBotService
 
     private function openLivePosition(FutureTradeBotConfig $config, array $signal): void
     {
+        $lock = Cache::lock('future_trade_live_entry_' . $config->id, 30);
+        if (! $lock->get()) {
+            $this->logThrottled(
+                $config->fresh('state'),
+                'TRADE_BLOCKED',
+                (string) ($signal['symbol'] ?? null),
+                (string) ($signal['signal'] ?? null),
+                (float) ($signal['confidence'] ?? 0),
+                'Duplicate live entry blocked because another live entry is already being processed.',
+                ['status' => 'BLOCKED', 'hardBlockers' => ['duplicate_live_position']],
+                15
+            );
+
+            return;
+        }
+
+        try {
+            $this->openLivePositionLocked($config, $signal);
+        } finally {
+            optional($lock)->release();
+        }
+    }
+
+    private function openLivePositionLocked(FutureTradeBotConfig $config, array $signal): void
+    {
         $guard = $this->liveGuard->canActivate($config->workspace_id, 'future_trade');
         if (! $guard['allowed']) {
             $this->log($config->fresh('state'), 'LIVE_GUARD_BLOCKED', (string) $signal['symbol'], (string) $signal['signal'], (float) $signal['confidence'], $guard['reason']);
@@ -1419,6 +1519,46 @@ class FutureTradeBotService
         $positionSide = $signal['signal'] === 'BUY' ? 'LONG' : 'SHORT';
         $price = (float) $signal['price'];
         $leverage = min((int) ($settings['leverage'] ?? 3), (int) ($settings['maxLeverage'] ?? 5));
+        $freshState = $this->state($config->fresh('state'));
+        if ((float) ($freshState->quantity ?? 0) > 0 || in_array((string) ($freshState->state ?? ''), ['IN_POSITION', 'LIVE_IN_POSITION'], true)) {
+            $this->logThrottled(
+                $config->fresh('state'),
+                'TRADE_BLOCKED',
+                $symbol,
+                (string) $signal['signal'],
+                (float) ($signal['confidence'] ?? 0),
+                'Duplicate live position blocked: local bot state already has an open position.',
+                $this->runtimeContext($dynamic, [
+                    'status' => 'BLOCKED',
+                    'state' => $freshState->state,
+                    'quantity' => (float) ($freshState->quantity ?? 0),
+                ], $signal, ['duplicate_live_position', 'open_position_guard']),
+                15
+            );
+
+            return;
+        }
+
+        $exchangeBefore = $this->exchangePositionSnapshot($client, $symbol);
+        if ((float) ($exchangeBefore['quantity'] ?? 0) > 0) {
+            $this->logThrottled(
+                $config->fresh('state'),
+                'TRADE_BLOCKED',
+                $symbol,
+                (string) $signal['signal'],
+                (float) ($signal['confidence'] ?? 0),
+                'Duplicate live position blocked: Binance already reports an open futures position.',
+                $this->runtimeContext($dynamic, [
+                    'status' => 'BLOCKED',
+                    'exchangeQuantity' => (float) ($exchangeBefore['quantity'] ?? 0),
+                    'exchangeSide' => $exchangeBefore['position_side'] ?? null,
+                ], $signal, ['duplicate_live_position', 'binance_position_confirmation']),
+                15
+            );
+
+            return;
+        }
+
         $filters = $this->orderSizing->extractFilters($client->fetchExchangeInfo($symbol), $symbol);
         $account = $client->fetchAccountInfo();
         $asset = collect((array) ($account['assets'] ?? []))
@@ -1684,6 +1824,7 @@ class FutureTradeBotService
         ]);
 
         if ($positionClosed) {
+            $this->markOpenEntryTradesClosed($config, $symbol, (string) $state->position_side, $price, $net);
             $this->persistState($state, [
                 'state' => 'COOLDOWN',
                 'position_side' => null,
@@ -1752,8 +1893,10 @@ class FutureTradeBotService
             'reason' => $reason,
             'mode' => 'PAPER',
 	            'status' => 'FILLED',
-	            'meta' => ['dynamic' => $dynamic['public'], 'algorithm_mode' => $dynamic['mode']],
+            'meta' => ['dynamic' => $dynamic['public'], 'algorithm_mode' => $dynamic['mode']],
 	        ]);
+
+        $this->markOpenEntryTradesClosed($config, (string) $state->current_symbol, $side, $price, $net);
 
         $this->persistState($state, [
             'state' => 'COOLDOWN',
@@ -1783,6 +1926,20 @@ class FutureTradeBotService
         );
         $freshConfig = $config->fresh('state');
         $this->applyDailyLossLock($freshConfig, $this->state($freshConfig));
+    }
+
+    private function markOpenEntryTradesClosed(FutureTradeBotConfig $config, string $symbol, string $side, float $exitPrice, float $netPnl): void
+    {
+        $config->trades()
+            ->where('symbol', strtoupper($symbol))
+            ->whereIn('status', ['OPEN', 'SUBMITTED'])
+            ->where('side', 'not like', '%CLOSE%')
+            ->update([
+                'exit_price' => $exitPrice,
+                'net_pnl' => $netPnl,
+                'status' => 'CLOSED',
+                'updated_at' => now(),
+            ]);
     }
 
     private function scoreTicker(array $ticker, array $settings): array
@@ -3848,7 +4005,7 @@ class FutureTradeBotService
     private function liveStatusPayload(FutureTradeBotConfig $config, FutureTradeBotState $state, ?array $bestSignal, array $signals, array $settings): array
     {
         $lastChartPoint = Arr::last((array) ($state->chart_points ?? []));
-        $ageSeconds = $state->last_scan_at ? now()->diffInSeconds($state->last_scan_at) : null;
+        $ageSeconds = $this->ageSecondsSince($state->last_scan_at);
         $feedPrice = $state->current_symbol ? $this->cachedLatestPrice((string) $state->current_symbol) : null;
         $hasSharedFeed = $feedPrice !== null;
         $feedFreshness = $this->feedFreshnessSnapshot((string) ($state->current_symbol ?: ($bestSignal['symbol'] ?? '')));
@@ -3869,7 +4026,7 @@ class FutureTradeBotService
             'timeframe' => $settings['timeframe'] ?? '5m',
             'lastCandleTime' => data_get($bestSignal, 'debug.timing.sequenceLastCandleTime'),
             'lastPrice' => (float) ($state->current_price ?? 0),
-            'updatedAt' => now()->toIso8601String(),
+            'updatedAt' => $this->isoTimestamp(now()),
             'confidence' => (float) ($bestSignal['confidence'] ?? $state->confidence ?? 0),
         ]);
 
@@ -3879,7 +4036,7 @@ class FutureTradeBotService
                 : ((bool) ($feedFreshness['feedFresh'] ?? false) ? (string) ($feedFreshness['feedMode'] ?? 'SHARED_FEED_CACHE') : ($hasSharedFeed ? 'SHARED_FEED_CACHE' : 'REST_POLLING')),
             'priceUpdateMode' => 'SCAN_LOOP',
             'indicatorMode' => 'FORMING_CANDLE',
-            'lastUpdateTime' => optional($state->last_scan_at)->toIso8601String(),
+            'lastUpdateTime' => $this->isoTimestamp($state->last_scan_at),
             'lastChartPointTime' => $lastChartPoint['time'] ?? null,
             'lastCandleTime' => data_get($bestSignal, 'debug.timing.sequenceLastCandleTime'),
             'higherTimeframeLastCandleTime' => data_get($bestSignal, 'debug.timing.higherTimeframeLastCandleTime'),
@@ -3910,7 +4067,7 @@ class FutureTradeBotService
         $latestPrice = $symbol !== '' ? $this->cachedLatestPrice($symbol) : null;
         $priceAge = null;
         if (is_array($latestPrice) && (int) ($latestPrice['timestamp_ms'] ?? 0) > 0) {
-            $priceAge = max(0, (int) floor((microtime(true) * 1000 - (int) $latestPrice['timestamp_ms']) / 1000));
+            $priceAge = $this->ageSecondsSinceTimestampMs((int) $latestPrice['timestamp_ms']);
         }
 
         $latestFeed = MarketFeedStatus::query()
@@ -3920,11 +4077,11 @@ class FutureTradeBotService
             ->orderByDesc('last_tick_at')
             ->first();
 
-        $feedAge = $latestFeed?->last_tick_at ? now()->diffInSeconds($latestFeed->last_tick_at) : null;
+        $feedAge = $this->ageSecondsSince($latestFeed?->last_tick_at);
         $age = $priceAge !== null && $feedAge !== null ? min($priceAge, $feedAge) : ($priceAge ?? $feedAge);
         $lastTickAt = $latestPrice && (int) ($latestPrice['timestamp_ms'] ?? 0) > 0
-            ? Carbon::createFromTimestampMs((int) $latestPrice['timestamp_ms'])->toIso8601String()
-            : $latestFeed?->last_tick_at?->toIso8601String();
+            ? $this->isoTimestamp(Carbon::createFromTimestampMs((int) $latestPrice['timestamp_ms']))
+            : $this->isoTimestamp($latestFeed?->last_tick_at);
         $lastTickPrice = (float) ($latestPrice['price'] ?? $latestFeed?->last_price ?? 0) ?: null;
         $source = (string) ($latestPrice['source'] ?? $latestFeed?->source ?? 'none');
         $fresh10 = $age !== null && $age <= 10;
@@ -3935,11 +4092,54 @@ class FutureTradeBotService
                 ? 'TRUE_WEBSOCKET_CACHE_LIVE'
                 : ($fresh20 ? 'TRUE_WEBSOCKET_CACHE_LIVE_MANUAL' : ($age !== null && $age <= 60 ? 'REST_FALLBACK' : 'STALE')),
             'feedFresh' => $fresh20,
-            'feedAgeSeconds' => $age,
+            'feedAgeSeconds' => (int) ($age ?? 0),
             'lastTickAt' => $lastTickAt,
             'lastTickPrice' => $lastTickPrice,
             'source' => $source,
         ];
+    }
+
+    private function ageSecondsSince(mixed $timestamp): ?int
+    {
+        if ($timestamp === null || $timestamp === '') {
+            return null;
+        }
+
+        try {
+            $time = $timestamp instanceof \DateTimeInterface
+                ? Carbon::instance($timestamp)
+                : Carbon::parse((string) $timestamp, config('app.timezone'));
+        } catch (Throwable) {
+            return null;
+        }
+
+        return max(0, now(config('app.timezone'))->getTimestamp() - $time->getTimestamp());
+    }
+
+    private function ageSecondsSinceTimestampMs(int $timestampMs): ?int
+    {
+        if ($timestampMs <= 0) {
+            return null;
+        }
+
+        return max(0, (int) floor((now(config('app.timezone'))->getTimestampMs() - $timestampMs) / 1000));
+    }
+
+    private function isoTimestamp(mixed $timestamp): ?string
+    {
+        if ($timestamp === null || $timestamp === '') {
+            return null;
+        }
+
+        try {
+            $time = $timestamp instanceof \DateTimeInterface
+                ? Carbon::instance($timestamp)
+                : Carbon::parse((string) $timestamp, config('app.timezone'));
+        } catch (Throwable) {
+            return null;
+        }
+
+        return $time->timezone(config('app.timezone'))->toIso8601String();
     }
 
     private function strategyModeLabel(array $settings): string
