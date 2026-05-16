@@ -520,6 +520,33 @@ class FutureTradeBotService
             $market = $this->marketSnapshot($config, $settings);
             $signals = array_map(fn (array $ticker) => $this->scoreTicker($ticker, $settings), $market);
             usort($signals, fn ($a, $b) => $b['confidence'] <=> $a['confidence']);
+
+            // When multiple slots share a workspace, exclude symbols already held by sibling slots
+            // so each slot trades a different symbol (e.g. BTC + ETH, not BTC + BTC).
+            if (! $config->isPrimary() || FutureTradeBotConfig::query()
+                ->where('workspace_id', $config->workspace_id)
+                ->where('id', '!=', $config->id)
+                ->exists()
+            ) {
+                $siblingSymbols = FutureTradeBotConfig::query()
+                    ->where('workspace_id', $config->workspace_id)
+                    ->where('id', '!=', $config->id)
+                    ->with('state')
+                    ->get()
+                    ->map(fn ($c) => $c->state?->current_symbol)
+                    ->filter()
+                    ->unique()
+                    ->values()
+                    ->all();
+
+                if (! empty($siblingSymbols)) {
+                    $signals = array_values(array_filter(
+                        $signals,
+                        fn ($s) => ! in_array($s['symbol'] ?? '', $siblingSymbols, true)
+                    ));
+                }
+            }
+
             $best = $signals[0] ?? null;
 
             if (! $best) {

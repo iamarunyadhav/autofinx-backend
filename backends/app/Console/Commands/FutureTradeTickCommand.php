@@ -42,30 +42,23 @@ class FutureTradeTickCommand extends Command
             'allowExecution' => $allowExecution,
         ]);
 
+        // Sync slots once per tick run (not every loop iteration) to avoid unnecessary DB overhead
+        if ($workspaceId !== '') {
+            $bot->syncSlots($bot->getOrCreateConfig($workspaceId));
+        } else {
+            FutureTradeBotConfig::query()->where('slot_index', 0)->get()
+                ->each(fn ($p) => $bot->syncSlots($p));
+        }
+
         try {
             while ((microtime(true) - $started) < $duration) {
                 $loopStarted = microtime(true);
                 $loopCount++;
                 Log::info('[FT TICK LOOP]', ['loopCount' => $loopCount]);
 
-                if ($workspaceId !== '') {
-                    $primary = $bot->getOrCreateConfig($workspaceId);
-                    $bot->syncSlots($primary);
-                    $configs = FutureTradeBotConfig::query()
-                        ->with('state')
-                        ->where('workspace_id', $workspaceId)
-                        ->orderBy('slot_index')
-                        ->get();
-                } else {
-                    // Sync slots for every primary config once per loop iteration
-                    $primaries = FutureTradeBotConfig::query()
-                        ->where('slot_index', 0)
-                        ->get();
-                    foreach ($primaries as $primary) {
-                        $bot->syncSlots($primary);
-                    }
-                    $configs = FutureTradeBotConfig::query()->with('state')->orderBy('slot_index')->get();
-                }
+                $configs = $workspaceId !== ''
+                    ? FutureTradeBotConfig::query()->with('state')->where('workspace_id', $workspaceId)->orderBy('slot_index')->get()
+                    : FutureTradeBotConfig::query()->with('state')->orderBy('slot_index')->get();
 
                 foreach ($configs as $config) {
                     $config = $config->fresh('state');
