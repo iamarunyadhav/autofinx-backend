@@ -2074,9 +2074,9 @@ class FutureTradeBotService
         $adxReady = $adx14 >= ($isFastTimeframe ? 17.0 : 16.0);
         $choppy = ($settings['avoidChoppyMarket'] ?? true)
             && ($sequenceVolatility > 0.32 || $adx14 < 15.0 || (abs($sequenceNetChange) < 0.08 && $sequenceConsistency < 0.55));
-        $strongDirectionalSequence = $sequenceConsistency >= ($isFastTimeframe ? 0.58 : 0.54)
-            && abs($sequenceNetChange) >= ($isFastTimeframe ? 0.12 : 0.09)
-            && $adx14 >= ($isFastTimeframe ? 17.0 : 16.0)
+        $strongDirectionalSequence = $sequenceConsistency >= ($isFastTimeframe ? 0.54 : 0.52)
+            && abs($sequenceNetChange) >= ($isFastTimeframe ? 0.10 : 0.08)
+            && $adx14 >= ($isFastTimeframe ? 16.0 : 15.5)
             && $volumeOk;
 
         $buyReasons = [];
@@ -2182,7 +2182,7 @@ class FutureTradeBotService
         }
 
         $fiveMinuteWeakSetup = $isFastTimeframe && (
-            ! $strongDirectionalSequence
+            (! $strongDirectionalSequence && $sequenceConsistency < 0.50)
             || $conflicted
             || (($settings['avoidChoppyMarket'] ?? true) && $choppy && ! $volumeOk)
             || ($dominantScore < 3)
@@ -2196,10 +2196,9 @@ class FutureTradeBotService
 
         if ($strictEntryGuards && $signal !== 'WAIT') {
             $directionChecks = $signal === 'SELL' ? $sellChecks : $buyChecks;
-            $structureAligned = (bool) ($directionChecks['structure'] ?? false);
-            $orderBlockAligned = (bool) ($directionChecks['ob'] ?? false);
+            $breakoutAligned = (bool) ($directionChecks['msb'] ?? false);
 
-            if (! $structureAligned && ! $orderBlockAligned) {
+            if (! $breakoutAligned) {
                 $signal = 'WAIT';
             }
         }
@@ -2221,13 +2220,13 @@ class FutureTradeBotService
                 $avoidReasons[] = '15m market structure breakout not confirmed';
             }
             if (! $bullishObValid && ! $bearishObValid) {
-                $avoidReasons[] = 'Order block confirmation missing';
+                $avoidReasons[] = 'Order block confirmation missing; breakout quality softened';
             }
             if ($conflicted) {
                 $avoidReasons[] = sprintf('Direction conflict between ticker and %s candle sequence', $tf);
             }
             if (! $strongDirectionalSequence) {
-                $avoidReasons[] = sprintf('%s sequence not strong enough for breakout entry', $tf);
+                $avoidReasons[] = sprintf('%s sequence momentum is weak; entry quality softened', $tf);
             }
             if ($choppy) {
                 $avoidReasons[] = 'Low-clarity or choppy market avoided';
