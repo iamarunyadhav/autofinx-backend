@@ -1078,6 +1078,33 @@ class FutureTradeBotService
         return $payload;
     }
 
+    // -------------------------------------------------------------------------
+    // Backtest public accessors — thin wrappers so BacktestEngine can call
+    // private scoring/snapshot/SL-TP helpers without using Reflection.
+    // -------------------------------------------------------------------------
+
+    public function scoreTickerForBacktest(array $ticker, array $settings): array
+    {
+        return $this->scoreTicker($ticker, $settings);
+    }
+
+    public function buildSequenceSnapshotForBacktest(array $candles): array
+    {
+        return $this->buildSequenceSnapshot($candles);
+    }
+
+    public function buildStructureSnapshotForBacktest(array $candles): array
+    {
+        return $this->buildStructureSnapshot($candles);
+    }
+
+    public function normalizeSettingsForBacktest(array $settings): array
+    {
+        return $this->normalizeFutureTradeSettings($settings);
+    }
+
+    // -------------------------------------------------------------------------
+
     public function configPayload(FutureTradeBotConfig $config): array
     {
         $settings = $this->normalizeFutureTradeSettings($config->mergedSettings());

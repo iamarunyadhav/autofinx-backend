@@ -473,6 +473,12 @@ Route::prefix('v1')->group(function () {
         Route::post('workspaces/{workspace}/future-trade/import-trades', [FutureTradeBotController::class, 'importTrades'])->middleware('require.2fa');
         Route::post('workspaces/{workspace}/future-trade/clear-history', [FutureTradeBotController::class, 'clearHistory'])->middleware('require.2fa');
 
+        // Backtest
+        Route::post('workspaces/{workspace}/future-trade/backtest', [FutureTradeBotController::class, 'runBacktest']);
+        Route::get('workspaces/{workspace}/future-trade/backtest', [FutureTradeBotController::class, 'backtestList']);
+        Route::get('workspaces/{workspace}/future-trade/backtest/{runId}', [FutureTradeBotController::class, 'backtestStatus']);
+        Route::get('workspaces/{workspace}/future-trade/backtest/{runId}/trades', [FutureTradeBotController::class, 'backtestTrades']);
+
         Route::match(['get', 'post', 'put', 'patch', 'delete'], 'table/{table}', [TableController::class, 'handle']);
     });
 });
