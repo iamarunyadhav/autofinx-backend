@@ -56,7 +56,11 @@ class FutureTradeUserStreamService
             ? ($settings['testnetApiUrl'] ?? config('services.binance.futures_testnet_api_url') ?? 'https://testnet.binancefuture.com')
             : ($settings['liveApiUrl'] ?? config('services.binance.futures_api_url') ?? 'https://fapi.binance.com'));
 
-        return new BinanceFuturesClient($baseUrl, $apiKey, $apiSecret);
+        return new BinanceFuturesClient(
+            apiKey: $apiKey,
+            apiSecret: $apiSecret,
+            baseUrl: $baseUrl,
+        );
     }
 
     /**
