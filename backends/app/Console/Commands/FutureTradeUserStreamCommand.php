@@ -79,6 +79,7 @@ class FutureTradeUserStreamCommand extends Command
 
         $reconnects = 0;
         $lastKeepAlive = time();
+        $lastHeartbeat = 0;
 
         try {
             while (true) {
@@ -89,6 +90,7 @@ class FutureTradeUserStreamCommand extends Command
                     $client->connect($wsBase);
                     $userStream->setStatus($config, FutureTradeUserStreamService::STATUS_CONNECTED);
                     $userStream->recordEvent($config); // initial heartbeat
+                    $lastHeartbeat = time();
                     $this->line('[FT USER STREAM] connected — ' . $config->workspace_id);
 
                     while (true) {
@@ -99,6 +101,10 @@ class FutureTradeUserStreamCommand extends Command
                         if ((time() - $lastKeepAlive) >= $keepAliveEvery) {
                             $userStream->keepAlive($config);
                             $lastKeepAlive = time();
+                        }
+                        if ((time() - $lastHeartbeat) >= 5) {
+                            $userStream->recordEvent($config);
+                            $lastHeartbeat = time();
                         }
                         $frame = $client->readFrame(1);
                         if ($frame === null) {
