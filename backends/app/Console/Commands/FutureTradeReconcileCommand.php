@@ -51,8 +51,8 @@ class FutureTradeReconcileCommand extends Command
                         continue;
                     }
                     $baseUrl = (string) ($forceTestnet
-                        ? ($settings['testnetApiUrl'] ?? config('services.binance.futures_testnet_url') ?? 'https://testnet.binancefuture.com')
-                        : ($settings['liveApiUrl'] ?? config('services.binance.futures_url') ?? 'https://fapi.binance.com'));
+                        ? ($settings['testnetApiUrl'] ?? config('services.binance.futures_testnet_api_url') ?? 'https://testnet.binancefuture.com')
+                        : ($settings['liveApiUrl'] ?? config('services.binance.futures_api_url') ?? 'https://fapi.binance.com'));
 
                     $client = new BinanceFuturesClient($baseUrl, $apiKey, $apiSecret);
                     $report = $reconciler->reconcileConfig($config, $client, $symbol);
