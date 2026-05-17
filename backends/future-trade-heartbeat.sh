@@ -20,12 +20,11 @@ count_processes() {
 }
 
 queue_count="$(count_processes "artisan queue:work")"
-schedule_count="$(count_processes "artisan schedule:work")"
 feed_count="$(count_processes "future-trade:live-feed")"
 
-echo "[HEARTBEAT] queue=$queue_count schedule=$schedule_count feed=$feed_count at $(date -Is)"
+echo "[HEARTBEAT] queue=$queue_count feed=$feed_count at $(date -Is)"
 
-if [ "$queue_count" -lt 3 ] || [ "$schedule_count" -lt 1 ] || [ "$feed_count" -lt 1 ]; then
+if [ "$queue_count" -lt 3 ] || [ "$feed_count" -lt 1 ]; then
   echo "[HEARTBEAT] missing worker; starting missing processes only"
   "$APP_DIR/start-workers.sh" || true
 fi

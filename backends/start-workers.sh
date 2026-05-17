@@ -34,11 +34,6 @@ start_if_missing \
   >> storage/logs/worker-safe.log 2>&1
 
 start_if_missing \
-  "artisan schedule:work" \
-  "$PHP" artisan schedule:work \
-  >> storage/logs/schedule-work.log 2>&1
-
-start_if_missing \
   "future-trade:live-feed" \
   "$PHP" artisan future-trade:live-feed --reconnect-sleep=2 \
   >> storage/logs/future-trade-live-feed.log 2>> storage/logs/future-trade-live-feed.error.log

@@ -31,6 +31,8 @@ $markRunEnd = function (string $command): void {
     $run->save();
 };
 
+$sharedHostingMode = (bool) config('future_trade.shared_hosting_mode', true);
+$scheduleFutureTradeRuntime = (bool) config('future_trade.schedule_runtime_commands', false);
 
 Artisan::command('inspire', function () {
     $this->comment(Inspiring::quote());
@@ -58,22 +60,24 @@ Schedule::command('orders:poll-status')
     ->runInBackground();
 */
 
-Schedule::command('market:ws-consume --once --store-ohlc')
-    ->everySecond()
-    ->withoutOverlapping()
-    ->runInBackground();
+if (! $sharedHostingMode) {
+    Schedule::command('market:ws-consume --once --store-ohlc')
+        ->everySecond()
+        ->withoutOverlapping()
+        ->runInBackground();
 
-Schedule::command('market:ws-consume --once --market-type=futures --store-ohlc --ohlc-intervals=1m,5m,15m,1h,4h')
-    ->everySecond()
-    ->withoutOverlapping()
-    ->runInBackground();
+    Schedule::command('market:ws-consume --once --market-type=futures --store-ohlc --ohlc-intervals=1m,5m,15m,1h,4h')
+        ->everySecond()
+        ->withoutOverlapping()
+        ->runInBackground();
 
-Schedule::command('metals:poll-prices --once')
-    ->everyFiveSeconds()
-    ->withoutOverlapping()
-    ->runInBackground()
-    ->before(fn () => $markRunStart('metals:poll-prices'))
-    ->after(fn () => $markRunEnd('metals:poll-prices'));
+    Schedule::command('metals:poll-prices --once')
+        ->everyFiveSeconds()
+        ->withoutOverlapping()
+        ->runInBackground()
+        ->before(fn () => $markRunStart('metals:poll-prices'))
+        ->after(fn () => $markRunEnd('metals:poll-prices'));
+}
 
 /*
 Temporarily disabled to reduce unnecessary Binance REST pressure while only Future Trade and Fast2X are needed.
@@ -127,13 +131,15 @@ Schedule::command('jobs:maintain-backlog')
 // workers. The command itself takes a secondary cache lock keyed on the
 // workspace, so even a misconfigured cron cannot spawn two scanner loops on
 // the same workspace.
-Schedule::command('future-trade:tick --duration=55 --sleep-ms=1000')
-    ->everyMinute()
-    ->withoutOverlapping(2)
-    ->onOneServer()
-    ->runInBackground()
-    ->before(fn () => $markRunStart('future-trade:tick'))
-    ->after(fn () => $markRunEnd('future-trade:tick'));
+if ($scheduleFutureTradeRuntime) {
+    Schedule::command('future-trade:tick --duration=55 --sleep-ms=1000')
+        ->everyMinute()
+        ->withoutOverlapping(2)
+        ->onOneServer()
+        ->runInBackground()
+        ->before(fn () => $markRunStart('future-trade:tick'))
+        ->after(fn () => $markRunEnd('future-trade:tick'));
+}
 
 Schedule::command('future-trade:diagnostics --persist')
     ->everyFiveMinutes()
@@ -160,10 +166,12 @@ Schedule::command('future-trade:reconcile')
 // minute. withoutOverlapping/onOneServer guarantee at most one consumer per
 // cluster; the command itself takes a secondary cache lock so a misconfigured
 // crontab cannot spawn two consumers on the same workspace.
-Schedule::command('future-trade:user-stream --duration=55')
-    ->everyMinute()
-    ->withoutOverlapping(2)
-    ->onOneServer()
-    ->runInBackground()
-    ->before(fn () => $markRunStart('future-trade:user-stream'))
-    ->after(fn () => $markRunEnd('future-trade:user-stream'));
+if ($scheduleFutureTradeRuntime) {
+    Schedule::command('future-trade:user-stream --duration=55')
+        ->everyMinute()
+        ->withoutOverlapping(2)
+        ->onOneServer()
+        ->runInBackground()
+        ->before(fn () => $markRunStart('future-trade:user-stream'))
+        ->after(fn () => $markRunEnd('future-trade:user-stream'));
+}

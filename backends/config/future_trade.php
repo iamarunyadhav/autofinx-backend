@@ -5,6 +5,8 @@ return [
     'enable_testnet_trading' => env('FUTURE_TRADE_ENABLE_TESTNET_TRADING', false),
     'enable_live_trading' => env('FUTURE_TRADE_ENABLE_LIVE_TRADING', false),
     'force_testnet' => env('FUTURE_TRADE_FORCE_TESTNET', true),
+    'shared_hosting_mode' => env('AUTOFINX_SHARED_HOSTING_MODE', true),
+    'schedule_runtime_commands' => env('FUTURE_TRADE_SCHEDULE_RUNTIME_COMMANDS', false),
 
     // All futures symbols available in the UI selector
     'available_symbols' => [
