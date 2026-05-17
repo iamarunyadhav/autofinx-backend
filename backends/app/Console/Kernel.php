@@ -34,8 +34,10 @@ use App\Console\Commands\FutureTradeBotRunCommand;
 use App\Console\Commands\FutureTradeDiagnosticsCommand;
 use App\Console\Commands\FutureTradeQueueCleanupCommand;
 use App\Console\Commands\FutureTradeQueueHealthCommand;
+use App\Console\Commands\FutureTradeReconcileCommand;
 use App\Console\Commands\FutureTradeScanAllCommand;
 use App\Console\Commands\FutureTradeTickCommand;
+use App\Console\Commands\FutureTradeUserStreamCommand;
 use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Foundation\Console\Kernel as ConsoleKernel;
 
@@ -85,8 +87,10 @@ class Kernel extends ConsoleKernel
         FutureTradeDiagnosticsCommand::class,
         FutureTradeQueueCleanupCommand::class,
         FutureTradeQueueHealthCommand::class,
+        FutureTradeReconcileCommand::class,
         FutureTradeScanAllCommand::class,
         FutureTradeTickCommand::class,
+        FutureTradeUserStreamCommand::class,
     ];
 
 }

@@ -42,6 +42,7 @@ use App\Http\Controllers\Api\PortfolioTargetsController;
 use App\Http\Controllers\Api\AssistantActionController;
 use App\Http\Controllers\Api\ArbitrageOpportunityController;
 use App\Http\Controllers\Api\BinanceUserStreamController;
+use App\Http\Controllers\Api\FutureTradeUserStreamController;
 use App\Http\Controllers\Api\BotController;
 use App\Http\Controllers\Api\ExitAutomationController;
 use App\Http\Controllers\Api\LiveWalletController;
@@ -96,6 +97,7 @@ Route::prefix('v1')->group(function () {
     Route::post('wallet/deposit/webhook/stripe', [LiveWalletController::class, 'stripeWebhook'])->middleware('throttle:120,1');
     Route::post('wallet/withdraw/webhook', [LiveWalletController::class, 'withdrawWebhook'])->middleware('throttle:60,1');
     Route::post('exchange/binance/user-stream/ingest', [BinanceUserStreamController::class, 'ingest'])->middleware('throttle:120,1');
+    Route::post('future-trade/user-stream/ingest', [FutureTradeUserStreamController::class, 'ingest'])->middleware('throttle:240,1');
 
     Route::middleware('auth:sanctum')->group(function () {
         Route::get('workspaces', [WorkspaceController::class, 'index']);
@@ -452,6 +454,7 @@ Route::prefix('v1')->group(function () {
         Route::get('workspaces/{workspace}/future-trade/scanner-snapshot', [FutureTradeBotController::class, 'scannerSnapshot']);
         Route::get('workspaces/{workspace}/future-trade/chart', [FutureTradeBotController::class, 'chart']);
         Route::get('workspaces/{workspace}/future-trade/live-feed', [FutureTradeBotController::class, 'liveFeedStatus']);
+        Route::get('workspaces/{workspace}/future-trade/user-stream', [FutureTradeUserStreamController::class, 'snapshot']);
         Route::post('workspaces/{workspace}/future-trade/live-feed/start', [FutureTradeBotController::class, 'startLiveFeed'])->middleware('require.2fa');
         Route::post('workspaces/{workspace}/future-trade/live-feed/stop', [FutureTradeBotController::class, 'stopLiveFeed'])->middleware('require.2fa');
         Route::post('workspaces/{workspace}/future-trade/live-feed/restart', [FutureTradeBotController::class, 'restartLiveFeed'])->middleware('require.2fa');

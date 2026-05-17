@@ -12,6 +12,8 @@ use App\Domain\Signals\StrategyResearchLabService;
 use App\Domain\Trading\FuturesOrderSizingService;
 use App\Models\FutureTradeBotConfig;
 use App\Models\FutureTradeConfigVersion;
+use App\Models\FutureTradeLogicalTrade;
+use App\Models\FutureTradeLogicalTradeEvent;
 use App\Models\FutureTradeMissedSignalAudit;
 use App\Models\FutureTradeBotState;
 use App\Models\MarketFeedStatus;
@@ -35,7 +37,87 @@ class FutureTradeBotService
         private readonly IndicatorIntelligenceService $indicatorIntelligence,
         private readonly StrategyResearchLabService $researchLab,
         private readonly ?FutureTradeLiveFeedManager $liveFeedManager = null,
+        private readonly ?FutureTradeLockService $lockService = null,
+        private readonly ?FutureTradePnLService $pnlService = null,
+        private readonly ?FutureTradeSignalStabilityService $signalStability = null,
+        private readonly ?FutureTradeUserStreamService $userStreamService = null,
     ) {}
+
+    private function lockSvc(): FutureTradeLockService
+    {
+        return $this->lockService ?? app(FutureTradeLockService::class);
+    }
+
+    private function pnlSvc(): FutureTradePnLService
+    {
+        return $this->pnlService ?? app(FutureTradePnLService::class);
+    }
+
+    private function stabilitySvc(): FutureTradeSignalStabilityService
+    {
+        return $this->signalStability ?? app(FutureTradeSignalStabilityService::class);
+    }
+
+    private function userStreamSvc(): FutureTradeUserStreamService
+    {
+        return $this->userStreamService ?? app(FutureTradeUserStreamService::class);
+    }
+
+    /**
+     * Centralized pre-execution gate. Hard-blocks live execution when feed or
+     * user-stream freshness fail safety thresholds. Paper trading is gated only
+     * by feed freshness (no exchange credentials are required).
+     *
+     * Returns the array of failed blocker keys (empty when execution is safe).
+     */
+    private function preExecutionFreshnessBlockers(FutureTradeBotConfig $config, ?array $signal): array
+    {
+        $blockers = [];
+        $symbol = strtoupper((string) ($signal['symbol'] ?? $config->state?->current_symbol ?? ''));
+        $feed = $this->feedFreshnessSnapshot($symbol);
+        if (! ($feed['feedFresh'] ?? false)) {
+            $blockers[] = 'stale_feed';
+        }
+        if ($this->isLiveMode($config)) {
+            $stream = $this->userStreamSvc()->snapshot($config);
+            // Only enforce stream freshness once credentials are configured.
+            if ($stream['configured'] && ! $stream['fresh']) {
+                $blockers[] = 'user_stream_stale';
+            }
+            if (! $stream['configured']) {
+                // Credentials missing — let live execution proceed via REST only
+                // if the bot operator explicitly accepted that risk. By default
+                // we still hard block: live trading without a stream blinds the
+                // bot to fills it didn't initiate.
+                $allowRestOnly = (bool) ($config->mergedSettings()['allowLiveWithoutUserStream'] ?? false);
+                if (! $allowRestOnly) {
+                    $blockers[] = 'user_stream_not_configured';
+                }
+            }
+        }
+        return $blockers;
+    }
+
+    /**
+     * Generate a deterministic signal key for idempotency, used by both the
+     * locking layer and the DB unique constraint on logical_trades.
+     */
+    private function buildSignalKey(FutureTradeBotConfig $config, array $signal, array $settings): string
+    {
+        $tf = strtolower((string) ($settings['timeframe'] ?? '5m'));
+        $stability = $this->stabilitySvc();
+        $candle = (string) ($signal['candle_open'] ?? $stability->previousClosedCandleOpenIso($tf));
+        return $stability->generateSignalKey(
+            (string) ($signal['symbol'] ?? ''),
+            (string) ($signal['signal'] ?? ''),
+            $tf,
+            $candle,
+            [
+                'config' => (string) $config->id,
+                'price' => round((float) ($signal['price'] ?? 0), 8),
+            ]
+        );
+    }
 
     public function getOrCreateConfig(string $workspaceId): FutureTradeBotConfig
     {
@@ -719,10 +801,16 @@ class FutureTradeBotService
         $marketTimeframe = (string) ($settings['timeframe'] ?? '5m');
         $marketCandles = $marketChartSymbol ? $this->fetchMarketCandles($marketChartSymbol, $marketTimeframe, 180) : [];
 
+        $signalStability = $this->buildSignalStabilitySnapshot($config, $bestSignal, $settings);
+        $runtimeHealth = $this->buildRuntimeHealthSnapshot($config, $state, $bestSignal);
+
         return [
             'status' => $this->statusPayload($config),
             'scanner' => $signals,
             'bestSignal' => $bestSignal,
+            'signalStability' => $signalStability,
+            'runtimeHealth' => $runtimeHealth,
+            'realized' => $this->pnlSvc()->realizedSummary($config),
             'chart' => $state->chart_points ?? [],
             'marketChart' => $this->marketChartPayload($marketChartSymbol, $marketTimeframe, 180, $marketCandles),
             'indicatorSuite' => $this->indicatorSuitePayload($marketCandles, $bestSignal, $effectiveSettings, $marketTimeframe),
@@ -1408,10 +1496,72 @@ class FutureTradeBotService
             return;
         }
 
+        // === Hard freshness gates (feed + Binance user stream) ===
+        // These block BEFORE we evaluate idempotency, so a stale stream cannot
+        // ever produce a real exchange order even if everything else is OK.
+        $freshnessBlockers = $this->preExecutionFreshnessBlockers($config, $signal);
+        if ($freshnessBlockers !== []) {
+            $this->emitTradeDecisionDebug($config, $signal, $dynamic, 'BLOCKED', $freshnessBlockers);
+            $this->logThrottled(
+                $config,
+                'TRADE_BLOCKED',
+                (string) ($signal['symbol'] ?? null),
+                (string) ($signal['signal'] ?? null),
+                (float) ($signal['confidence'] ?? 0),
+                'Execution blocked by freshness gate: ' . implode(', ', $freshnessBlockers),
+                $this->runtimeContext($dynamic, ['status' => 'BLOCKED'], $signal, $freshnessBlockers),
+                30
+            );
+            return;
+        }
+
+        // === Hard duplicate-prevention gates (apply before LIVE or PAPER) ===
+        $symbolUpper = strtoupper((string) ($signal['symbol'] ?? ''));
+        $timeframe = strtolower((string) ($settings['timeframe'] ?? '5m'));
+        $signalKey = $this->buildSignalKey($config, $signal, $settings);
+        $stability = $this->stabilitySvc();
+        $candleOpen = (string) ($signal['candle_open'] ?? $stability->previousClosedCandleOpenIso($timeframe));
+
+        // Same-candle re-entry block (covers the ETHUSDT-SHORT-twice-in-2-seconds case).
+        if ($stability->sameCandleExecuted((string) $config->id, $symbolUpper, (string) $signal['signal'], $candleOpen)) {
+            $this->emitTradeDecisionDebug($config, $signal, $dynamic, 'BLOCKED', ['same_candle_reentry_blocked']);
+            $this->logThrottled(
+                $config,
+                'TRADE_BLOCKED',
+                $symbolUpper,
+                $signal['signal'],
+                (float) ($signal['confidence'] ?? 0),
+                'Same-candle re-entry blocked: this symbol/side already opened during this candle.',
+                $this->runtimeContext($dynamic, ['status' => 'BLOCKED', 'signalKey' => $signalKey, 'candleOpen' => $candleOpen], $signal, ['same_candle_reentry_blocked']),
+                30
+            );
+            return;
+        }
+
+        // DB-level idempotency: signal_key must be unique per config.
+        if ($this->lockSvc()->hasSignalKey((string) $config->id, $signalKey)) {
+            $this->emitTradeDecisionDebug($config, $signal, $dynamic, 'BLOCKED', ['duplicate_signal_key']);
+            $this->logThrottled(
+                $config,
+                'TRADE_BLOCKED',
+                $symbolUpper,
+                $signal['signal'],
+                (float) ($signal['confidence'] ?? 0),
+                'Duplicate signal_key blocked: same signal already produced a logical trade.',
+                $this->runtimeContext($dynamic, ['status' => 'BLOCKED', 'signalKey' => $signalKey], $signal, ['duplicate_signal_key']),
+                30
+            );
+            return;
+        }
+
         if ($this->isLiveMode($config)) {
             $this->emitTradeDecisionDebug($config, $signal, $dynamic, 'OPEN', [], ['live_entry_allowed']);
             try {
-                $this->openLivePosition($config, $signal);
+                $this->openLivePosition($config, array_merge($signal, [
+                    'signal_key' => $signalKey,
+                    'candle_open' => $candleOpen,
+                    'timeframe' => $timeframe,
+                ]));
             } catch (Throwable $e) {
                 $this->persistState($state, [
                     'connection_status' => 'Live entry failed',
@@ -1431,48 +1581,147 @@ class FutureTradeBotService
             return;
         }
 
-        $side = $signal['signal'] === 'BUY' ? 'LONG' : 'SHORT';
-        $price = (float) $signal['price'];
-        $tradeAmountUsdt = (float) ($settings['tradeAmountUsdt'] ?? 25);
-        if (($settings['weakSetupAction'] ?? 'reduce_size') === 'reduce_size' && (bool) ($signal['fastTimeframeWeakSetup'] ?? false)) {
-            $tradeAmountUsdt *= 0.5;
-        }
-        $qty = ($tradeAmountUsdt * (float) ($settings['leverage'] ?? 3)) / max($price, 0.00000001);
-        $this->persistState($state, [
-            'state' => 'IN_POSITION',
-            'current_symbol' => $signal['symbol'],
-            'position_side' => $side,
-            'entry_price' => $price,
-            'quantity' => $qty,
-            'peak_price' => $price,
-            'bottom_price' => $price,
-            'current_signal' => $signal['signal'] . '_EXECUTED',
-            'trade_count_today' => (int) $state->trade_count_today + 1,
-            'status' => 'Running',
-            'connection_status' => 'Connected',
-        ]);
+        // === Paper entry path (locked + DB-level idempotent) ===
+        $lockResult = $this->lockSvc()->withEntryLock($config, $symbolUpper, function () use (
+            $config, $signal, $signalKey, $candleOpen, $timeframe, $settings, $dynamic, $state, $stability, $symbolUpper
+        ) {
+            // Re-check inside the lock.
+            if ($this->lockSvc()->hasActiveLogicalTrade((string) $config->id, $symbolUpper)) {
+                $this->logThrottled(
+                    $config,
+                    'TRADE_BLOCKED',
+                    $symbolUpper,
+                    $signal['signal'],
+                    (float) ($signal['confidence'] ?? 0),
+                    'Open logical trade already exists for this symbol (locked re-check).',
+                    $this->runtimeContext($dynamic, ['status' => 'BLOCKED'], $signal, ['open_position_exists']),
+                    30
+                );
+                return false;
+            }
+            if ($this->lockSvc()->hasSignalKey((string) $config->id, $signalKey)) {
+                $this->logThrottled(
+                    $config,
+                    'TRADE_BLOCKED',
+                    $symbolUpper,
+                    $signal['signal'],
+                    (float) ($signal['confidence'] ?? 0),
+                    'Duplicate signal_key blocked (locked re-check).',
+                    $this->runtimeContext($dynamic, ['status' => 'BLOCKED'], $signal, ['duplicate_signal_key']),
+                    30
+                );
+                return false;
+            }
 
-        $config->trades()->create([
-            'symbol' => $signal['symbol'],
-            'side' => $side,
-            'entry_price' => $price,
-            'quantity' => $qty,
-            'leverage' => (float) ($settings['leverage'] ?? 3),
-            'fees' => $price * $qty * 0.0004,
-            'reason' => 'AUTO_' . $signal['signal'] . '_SIGNAL',
-            'mode' => 'PAPER',
-            'status' => 'OPEN',
-            'meta' => ['signal' => $signal, 'dynamic' => $dynamic['public'], 'algorithm_mode' => $dynamic['mode'], 'idempotency_key' => (string) Str::uuid()],
-        ]);
-        $this->log(
-            $config->fresh('state'),
-            $signal['signal'] . '_EXECUTED',
-            $signal['symbol'],
-            $signal['signal'],
-            $signal['confidence'],
-            'Paper futures position opened.',
-            $this->runtimeContext($dynamic, ['status' => 'OPEN', 'side' => $side, 'entryPrice' => $price, 'quantity' => $qty, 'mode' => 'PAPER'], $signal)
-        );
+            $side = $signal['signal'] === 'BUY' ? 'LONG' : 'SHORT';
+            $price = (float) $signal['price'];
+            $tradeAmountUsdt = (float) ($settings['tradeAmountUsdt'] ?? 25);
+            if (($settings['weakSetupAction'] ?? 'reduce_size') === 'reduce_size' && (bool) ($signal['fastTimeframeWeakSetup'] ?? false)) {
+                $tradeAmountUsdt *= 0.5;
+            }
+            $qty = ($tradeAmountUsdt * (float) ($settings['leverage'] ?? 3)) / max($price, 0.00000001);
+            $this->persistState($state, [
+                'state' => 'IN_POSITION',
+                'current_symbol' => $signal['symbol'],
+                'position_side' => $side,
+                'entry_price' => $price,
+                'quantity' => $qty,
+                'peak_price' => $price,
+                'bottom_price' => $price,
+                'current_signal' => $signal['signal'] . '_EXECUTED',
+                'trade_count_today' => (int) $state->trade_count_today + 1,
+                'status' => 'Running',
+                'connection_status' => 'Connected',
+            ]);
+
+            $legacyTrade = $config->trades()->create([
+                'symbol' => $signal['symbol'],
+                'side' => $side,
+                'entry_price' => $price,
+                'quantity' => $qty,
+                'leverage' => (float) ($settings['leverage'] ?? 3),
+                'fees' => $price * $qty * 0.0004,
+                'reason' => 'AUTO_' . $signal['signal'] . '_SIGNAL',
+                'mode' => 'PAPER',
+                'status' => 'OPEN',
+                'meta' => [
+                    'signal' => $signal,
+                    'dynamic' => $dynamic['public'],
+                    'algorithm_mode' => $dynamic['mode'],
+                    'idempotency_key' => (string) Str::uuid(),
+                    'signal_key' => $signalKey,
+                ],
+            ]);
+
+            $logical = FutureTradeLogicalTrade::create([
+                'future_trade_bot_config_id' => $config->id,
+                'workspace_id' => (string) $config->workspace_id,
+                'symbol' => $symbolUpper,
+                'side' => $side,
+                'status' => FutureTradeLogicalTrade::STATUS_OPEN,
+                'mode' => 'PAPER',
+                'signal_key' => $signalKey,
+                'candle_time' => $candleOpen,
+                'timeframe' => $timeframe,
+                'entry_price' => $price,
+                'quantity' => $qty,
+                'leverage' => (float) ($settings['leverage'] ?? 3),
+                'fees' => $price * $qty * 0.0004,
+                'opened_at' => now(),
+                'meta' => ['legacy_trade_id' => $legacyTrade->id],
+            ]);
+
+            FutureTradeLogicalTradeEvent::create([
+                'future_trade_logical_trade_id' => $logical->id,
+                'future_trade_bot_config_id' => $config->id,
+                'symbol' => $symbolUpper,
+                'event_type' => FutureTradeLogicalTradeEvent::EVENT_ENTRY_FILLED,
+                'price' => $price,
+                'quantity' => $qty,
+                'payload' => ['signal' => $signal, 'mode' => 'PAPER'],
+            ]);
+
+            // Same-candle re-entry hard block — survives even after the lock is
+            // released (the cached flag lasts longer than the candle).
+            $stability->rememberCandleExecution((string) $config->id, $symbolUpper, $signal['signal'], $candleOpen);
+
+            $this->log(
+                $config->fresh('state'),
+                $signal['signal'] . '_EXECUTED',
+                $signal['symbol'],
+                $signal['signal'],
+                $signal['confidence'],
+                'Paper futures position opened.',
+                $this->runtimeContext($dynamic, [
+                    'status' => 'OPEN',
+                    'side' => $side,
+                    'entryPrice' => $price,
+                    'quantity' => $qty,
+                    'mode' => 'PAPER',
+                    'signalKey' => $signalKey,
+                    'logicalTradeId' => $logical->id,
+                ], $signal)
+            );
+            return true;
+        });
+
+        if ($lockResult === null) {
+            $this->logThrottled(
+                $config,
+                'TRADE_BLOCKED',
+                $symbolUpper,
+                $signal['signal'],
+                (float) ($signal['confidence'] ?? 0),
+                'Entry lock not acquired — another worker is processing this symbol.',
+                $this->runtimeContext($dynamic, ['status' => 'BLOCKED'], $signal, ['entry_lock_active']),
+                30
+            );
+            return;
+        }
+        if ($lockResult === false) {
+            return;
+        }
+
         $allowedBecause = ['paper_entry_allowed'];
         if (($settings['weakSetupAction'] ?? 'reduce_size') === 'reduce_size' && (bool) ($signal['fastTimeframeWeakSetup'] ?? false)) {
             $allowedBecause[] = 'weak_setup_allowed_with_reduced_size';
@@ -1532,26 +1781,72 @@ class FutureTradeBotService
 
     private function openLivePosition(FutureTradeBotConfig $config, array $signal): void
     {
-        $lock = Cache::lock('future_trade_live_entry_' . $config->id, 30);
-        if (! $lock->get()) {
+        // Defense-in-depth: re-run the freshness gate here too. Any future
+        // caller that bypasses maybeEnterPaperPosition still hits this check
+        // before a real order is placed.
+        $freshnessBlockers = $this->preExecutionFreshnessBlockers($config, $signal);
+        if ($freshnessBlockers !== []) {
             $this->logThrottled(
                 $config->fresh('state'),
                 'TRADE_BLOCKED',
                 (string) ($signal['symbol'] ?? null),
                 (string) ($signal['signal'] ?? null),
                 (float) ($signal['confidence'] ?? 0),
+                'Live entry blocked: ' . implode(', ', $freshnessBlockers),
+                ['status' => 'BLOCKED', 'hardBlockers' => $freshnessBlockers],
+                15
+            );
+            return;
+        }
+
+        // Per-symbol entry lock with mandatory re-check inside the lock. This
+        // closes the 1–2 second duplicate-entry window that previously allowed
+        // two ETHUSDT SHORTs to open back-to-back.
+        $symbolUpper = strtoupper((string) ($signal['symbol'] ?? ''));
+        $signalKey = (string) ($signal['signal_key'] ?? '');
+        $result = $this->lockSvc()->withEntryLock($config, $symbolUpper, function () use ($config, $signal, $symbolUpper, $signalKey) {
+            if ($symbolUpper !== '' && $this->lockSvc()->hasActiveLogicalTrade((string) $config->id, $symbolUpper)) {
+                $this->logThrottled(
+                    $config->fresh('state'),
+                    'TRADE_BLOCKED',
+                    $symbolUpper,
+                    (string) ($signal['signal'] ?? null),
+                    (float) ($signal['confidence'] ?? 0),
+                    'Open logical trade already exists for this symbol (live re-check inside lock).',
+                    ['status' => 'BLOCKED', 'hardBlockers' => ['open_position_exists']],
+                    30
+                );
+                return false;
+            }
+            if ($signalKey !== '' && $this->lockSvc()->hasSignalKey((string) $config->id, $signalKey)) {
+                $this->logThrottled(
+                    $config->fresh('state'),
+                    'TRADE_BLOCKED',
+                    $symbolUpper,
+                    (string) ($signal['signal'] ?? null),
+                    (float) ($signal['confidence'] ?? 0),
+                    'Duplicate signal_key blocked (live re-check).',
+                    ['status' => 'BLOCKED', 'hardBlockers' => ['duplicate_signal_key']],
+                    30
+                );
+                return false;
+            }
+            $this->openLivePositionLocked($config, $signal);
+            return true;
+        });
+
+        if ($result === null) {
+            $this->logThrottled(
+                $config->fresh('state'),
+                'TRADE_BLOCKED',
+                $symbolUpper ?: null,
+                (string) ($signal['signal'] ?? null),
+                (float) ($signal['confidence'] ?? 0),
                 'Duplicate live entry blocked because another live entry is already being processed.',
                 ['status' => 'BLOCKED', 'hardBlockers' => ['duplicate_live_position']],
                 15
             );
-
             return;
-        }
-
-        try {
-            $this->openLivePositionLocked($config, $signal);
-        } finally {
-            optional($lock)->release();
         }
     }
 
@@ -1718,12 +2013,19 @@ class FutureTradeBotService
 
         $client->setLeverage($symbol, $leverage);
         $client->setMarginType($symbol, (string) ($settings['marginMode'] ?? 'isolated'));
+
+        // Deterministic clientOrderId — if a retry fires on the same signal_key
+        // Binance will reject the duplicate instead of opening a second order.
+        $signalKey = (string) ($signal['signal_key'] ?? '');
+        $clientOrderId = $signalKey !== ''
+            ? $this->stabilitySvc()->deterministicClientOrderId($signalKey, 'entry')
+            : substr('ft-entry-' . Str::uuid(), 0, 36);
         $response = $client->placeOrder([
             'symbol' => $symbol,
             'side' => $side,
             'type' => 'MARKET',
             'quantity' => $qty,
-            'newClientOrderId' => substr('ft-entry-' . Str::uuid(), 0, 36),
+            'newClientOrderId' => $clientOrderId,
             'positionSide' => 'BOTH',
         ]);
         $exchange = $this->exchangePositionSnapshot($client, $symbol);
@@ -1758,7 +2060,8 @@ class FutureTradeBotService
             ]);
         }
 
-        $config->trades()->create([
+        $modeLabel = ($settings['forceTestnet'] ?? true) ? 'LIVE_TESTNET' : 'LIVE';
+        $legacyTrade = $config->trades()->create([
             'symbol' => $symbol,
             'side' => $positionSide,
             'entry_price' => $entry,
@@ -1766,7 +2069,7 @@ class FutureTradeBotService
             'leverage' => $leverage,
             'fees' => $entry * (float) $qty * 0.0004,
             'reason' => 'LIVE_' . $signal['signal'] . '_SIGNAL',
-            'mode' => $settings['forceTestnet'] ?? true ? 'LIVE_TESTNET' : 'LIVE',
+            'mode' => $modeLabel,
             'status' => $confirmedOpen ? 'OPEN' : 'SUBMITTED',
             'meta' => [
                 'entry_order' => $response,
@@ -1776,8 +2079,61 @@ class FutureTradeBotService
                 'dynamic' => $dynamic['public'],
                 'algorithm_mode' => $dynamic['mode'],
                 'effective_trade_amount_usdt' => $requiredTradeAmountUsdt,
+                'signal_key' => $signalKey,
+                'client_order_id' => $clientOrderId,
             ],
         ]);
+
+        // Logical trade — source of truth for realized PnL. Persisted even if
+        // the exchange hasn't confirmed yet, so the signal_key uniqueness lock
+        // engages immediately.
+        $logical = FutureTradeLogicalTrade::create([
+            'future_trade_bot_config_id' => $config->id,
+            'workspace_id' => (string) $config->workspace_id,
+            'symbol' => $symbol,
+            'side' => $positionSide,
+            'status' => $confirmedOpen ? FutureTradeLogicalTrade::STATUS_OPEN : FutureTradeLogicalTrade::STATUS_OPEN,
+            'mode' => $modeLabel,
+            'signal_key' => $signalKey ?: null,
+            'candle_time' => (string) ($signal['candle_open'] ?? null),
+            'timeframe' => strtolower((string) ($signal['timeframe'] ?? ($settings['timeframe'] ?? '5m'))),
+            'entry_client_order_id' => $clientOrderId,
+            'entry_exchange_order_id' => (string) ($response['orderId'] ?? ''),
+            'entry_price' => $entry,
+            'quantity' => (float) $qty,
+            'leverage' => $leverage,
+            'fees' => $entry * (float) $qty * 0.0004,
+            'opened_at' => now(),
+            'meta' => [
+                'legacy_trade_id' => $legacyTrade->id,
+                'entry_response' => $response,
+                'exchange_snapshot_initial' => $exchange,
+            ],
+        ]);
+        FutureTradeLogicalTradeEvent::create([
+            'future_trade_logical_trade_id' => $logical->id,
+            'future_trade_bot_config_id' => $config->id,
+            'symbol' => $symbol,
+            'event_type' => $confirmedOpen
+                ? FutureTradeLogicalTradeEvent::EVENT_ENTRY_FILLED
+                : FutureTradeLogicalTradeEvent::EVENT_ENTRY_SUBMITTED,
+            'client_order_id' => $clientOrderId,
+            'exchange_order_id' => (string) ($response['orderId'] ?? ''),
+            'price' => $entry,
+            'quantity' => (float) $qty,
+            'payload' => ['entry_response' => $response, 'exchange_snapshot' => $exchange],
+        ]);
+
+        // Same-candle re-entry hard block.
+        $candleOpenForLock = (string) ($signal['candle_open'] ?? '');
+        if ($candleOpenForLock !== '') {
+            $this->stabilitySvc()->rememberCandleExecution(
+                (string) $config->id,
+                $symbol,
+                (string) $signal['signal'],
+                $candleOpenForLock
+            );
+        }
         $this->log(
             $config->fresh('state'),
             $confirmedOpen ? 'LIVE_' . $signal['signal'] . '_EXECUTED' : 'LIVE_ENTRY_SUBMITTED',
@@ -1823,6 +2179,19 @@ class FutureTradeBotService
             return;
         }
 
+        // Look up the active logical trade for this symbol/side so we can mint
+        // a deterministic close clientOrderId — preventing a retried close
+        // request from creating a second close order on Binance.
+        $logicalForClose = FutureTradeLogicalTrade::query()
+            ->where('future_trade_bot_config_id', $config->id)
+            ->where('symbol', $symbol)
+            ->where('side', (string) $state->position_side)
+            ->whereIn('status', FutureTradeLogicalTrade::ACTIVE_STATUSES)
+            ->orderByDesc('opened_at')
+            ->first();
+        $closeKey = $logicalForClose?->signal_key ?: ('close-' . $symbol . '-' . substr((string) $config->id, 0, 8) . '-' . (string) now()->timestamp);
+        $closeClientOrderId = $this->stabilitySvc()->deterministicClientOrderId($closeKey, 'exit');
+
         try {
             $response = $client->placeOrder([
                 'symbol' => $symbol,
@@ -1830,7 +2199,7 @@ class FutureTradeBotService
                 'type' => 'MARKET',
                 'quantity' => $qty,
                 'reduceOnly' => 'true',
-                'newClientOrderId' => substr('ft-close-' . Str::uuid(), 0, 36),
+                'newClientOrderId' => $closeClientOrderId,
                 'positionSide' => 'BOTH',
             ]);
         } catch (Throwable $e) {
@@ -1876,6 +2245,29 @@ class FutureTradeBotService
             'status' => $positionClosed ? 'FILLED' : 'SUBMITTED',
             'meta' => ['close_order' => $response, 'exchange_snapshot' => $postCloseExchange, 'dynamic' => $dynamic['public'], 'algorithm_mode' => $dynamic['mode']],
         ]);
+
+        // Record an exit event on the logical trade (whether or not it
+        // confirmed) so reconciliation/audit always has a paper trail.
+        if ($logicalForClose) {
+            $logicalForClose->update([
+                'exit_client_order_id' => $closeClientOrderId,
+                'exit_exchange_order_id' => (string) ($response['orderId'] ?? $logicalForClose->exit_exchange_order_id ?? ''),
+                'status' => $positionClosed ? FutureTradeLogicalTrade::STATUS_CLOSED : FutureTradeLogicalTrade::STATUS_CLOSING,
+            ]);
+            FutureTradeLogicalTradeEvent::create([
+                'future_trade_logical_trade_id' => $logicalForClose->id,
+                'future_trade_bot_config_id' => $config->id,
+                'symbol' => $symbol,
+                'event_type' => $positionClosed
+                    ? FutureTradeLogicalTradeEvent::EVENT_EXIT_FILLED
+                    : FutureTradeLogicalTradeEvent::EVENT_EXIT_SUBMITTED,
+                'client_order_id' => $closeClientOrderId,
+                'exchange_order_id' => (string) ($response['orderId'] ?? ''),
+                'price' => $price,
+                'quantity' => (float) $state->quantity,
+                'payload' => ['close_order' => $response, 'exchange_snapshot' => $postCloseExchange, 'reason' => $reason],
+            ]);
+        }
 
         if ($positionClosed) {
             $this->markOpenEntryTradesClosed($config, $symbol, (string) $state->position_side, $price, $net);
@@ -1982,6 +2374,15 @@ class FutureTradeBotService
         $this->applyDailyLossLock($freshConfig, $this->state($freshConfig));
     }
 
+    /**
+     * Flip historical OPEN entry rows to CLOSED. We do NOT copy net_pnl onto
+     * entry rows anymore — that caused the realized-PnL double-count visible on
+     * the dashboard, because the close row also persisted the same net_pnl.
+     *
+     * The realized PnL source of truth lives on the matching CLOSE row (legacy)
+     * or on the linked logical_trade (new path). This method only records the
+     * exit_price snapshot for human inspection of the entry row.
+     */
     private function markOpenEntryTradesClosed(FutureTradeBotConfig $config, string $symbol, string $side, float $exitPrice, float $netPnl): void
     {
         $config->trades()
@@ -1990,10 +2391,48 @@ class FutureTradeBotService
             ->where('side', 'not like', '%CLOSE%')
             ->update([
                 'exit_price' => $exitPrice,
-                'net_pnl' => $netPnl,
+                // Intentionally do NOT copy net_pnl here — the close row owns
+                // the realized PnL; the entry row stays neutral so dashboard
+                // SUM(net_pnl) does not double-count.
                 'status' => 'CLOSED',
                 'updated_at' => now(),
             ]);
+
+        // Mirror the close into the linked logical_trade (the new source of
+        // truth). If no logical_trade was ever created for this position
+        // (legacy install), this is a no-op.
+        FutureTradeLogicalTrade::query()
+            ->where('future_trade_bot_config_id', $config->id)
+            ->where('symbol', strtoupper($symbol))
+            ->whereIn('status', FutureTradeLogicalTrade::ACTIVE_STATUSES)
+            ->orderBy('created_at')
+            ->get()
+            ->each(function (FutureTradeLogicalTrade $trade) use ($exitPrice, $netPnl) {
+                $entry = (float) $trade->entry_price;
+                $qty = (float) $trade->quantity;
+                $direction = $trade->side === 'LONG' ? 1 : -1;
+                $gross = ($exitPrice - $entry) * $qty * $direction;
+                $fees = (float) ($trade->fees ?? 0);
+                // Trust whatever net_pnl the caller computed (it included fees),
+                // but recompute gross from the recorded entry to keep numbers
+                // internally consistent.
+                $trade->update([
+                    'exit_price' => $exitPrice,
+                    'gross_pnl' => $gross,
+                    'net_pnl' => $netPnl,
+                    'status' => FutureTradeLogicalTrade::STATUS_CLOSED,
+                    'closed_at' => now(),
+                ]);
+                FutureTradeLogicalTradeEvent::create([
+                    'future_trade_logical_trade_id' => $trade->id,
+                    'future_trade_bot_config_id' => $trade->future_trade_bot_config_id,
+                    'symbol' => $trade->symbol,
+                    'event_type' => FutureTradeLogicalTradeEvent::EVENT_EXIT_FILLED,
+                    'price' => $exitPrice,
+                    'quantity' => $qty,
+                    'payload' => ['net_pnl' => $netPnl, 'gross_pnl' => $gross],
+                ]);
+            });
     }
 
     private function scoreTicker(array $ticker, array $settings): array
@@ -4110,6 +4549,102 @@ class FutureTradeBotService
         ];
     }
 
+    /**
+     * Compact runtime-health snapshot for the dashboard. Surfaces blockers so
+     * the user can see WHY the bot is sitting on a signal:
+     *   - feedFresh / feedAgeSeconds
+     *   - openLogicalTrades / activeBlockers
+     *   - signal stability state (raw/confirmed/executable)
+     */
+    private function buildRuntimeHealthSnapshot(FutureTradeBotConfig $config, FutureTradeBotState $state, ?array $bestSignal): array
+    {
+        $symbol = (string) ($state->current_symbol ?? ($bestSignal['symbol'] ?? ''));
+        $feed = $this->feedFreshnessSnapshot($symbol);
+        $openLogical = FutureTradeLogicalTrade::query()
+            ->where('future_trade_bot_config_id', $config->id)
+            ->whereIn('status', FutureTradeLogicalTrade::ACTIVE_STATUSES)
+            ->count();
+        $reconcileRequired = FutureTradeLogicalTrade::query()
+            ->where('future_trade_bot_config_id', $config->id)
+            ->where('status', FutureTradeLogicalTrade::STATUS_RECONCILIATION_REQUIRED)
+            ->count();
+
+        $userStream = $this->userStreamSvc()->snapshot($config);
+        $isLive = $this->isLiveMode($config);
+
+        $blockers = [];
+        if (! ($feed['feedFresh'] ?? false)) {
+            $blockers[] = 'STALE_FEED';
+        }
+        if ($openLogical > 0) {
+            $blockers[] = 'OPEN_POSITION_EXISTS';
+        }
+        if ($reconcileRequired > 0) {
+            $blockers[] = 'RECONCILIATION_REQUIRED';
+        }
+        if ($state->cooldown_until && $state->cooldown_until->isFuture()) {
+            $blockers[] = 'COOLDOWN_ACTIVE';
+        }
+        if ($state->daily_stop_until && $state->daily_stop_until->isFuture()) {
+            $blockers[] = 'DAILY_LOSS_LOCKED';
+        }
+        if ($isLive) {
+            if ($userStream['configured'] && ! $userStream['fresh']) {
+                $blockers[] = 'USER_STREAM_STALE';
+            }
+            if (! $userStream['configured']) {
+                $allowRestOnly = (bool) ($config->mergedSettings()['allowLiveWithoutUserStream'] ?? false);
+                if (! $allowRestOnly) {
+                    $blockers[] = 'USER_STREAM_NOT_CONFIGURED';
+                }
+            }
+        }
+
+        return [
+            'feedFresh' => (bool) ($feed['feedFresh'] ?? false),
+            'feedAgeSeconds' => (int) ($feed['feedAgeSeconds'] ?? 0),
+            'feedMode' => $feed['feedMode'] ?? 'unknown',
+            'lastTickAt' => $feed['lastTickAt'] ?? null,
+            'lastTickPrice' => $feed['lastTickPrice'] ?? null,
+            'openLogicalTrades' => $openLogical,
+            'reconciliationRequired' => $reconcileRequired,
+            'cooldownUntil' => optional($state->cooldown_until)->toIso8601String(),
+            'dailyLossLocked' => (bool) ($state->daily_stop_until && $state->daily_stop_until->isFuture()),
+            'liveMode' => $isLive,
+            'userStream' => $userStream,
+            'activeBlockers' => $blockers,
+            'healthy' => $blockers === [],
+        ];
+    }
+
+    /**
+     * Compute the RAW / CONFIRMED / EXECUTABLE state for the dashboard's current
+     * best signal so the UI can stop flashing 1-second BUY/SELL flips as the
+     * executable signal.
+     */
+    private function buildSignalStabilitySnapshot(FutureTradeBotConfig $config, ?array $bestSignal, array $settings): array
+    {
+        if (! $bestSignal || ! isset($bestSignal['signal']) || $bestSignal['signal'] === '') {
+            return [
+                'raw' => 'WAIT',
+                'confirmed' => 'WAIT',
+                'executable' => 'WAIT',
+                'reason' => 'no_signal',
+                'confirmedScans' => 0,
+                'sameCandleFlip' => false,
+            ];
+        }
+        $tf = strtolower((string) ($settings['timeframe'] ?? '5m'));
+        $state = $this->stabilitySvc()->observeRaw($config, [
+            'symbol' => (string) ($bestSignal['symbol'] ?? ''),
+            'side' => (string) ($bestSignal['signal'] ?? 'WAIT'),
+            'timeframe' => $tf,
+            'candle_open' => (string) ($bestSignal['candle_open'] ?? $this->stabilitySvc()->currentCandleOpenIso($tf)),
+            'confidence' => (float) ($bestSignal['confidence'] ?? 0),
+        ]);
+        return $state;
+    }
+
     private function feedFreshnessSnapshot(?string $symbol = null): array
     {
         $symbol = strtoupper(trim((string) $symbol));
@@ -5520,17 +6055,32 @@ class FutureTradeBotService
 
     private function accountSummary(FutureTradeBotConfig $config): array
     {
-        $trades = $config->trades()
-            ->whereNotNull('net_pnl')
-            ->get(['net_pnl']);
+        // Source of truth: closed logical trades only. Falls back to legacy
+        // future_trade_bot_trades rows when no logical trades exist (e.g. early
+        // installs that have not opened a fresh logical trade yet) — but in
+        // that fallback we filter to FILLED-status CLOSE rows to avoid the
+        // historical double-count where entry rows shared net_pnl with close
+        // rows.
+        $realized = $this->pnlSvc()->realizedSummary($config);
+        $botProfit = (float) $realized['botProfit'];
+        $botLoss = (float) $realized['botLoss'];
 
-        $botProfit = (float) $trades
-            ->filter(fn ($trade) => (float) $trade->net_pnl > 0)
-            ->sum(fn ($trade) => (float) $trade->net_pnl);
-
-        $botLoss = (float) $trades
-            ->filter(fn ($trade) => (float) $trade->net_pnl < 0)
-            ->sum(fn ($trade) => abs((float) $trade->net_pnl));
+        if ($realized['closedCount'] === 0) {
+            $legacyClosed = $config->trades()
+                ->whereNotNull('net_pnl')
+                ->where(function ($q) {
+                    $q->where('status', 'CLOSED')
+                        ->orWhere('side', 'like', '%CLOSE%')
+                        ->orWhere('side', 'like', 'CLOSE_%');
+                })
+                ->get(['net_pnl']);
+            $botProfit = (float) $legacyClosed
+                ->filter(fn ($trade) => (float) $trade->net_pnl > 0)
+                ->sum(fn ($trade) => (float) $trade->net_pnl);
+            $botLoss = (float) $legacyClosed
+                ->filter(fn ($trade) => (float) $trade->net_pnl < 0)
+                ->sum(fn ($trade) => abs((float) $trade->net_pnl));
+        }
 
         $summary = [
             'walletBalance' => null,
@@ -5539,6 +6089,9 @@ class FutureTradeBotService
             'botProfit' => $botProfit,
             'botLoss' => $botLoss,
             'totalProfit' => $botProfit - $botLoss,
+            'realizedSource' => $realized['closedCount'] > 0 ? 'LOGICAL_TRADES' : 'LEGACY_CLOSE_ROWS',
+            'openLogicalTrades' => (int) $realized['openPositions'],
+            'reconciliationRequired' => (int) $realized['reconciliationRequired'],
             'balanceSource' => $this->isLiveMode($config) ? 'BINANCE_FUTURES' : 'PAPER_LEDGER',
             'accountAsset' => 'USDT',
             'balanceError' => null,

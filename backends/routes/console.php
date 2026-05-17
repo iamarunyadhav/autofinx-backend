@@ -121,18 +121,49 @@ Schedule::command('jobs:maintain-backlog')
     ->before(fn () => $markRunStart('jobs:maintain-backlog'))
     ->after(fn () => $markRunEnd('jobs:maintain-backlog'));
 
+// Future-trade tick: withoutOverlapping uses a cache lock under the hood, but
+// we also (a) bound the lock to 60s so a crashed run cannot wedge forever, and
+// (b) onOneServer to prevent duplicate execution when scheduling on multiple
+// workers. The command itself takes a secondary cache lock keyed on the
+// workspace, so even a misconfigured cron cannot spawn two scanner loops on
+// the same workspace.
 Schedule::command('future-trade:tick --duration=55 --sleep-ms=1000')
     ->everyMinute()
-    ->withoutOverlapping();
+    ->withoutOverlapping(2)
+    ->onOneServer()
+    ->runInBackground()
+    ->before(fn () => $markRunStart('future-trade:tick'))
+    ->after(fn () => $markRunEnd('future-trade:tick'));
 
 Schedule::command('future-trade:diagnostics --persist')
     ->everyFiveMinutes()
-    ->withoutOverlapping()
+    ->withoutOverlapping(5)
+    ->onOneServer()
     ->before(fn () => $markRunStart('future-trade:diagnostics'))
     ->after(fn () => $markRunEnd('future-trade:diagnostics'));
 
 Schedule::command('future-trade:audit-missed-signals --limit=100')
     ->everyFiveMinutes()
-    ->withoutOverlapping()
+    ->withoutOverlapping(5)
+    ->onOneServer()
     ->before(fn () => $markRunStart('future-trade:audit-missed-signals'))
     ->after(fn () => $markRunEnd('future-trade:audit-missed-signals'));
+
+Schedule::command('future-trade:reconcile')
+    ->everyFiveMinutes()
+    ->withoutOverlapping(10)
+    ->onOneServer()
+    ->before(fn () => $markRunStart('future-trade:reconcile'))
+    ->after(fn () => $markRunEnd('future-trade:reconcile'));
+
+// Bounded futures user-stream consumer — runs in 55s slices and re-spawns each
+// minute. withoutOverlapping/onOneServer guarantee at most one consumer per
+// cluster; the command itself takes a secondary cache lock so a misconfigured
+// crontab cannot spawn two consumers on the same workspace.
+Schedule::command('future-trade:user-stream --duration=55')
+    ->everyMinute()
+    ->withoutOverlapping(2)
+    ->onOneServer()
+    ->runInBackground()
+    ->before(fn () => $markRunStart('future-trade:user-stream'))
+    ->after(fn () => $markRunEnd('future-trade:user-stream'));

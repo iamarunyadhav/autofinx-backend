@@ -185,6 +185,31 @@ class BinanceFuturesClient
         return (array) $response->json();
     }
 
+    /**
+     * GET /fapi/v1/userTrades — recent fills for a symbol. Used by reconciliation.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    public function fetchUserTrades(string $symbol, ?int $startTimeMs = null, int $limit = 100): array
+    {
+        $params = [
+            'symbol' => BinanceSymbolNormalizer::normalize($symbol),
+            'limit' => max(1, min(1000, $limit)),
+        ];
+        if ($startTimeMs !== null) {
+            $params['startTime'] = $startTimeMs;
+        }
+
+        $response = $this->signedRequest('GET', '/fapi/v1/userTrades', $params, false);
+
+        if (! $response->successful()) {
+            return [];
+        }
+
+        $body = $response->json();
+        return is_array($body) ? $body : [];
+    }
+
     private function signedRequest(string $method, string $path, array $params = [], bool $throw = true): Response
     {
         $signedPayload = $this->sign($params);

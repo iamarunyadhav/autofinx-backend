@@ -32,6 +32,16 @@ class FutureTradeBotConfig extends BaseModel
         return $this->hasMany(FutureTradeBotTrade::class, 'future_trade_bot_config_id');
     }
 
+    public function logicalTrades(): HasMany
+    {
+        return $this->hasMany(FutureTradeLogicalTrade::class, 'future_trade_bot_config_id');
+    }
+
+    public function logicalTradeEvents(): HasMany
+    {
+        return $this->hasMany(FutureTradeLogicalTradeEvent::class, 'future_trade_bot_config_id');
+    }
+
     public function logs(): HasMany
     {
         return $this->hasMany(FutureTradeBotLog::class, 'future_trade_bot_config_id');
