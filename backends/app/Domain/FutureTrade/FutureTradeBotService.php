@@ -5360,12 +5360,12 @@ class FutureTradeBotService
 
         $feedCandles = $this->cachedOhlcCandles($symbol, $interval, $safeLimit);
         if (count($feedCandles) >= min(20, $safeLimit)) {
-            Cache::put($cacheKey, $feedCandles, now()->addSeconds(4));
+            Cache::put($cacheKey, $feedCandles, now()->addSeconds(2));
             return $feedCandles;
         }
 
         try {
-            $base = rtrim((string) config('services.binance.futures.base_url', 'https://fapi.binance.com'), '/');
+            $base = rtrim((string) config('services.binance.futures_api_url', 'https://fapi.binance.com'), '/');
             $response = Http::timeout(5)->get($base . '/fapi/v1/klines', [
                 'symbol' => $symbol,
                 'interval' => $interval,
@@ -5401,7 +5401,7 @@ class FutureTradeBotService
                 ];
             }
 
-            Cache::put($cacheKey, $candles, now()->addSeconds(8));
+            Cache::put($cacheKey, $candles, now()->addSeconds(4));
 
             return $candles;
         } catch (Throwable) {
