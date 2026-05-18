@@ -1,0 +1,557 @@
+{
+  "summary": {
+    "run_id": "autofinx-ft-20260518-072826",
+    "started_at": "2026-05-18T07:28:26.525181+00:00",
+    "finished_at": "2026-05-18T07:28:36.107259+00:00",
+    "api_base": "https://api.autofinx.arunyadhav.dev",
+    "workspace": "26a36b56-4383-4edd-99d1-7622e7c191ef",
+    "environment": {
+      "mode": null,
+      "force_testnet": null,
+      "testnet_configured": null,
+      "live_configured": null,
+      "testnet_api_url": null,
+      "live_api_url": null
+    },
+    "bot_status": {
+      "state": null,
+      "status": null,
+      "connection_status": null,
+      "current_symbol": null,
+      "current_signal": null,
+      "current_price": null,
+      "confidence": null
+    },
+    "counts": {
+      "before_logs": 0,
+      "after_logs": 0,
+      "new_logs": 0,
+      "new_signal_logs": 0,
+      "new_blocked_or_skipped_logs": 0,
+      "before_trades": 0,
+      "after_trades": 0,
+      "new_trades": 0,
+      "closed_trades_total_seen": 0
+    },
+    "api_latency_ms": {
+      "count": 0,
+      "avg": null,
+      "median": null,
+      "max": null
+    },
+    "execution_latency_seconds": {
+      "matched_trades": 0,
+      "avg": null,
+      "median": null,
+      "max": null,
+      "matches": []
+    },
+    "pnl_summary_total_seen": {
+      "closed_trades_with_pnl": 0,
+      "wins": 0,
+      "losses": 0,
+      "win_rate_percent": null,
+      "net_pnl_sum": null
+    },
+    "failed_endpoints": [
+      "POST /api/v1/auth/login -> 422 HTTP Error 422: Unprocessable Content",
+      "GET /api/v1/workspaces/26a36b56-4383-4edd-99d1-7622e7c191ef/future-trade/env-config -> 401 HTTP Error 401: Unauthorized",
+      "GET /api/v1/workspaces/26a36b56-4383-4edd-99d1-7622e7c191ef/future-trade/config -> 401 HTTP Error 401: Unauthorized",
+      "GET /api/v1/workspaces/26a36b56-4383-4edd-99d1-7622e7c191ef/future-trade/status -> 401 HTTP Error 401: Unauthorized",
+      "GET /api/v1/workspaces/26a36b56-4383-4edd-99d1-7622e7c191ef/future-trade/dashboard -> 401 HTTP Error 401: Unauthorized",
+      "GET /api/v1/workspaces/26a36b56-4383-4edd-99d1-7622e7c191ef/future-trade/live-status -> 401 HTTP Error 401: Unauthorized",
+      "GET /api/v1/workspaces/26a36b56-4383-4edd-99d1-7622e7c191ef/future-trade/scanner-snapshot -> 401 HTTP Error 401: Unauthorized",
+      "GET /api/v1/workspaces/26a36b56-4383-4edd-99d1-7622e7c191ef/future-trade/live-feed -> 401 HTTP Error 401: Unauthorized",
+      "GET /api/v1/workspaces/26a36b56-4383-4edd-99d1-7622e7c191ef/future-trade/user-stream -> 401 HTTP Error 401: Unauthorized",
+      "GET /api/v1/workspaces/26a36b56-4383-4edd-99d1-7622e7c191ef/future-trade/logs -> 401 HTTP Error 401: Unauthorized",
+      "GET /api/v1/workspaces/26a36b56-4383-4edd-99d1-7622e7c191ef/future-trade/trades -> 401 HTTP Error 401: Unauthorized",
+      "GET /api/v1/workspaces/26a36b56-4383-4edd-99d1-7622e7c191ef/future-trade/chart -> 401 HTTP Error 401: Unauthorized",
+      "GET /api/v1/workspaces/26a36b56-4383-4edd-99d1-7622e7c191ef/future-trade/env-config -> 401 HTTP Error 401: Unauthorized",
+      "GET /api/v1/workspaces/26a36b56-4383-4edd-99d1-7622e7c191ef/future-trade/config -> 401 HTTP Error 401: Unauthorized",
+      "GET /api/v1/workspaces/26a36b56-4383-4edd-99d1-7622e7c191ef/future-trade/status -> 401 HTTP Error 401: Unauthorized",
+      "GET /api/v1/workspaces/26a36b56-4383-4edd-99d1-7622e7c191ef/future-trade/dashboard -> 401 HTTP Error 401: Unauthorized",
+      "GET /api/v1/workspaces/26a36b56-4383-4edd-99d1-7622e7c191ef/future-trade/live-status -> 401 HTTP Error 401: Unauthorized",
+      "GET /api/v1/workspaces/26a36b56-4383-4edd-99d1-7622e7c191ef/future-trade/scanner-snapshot -> 401 HTTP Error 401: Unauthorized",
+      "GET /api/v1/workspaces/26a36b56-4383-4edd-99d1-7622e7c191ef/future-trade/live-feed -> 401 HTTP Error 401: Unauthorized",
+      "GET /api/v1/workspaces/26a36b56-4383-4edd-99d1-7622e7c191ef/future-trade/user-stream -> 401 HTTP Error 401: Unauthorized",
+      "GET /api/v1/workspaces/26a36b56-4383-4edd-99d1-7622e7c191ef/future-trade/logs -> 401 HTTP Error 401: Unauthorized",
+      "GET /api/v1/workspaces/26a36b56-4383-4edd-99d1-7622e7c191ef/future-trade/trades -> 401 HTTP Error 401: Unauthorized",
+      "GET /api/v1/workspaces/26a36b56-4383-4edd-99d1-7622e7c191ef/future-trade/chart -> 401 HTTP Error 401: Unauthorized"
+    ],
+    "command_failures": [],
+    "new_logs_sample": [],
+    "new_trades_sample": [],
+    "config_settings_keys": [],
+    "warnings": [
+      "--run-artisan not provided; report is API snapshot only. Add --run-artisan to actually run diagnostics/tick/audit on the server.",
+      "23 API calls failed. See failed_endpoints in JSON report."
+    ],
+    "failures": [
+      "Login failed. Check API base URL, email/password, OTP, and backend auth config.",
+      "Could not read Future Trade status endpoint."
+    ]
+  },
+  "api_results": [
+    {
+      "method": "POST",
+      "path": "/api/v1/auth/login",
+      "status": 422,
+      "ok": false,
+      "elapsed_ms": 1280.4651680053212,
+      "body": {
+        "message": "Two-factor code required or invalid.",
+        "errors": {
+          "code": [
+            "Two-factor code required or invalid."
+          ]
+        }
+      },
+      "error": "HTTP Error 422: Unprocessable Content"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/workspaces/26a36b56-4383-4edd-99d1-7622e7c191ef/future-trade/env-config",
+      "status": 401,
+      "ok": false,
+      "elapsed_ms": 497.70879902644083,
+      "body": {
+        "message": "Unauthenticated."
+      },
+      "error": "HTTP Error 401: Unauthorized"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/workspaces/26a36b56-4383-4edd-99d1-7622e7c191ef/future-trade/config",
+      "status": 401,
+      "ok": false,
+      "elapsed_ms": 400.00760299153626,
+      "body": {
+        "message": "Unauthenticated."
+      },
+      "error": "HTTP Error 401: Unauthorized"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/workspaces/26a36b56-4383-4edd-99d1-7622e7c191ef/future-trade/status",
+      "status": 401,
+      "ok": false,
+      "elapsed_ms": 368.0498859612271,
+      "body": {
+        "message": "Unauthenticated."
+      },
+      "error": "HTTP Error 401: Unauthorized"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/workspaces/26a36b56-4383-4edd-99d1-7622e7c191ef/future-trade/dashboard",
+      "status": 401,
+      "ok": false,
+      "elapsed_ms": 398.1021810323,
+      "body": {
+        "message": "Unauthenticated."
+      },
+      "error": "HTTP Error 401: Unauthorized"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/workspaces/26a36b56-4383-4edd-99d1-7622e7c191ef/future-trade/live-status",
+      "status": 401,
+      "ok": false,
+      "elapsed_ms": 397.85505301551893,
+      "body": {
+        "message": "Unauthenticated."
+      },
+      "error": "HTTP Error 401: Unauthorized"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/workspaces/26a36b56-4383-4edd-99d1-7622e7c191ef/future-trade/scanner-snapshot",
+      "status": 401,
+      "ok": false,
+      "elapsed_ms": 309.5133640454151,
+      "body": {
+        "message": "Unauthenticated."
+      },
+      "error": "HTTP Error 401: Unauthorized"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/workspaces/26a36b56-4383-4edd-99d1-7622e7c191ef/future-trade/live-feed",
+      "status": 401,
+      "ok": false,
+      "elapsed_ms": 486.68469401309267,
+      "body": {
+        "message": "Unauthenticated."
+      },
+      "error": "HTTP Error 401: Unauthorized"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/workspaces/26a36b56-4383-4edd-99d1-7622e7c191ef/future-trade/user-stream",
+      "status": 401,
+      "ok": false,
+      "elapsed_ms": 397.6614219718613,
+      "body": {
+        "message": "Unauthenticated."
+      },
+      "error": "HTTP Error 401: Unauthorized"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/workspaces/26a36b56-4383-4edd-99d1-7622e7c191ef/future-trade/logs",
+      "status": 401,
+      "ok": false,
+      "elapsed_ms": 397.91226998204365,
+      "body": {
+        "message": "Unauthenticated."
+      },
+      "error": "HTTP Error 401: Unauthorized"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/workspaces/26a36b56-4383-4edd-99d1-7622e7c191ef/future-trade/trades",
+      "status": 401,
+      "ok": false,
+      "elapsed_ms": 56.04036495788023,
+      "body": {
+        "message": "Unauthenticated."
+      },
+      "error": "HTTP Error 401: Unauthorized"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/workspaces/26a36b56-4383-4edd-99d1-7622e7c191ef/future-trade/chart",
+      "status": 401,
+      "ok": false,
+      "elapsed_ms": 397.1267059678212,
+      "body": {
+        "message": "Unauthenticated."
+      },
+      "error": "HTTP Error 401: Unauthorized"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/workspaces/26a36b56-4383-4edd-99d1-7622e7c191ef/future-trade/env-config",
+      "status": 401,
+      "ok": false,
+      "elapsed_ms": 398.0398289859295,
+      "body": {
+        "message": "Unauthenticated."
+      },
+      "error": "HTTP Error 401: Unauthorized"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/workspaces/26a36b56-4383-4edd-99d1-7622e7c191ef/future-trade/config",
+      "status": 401,
+      "ok": false,
+      "elapsed_ms": 397.7569210110232,
+      "body": {
+        "message": "Unauthenticated."
+      },
+      "error": "HTTP Error 401: Unauthorized"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/workspaces/26a36b56-4383-4edd-99d1-7622e7c191ef/future-trade/status",
+      "status": 401,
+      "ok": false,
+      "elapsed_ms": 413.5149829671718,
+      "body": {
+        "message": "Unauthenticated."
+      },
+      "error": "HTTP Error 401: Unauthorized"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/workspaces/26a36b56-4383-4edd-99d1-7622e7c191ef/future-trade/dashboard",
+      "status": 401,
+      "ok": false,
+      "elapsed_ms": 478.8768609869294,
+      "body": {
+        "message": "Unauthenticated."
+      },
+      "error": "HTTP Error 401: Unauthorized"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/workspaces/26a36b56-4383-4edd-99d1-7622e7c191ef/future-trade/live-status",
+      "status": 401,
+      "ok": false,
+      "elapsed_ms": 185.0494770333171,
+      "body": {
+        "message": "Unauthenticated."
+      },
+      "error": "HTTP Error 401: Unauthorized"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/workspaces/26a36b56-4383-4edd-99d1-7622e7c191ef/future-trade/scanner-snapshot",
+      "status": 401,
+      "ok": false,
+      "elapsed_ms": 389.9039829848334,
+      "body": {
+        "message": "Unauthenticated."
+      },
+      "error": "HTTP Error 401: Unauthorized"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/workspaces/26a36b56-4383-4edd-99d1-7622e7c191ef/future-trade/live-feed",
+      "status": 401,
+      "ok": false,
+      "elapsed_ms": 401.5632619848475,
+      "body": {
+        "message": "Unauthenticated."
+      },
+      "error": "HTTP Error 401: Unauthorized"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/workspaces/26a36b56-4383-4edd-99d1-7622e7c191ef/future-trade/user-stream",
+      "status": 401,
+      "ok": false,
+      "elapsed_ms": 401.1420859606005,
+      "body": {
+        "message": "Unauthenticated."
+      },
+      "error": "HTTP Error 401: Unauthorized"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/workspaces/26a36b56-4383-4edd-99d1-7622e7c191ef/future-trade/logs",
+      "status": 401,
+      "ok": false,
+      "elapsed_ms": 589.3206520122476,
+      "body": {
+        "message": "Unauthenticated."
+      },
+      "error": "HTTP Error 401: Unauthorized"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/workspaces/26a36b56-4383-4edd-99d1-7622e7c191ef/future-trade/trades",
+      "status": 401,
+      "ok": false,
+      "elapsed_ms": 295.1967240078375,
+      "body": {
+        "message": "Unauthenticated."
+      },
+      "error": "HTTP Error 401: Unauthorized"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/workspaces/26a36b56-4383-4edd-99d1-7622e7c191ef/future-trade/chart",
+      "status": 401,
+      "ok": false,
+      "elapsed_ms": 94.79344903957099,
+      "body": {
+        "message": "Unauthenticated."
+      },
+      "error": "HTTP Error 401: Unauthorized"
+    }
+  ],
+  "commands": [],
+  "before": {
+    "env_config": {
+      "ok": false,
+      "status": 401,
+      "elapsed_ms": 497.70879902644083,
+      "body": {
+        "message": "Unauthenticated."
+      },
+      "error": "HTTP Error 401: Unauthorized"
+    },
+    "config": {
+      "ok": false,
+      "status": 401,
+      "elapsed_ms": 400.00760299153626,
+      "body": {
+        "message": "Unauthenticated."
+      },
+      "error": "HTTP Error 401: Unauthorized"
+    },
+    "status": {
+      "ok": false,
+      "status": 401,
+      "elapsed_ms": 368.0498859612271,
+      "body": {
+        "message": "Unauthenticated."
+      },
+      "error": "HTTP Error 401: Unauthorized"
+    },
+    "dashboard": {
+      "ok": false,
+      "status": 401,
+      "elapsed_ms": 398.1021810323,
+      "body": {
+        "message": "Unauthenticated."
+      },
+      "error": "HTTP Error 401: Unauthorized"
+    },
+    "live_status": {
+      "ok": false,
+      "status": 401,
+      "elapsed_ms": 397.85505301551893,
+      "body": {
+        "message": "Unauthenticated."
+      },
+      "error": "HTTP Error 401: Unauthorized"
+    },
+    "scanner_snapshot": {
+      "ok": false,
+      "status": 401,
+      "elapsed_ms": 309.5133640454151,
+      "body": {
+        "message": "Unauthenticated."
+      },
+      "error": "HTTP Error 401: Unauthorized"
+    },
+    "live_feed": {
+      "ok": false,
+      "status": 401,
+      "elapsed_ms": 486.68469401309267,
+      "body": {
+        "message": "Unauthenticated."
+      },
+      "error": "HTTP Error 401: Unauthorized"
+    },
+    "user_stream": {
+      "ok": false,
+      "status": 401,
+      "elapsed_ms": 397.6614219718613,
+      "body": {
+        "message": "Unauthenticated."
+      },
+      "error": "HTTP Error 401: Unauthorized"
+    },
+    "logs": {
+      "ok": false,
+      "status": 401,
+      "elapsed_ms": 397.91226998204365,
+      "body": {
+        "message": "Unauthenticated."
+      },
+      "error": "HTTP Error 401: Unauthorized"
+    },
+    "trades": {
+      "ok": false,
+      "status": 401,
+      "elapsed_ms": 56.04036495788023,
+      "body": {
+        "message": "Unauthenticated."
+      },
+      "error": "HTTP Error 401: Unauthorized"
+    },
+    "chart": {
+      "ok": false,
+      "status": 401,
+      "elapsed_ms": 397.1267059678212,
+      "body": {
+        "message": "Unauthenticated."
+      },
+      "error": "HTTP Error 401: Unauthorized"
+    }
+  },
+  "after": {
+    "env_config": {
+      "ok": false,
+      "status": 401,
+      "elapsed_ms": 398.0398289859295,
+      "body": {
+        "message": "Unauthenticated."
+      },
+      "error": "HTTP Error 401: Unauthorized"
+    },
+    "config": {
+      "ok": false,
+      "status": 401,
+      "elapsed_ms": 397.7569210110232,
+      "body": {
+        "message": "Unauthenticated."
+      },
+      "error": "HTTP Error 401: Unauthorized"
+    },
+    "status": {
+      "ok": false,
+      "status": 401,
+      "elapsed_ms": 413.5149829671718,
+      "body": {
+        "message": "Unauthenticated."
+      },
+      "error": "HTTP Error 401: Unauthorized"
+    },
+    "dashboard": {
+      "ok": false,
+      "status": 401,
+      "elapsed_ms": 478.8768609869294,
+      "body": {
+        "message": "Unauthenticated."
+      },
+      "error": "HTTP Error 401: Unauthorized"
+    },
+    "live_status": {
+      "ok": false,
+      "status": 401,
+      "elapsed_ms": 185.0494770333171,
+      "body": {
+        "message": "Unauthenticated."
+      },
+      "error": "HTTP Error 401: Unauthorized"
+    },
+    "scanner_snapshot": {
+      "ok": false,
+      "status": 401,
+      "elapsed_ms": 389.9039829848334,
+      "body": {
+        "message": "Unauthenticated."
+      },
+      "error": "HTTP Error 401: Unauthorized"
+    },
+    "live_feed": {
+      "ok": false,
+      "status": 401,
+      "elapsed_ms": 401.5632619848475,
+      "body": {
+        "message": "Unauthenticated."
+      },
+      "error": "HTTP Error 401: Unauthorized"
+    },
+    "user_stream": {
+      "ok": false,
+      "status": 401,
+      "elapsed_ms": 401.1420859606005,
+      "body": {
+        "message": "Unauthenticated."
+      },
+      "error": "HTTP Error 401: Unauthorized"
+    },
+    "logs": {
+      "ok": false,
+      "status": 401,
+      "elapsed_ms": 589.3206520122476,
+      "body": {
+        "message": "Unauthenticated."
+      },
+      "error": "HTTP Error 401: Unauthorized"
+    },
+    "trades": {
+      "ok": false,
+      "status": 401,
+      "elapsed_ms": 295.1967240078375,
+      "body": {
+        "message": "Unauthenticated."
+      },
+      "error": "HTTP Error 401: Unauthorized"
+    },
+    "chart": {
+      "ok": false,
+      "status": 401,
+      "elapsed_ms": 94.79344903957099,
+      "body": {
+        "message": "Unauthenticated."
+      },
+      "error": "HTTP Error 401: Unauthorized"
+    }
+  }
+}

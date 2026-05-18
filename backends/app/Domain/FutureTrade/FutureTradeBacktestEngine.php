@@ -13,7 +13,7 @@ class FutureTradeBacktestEngine
 {
     private const BINANCE_BASE       = 'https://fapi.binance.com';
     private const KLINE_LIMIT        = 1000;
-    private const SEQUENCE_LOOKBACK  = 60;  // 60 × 5m = 5 h of candles fed to scoreTicker
+    private const SEQUENCE_LOOKBACK  = 240; // 240 x 5m = 20 h, enough for Prime v6.1.7 EMA200 warm-up
     private const STRUCTURE_LOOKBACK = 100; // candles for structure detection
     private const FEE_RATE           = 0.0004; // 0.04 % per side (taker)
 
@@ -29,8 +29,10 @@ class FutureTradeBacktestEngine
         FutureTradeBotConfig $config,
         Carbon $from,
         Carbon $to,
-        float $initialCapital = 1000.0
+        float $initialCapital = 1000.0,
+        array $settingsOverride = []
     ): FutureTradeBacktestRun {
+        $settingsSnapshot = array_merge($config->mergedSettings(), $settingsOverride);
         $run = FutureTradeBacktestRun::create([
             'workspace_id'              => $config->workspace_id,
             'future_trade_bot_config_id' => $config->id,
@@ -38,12 +40,12 @@ class FutureTradeBacktestEngine
             'from_date'                 => $from->toDateString(),
             'to_date'                   => $to->toDateString(),
             'initial_capital_usdt'      => $initialCapital,
-            'settings_snapshot'         => $config->mergedSettings(),
+            'settings_snapshot'         => $settingsSnapshot,
             'started_at'                => now(),
         ]);
 
         try {
-            $settings = $this->botService->normalizeSettingsForBacktest($config->mergedSettings());
+            $settings = $this->botService->normalizeSettingsForBacktest($settingsSnapshot);
             $symbols  = array_values((array) ($settings['symbols'] ?? ['BTCUSDT']));
 
             Log::info('[FT BACKTEST] Fetching historical klines', [
@@ -135,6 +137,7 @@ class FutureTradeBacktestEngine
             'quantity'      => 0.0,
             'stopLoss'      => 0.0,
             'takeProfit'    => 0.0,
+            'trailPct'      => 0.0,
             'peakPrice'     => 0.0,
             'entryTime'     => null,
             'cooldownUntil' => null,
@@ -265,9 +268,23 @@ class FutureTradeBacktestEngine
                 continue;
             }
 
+            $entrySlPct = $slPct;
+            $entryTpPct = $tpPct;
+            $entryTrailPct = $trailPct;
+            if (($settings['signalProfile'] ?? null) === FutureTradeBotService::PROFILE_PRIME_V617_CRYPTO) {
+                $risk = (array) ($best['debug']['risk'] ?? []);
+                $riskPercent = (float) ($risk['riskPercent'] ?? 0);
+                if ($riskPercent > 0) {
+                    $entrySlPct = $riskPercent / 100;
+                    $entryTpPct = $entrySlPct * (float) ($settings['tp1RR'] ?? 1.0);
+                    $trailAtr = (float) ($risk['atr14'] ?? 0) * (float) ($settings['trailAtrMultiplier'] ?? 1.0);
+                    $entryTrailPct = $entryPrice > 0 ? max(0.0001, $trailAtr / $entryPrice) : $trailPct;
+                }
+            }
+
             $qty = ($tradeUsdt * $leverage) / $entryPrice;
-            $sl  = $side === 'LONG' ? $entryPrice * (1 - $slPct) : $entryPrice * (1 + $slPct);
-            $tp  = $side === 'LONG' ? $entryPrice * (1 + $tpPct) : $entryPrice * (1 - $tpPct);
+            $sl  = $side === 'LONG' ? $entryPrice * (1 - $entrySlPct) : $entryPrice * (1 + $entrySlPct);
+            $tp  = $side === 'LONG' ? $entryPrice * (1 + $entryTpPct) : $entryPrice * (1 - $entryTpPct);
 
             $state['inPosition']    = true;
             $state['symbol']        = $symbol;
@@ -276,6 +293,7 @@ class FutureTradeBacktestEngine
             $state['quantity']      = $qty;
             $state['stopLoss']      = $sl;
             $state['takeProfit']    = $tp;
+            $state['trailPct']      = $entryTrailPct;
             $state['peakPrice']     = $entryPrice;
             $state['entryTime']     = $now;
             $state['tradeCountToday']++;
@@ -299,6 +317,8 @@ class FutureTradeBacktestEngine
                 'meta'             => [
                     'stop_loss'   => round($sl, 8),
                     'take_profit' => round($tp, 8),
+                    'trail_percent' => round($entryTrailPct * 100, 4),
+                    'risk_model' => ($settings['signalProfile'] ?? null) === FutureTradeBotService::PROFILE_PRIME_V617_CRYPTO ? 'atr_dynamic_prime_v6_1_7' : 'percent',
                 ],
             ];
         }
@@ -366,9 +386,10 @@ class FutureTradeBacktestEngine
 
         // Trailing profit (activate when pct >= 0.10%)
         $peakNow = $side === 'LONG' ? max($peak, $high) : min($peak, $low);
+        $activeTrailPct = (float) ($state['trailPct'] ?? $trailPct);
         $trailTrigger = $side === 'LONG'
-            ? $peakNow * (1 - $trailPct)
-            : $peakNow * (1 + $trailPct);
+            ? $peakNow * (1 - $activeTrailPct)
+            : $peakNow * (1 + $activeTrailPct);
 
         if ($pctClose >= 0.10 && $side === 'LONG' && $close <= $trailTrigger && $peakNow > $entry) {
             return ['price' => $close, 'reason' => 'TRAILING_PROFIT_HIT'];
@@ -451,11 +472,13 @@ class FutureTradeBacktestEngine
             $ema50_1h  = $this->calcEmaSequence($closes1h, 50);
             $ema200_1h = $this->calcEmaSequence($closes1h, 200);
             $ema50_4h  = $this->calcEmaSequence($closes4h, 50);
+            $ema200_4h = $this->calcEmaSequence($closes4h, 200);
 
             // Build lookup arrays: [timestamp => emaValue]
             $lookup1h_50  = array_combine($times1h, $ema50_1h);
             $lookup1h_200 = array_combine($times1h, $ema200_1h);
             $lookup4h_50  = array_combine($times4h, $ema50_4h);
+            $lookup4h_200 = array_combine($times4h, $ema200_4h);
 
             $index[$symbol] = [
                 'times1h'      => $times1h,
@@ -465,6 +488,7 @@ class FutureTradeBacktestEngine
                 'times4h'      => $times4h,
                 'closes4h'     => $closes4h,
                 'ema50_4h'     => $lookup4h_50,
+                'ema200_4h'    => $lookup4h_200,
             ];
         }
         return $index;
@@ -473,22 +497,28 @@ class FutureTradeBacktestEngine
     private function resolveHtf(array $htfData, int $currentTs): array
     {
         if (empty($htfData)) {
-            return ['emaBullish' => null, 'h4EmaBullish' => null, 'ema200Bullish' => null, 'ema50_1h' => 0.0, 'ema50_4h' => 0.0, 'ema200_1h' => 0.0, 'lastCandleTime_1h' => null, 'lastCandleTime_4h' => null];
+            return ['emaBullish' => null, 'h4EmaBullish' => null, 'ema200Bullish' => null, 'trend1h' => 0, 'trend4h' => 0, 'ema50_1h' => 0.0, 'ema50_4h' => 0.0, 'ema200_1h' => 0.0, 'ema200_4h' => 0.0, 'lastCandleTime_1h' => null, 'lastCandleTime_4h' => null];
         }
 
         $ema50_1h  = $this->latestBefore($htfData['ema50_1h'],  $htfData['times1h'], $currentTs) ?? 0.0;
         $ema200_1h = $this->latestBefore($htfData['ema200_1h'], $htfData['times1h'], $currentTs) ?? 0.0;
         $ema50_4h  = $this->latestBefore($htfData['ema50_4h'],  $htfData['times4h'], $currentTs) ?? 0.0;
+        $ema200_4h = $this->latestBefore($htfData['ema200_4h'] ?? [], $htfData['times4h'], $currentTs) ?? 0.0;
         $last1h    = $this->latestCloseBefore($htfData['closes1h'], $htfData['times1h'], $currentTs) ?? 0.0;
         $last4h    = $this->latestCloseBefore($htfData['closes4h'], $htfData['times4h'], $currentTs) ?? 0.0;
+        $trend1h = ($last1h > $ema200_1h && $ema50_1h > $ema200_1h) ? 1 : (($last1h < $ema200_1h && $ema50_1h < $ema200_1h) ? -1 : 0);
+        $trend4h = ($last4h > $ema200_4h && $ema50_4h > $ema200_4h) ? 1 : (($last4h < $ema200_4h && $ema50_4h < $ema200_4h) ? -1 : 0);
 
         return [
             'emaBullish'    => $ema50_1h > 0 ? $last1h > $ema50_1h : null,
             'h4EmaBullish'  => $ema50_4h > 0 ? $last4h > $ema50_4h : null,
             'ema200Bullish' => $ema200_1h > 0 ? $last1h > $ema200_1h : null,
+            'trend1h'        => $trend1h,
+            'trend4h'        => $trend4h,
             'ema50_1h'      => round($ema50_1h, 4),
             'ema50_4h'      => round($ema50_4h, 4),
             'ema200_1h'     => round($ema200_1h, 4),
+            'ema200_4h'     => round($ema200_4h, 4),
             'lastCandleTime_1h' => null,
             'lastCandleTime_4h' => null,
         ];
@@ -734,3 +764,4 @@ class FutureTradeBacktestEngine
         return $std > 0 ? round($mean / $std, 4) : 0.0;
     }
 }
+
