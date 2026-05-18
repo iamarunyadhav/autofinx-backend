@@ -43,7 +43,7 @@ return [
         'validatedDefaultSymbols' => ['ETHUSDT', 'BTCUSDT', 'SOLUSDT'],
         'validationSymbols' => ['ETHUSDT', 'BTCUSDT', 'SOLUSDT', 'BNBUSDT'],
         'symbols' => ['ETHUSDT', 'BTCUSDT', 'SOLUSDT'],
-        'timeframe' => '5m',
+        'timeframe' => '15m',
         'paperTrading' => true,
         'liveTrading' => false,
         'forceTestnet' => true,
