@@ -151,6 +151,7 @@ class FutureTradeLiveFeedManager
                     static fn ($symbol) => strtoupper(trim((string) $symbol)),
                     (array) ($settings['symbols'] ?? config('future_trade.defaults.symbols', []))
                 );
+                $configured = $this->normalizePrimeDefaultSymbols($settings, $configured);
                 $currentSymbol = strtoupper(trim((string) ($config->state?->current_symbol ?? '')));
                 if ($currentSymbol !== '') {
                     $configured[] = $currentSymbol;
@@ -163,6 +164,36 @@ class FutureTradeLiveFeedManager
             ->all();
 
         return $symbols !== [] ? $symbols : ['BTCUSDT', 'ETHUSDT'];
+    }
+
+    /**
+     * Existing configs can still contain the old broad experiment basket. When
+     * Prime v6.1.7 is the active crypto profile, the live-feed daemon should
+     * follow the validated default symbols unless the operator picked a custom
+     * set.
+     *
+     * @param  string[]  $symbols
+     * @return string[]
+     */
+    private function normalizePrimeDefaultSymbols(array $settings, array $symbols): array
+    {
+        $profile = strtolower(trim((string) ($settings['signalProfile'] ?? config('future_trade.default_signal_profile', ''))));
+        $market = strtolower(trim((string) ($settings['marketProfile'] ?? 'crypto')));
+        if ($profile !== 'autofinx_prime_v6_1_7_crypto' || $market !== 'crypto') {
+            return array_values(array_filter($symbols));
+        }
+
+        $legacyDefault = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'AVAXUSDT'];
+        $sortedSymbols = array_values(array_unique(array_filter($symbols)));
+        $sortedLegacy = $legacyDefault;
+        sort($sortedSymbols);
+        sort($sortedLegacy);
+
+        if ($sortedSymbols === [] || $sortedSymbols === $sortedLegacy) {
+            return ['ETHUSDT', 'BTCUSDT', 'SOLUSDT'];
+        }
+
+        return array_values(array_filter($symbols));
     }
 
     /**
