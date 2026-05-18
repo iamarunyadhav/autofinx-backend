@@ -195,7 +195,7 @@ test('tuning plan preview recommends safe settings and config versioning stores 
     /** @var FutureTradeBotService $service */
     $service = app(FutureTradeBotService::class);
     $saved = $service->updateConfig($config, [
-        'settings' => ['minConfidence' => 0.50],
+        'settings' => ['signalProfile' => 'legacy_future_trade', 'minConfidence' => 0.50],
         'algorithm_notes' => 'Preview version test',
     ]);
 

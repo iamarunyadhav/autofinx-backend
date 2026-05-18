@@ -1,0 +1,308 @@
+//@version=6
+strategy(
+     title="AutoFinX Prime Algo v6.1.7 - Crypto Stable Default",
+     shorttitle="AutoFinX Prime v6.1.7",
+     overlay=true,
+     pyramiding=0,
+     initial_capital=10000,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=10,
+     commission_type=strategy.commission.percent,
+     commission_value=0.04,
+     process_orders_on_close=true,
+     calc_on_every_tick=true,
+     calc_on_order_fills=true
+)
+
+// AutoFinX Prime v6.1.7 Crypto Stable Default
+// Default pairs: ETHUSDT.P, SOLUSDT.P, BTCUSDT.P
+
+profile = input.string("Crypto", "Market Profile", options=["Crypto", "Forex"])
+tradeSide = input.string("Both", "Trade Direction", options=["Both", "Long Only", "Short Only"])
+scoreThreshold = input.float(72, "Trade Score Threshold", minval=50, maxval=100)
+watchThreshold = input.float(58, "Watch Score Threshold", minval=30, maxval=99)
+htf1 = input.timeframe("60", "Higher Timeframe 1")
+htf2 = input.timeframe("240", "Higher Timeframe 2")
+emaFastLen  = input.int(9, "EMA Fast", minval=1)
+emaSlowLen  = input.int(21, "EMA Slow", minval=1)
+emaTrendLen = input.int(50, "EMA Trend", minval=1)
+emaMajorLen = input.int(200, "EMA Major", minval=1)
+emaSlopeLookback = input.int(5, "EMA Slope Lookback", minval=1)
+donLen = input.int(20, "Donchian Trend Length", minval=10)
+useVWAP = input.bool(true, "Use VWAP Filter")
+useDonchianScore = input.bool(true, "Use Donchian As Score Only")
+useVolume = input.bool(true, "Use Relative Volume Filter")
+useVolatilityFilter = input.bool(true, "Use ATR Volatility Filter")
+useChopFilter = input.bool(true, "Use Choppiness Regime Filter")
+chopLen = input.int(14, "Choppiness Length", minval=5)
+cryptoChopMax = input.float(61.8, "Crypto Max Choppiness", minval=30, maxval=80, step=0.1)
+forexChopMax = input.float(58.0, "Forex Max Choppiness", minval=30, maxval=80, step=0.1)
+useMomentumBreakoutFilter = input.bool(false, "Use Momentum Breakout Filter")
+minBodyRatio = input.float(0.55, "Min Candle Body / Range", minval=0.10, maxval=1.00, step=0.05)
+breakoutLookback = input.int(5, "Breakout Lookback", minval=2)
+rsiLen = input.int(14, "RSI Length")
+longRsiMin = input.float(48, "Long RSI Min")
+longRsiMax = input.float(72, "Long RSI Max")
+shortRsiMin = input.float(28, "Short RSI Min")
+shortRsiMax = input.float(52, "Short RSI Max")
+adxLen = input.int(14, "ADX DI Length")
+adxSmooth = input.int(14, "ADX Smoothing")
+adxMin = input.float(20, "Minimum ADX")
+volumeLen = input.int(20, "Relative Volume Length")
+cryptoRelVolMin = input.float(1.00, "Crypto Min Relative Volume")
+forexRelVolMin = input.float(0.80, "Forex Min Relative Volume")
+atrLen = input.int(14, "ATR Length")
+atrRegimeLen = input.int(50, "ATR Regime Length")
+minAtrPctCrypto = input.float(0.06, "Crypto Min ATR %")
+maxAtrPctCrypto = input.float(3.00, "Crypto Max ATR %")
+minAtrPctForex = input.float(0.01, "Forex Min ATR %")
+maxAtrPctForex = input.float(1.20, "Forex Max ATR %")
+slAtrMult = input.float(1.4, "Base Stop Loss ATR Multiplier")
+tp1RR = input.float(1.0, "TP1 Risk Reward")
+tp2RR = input.float(2.0, "TP2 Risk Reward")
+useTrailing = input.bool(true, "Use ATR Trailing For Second Half")
+trailAtrMult = input.float(1.0, "Trailing ATR Multiplier")
+cooldownBars = input.int(3, "Cooldown Bars After Entry", minval=0)
+exitOnStrongOpposite = input.bool(true, "Exit On Strong Opposite Score")
+oppositeExitThreshold = input.float(78, "Opposite Exit Score", minval=50, maxval=100)
+showDashboard = input.bool(true, "Show Dashboard")
+showSignals = input.bool(true, "Show Buy/Sell Labels")
+showWatch = input.bool(true, "Show Watch Signals")
+colorBars = input.bool(false, "Color Bars By Bias")
+
+emaFast  = ta.ema(close, emaFastLen)
+emaSlow  = ta.ema(close, emaSlowLen)
+emaTrend = ta.ema(close, emaTrendLen)
+emaMajor = ta.ema(close, emaMajorLen)
+vwapVal = ta.vwap(hlc3)
+rsiVal = ta.rsi(close, rsiLen)
+[diPlus, diMinus, adxVal] = ta.dmi(adxLen, adxSmooth)
+atrVal = ta.atr(atrLen)
+atrMA = ta.sma(atrVal, atrRegimeLen)
+atrPct = close > 0 ? atrVal / close * 100.0 : 0.0
+volAvg = ta.sma(volume, volumeLen)
+relVol = not na(volAvg) and volAvg > 0 ? volume / volAvg : 1.0
+
+effectiveRelVolMin = profile == "Crypto" ? cryptoRelVolMin : forexRelVolMin
+effectiveMinAtrPct = profile == "Crypto" ? minAtrPctCrypto : minAtrPctForex
+effectiveMaxAtrPct = profile == "Crypto" ? maxAtrPctCrypto : maxAtrPctForex
+effectiveChopMax = profile == "Crypto" ? cryptoChopMax : forexChopMax
+
+trSum = ta.sma(ta.tr(true), chopLen) * chopLen
+rangeHigh = ta.highest(high, chopLen)
+rangeLow = ta.lowest(low, chopLen)
+rangeSize = rangeHigh - rangeLow
+chopRaw = rangeSize > 0 and chopLen > 1 and trSum > 0 ? 100 * math.log10(trSum / rangeSize) / math.log10(chopLen) : 100
+chopVal = math.max(0.0, math.min(100.0, chopRaw))
+chopOk = not useChopFilter or chopVal <= effectiveChopMax
+
+f_emaTrend() =>
+    _emaTrend = ta.ema(close, emaTrendLen)
+    _emaMajor = ta.ema(close, emaMajorLen)
+    close > _emaMajor and _emaTrend > _emaMajor ? 1 : close < _emaMajor and _emaTrend < _emaMajor ? -1 : 0
+
+htfTrend1 = request.security(syminfo.tickerid, htf1, f_emaTrend()[1], barmerge.gaps_off, barmerge.lookahead_off)
+htfTrend2 = request.security(syminfo.tickerid, htf2, f_emaTrend()[1], barmerge.gaps_off, barmerge.lookahead_off)
+htfBull = htfTrend1 == 1 and htfTrend2 == 1
+htfBear = htfTrend1 == -1 and htfTrend2 == -1
+htfMixed = not htfBull and not htfBear
+
+f_donchianTrend(_len) =>
+    _hh = ta.highest(high, _len)
+    _ll = ta.lowest(low, _len)
+    int _trend = 0
+    _trend := close > _hh[1] ? 1 : close < _ll[1] ? -1 : nz(_trend[1], 0)
+    _trend
+
+d0 = f_donchianTrend(donLen)
+d1 = f_donchianTrend(math.max(donLen - 1, 2))
+d2 = f_donchianTrend(math.max(donLen - 2, 2))
+d3 = f_donchianTrend(math.max(donLen - 3, 2))
+d4 = f_donchianTrend(math.max(donLen - 4, 2))
+d5 = f_donchianTrend(math.max(donLen - 5, 2))
+d6 = f_donchianTrend(math.max(donLen - 6, 2))
+d7 = f_donchianTrend(math.max(donLen - 7, 2))
+d8 = f_donchianTrend(math.max(donLen - 8, 2))
+d9 = f_donchianTrend(math.max(donLen - 9, 2))
+
+donBullCount = (d0 == 1 ? 1 : 0) + (d1 == 1 ? 1 : 0) + (d2 == 1 ? 1 : 0) + (d3 == 1 ? 1 : 0) + (d4 == 1 ? 1 : 0) + (d5 == 1 ? 1 : 0) + (d6 == 1 ? 1 : 0) + (d7 == 1 ? 1 : 0) + (d8 == 1 ? 1 : 0) + (d9 == 1 ? 1 : 0)
+donBearCount = (d0 == -1 ? 1 : 0) + (d1 == -1 ? 1 : 0) + (d2 == -1 ? 1 : 0) + (d3 == -1 ? 1 : 0) + (d4 == -1 ? 1 : 0) + (d5 == -1 ? 1 : 0) + (d6 == -1 ? 1 : 0) + (d7 == -1 ? 1 : 0) + (d8 == -1 ? 1 : 0) + (d9 == -1 ? 1 : 0)
+donBullStrong = donBullCount >= 8
+donBearStrong = donBearCount >= 8
+donMixed = not donBullStrong and not donBearStrong
+
+emaSlope = emaTrend - emaTrend[emaSlopeLookback]
+emaSlopeBull = emaSlope > 0
+emaSlopeBear = emaSlope < 0
+bodySize = math.abs(close - open)
+candleRange = high - low
+bodyRatio = candleRange > 0 ? bodySize / candleRange : 0.0
+strongBullCandle = close > open and bodyRatio >= minBodyRatio
+strongBearCandle = close < open and bodyRatio >= minBodyRatio
+breakoutLong = close > ta.highest(high, breakoutLookback)[1]
+breakoutShort = close < ta.lowest(low, breakoutLookback)[1]
+momentumLongOk = not useMomentumBreakoutFilter or (emaSlopeBull and strongBullCandle and breakoutLong)
+momentumShortOk = not useMomentumBreakoutFilter or (emaSlopeBear and strongBearCandle and breakoutShort)
+
+allowLong = tradeSide == "Both" or tradeSide == "Long Only"
+allowShort = tradeSide == "Both" or tradeSide == "Short Only"
+emaBull = emaFast > emaSlow and close > emaTrend
+emaBear = emaFast < emaSlow and close < emaTrend
+majorBull = close > emaMajor
+majorBear = close < emaMajor
+vwapBull = not useVWAP or na(vwapVal) or close > vwapVal
+vwapBear = not useVWAP or na(vwapVal) or close < vwapVal
+rsiBull = rsiVal >= longRsiMin and rsiVal <= longRsiMax
+rsiBear = rsiVal >= shortRsiMin and rsiVal <= shortRsiMax
+adxBull = adxVal >= adxMin and diPlus > diMinus
+adxBear = adxVal >= adxMin and diMinus > diPlus
+volumeOk = not useVolume or relVol >= effectiveRelVolMin
+volatilityOk = not useVolatilityFilter or (atrPct >= effectiveMinAtrPct and atrPct <= effectiveMaxAtrPct)
+
+donLongScore = useDonchianScore ? donBullStrong ? 10 : donMixed ? 3 : 0 : 0
+donShortScore = useDonchianScore ? donBearStrong ? 10 : donMixed ? 3 : 0 : 0
+
+float longScore = 0.0
+longScore += htfBull ? 20 : htfMixed ? 5 : 0
+longScore += emaBull ? 15 : 0
+longScore += majorBull ? 10 : 0
+longScore += donLongScore
+longScore += vwapBull ? 10 : 0
+longScore += rsiBull ? 5 : 0
+longScore += adxBull ? 12 : 0
+longScore += volumeOk ? 5 : 0
+longScore += volatilityOk ? 3 : 0
+longScore += momentumLongOk ? 10 : 0
+
+float shortScore = 0.0
+shortScore += htfBear ? 20 : htfMixed ? 5 : 0
+shortScore += emaBear ? 15 : 0
+shortScore += majorBear ? 10 : 0
+shortScore += donShortScore
+shortScore += vwapBear ? 10 : 0
+shortScore += rsiBear ? 5 : 0
+shortScore += adxBear ? 12 : 0
+shortScore += volumeOk ? 5 : 0
+shortScore += volatilityOk ? 3 : 0
+shortScore += momentumShortOk ? 10 : 0
+
+longWatch = htfBull and longScore >= watchThreshold and longScore < scoreThreshold and longScore > shortScore
+shortWatch = htfBear and shortScore >= watchThreshold and shortScore < scoreThreshold and shortScore > longScore
+
+var int lastEntryBar = na
+canEnter = na(lastEntryBar) or bar_index - lastEntryBar >= cooldownBars
+hardLongFilter = allowLong and htfBull and emaBull and vwapBull and adxBull and volumeOk and volatilityOk and chopOk and momentumLongOk
+hardShortFilter = allowShort and htfBear and emaBear and vwapBear and adxBear and volumeOk and volatilityOk and chopOk and momentumShortOk
+longEntrySignal = barstate.isconfirmed and canEnter and hardLongFilter and longScore >= scoreThreshold and longScore > shortScore
+shortEntrySignal = barstate.isconfirmed and canEnter and hardShortFilter and shortScore >= scoreThreshold and shortScore > longScore
+
+highVolAtrPct = profile == "Crypto" ? 1.20 : 0.45
+dynamicSlMult = slAtrMult
+dynamicSlMult += adxVal < adxMin ? 0.20 : 0.0
+dynamicSlMult += atrPct > highVolAtrPct ? 0.30 : 0.0
+
+var float entryAtr = na
+var float entrySlMult = na
+if strategy.position_size == 0
+    entryAtr := na
+    entrySlMult := na
+if longEntrySignal and strategy.position_size <= 0
+    entryAtr := atrVal
+    entrySlMult := dynamicSlMult
+    lastEntryBar := bar_index
+    strategy.entry("LONG", strategy.long, alert_message="AutoFinX Prime v6.1.7 BUY on {{ticker}}")
+if shortEntrySignal and strategy.position_size >= 0
+    entryAtr := atrVal
+    entrySlMult := dynamicSlMult
+    lastEntryBar := bar_index
+    strategy.entry("SHORT", strategy.short, alert_message="AutoFinX Prime v6.1.7 SELL on {{ticker}}")
+
+riskAtr = na(entryAtr) ? atrVal : entryAtr
+riskMult = na(entrySlMult) ? dynamicSlMult : entrySlMult
+riskDistance = riskAtr * riskMult
+trailTicks = math.max(1, math.round((atrVal * trailAtrMult) / syminfo.mintick))
+
+if strategy.position_size > 0
+    avg = strategy.position_avg_price
+    stopPrice = avg - riskDistance
+    tp1Price = avg + riskDistance * tp1RR
+    tp2Price = avg + riskDistance * tp2RR
+    strategy.exit("L-TP1", from_entry="LONG", qty_percent=50, stop=stopPrice, limit=tp1Price)
+    if useTrailing
+        strategy.exit("L-TRAIL", from_entry="LONG", qty_percent=50, stop=stopPrice, trail_points=trailTicks, trail_offset=trailTicks)
+    else
+        strategy.exit("L-TP2", from_entry="LONG", qty_percent=50, stop=stopPrice, limit=tp2Price)
+    if exitOnStrongOpposite and shortScore >= oppositeExitThreshold and shortScore > longScore
+        strategy.close("LONG", comment="Opposite SELL score")
+
+if strategy.position_size < 0
+    avg = strategy.position_avg_price
+    stopPrice = avg + riskDistance
+    tp1Price = avg - riskDistance * tp1RR
+    tp2Price = avg - riskDistance * tp2RR
+    strategy.exit("S-TP1", from_entry="SHORT", qty_percent=50, stop=stopPrice, limit=tp1Price)
+    if useTrailing
+        strategy.exit("S-TRAIL", from_entry="SHORT", qty_percent=50, stop=stopPrice, trail_points=trailTicks, trail_offset=trailTicks)
+    else
+        strategy.exit("S-TP2", from_entry="SHORT", qty_percent=50, stop=stopPrice, limit=tp2Price)
+    if exitOnStrongOpposite and longScore >= oppositeExitThreshold and longScore > shortScore
+        strategy.close("SHORT", comment="Opposite BUY score")
+
+emaFastColor = emaFast > emaSlow ? color.lime : color.red
+emaSlowColor = emaFast > emaSlow ? color.green : color.orange
+plot(emaFast, "EMA Fast", color=color.new(emaFastColor, 0))
+plot(emaSlow, "EMA Slow", color=color.new(emaSlowColor, 0))
+plot(emaTrend, "EMA Trend 50", color=color.new(color.blue, 0))
+plot(emaMajor, "EMA Major 200", color=color.new(color.red, 0))
+plot(vwapVal, "VWAP", color=color.new(color.purple, 0), linewidth=2)
+plotshape(showSignals and longEntrySignal, title="BUY", style=shape.labelup, text="BUY", location=location.belowbar, color=color.lime, textcolor=color.black, size=size.small)
+plotshape(showSignals and shortEntrySignal, title="SELL", style=shape.labeldown, text="SELL", location=location.abovebar, color=color.red, textcolor=color.white, size=size.small)
+plotshape(showWatch and longWatch, title="WATCH BUY", style=shape.circle, text="W", location=location.belowbar, color=color.new(color.lime, 60), textcolor=color.white, size=size.tiny)
+plotshape(showWatch and shortWatch, title="WATCH SELL", style=shape.circle, text="W", location=location.abovebar, color=color.new(color.red, 60), textcolor=color.white, size=size.tiny)
+barBiasColor = longScore > shortScore ? color.new(color.green, 75) : shortScore > longScore ? color.new(color.red, 75) : na
+barcolor(colorBars ? barBiasColor : na)
+
+var table dash = table.new(position.top_right, 2, 18, border_width=1)
+signalText = longEntrySignal ? "BUY" : shortEntrySignal ? "SELL" : longWatch ? "WATCH BUY" : shortWatch ? "WATCH SELL" : "WAIT"
+trendText = htfBull ? "BULL" : htfBear ? "BEAR" : "MIXED"
+donText = donBullStrong ? "BULL " + str.tostring(donBullCount) + "/10" : donBearStrong ? "BEAR " + str.tostring(donBearCount) + "/10" : "MIXED " + str.tostring(donBullCount) + "B/" + str.tostring(donBearCount) + "S"
+regimeText = chopOk ? "TREND OK" : "CHOP BLOCK"
+momentumText = momentumLongOk and momentumShortOk ? "BOTH OK" : momentumLongOk ? "LONG OK" : momentumShortOk ? "SHORT OK" : "BLOCK"
+
+if showDashboard and barstate.islast
+    table.cell(dash, 0, 0, "AutoFinX Prime", bgcolor=color.gray, text_color=color.white)
+    table.cell(dash, 1, 0, "v6.1.7 " + profile, bgcolor=color.gray, text_color=color.white)
+    table.cell(dash, 0, 1, "Signal")
+    table.cell(dash, 1, 1, signalText)
+    table.cell(dash, 0, 2, "Trend")
+    table.cell(dash, 1, 2, trendText)
+    table.cell(dash, 0, 3, "Long Score")
+    table.cell(dash, 1, 3, str.tostring(longScore, "#.0"))
+    table.cell(dash, 0, 4, "Short Score")
+    table.cell(dash, 1, 4, str.tostring(shortScore, "#.0"))
+    table.cell(dash, 0, 5, "Donchian")
+    table.cell(dash, 1, 5, donText)
+    table.cell(dash, 0, 6, "Regime")
+    table.cell(dash, 1, 6, regimeText)
+    table.cell(dash, 0, 7, "Momentum")
+    table.cell(dash, 1, 7, momentumText)
+    table.cell(dash, 0, 8, "Chop")
+    table.cell(dash, 1, 8, str.tostring(chopVal, "#.0"))
+    table.cell(dash, 0, 9, "Body Ratio")
+    table.cell(dash, 1, 9, str.tostring(bodyRatio, "#.00"))
+    table.cell(dash, 0, 10, "RSI")
+    table.cell(dash, 1, 10, str.tostring(rsiVal, "#.0"))
+    table.cell(dash, 0, 11, "ADX")
+    table.cell(dash, 1, 11, str.tostring(adxVal, "#.0"))
+    table.cell(dash, 0, 12, "Rel Volume")
+    table.cell(dash, 1, 12, str.tostring(relVol, "#.00"))
+    table.cell(dash, 0, 13, "ATR %")
+    table.cell(dash, 1, 13, str.tostring(atrPct, "#.00") + "%")
+    table.cell(dash, 0, 14, "VWAP")
+    table.cell(dash, 1, 14, close > vwapVal ? "ABOVE" : close < vwapVal ? "BELOW" : "NA")
+    table.cell(dash, 0, 15, "HTF 1")
+    table.cell(dash, 1, 15, htfTrend1 == 1 ? "BULL" : htfTrend1 == -1 ? "BEAR" : "MIXED")
+    table.cell(dash, 0, 16, "HTF 2")
+    table.cell(dash, 1, 16, htfTrend2 == 1 ? "BULL" : htfTrend2 == -1 ? "BEAR" : "MIXED")
+    table.cell(dash, 0, 17, "Mode")
+    table.cell(dash, 1, 17, "Crypto Stable Default")

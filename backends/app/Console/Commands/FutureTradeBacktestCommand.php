@@ -13,7 +13,8 @@ class FutureTradeBacktestCommand extends Command
         {--workspace= : Workspace UUID (required)}
         {--from=      : Start date YYYY-MM-DD (default: 30 days ago)}
         {--to=        : End date   YYYY-MM-DD (default: yesterday)}
-        {--capital=1000 : Initial capital in USDT}';
+        {--capital=1000 : Initial capital in USDT}
+        {--prime-validation : Run AutoFinX Prime v6.1.7 validation symbols: ETH, BTC, SOL, BNB}';
 
     protected $description = 'Run a historical backtest for a Future Trade bot config using Binance kline data.';
 
@@ -43,11 +44,21 @@ class FutureTradeBacktestCommand extends Command
             : now()->subDay()->endOfDay();
 
         $capital = max(10, (float) $this->option('capital'));
+        $settingsOverride = [];
+        if ((bool) $this->option('prime-validation')) {
+            $settingsOverride = [
+                'signalProfile' => 'autofinx_prime_v6_1_7_crypto',
+                'signalProfileName' => 'AutoFinX Prime v6.1.7 Crypto Stable Default',
+                'marketProfile' => 'Crypto',
+                'symbols' => ['ETHUSDT', 'BTCUSDT', 'SOLUSDT', 'BNBUSDT'],
+            ];
+            $this->warn('Prime validation mode: ETHUSDT, BTCUSDT, SOLUSDT, BNBUSDT. BNB is validation-only, not a default symbol.');
+        }
 
         $this->info("Backtest: {$from->toDateString()} → {$to->toDateString()} | capital USDT {$capital}");
         $this->info('Fetching klines from Binance... (may take 30-60s)');
 
-        $run = $engine->run($config, $from, $to, $capital);
+        $run = $engine->run($config, $from, $to, $capital, $settingsOverride);
 
         if ($run->status === 'failed') {
             $this->error('Backtest failed: ' . $run->error_message);
@@ -79,6 +90,15 @@ class FutureTradeBacktestCommand extends Command
                 $rows[] = [$sym, $data['trades'], round($data['win_rate'] * 100, 1) . '%', '$' . round($data['net_pnl'], 2)];
             }
             $this->table(['Symbol', 'Trades', 'Win%', 'Net P&L'], $rows);
+        }
+
+        if ((bool) $this->option('prime-validation')) {
+            $this->newLine();
+            $this->info('--- Prime v6.1.7 Validation Notes ---');
+            $this->line('Expected: ETH and SOL should be strongest.');
+            $this->line('BTC is acceptable only if profit factor stays above about 1.15 with low drawdown.');
+            $this->line('BNB remains validation-only and should not become default if PF is below 1.0.');
+            $this->line('Forex and XAUUSD/Gold require separate profiles.');
         }
 
         if (! empty($run->by_exit_reason)) {

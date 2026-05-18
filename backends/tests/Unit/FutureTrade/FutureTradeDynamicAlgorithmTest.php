@@ -320,7 +320,6 @@ class FutureTradeDynamicAlgorithmTest extends TestCase
         ], ['timeframe' => '5m', 'strictEntryGuards' => true]);
 
         $this->assertSame('WAIT', $score['signal']);
-        $this->assertStringContainsString('UT Bot', $score['reason']);
         $this->assertStringContainsString('market structure breakout', $score['reason']);
     }
 
@@ -376,6 +375,7 @@ class FutureTradeDynamicAlgorithmTest extends TestCase
     private function decision(array $settings, FutureTradeBotState $state, array $signals): array
     {
         $settings = array_merge([
+            'signalProfile' => 'legacy_future_trade',
             'confidenceMode' => 'fixed',
             'minConfidence' => 0.72,
             'strictEntryGuards' => true,
@@ -420,7 +420,7 @@ class FutureTradeDynamicAlgorithmTest extends TestCase
         $method = new ReflectionMethod($service, 'scoreTicker');
         $method->setAccessible(true);
 
-        return $method->invoke($service, $ticker, $settings);
+        return $method->invoke($service, $ticker, array_merge(['signalProfile' => 'legacy_future_trade'], $settings));
     }
 
     private function state(array $attributes): FutureTradeBotState

@@ -30,6 +30,8 @@ use Throwable;
 
 class FutureTradeBotService
 {
+    public const PROFILE_PRIME_V617_CRYPTO = 'autofinx_prime_v6_1_7_crypto';
+
     public function __construct(
         private readonly LivePortfolioGuardService $liveGuard,
         private readonly OperationalHealthService $operationalHealth,
@@ -129,7 +131,7 @@ class FutureTradeBotService
                 'enable_live_trading' => false,
                 'enabled' => false,
                 'settings' => config('future_trade.defaults'),
-                'algorithm_notes' => "Video-style futures scanner: scan symbols, issue BUY/SELL signals, paper execute only, protect with stop loss, rollback and trailing profit.",
+                'algorithm_notes' => 'Default crypto profile: AutoFinX Prime v6.1.7 Crypto Stable Default. Use only for validated crypto futures; Forex and XAUUSD/Gold require separate profiles.',
             ]
         );
 
@@ -598,7 +600,7 @@ class FutureTradeBotService
         try {
             $state = $this->refreshDailyCycleState($config, $state);
             $lockedForDay = $this->applyDailyLossLock($config, $state);
-            $settings = $config->mergedSettings();
+            $settings = $this->normalizeFutureTradeSettings($config->mergedSettings());
             $market = $this->marketSnapshot($config, $settings);
             $signals = array_map(fn (array $ticker) => $this->scoreTicker($ticker, $settings), $market);
             usort($signals, fn ($a, $b) => $b['confidence'] <=> $a['confidence']);
@@ -2438,6 +2440,10 @@ class FutureTradeBotService
     private function scoreTicker(array $ticker, array $settings): array
     {
         $settings = $this->normalizeFutureTradeSettings($settings);
+        if ($this->isPrimeCryptoProfile($settings)) {
+            return $this->scoreTickerPrimeCrypto($ticker, $settings);
+        }
+
         $price = (float) ($ticker['lastPrice'] ?? $ticker['price'] ?? 0);
         $change = (float) ($ticker['priceChangePercent'] ?? 0);
         $quoteVolume = (float) ($ticker['quoteVolume'] ?? 0);
@@ -2800,6 +2806,229 @@ class FutureTradeBotService
             'componentScores' => $componentDebug['componentScores'],
             'debug' => $componentDebug,
             'reason' => implode(' | ', $reasonParts),
+        ];
+    }
+
+    private function scoreTickerPrimeCrypto(array $ticker, array $settings): array
+    {
+        $price = (float) ($ticker['lastPrice'] ?? $ticker['price'] ?? 0);
+        $change = (float) ($ticker['priceChangePercent'] ?? 0);
+        $quoteVolume = (float) ($ticker['quoteVolume'] ?? 0);
+        $high = (float) ($ticker['highPrice'] ?? $price);
+        $low = (float) ($ticker['lowPrice'] ?? $price);
+        $openPrice = (float) ($ticker['openPrice'] ?? $price);
+        $sequence = (array) ($ticker['sequence'] ?? []);
+        $htf = (array) ($ticker['htf'] ?? []);
+        $tf = strtolower((string) ($settings['timeframe'] ?? '5m'));
+
+        $tradeSide = (string) ($settings['tradeDirection'] ?? 'Both');
+        $allowLong = in_array($tradeSide, ['Both', 'Long Only'], true);
+        $allowShort = in_array($tradeSide, ['Both', 'Short Only'], true);
+        $threshold = (float) ($settings['tradeScoreThreshold'] ?? 72);
+        $watchThreshold = (float) ($settings['watchScoreThreshold'] ?? 58);
+        $useVwap = (bool) ($settings['useVWAP'] ?? true);
+        $useDonchianScore = (bool) ($settings['useDonchianScore'] ?? true);
+        $useVolume = (bool) ($settings['useVolume'] ?? true);
+        $useVolatility = (bool) ($settings['useVolatilityFilter'] ?? true);
+        $useChop = (bool) ($settings['useChopFilter'] ?? true);
+        $useMomentumBreakout = (bool) ($settings['useMomentumBreakoutFilter'] ?? false);
+
+        $ema9 = (float) ($sequence['ema9'] ?? 0.0);
+        $ema21 = (float) ($sequence['ema21'] ?? 0.0);
+        $ema50 = (float) ($sequence['ema50'] ?? 0.0);
+        $ema200 = (float) ($sequence['ema200'] ?? 0.0);
+        $sessionVwap = (float) ($sequence['sessionVwap'] ?? ($ticker['weightedAvgPrice'] ?? 0));
+        $rsi14 = (float) ($sequence['rsi14'] ?? 50.0);
+        $adx14 = (float) ($sequence['adx14'] ?? 0.0);
+        $diPlus = (float) ($sequence['diPlus14'] ?? 0.0);
+        $diMinus = (float) ($sequence['diMinus14'] ?? 0.0);
+        $atr14 = (float) ($sequence['atr14'] ?? 0.0);
+        $atrPct = (float) ($sequence['atrPercent'] ?? 0.0);
+        $relVol = (float) ($sequence['relativeVolume'] ?? 1.0);
+        $chop = (float) ($sequence['choppiness14'] ?? 100.0);
+        $donBullCount = (int) ($sequence['donchianBullCount'] ?? 0);
+        $donBearCount = (int) ($sequence['donchianBearCount'] ?? 0);
+
+        $htfTrend1 = array_key_exists('trend1h', $htf)
+            ? (int) $htf['trend1h']
+            : (((bool) ($htf['emaBullish'] ?? false) && (bool) ($htf['ema200Bullish'] ?? false)) ? 1 : (((isset($htf['emaBullish'], $htf['ema200Bullish']) && ! $htf['emaBullish'] && ! $htf['ema200Bullish']) ? -1 : 0)));
+        $htfTrend2 = array_key_exists('trend4h', $htf)
+            ? (int) $htf['trend4h']
+            : (((bool) ($htf['h4EmaBullish'] ?? false)) ? 1 : ((isset($htf['h4EmaBullish']) && ! $htf['h4EmaBullish']) ? -1 : 0));
+        $htfBull = $htfTrend1 === 1 && $htfTrend2 === 1;
+        $htfBear = $htfTrend1 === -1 && $htfTrend2 === -1;
+        $htfMixed = ! $htfBull && ! $htfBear;
+
+        $emaBull = $ema9 > 0 && $ema21 > 0 && $ema50 > 0 && $ema9 > $ema21 && $price > $ema50;
+        $emaBear = $ema9 > 0 && $ema21 > 0 && $ema50 > 0 && $ema9 < $ema21 && $price < $ema50;
+        $majorBull = $ema200 > 0 && $price > $ema200;
+        $majorBear = $ema200 > 0 && $price < $ema200;
+        $vwapBull = ! $useVwap || $sessionVwap <= 0 || $price > $sessionVwap;
+        $vwapBear = ! $useVwap || $sessionVwap <= 0 || $price < $sessionVwap;
+        $rsiBull = $rsi14 >= (float) ($settings['longRsiMin'] ?? 48) && $rsi14 <= (float) ($settings['longRsiMax'] ?? 72);
+        $rsiBear = $rsi14 >= (float) ($settings['shortRsiMin'] ?? 28) && $rsi14 <= (float) ($settings['shortRsiMax'] ?? 52);
+        $adxBull = $adx14 >= (float) ($settings['adxMin'] ?? 20) && $diPlus > $diMinus;
+        $adxBear = $adx14 >= (float) ($settings['adxMin'] ?? 20) && $diMinus > $diPlus;
+        $volumeOk = ! $useVolume || $relVol >= (float) ($settings['cryptoRelVolMin'] ?? 1.0);
+        $volatilityOk = ! $useVolatility || ($atrPct >= (float) ($settings['cryptoMinAtrPct'] ?? 0.06) && $atrPct <= (float) ($settings['cryptoMaxAtrPct'] ?? 3.0));
+        $chopOk = ! $useChop || $chop <= (float) ($settings['cryptoChopMax'] ?? 61.8);
+
+        $donBullStrong = $donBullCount >= 8;
+        $donBearStrong = $donBearCount >= 8;
+        $donMixed = ! $donBullStrong && ! $donBearStrong;
+        $donLongScore = $useDonchianScore ? ($donBullStrong ? 10 : ($donMixed ? 3 : 0)) : 0;
+        $donShortScore = $useDonchianScore ? ($donBearStrong ? 10 : ($donMixed ? 3 : 0)) : 0;
+
+        $momentumLongOk = ! $useMomentumBreakout || (bool) ($sequence['momentumLongOk'] ?? false);
+        $momentumShortOk = ! $useMomentumBreakout || (bool) ($sequence['momentumShortOk'] ?? false);
+
+        $longScore = 0.0;
+        $longScore += $htfBull ? 20 : ($htfMixed ? 5 : 0);
+        $longScore += $emaBull ? 15 : 0;
+        $longScore += $majorBull ? 10 : 0;
+        $longScore += $donLongScore;
+        $longScore += $vwapBull ? 10 : 0;
+        $longScore += $rsiBull ? 5 : 0;
+        $longScore += $adxBull ? 12 : 0;
+        $longScore += $volumeOk ? 5 : 0;
+        $longScore += $volatilityOk ? 3 : 0;
+        $longScore += $momentumLongOk ? 10 : 0;
+
+        $shortScore = 0.0;
+        $shortScore += $htfBear ? 20 : ($htfMixed ? 5 : 0);
+        $shortScore += $emaBear ? 15 : 0;
+        $shortScore += $majorBear ? 10 : 0;
+        $shortScore += $donShortScore;
+        $shortScore += $vwapBear ? 10 : 0;
+        $shortScore += $rsiBear ? 5 : 0;
+        $shortScore += $adxBear ? 12 : 0;
+        $shortScore += $volumeOk ? 5 : 0;
+        $shortScore += $volatilityOk ? 3 : 0;
+        $shortScore += $momentumShortOk ? 10 : 0;
+
+        $hardLong = $allowLong && $htfBull && $emaBull && $vwapBull && $adxBull && $volumeOk && $volatilityOk && $chopOk && $momentumLongOk;
+        $hardShort = $allowShort && $htfBear && $emaBear && $vwapBear && $adxBear && $volumeOk && $volatilityOk && $chopOk && $momentumShortOk;
+
+        $signal = 'WAIT';
+        if ($hardLong && $longScore >= $threshold && $longScore > $shortScore) {
+            $signal = 'BUY';
+        } elseif ($hardShort && $shortScore >= $threshold && $shortScore > $longScore) {
+            $signal = 'SELL';
+        }
+
+        $activeScore = $signal === 'SELL' ? $shortScore : ($signal === 'BUY' ? $longScore : max($longScore, $shortScore));
+        $confidence = $this->clamp($activeScore / 100, 0.01, 0.99);
+        $watchSignal = $signal === 'WAIT' && max($longScore, $shortScore) >= $watchThreshold
+            ? ($longScore > $shortScore ? 'WATCH_BUY' : ($shortScore > $longScore ? 'WATCH_SELL' : 'WATCH'))
+            : null;
+
+        $dynamicSlMult = (float) ($settings['slAtrMultiplier'] ?? 1.4);
+        $dynamicSlMult += $adx14 < (float) ($settings['adxMin'] ?? 20) ? 0.20 : 0.0;
+        $dynamicSlMult += $atrPct > 1.20 ? 0.30 : 0.0;
+        $riskDistance = $atr14 * $dynamicSlMult;
+        $riskPercent = $price > 0 ? ($riskDistance / $price) * 100 : 0.0;
+
+        $checks = [
+            'htfBull' => $htfBull,
+            'htfBear' => $htfBear,
+            'emaBull' => $emaBull,
+            'emaBear' => $emaBear,
+            'vwapBull' => $vwapBull,
+            'vwapBear' => $vwapBear,
+            'adxBull' => $adxBull,
+            'adxBear' => $adxBear,
+            'volumeOk' => $volumeOk,
+            'volatilityOk' => $volatilityOk,
+            'chopOk' => $chopOk,
+            'momentumLongOk' => $momentumLongOk,
+            'momentumShortOk' => $momentumShortOk,
+        ];
+
+        $componentScores = [
+            'htf' => $signal === 'SELL' ? ($htfBear ? 20 : ($htfMixed ? 5 : 0)) : ($htfBull ? 20 : ($htfMixed ? 5 : 0)),
+            'ema' => $signal === 'SELL' ? ($emaBear ? 15 : 0) : ($emaBull ? 15 : 0),
+            'major' => $signal === 'SELL' ? ($majorBear ? 10 : 0) : ($majorBull ? 10 : 0),
+            'donchian' => $signal === 'SELL' ? $donShortScore : $donLongScore,
+            'vwap' => $signal === 'SELL' ? ($vwapBear ? 10 : 0) : ($vwapBull ? 10 : 0),
+            'rsi' => $signal === 'SELL' ? ($rsiBear ? 5 : 0) : ($rsiBull ? 5 : 0),
+            'adx' => $signal === 'SELL' ? ($adxBear ? 12 : 0) : ($adxBull ? 12 : 0),
+            'volume' => $volumeOk ? 5 : 0,
+            'atrVolatility' => $volatilityOk ? 3 : 0,
+            'momentum' => ($signal === 'SELL' ? $momentumShortOk : $momentumLongOk) ? 10 : 0,
+        ];
+
+        $positiveFactors = array_keys(array_filter($checks));
+        $negativeFactors = [];
+        foreach ($checks as $key => $passed) {
+            if (! $passed) {
+                $negativeFactors[] = $key;
+            }
+        }
+
+        return [
+            'symbol' => (string) ($ticker['symbol'] ?? 'BTCUSDT'),
+            'signal' => $signal,
+            'price' => $price,
+            'changePercent' => round($change, 4),
+            'intradayChange' => $openPrice > 0 ? round((($price - $openPrice) / $openPrice) * 100, 4) : round($change, 4),
+            'volume' => $quoteVolume,
+            'rangePercent' => $price > 0 ? round((($high - $low) / $price) * 100, 4) : 0.0,
+            'rangePosition' => $high > $low ? round(($price - $low) / ($high - $low), 4) : 0.5,
+            'vwapBullish' => $vwapBull,
+            'sequence' => $sequence,
+            'structure' => [],
+            'confidence' => round($confidence, 4),
+            'timeframe' => $tf,
+            'rsi14' => round($rsi14, 2),
+            'emaBullish' => $emaBull,
+            'macdBullish' => null,
+            'macdHistGrowing' => null,
+            'htfBullish' => $htfBull,
+            'htf4hBullish' => $htfTrend2 === 1,
+            'symbolPerfAdj' => 0.0,
+            'conflicted' => false,
+            'strongSequence' => $momentumLongOk || $momentumShortOk,
+            'fastTimeframeWeakSetup' => false,
+            'positiveFactors' => $positiveFactors,
+            'negativeFactors' => $negativeFactors,
+            'componentScores' => $componentScores,
+            'debug' => [
+                'profile' => self::PROFILE_PRIME_V617_CRYPTO,
+                'profileName' => (string) ($settings['signalProfileName'] ?? 'AutoFinX Prime v6.1.7 Crypto Stable Default'),
+                'finalConfidence' => round($confidence, 4),
+                'longScore' => round($longScore, 2),
+                'shortScore' => round($shortScore, 2),
+                'watchSignal' => $watchSignal,
+                'hardLongFilter' => $hardLong,
+                'hardShortFilter' => $hardShort,
+                'checks' => $checks,
+                'componentScores' => $componentScores,
+                'componentBreakdown' => array_map(
+                    fn (int|string $key, float|int $value): array => [
+                        'key' => (string) $key,
+                        'label' => (string) $key,
+                        'score' => (float) $value,
+                        'finalContribution' => (float) $value / 100,
+                    ],
+                    array_keys($componentScores),
+                    $componentScores
+                ),
+                'risk' => [
+                    'atr14' => round($atr14, 8),
+                    'atrPercent' => round($atrPct, 4),
+                    'dynamicSlMultiplier' => round($dynamicSlMult, 2),
+                    'riskDistance' => round($riskDistance, 8),
+                    'riskPercent' => round($riskPercent, 4),
+                    'tp1RR' => (float) ($settings['tp1RR'] ?? 1.0),
+                    'tp2RR' => (float) ($settings['tp2RR'] ?? 2.0),
+                    'trailAtrMultiplier' => (float) ($settings['trailAtrMultiplier'] ?? 1.0),
+                ],
+                'positiveFactors' => $positiveFactors,
+                'negativeFactors' => $negativeFactors,
+            ],
+            'reason' => $signal === 'WAIT'
+                ? 'Prime v6.1.7 WAIT: hard filters or score threshold not met.'
+                : sprintf('Prime v6.1.7 %s: score %.0f, opposite %.0f.', $signal, $activeScore, $signal === 'BUY' ? $shortScore : $longScore),
         ];
     }
 
@@ -3184,6 +3413,7 @@ class FutureTradeBotService
         $ema9 = 0.0;
         $ema21 = 0.0;
         $ema50 = 0.0;
+        $ema200 = 0.0;
         $emaStackBullish = false;
         $emaStackBearish = false;
         if (count($closes) >= 21) {
@@ -3195,6 +3425,9 @@ class FutureTradeBotService
                 $emaStackBullish = $ema9 > $ema21 && $ema21 > $ema50;
                 $emaStackBearish = $ema9 < $ema21 && $ema21 < $ema50;
             }
+            if (count($closes) >= 200) {
+                $ema200 = $this->calcEma($closes, 200);
+            }
         }
 
         // MACD(12,26,9) — requires 35+ candles
@@ -3204,8 +3437,21 @@ class FutureTradeBotService
         $sessionVwap = $this->calcSessionVwap($highs, $lows, $closes, $volumes);
         $volMa20 = count($volumes) >= 20 ? array_sum(array_slice($volumes, -20)) / 20 : (count($volumes) ? array_sum($volumes) / count($volumes) : 0.0);
         $lastVolume = (float) (end($volumes) ?: 0.0);
+        $relativeVolume = $volMa20 > 0 ? $lastVolume / $volMa20 : 1.0;
         $volumeOk = $volMa20 > 0 ? $lastVolume > ($volMa20 * 1.05) : false;
         $adx14 = count($closes) >= 20 ? $this->calcAdx($highs, $lows, $closes, 14) : 0.0;
+        $dmi14 = count($closes) >= 20 ? $this->calcDmi($highs, $lows, $closes, 14) : ['plusDi' => 0.0, 'minusDi' => 0.0, 'adx' => $adx14];
+        $choppiness14 = $this->calcChoppiness($highs, $lows, $closes, 14);
+        $donchian = $this->calcDonchianConsensus($highs, $lows, $closes, 20);
+        $emaSlope = count($closes) > 5 ? $ema50 - (float) $this->calcEma(array_slice($closes, 0, -5), 50) : 0.0;
+        $lastOpen = (float) (end($opens) ?: $last);
+        $lastHigh = (float) (end($highs) ?: $last);
+        $lastLow = (float) (end($lows) ?: $last);
+        $bodyRatio = ($lastHigh - $lastLow) > 0 ? abs($last - $lastOpen) / ($lastHigh - $lastLow) : 0.0;
+        $recentHighs = array_slice($highs, -6, 5);
+        $recentLows = array_slice($lows, -6, 5);
+        $momentumLongOk = $emaSlope > 0 && $last > $lastOpen && $bodyRatio >= 0.55 && count($recentHighs) > 0 && $last > max($recentHighs);
+        $momentumShortOk = $emaSlope < 0 && $last < $lastOpen && $bodyRatio >= 0.55 && count($recentLows) > 0 && $last < min($recentLows);
         $extendedFromEma = $atr14 > 0 && $ema9 > 0 ? abs($last - $ema9) >= ($atr14 * 1.2) : false;
         $extendedFromVwap = $atr14 > 0 && $sessionVwap > 0 ? abs($last - $sessionVwap) >= ($atr14 * 1.4) : false;
         $utBot = count($closes) >= 12 ? $this->calcUtBot($closes, 10, 3.0) : ['signal' => 'WAIT', 'bias' => 'NEUTRAL', 'stop' => 0.0];
@@ -3222,6 +3468,7 @@ class FutureTradeBotService
             'ema9' => round($ema9, 6),
             'ema21' => round($ema21, 6),
             'ema50' => round($ema50, 6),
+            'ema200' => round($ema200, 6),
             'emaStackBullish' => $emaStackBullish,
             'emaStackBearish' => $emaStackBearish,
             'macdBullish' => $macd['bullish'],
@@ -3230,10 +3477,18 @@ class FutureTradeBotService
             'atr14' => round($atr14, 8),
             'atrPercent' => round($atrPercent, 4),
             'adx14' => round($adx14, 4),
+            'diPlus14' => round((float) ($dmi14['plusDi'] ?? 0.0), 4),
+            'diMinus14' => round((float) ($dmi14['minusDi'] ?? 0.0), 4),
             'sessionVwap' => round($sessionVwap, 8),
             'volumeOk' => $volumeOk,
             'lastVolume' => round($lastVolume, 4),
             'volumeMa20' => round($volMa20, 4),
+            'relativeVolume' => round($relativeVolume, 4),
+            'choppiness14' => round($choppiness14, 4),
+            'donchianBullCount' => (int) ($donchian['bullCount'] ?? 0),
+            'donchianBearCount' => (int) ($donchian['bearCount'] ?? 0),
+            'momentumLongOk' => $momentumLongOk,
+            'momentumShortOk' => $momentumShortOk,
             'extendedFromEma' => $extendedFromEma,
             'extendedFromVwap' => $extendedFromVwap,
             'utSignal' => (string) ($utBot['signal'] ?? 'WAIT'),
@@ -3259,6 +3514,7 @@ class FutureTradeBotService
             'ema9' => 0.0,
             'ema21' => 0.0,
             'ema50' => 0.0,
+            'ema200' => 0.0,
             'emaStackBullish' => false,
             'emaStackBearish' => false,
             'macdBullish' => null,
@@ -3267,10 +3523,18 @@ class FutureTradeBotService
             'atr14' => 0.0,
             'atrPercent' => 0.0,
             'adx14' => 0.0,
+            'diPlus14' => 0.0,
+            'diMinus14' => 0.0,
             'sessionVwap' => 0.0,
             'volumeOk' => false,
             'lastVolume' => 0.0,
             'volumeMa20' => 0.0,
+            'relativeVolume' => 1.0,
+            'choppiness14' => 100.0,
+            'donchianBullCount' => 0,
+            'donchianBearCount' => 0,
+            'momentumLongOk' => false,
+            'momentumShortOk' => false,
             'extendedFromEma' => false,
             'extendedFromVwap' => false,
             'utSignal' => 'WAIT',
@@ -3453,6 +3717,120 @@ class FutureTradeBotService
         }
 
         return $adx;
+    }
+
+    private function calcDmi(array $highs, array $lows, array $closes, int $period = 14): array
+    {
+        $count = count($closes);
+        if ($count < ($period * 2) || count($highs) !== $count || count($lows) !== $count) {
+            return ['plusDi' => 0.0, 'minusDi' => 0.0, 'adx' => 0.0];
+        }
+
+        $trs = [];
+        $plusDm = [];
+        $minusDm = [];
+        for ($i = 1; $i < $count; $i++) {
+            $upMove = $highs[$i] - $highs[$i - 1];
+            $downMove = $lows[$i - 1] - $lows[$i];
+            $plusDm[] = ($upMove > $downMove && $upMove > 0) ? $upMove : 0.0;
+            $minusDm[] = ($downMove > $upMove && $downMove > 0) ? $downMove : 0.0;
+            $trs[] = max(
+                $highs[$i] - $lows[$i],
+                abs($highs[$i] - $closes[$i - 1]),
+                abs($lows[$i] - $closes[$i - 1])
+            );
+        }
+
+        $tr = array_sum(array_slice($trs, 0, $period));
+        $plus = array_sum(array_slice($plusDm, 0, $period));
+        $minus = array_sum(array_slice($minusDm, 0, $period));
+        $dxValues = [];
+        $plusDi = 0.0;
+        $minusDi = 0.0;
+
+        for ($i = $period; $i < count($trs); $i++) {
+            $tr = $tr - ($tr / $period) + $trs[$i];
+            $plus = $plus - ($plus / $period) + $plusDm[$i];
+            $minus = $minus - ($minus / $period) + $minusDm[$i];
+            if ($tr <= 0) {
+                continue;
+            }
+
+            $plusDi = 100 * ($plus / $tr);
+            $minusDi = 100 * ($minus / $tr);
+            $sum = $plusDi + $minusDi;
+            if ($sum > 0) {
+                $dxValues[] = 100 * abs($plusDi - $minusDi) / $sum;
+            }
+        }
+
+        $adx = 0.0;
+        if (count($dxValues) >= $period) {
+            $adx = array_sum(array_slice($dxValues, 0, $period)) / $period;
+            for ($i = $period; $i < count($dxValues); $i++) {
+                $adx = (($adx * ($period - 1)) + $dxValues[$i]) / $period;
+            }
+        } elseif (count($dxValues) > 0) {
+            $adx = (float) end($dxValues);
+        }
+
+        return ['plusDi' => $plusDi, 'minusDi' => $minusDi, 'adx' => $adx];
+    }
+
+    private function calcChoppiness(array $highs, array $lows, array $closes, int $period = 14): float
+    {
+        $count = count($closes);
+        if ($count < $period + 1 || count($highs) !== $count || count($lows) !== $count) {
+            return 100.0;
+        }
+
+        $start = $count - $period;
+        $trSum = 0.0;
+        for ($i = $start; $i < $count; $i++) {
+            $trSum += max(
+                $highs[$i] - $lows[$i],
+                abs($highs[$i] - $closes[$i - 1]),
+                abs($lows[$i] - $closes[$i - 1])
+            );
+        }
+
+        $rangeHigh = max(array_slice($highs, -$period));
+        $rangeLow = min(array_slice($lows, -$period));
+        $range = $rangeHigh - $rangeLow;
+        if ($range <= 0 || $trSum <= 0 || $period <= 1) {
+            return 100.0;
+        }
+
+        return $this->clamp(100 * log10($trSum / $range) / log10($period), 0.0, 100.0);
+    }
+
+    private function calcDonchianConsensus(array $highs, array $lows, array $closes, int $length = 20): array
+    {
+        $bull = 0;
+        $bear = 0;
+        $count = count($closes);
+        $last = (float) (end($closes) ?: 0.0);
+
+        for ($offset = 0; $offset < 10; $offset++) {
+            $len = max(2, $length - $offset);
+            if ($count <= $len) {
+                continue;
+            }
+
+            $windowHighs = array_slice($highs, -($len + 1), $len);
+            $windowLows = array_slice($lows, -($len + 1), $len);
+            if ($windowHighs === [] || $windowLows === []) {
+                continue;
+            }
+
+            if ($last > max($windowHighs)) {
+                $bull++;
+            } elseif ($last < min($windowLows)) {
+                $bear++;
+            }
+        }
+
+        return ['bullCount' => $bull, 'bearCount' => $bear];
     }
 
     private function calcSessionVwap(array $highs, array $lows, array $closes, array $volumes): float
@@ -4131,10 +4509,37 @@ class FutureTradeBotService
 
     private function normalizeFutureTradeSettings(array $settings): array
     {
+        $settings['signalProfile'] = (string) ($settings['signalProfile'] ?? config('future_trade.default_signal_profile', self::PROFILE_PRIME_V617_CRYPTO));
+        if ($this->isPrimeCryptoProfile($settings)) {
+            $settings['signalProfileName'] = 'AutoFinX Prime v6.1.7 Crypto Stable Default';
+            $settings['marketProfile'] = 'Crypto';
+            $settings['classicSimpleMode'] = false;
+            $settings['confidenceMode'] = 'fixed';
+            $settings['dynamicSuggestionEnabled'] = false;
+            $settings['avoidChoppyMarket'] = false;
+            $settings['strictEntryGuards'] = false;
+            $settings['weakSetupAction'] = 'hold';
+            $settings['minConfidence'] = (float) ($settings['tradeScoreThreshold'] ?? 72) / 100;
+            $symbols = array_values(array_map('strtoupper', (array) ($settings['symbols'] ?? [])));
+            $legacyDefaultSymbols = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'AVAXUSDT'];
+            sort($symbols);
+            $sortedLegacy = $legacyDefaultSymbols;
+            sort($sortedLegacy);
+            if ($symbols === [] || $symbols === $sortedLegacy) {
+                $settings['symbols'] = ['ETHUSDT', 'BTCUSDT', 'SOLUSDT'];
+            }
+        }
+
         return $this->indicatorIntelligence->normalizeSettings(
             IndicatorIntelligenceService::PROFILE_FUTURE_TRADE,
             $settings
         );
+    }
+
+    private function isPrimeCryptoProfile(array $settings): bool
+    {
+        return strtolower(trim((string) ($settings['signalProfile'] ?? ''))) === self::PROFILE_PRIME_V617_CRYPTO
+            && strtolower(trim((string) ($settings['marketProfile'] ?? 'crypto'))) === 'crypto';
     }
 
     private function indicatorIntelligencePayload(FutureTradeBotConfig $config, array $settings, ?array $bestSignal): array
