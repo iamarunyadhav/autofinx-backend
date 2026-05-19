@@ -43,11 +43,11 @@ return new class extends Migration
                 $table->json('meta')->nullable();
                 $table->timestamps();
 
-                $table->index(['symbol', 'status']);
-                $table->index(['future_trade_bot_config_id', 'status']);
-                $table->index(['mode']);
-                $table->index(['entry_client_order_id']);
-                $table->index(['exit_client_order_id']);
+                $table->index(['symbol', 'status'], 'ftlt_symbol_status_idx');
+                $table->index(['future_trade_bot_config_id', 'status'], 'ftlt_config_status_idx');
+                $table->index(['mode'], 'ftlt_mode_idx');
+                $table->index(['entry_client_order_id'], 'ftlt_entry_client_idx');
+                $table->index(['exit_client_order_id'], 'ftlt_exit_client_idx');
                 $table->unique(['future_trade_bot_config_id', 'signal_key'], 'flt_config_signal_key_unique');
             });
         }
@@ -55,8 +55,8 @@ return new class extends Migration
         if (! Schema::hasTable('future_trade_logical_trade_events')) {
             Schema::create('future_trade_logical_trade_events', function (Blueprint $table) {
                 $table->uuid('id')->primary();
-                $table->uuid('future_trade_logical_trade_id')->nullable()->index();
-                $table->uuid('future_trade_bot_config_id')->nullable()->index();
+                $table->uuid('future_trade_logical_trade_id')->nullable();
+                $table->uuid('future_trade_bot_config_id')->nullable();
                 $table->string('symbol', 32)->nullable();
                 $table->string('event_type', 64); // SIGNAL_RAW | SIGNAL_CONFIRMED | ENTRY_SUBMITTED | ENTRY_FILLED | EXIT_SUBMITTED | EXIT_FILLED | RECONCILED | ERROR | BLOCKED
                 $table->string('client_order_id', 64)->nullable();
@@ -67,8 +67,10 @@ return new class extends Migration
                 $table->json('payload')->nullable();
                 $table->timestamps();
 
-                $table->index(['client_order_id']);
-                $table->index(['event_type']);
+                $table->index(['future_trade_logical_trade_id'], 'ftlte_logical_trade_idx');
+                $table->index(['future_trade_bot_config_id'], 'ftlte_config_idx');
+                $table->index(['client_order_id'], 'ftlte_client_order_idx');
+                $table->index(['event_type'], 'ftlte_event_type_idx');
             });
         }
 
@@ -87,8 +89,8 @@ return new class extends Migration
                 $table->json('meta')->nullable();
                 $table->timestamps();
 
-                $table->index(['command', 'status']);
-                $table->index(['last_heartbeat_at']);
+                $table->index(['command', 'status'], 'ftri_command_status_idx');
+                $table->index(['last_heartbeat_at'], 'ftri_last_heartbeat_idx');
             });
         }
     }

@@ -13,7 +13,7 @@ class FutureTradeBacktestEngine
 {
     private const BINANCE_BASE       = 'https://fapi.binance.com';
     private const KLINE_LIMIT        = 1000;
-    private const SEQUENCE_LOOKBACK  = 240; // 240 x 5m = 20 h, enough for Prime v6.1.7 EMA200 warm-up
+    private const SEQUENCE_LOOKBACK  = 240; // Entry-timeframe candles, enough for Prime v6.1.7 EMA200 warm-up
     private const STRUCTURE_LOOKBACK = 100; // candles for structure detection
     private const FEE_RATE           = 0.0004; // 0.04 % per side (taker)
 
@@ -55,7 +55,8 @@ class FutureTradeBacktestEngine
                 'to'      => $to->toDateString(),
             ]);
 
-            $klines5m = $this->fetchAllKlines($symbols, '5m', $from, $to);
+            $entryTimeframe = $this->normalizeBacktestTimeframe((string) ($settings['timeframe'] ?? '5m'));
+            $klinesEntry = $this->fetchAllKlines($symbols, $entryTimeframe, $from, $to);
 
             // HTF needs a warm-up window before $from so EMAs are valid at the start
             $htfFrom = $from->copy()->subHours(220);
@@ -66,7 +67,7 @@ class FutureTradeBacktestEngine
 
             Log::info('[FT BACKTEST] Starting simulation', ['run_id' => $run->id]);
 
-            $trades = $this->simulate($settings, $symbols, $klines5m, $htfIndex, $initialCapital);
+            $trades = $this->simulate($settings, $symbols, $klinesEntry, $htfIndex, $initialCapital);
 
             $stats = $this->computeStats($trades, $initialCapital);
 
@@ -78,8 +79,11 @@ class FutureTradeBacktestEngine
 
             foreach (array_chunk($trades, 200) as $chunk) {
                 $rows = array_map(fn ($t) => array_merge(
-                    ['future_trade_backtest_run_id' => $run->id],
-                    $t,
+                    [
+                        'id' => (string) \Illuminate\Support\Str::uuid(),
+                        'future_trade_backtest_run_id' => $run->id,
+                    ],
+                    $this->serializeBacktestTradeForInsert($t),
                     ['created_at' => now(), 'updated_at' => now()]
                 ), $chunk);
                 FutureTradeBacktestTrade::insert($rows);
@@ -101,6 +105,102 @@ class FutureTradeBacktestEngine
         }
 
         return $run->fresh();
+    }
+
+    private function serializeBacktestTradeForInsert(array $trade): array
+    {
+        if (array_key_exists('meta', $trade) && is_array($trade['meta'])) {
+            $trade['meta'] = json_encode($trade['meta'], JSON_UNESCAPED_SLASHES);
+        }
+
+        return $trade;
+    }
+
+    /**
+     * Export one row per closed entry-timeframe candle for Prime/Pine mirror validation.
+     * This is read-only and does not simulate orders.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    public function decisionRows(
+        FutureTradeBotConfig $config,
+        Carbon $from,
+        Carbon $to,
+        array $settingsOverride = []
+    ): array {
+        $settingsSnapshot = array_merge($config->mergedSettings(), $settingsOverride);
+        $settings = $this->botService->normalizeSettingsForBacktest($settingsSnapshot);
+        $symbols = array_values((array) ($settings['symbols'] ?? ['BTCUSDT']));
+        $timeframe = $this->normalizeBacktestTimeframe((string) ($settings['timeframe'] ?? '15m'));
+        $timeframeMinutes = $this->timeframeMinutes($timeframe);
+
+        $klines = $this->fetchAllKlines($symbols, $timeframe, $from, $to);
+        $htfFrom = $from->copy()->subHours(220);
+        $klines1h = $this->fetchAllKlines($symbols, '1h', $htfFrom, $to);
+        $klines4h = $this->fetchAllKlines($symbols, '4h', $htfFrom, $to);
+        $htfIndex = $this->buildHtfIndex($symbols, $klines1h, $klines4h);
+
+        $timeline = $this->buildTimeline($symbols, $klines);
+        $rows = [];
+
+        foreach ($timeline as $ts => $symbolCandles) {
+            $openTime = Carbon::createFromTimestampMs((int) $ts);
+            $closeTime = $openTime->copy()->addMinutes($timeframeMinutes);
+
+            foreach ($symbolCandles as $symbol => $candle) {
+                $ticker = $this->buildTicker($symbol, $candle, $klines[$symbol] ?? [], (int) $ts, $htfIndex[$symbol] ?? [], $settings);
+                $scored = $this->botService->scoreTickerForBacktest($ticker, $settings);
+                $sequence = (array) ($scored['sequence'] ?? $ticker['sequence'] ?? []);
+                $htf = (array) ($ticker['htf'] ?? []);
+                $debug = (array) ($scored['debug'] ?? []);
+                $checks = (array) ($debug['checks'] ?? []);
+                $negative = (array) ($scored['negativeFactors'] ?? $debug['negativeFactors'] ?? []);
+
+                $rows[] = [
+                    'symbol' => $symbol,
+                    'timeframe' => $timeframe,
+                    'candle_open_time' => $openTime->toIso8601String(),
+                    'candle_close_time' => $closeTime->toIso8601String(),
+                    'close' => (float) ($scored['price'] ?? $ticker['price'] ?? 0),
+                    'emaFast' => (float) ($sequence['ema9'] ?? 0),
+                    'emaSlow' => (float) ($sequence['ema21'] ?? 0),
+                    'emaTrend' => (float) ($sequence['ema50'] ?? 0),
+                    'emaMajor' => (float) ($sequence['ema200'] ?? 0),
+                    'vwap' => (float) ($sequence['sessionVwap'] ?? $ticker['weightedAvgPrice'] ?? 0),
+                    'rsi' => (float) ($sequence['rsi14'] ?? 50),
+                    'adx' => (float) ($sequence['adx14'] ?? 0),
+                    'diPlus' => (float) ($sequence['diPlus14'] ?? 0),
+                    'diMinus' => (float) ($sequence['diMinus14'] ?? 0),
+                    'relativeVolume' => (float) ($sequence['relativeVolume'] ?? 1),
+                    'atrPct' => (float) ($sequence['atrPercent'] ?? 0),
+                    'chopValue' => (float) ($sequence['choppiness14'] ?? 100),
+                    'donBullCount' => (int) ($sequence['donchianBullCount'] ?? 0),
+                    'donBearCount' => (int) ($sequence['donchianBearCount'] ?? 0),
+                    'htfTrend1' => (int) ($htf['trend1h'] ?? 0),
+                    'htfTrend2' => (int) ($htf['trend4h'] ?? 0),
+                    'htfCandleTime1' => (string) ($htf['lastCandleTime_1h'] ?? ''),
+                    'htfCandleTime2' => (string) ($htf['lastCandleTime_4h'] ?? ''),
+                    'longScore' => (float) ($debug['longScore'] ?? 0),
+                    'shortScore' => (float) ($debug['shortScore'] ?? 0),
+                    'longAllowed' => (bool) ($debug['hardLongFilter'] ?? false),
+                    'shortAllowed' => (bool) ($debug['hardShortFilter'] ?? false),
+                    'finalDecision' => (string) ($scored['signal'] ?? 'WAIT'),
+                    'blockedReason' => ($scored['signal'] ?? 'WAIT') === 'WAIT'
+                        ? (implode('|', array_values(array_filter(array_map('strval', $negative)))) ?: (string) ($scored['reason'] ?? 'WAIT'))
+                        : '',
+                    'executedOrderId' => '',
+                    'confidence' => (float) ($scored['confidence'] ?? 0),
+                    'watchSignal' => (string) ($debug['watchSignal'] ?? ''),
+                    'volumeOk' => (bool) ($checks['volumeOk'] ?? false),
+                    'volatilityOk' => (bool) ($checks['volatilityOk'] ?? false),
+                    'chopOk' => (bool) ($checks['chopOk'] ?? false),
+                    'momentumLongOk' => (bool) ($checks['momentumLongOk'] ?? false),
+                    'momentumShortOk' => (bool) ($checks['momentumShortOk'] ?? false),
+                ];
+            }
+        }
+
+        return $rows;
     }
 
     // -------------------------------------------------------------------------
@@ -125,7 +225,7 @@ class FutureTradeBacktestEngine
         $maxTrades   = (int) ($settings['maxTradesPerDay'] ?? 25);
         $cooldownSec = (int) ($settings['cooldownSeconds'] ?? 15);
 
-        // Build unified 5m timeline (all symbols, sorted by open time)
+        // Build unified entry-timeframe timeline (all symbols, sorted by open time)
         $timeline = $this->buildTimeline($symbols, $klines5m);
 
         // Position state (in-memory, no DB)
@@ -150,9 +250,10 @@ class FutureTradeBacktestEngine
 
         $trades = [];
         $openTrade = null;
+        $timeframeMinutes = $this->timeframeMinutes((string) ($settings['timeframe'] ?? '5m'));
 
         foreach ($timeline as $ts => $symbolCandles) {
-            $now = Carbon::createFromTimestampMs($ts);
+            $now = Carbon::createFromTimestampMs((int) $ts)->addMinutes($timeframeMinutes);
 
             // Daily reset
             $today = $now->toDateString();
@@ -402,7 +503,7 @@ class FutureTradeBacktestEngine
     }
 
     // -------------------------------------------------------------------------
-    // Ticker builder for a given 5m candle and lookback window
+    // Ticker builder for a given entry-timeframe candle and lookback window
     // -------------------------------------------------------------------------
 
     private function buildTicker(
@@ -423,12 +524,16 @@ class FutureTradeBacktestEngine
         $lookback = $this->sliceKlinesUpTo($allCandles, $currentTs, self::SEQUENCE_LOOKBACK);
         $structureCandles = $this->sliceKlinesUpTo($allCandles, $currentTs, self::STRUCTURE_LOOKBACK);
 
+        $tfMinutes = $this->timeframeMinutes((string) ($settings['timeframe'] ?? '5m'));
+        $signalTs = $currentTs + ($tfMinutes * 60 * 1000);
+
         $sequence  = $this->botService->buildSequenceSnapshotForBacktest($lookback);
         $structure = $this->botService->buildStructureSnapshotForBacktest($structureCandles);
-        $htf       = $this->resolveHtf($htfData, $currentTs);
+        $htf       = $this->resolveHtf($htfData, $signalTs);
 
-        // Approximate 24h stats from available candles (last 288 × 5m = 24h)
-        $window24h = $this->sliceKlinesUpTo($allCandles, $currentTs, 288);
+        // Approximate 24h stats from the available entry-timeframe candles.
+        $candlesPerDay = max(1, (int) ceil(1440 / max(1, $tfMinutes)));
+        $window24h = $this->sliceKlinesUpTo($allCandles, $currentTs, $candlesPerDay);
         $open24h   = count($window24h) ? (float) ($window24h[0][1] ?? $open) : $open;
         $high24h   = count($window24h) ? max(array_column($window24h, 2)) : $high;
         $low24h    = count($window24h) ? min(array_column($window24h, 3)) : $low;
@@ -494,18 +599,23 @@ class FutureTradeBacktestEngine
         return $index;
     }
 
-    private function resolveHtf(array $htfData, int $currentTs): array
+    private function resolveHtf(array $htfData, int $signalCloseTs): array
     {
         if (empty($htfData)) {
             return ['emaBullish' => null, 'h4EmaBullish' => null, 'ema200Bullish' => null, 'trend1h' => 0, 'trend4h' => 0, 'ema50_1h' => 0.0, 'ema50_4h' => 0.0, 'ema200_1h' => 0.0, 'ema200_4h' => 0.0, 'lastCandleTime_1h' => null, 'lastCandleTime_4h' => null];
         }
 
-        $ema50_1h  = $this->latestBefore($htfData['ema50_1h'],  $htfData['times1h'], $currentTs) ?? 0.0;
-        $ema200_1h = $this->latestBefore($htfData['ema200_1h'], $htfData['times1h'], $currentTs) ?? 0.0;
-        $ema50_4h  = $this->latestBefore($htfData['ema50_4h'],  $htfData['times4h'], $currentTs) ?? 0.0;
-        $ema200_4h = $this->latestBefore($htfData['ema200_4h'] ?? [], $htfData['times4h'], $currentTs) ?? 0.0;
-        $last1h    = $this->latestCloseBefore($htfData['closes1h'], $htfData['times1h'], $currentTs) ?? 0.0;
-        $last4h    = $this->latestCloseBefore($htfData['closes4h'], $htfData['times4h'], $currentTs) ?? 0.0;
+        // Binance kline timestamps are candle open times. Pine no-repaint HTF checks
+        // must use only HTF candles whose close time is <= the 15m signal close.
+        $confirmed1hOpenTs = $signalCloseTs - (60 * 60 * 1000);
+        $confirmed4hOpenTs = $signalCloseTs - (240 * 60 * 1000);
+
+        $ema50_1h  = $this->latestBefore($htfData['ema50_1h'],  $htfData['times1h'], $confirmed1hOpenTs) ?? 0.0;
+        $ema200_1h = $this->latestBefore($htfData['ema200_1h'], $htfData['times1h'], $confirmed1hOpenTs) ?? 0.0;
+        $ema50_4h  = $this->latestBefore($htfData['ema50_4h'],  $htfData['times4h'], $confirmed4hOpenTs) ?? 0.0;
+        $ema200_4h = $this->latestBefore($htfData['ema200_4h'] ?? [], $htfData['times4h'], $confirmed4hOpenTs) ?? 0.0;
+        $last1h    = $this->latestCloseBefore($htfData['closes1h'], $htfData['times1h'], $confirmed1hOpenTs) ?? 0.0;
+        $last4h    = $this->latestCloseBefore($htfData['closes4h'], $htfData['times4h'], $confirmed4hOpenTs) ?? 0.0;
         $trend1h = ($last1h > $ema200_1h && $ema50_1h > $ema200_1h) ? 1 : (($last1h < $ema200_1h && $ema50_1h < $ema200_1h) ? -1 : 0);
         $trend4h = ($last4h > $ema200_4h && $ema50_4h > $ema200_4h) ? 1 : (($last4h < $ema200_4h && $ema50_4h < $ema200_4h) ? -1 : 0);
 
@@ -519,8 +629,8 @@ class FutureTradeBacktestEngine
             'ema50_4h'      => round($ema50_4h, 4),
             'ema200_1h'     => round($ema200_1h, 4),
             'ema200_4h'     => round($ema200_4h, 4),
-            'lastCandleTime_1h' => null,
-            'lastCandleTime_4h' => null,
+            'lastCandleTime_1h' => $confirmed1hOpenTs > 0 ? Carbon::createFromTimestampMs($confirmed1hOpenTs)->toIso8601String() : null,
+            'lastCandleTime_4h' => $confirmed4hOpenTs > 0 ? Carbon::createFromTimestampMs($confirmed4hOpenTs)->toIso8601String() : null,
         ];
     }
 
@@ -635,6 +745,36 @@ class FutureTradeBacktestEngine
         }
 
         return $all;
+    }
+
+    private function normalizeBacktestTimeframe(string $timeframe): string
+    {
+        $timeframe = strtolower(trim($timeframe));
+
+        return match ($timeframe) {
+            '1', '1m' => '1m',
+            '3', '3m' => '3m',
+            '5', '5m' => '5m',
+            '15', '15m' => '15m',
+            '30', '30m' => '30m',
+            '60', '1h', '1hr', '1hour' => '1h',
+            '240', '4h', '4hr', '4hour' => '4h',
+            default => '15m',
+        };
+    }
+
+    private function timeframeMinutes(string $timeframe): int
+    {
+        return match ($this->normalizeBacktestTimeframe($timeframe)) {
+            '1m' => 1,
+            '3m' => 3,
+            '5m' => 5,
+            '15m' => 15,
+            '30m' => 30,
+            '1h' => 60,
+            '4h' => 240,
+            default => 15,
+        };
     }
 
     // -------------------------------------------------------------------------

@@ -8,6 +8,11 @@ return [
     'force_testnet' => env('FUTURE_TRADE_FORCE_TESTNET', true),
     'shared_hosting_mode' => env('AUTOFINX_SHARED_HOSTING_MODE', true),
     'schedule_runtime_commands' => env('FUTURE_TRADE_SCHEDULE_RUNTIME_COMMANDS', false),
+    'php_binary' => env('FUTURE_TRADE_PHP_BINARY'),
+    'pine_webhook_token' => env('FUTURE_TRADE_PINE_WEBHOOK_TOKEN'),
+    'prime_mirror_execution_enabled' => env('FUTURE_TRADE_PRIME_MIRROR_EXECUTION_ENABLED', false),
+    'prime_mirror_live_enabled' => env('FUTURE_TRADE_PRIME_MIRROR_LIVE_ENABLED', false),
+    'pine_webhook_live_enabled' => env('FUTURE_TRADE_PINE_WEBHOOK_LIVE_ENABLED', true),
 
     // All futures symbols available in the UI selector
     'available_symbols' => [
@@ -40,6 +45,9 @@ return [
         'signalProfile' => env('FUTURE_TRADE_SIGNAL_PROFILE', env('FUTURE_TRADE_DEFAULT_SIGNAL_PROFILE', 'autofinx_prime_v6_1_7_crypto')),
         'signalProfileName' => 'AutoFinX Prime v6.1.7 Crypto Stable Default',
         'marketProfile' => 'Crypto',
+        'signalSource' => 'webhook_fallback',
+        'pineWebhookFallbackTimeoutSeconds' => (int) env('FUTURE_TRADE_PINE_WEBHOOK_FALLBACK_TIMEOUT_SECONDS', 1200),
+        'primeMirrorLiveEnabled' => true,
         'validatedDefaultSymbols' => ['ETHUSDT', 'BTCUSDT', 'SOLUSDT'],
         'validationSymbols' => ['ETHUSDT', 'BTCUSDT', 'SOLUSDT', 'BNBUSDT'],
         'symbols' => ['ETHUSDT', 'BTCUSDT', 'SOLUSDT'],
@@ -82,6 +90,7 @@ return [
         'volumeLength' => 20,
         'cryptoRelVolMin' => 1.00,
         'atrLength' => 14,
+        'atrRegimeLength' => 50,
         'cryptoMinAtrPct' => 0.06,
         'cryptoMaxAtrPct' => 3.00,
         'slAtrMultiplier' => 1.4,
@@ -115,6 +124,13 @@ return [
         'dynamicReentryBuffer' => 0.005,
         'dynamicSuggestionEnabled' => false,
         'autoExecutePaperSignals' => true,
+        // Signal source: 'mirror' = backend self-generated scanner signals execute
+        // trades; 'webhook' = only TradingView Pine webhook posts execute trades;
+        // 'webhook_fallback' = webhook is accepted when available, otherwise the
+        // Binance-backed mirror scanner may execute after the webhook stale window.
+        'signalSource' => 'webhook_fallback',
+        'pineWebhookFallbackTimeoutSeconds' => (int) env('FUTURE_TRADE_PINE_WEBHOOK_FALLBACK_TIMEOUT_SECONDS', 1200),
+        'primeMirrorExecutionEnabled' => true,
         'avoidChoppyMarket' => false,
         'strictEntryGuards' => false,
         'weakSetupAction' => 'reduce_size',

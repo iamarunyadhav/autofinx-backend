@@ -151,9 +151,10 @@ class FutureTradeLiveFeedManager
                     static fn ($symbol) => strtoupper(trim((string) $symbol)),
                     (array) ($settings['symbols'] ?? config('future_trade.defaults.symbols', []))
                 );
+                $primeDefaultSymbols = $this->usesPrimeDefaultSymbols($settings, $configured);
                 $configured = $this->normalizePrimeDefaultSymbols($settings, $configured);
                 $currentSymbol = strtoupper(trim((string) ($config->state?->current_symbol ?? '')));
-                if ($currentSymbol !== '') {
+                if ($currentSymbol !== '' && (! $primeDefaultSymbols || in_array($currentSymbol, $configured, true))) {
                     $configured[] = $currentSymbol;
                 }
 
@@ -177,23 +178,34 @@ class FutureTradeLiveFeedManager
      */
     private function normalizePrimeDefaultSymbols(array $settings, array $symbols): array
     {
-        $profile = strtolower(trim((string) ($settings['signalProfile'] ?? config('future_trade.default_signal_profile', ''))));
-        $market = strtolower(trim((string) ($settings['marketProfile'] ?? 'crypto')));
-        if ($profile !== 'autofinx_prime_v6_1_7_crypto' || $market !== 'crypto') {
+        if (! $this->usesPrimeDefaultSymbols($settings, $symbols)) {
             return array_values(array_filter($symbols));
         }
 
-        $legacyDefault = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'AVAXUSDT'];
-        $sortedSymbols = array_values(array_unique(array_filter($symbols)));
-        $sortedLegacy = $legacyDefault;
-        sort($sortedSymbols);
-        sort($sortedLegacy);
+        return ['ETHUSDT', 'BTCUSDT', 'SOLUSDT'];
+    }
 
-        if ($sortedSymbols === [] || $sortedSymbols === $sortedLegacy) {
-            return ['ETHUSDT', 'BTCUSDT', 'SOLUSDT'];
+    /**
+     * @param  string[]  $symbols
+     */
+    private function usesPrimeDefaultSymbols(array $settings, array $symbols): bool
+    {
+        $profile = strtolower(trim((string) ($settings['signalProfile'] ?? config('future_trade.default_signal_profile', ''))));
+        $market = strtolower(trim((string) ($settings['marketProfile'] ?? 'crypto')));
+        if ($profile !== 'autofinx_prime_v6_1_7_crypto' || $market !== 'crypto') {
+            return false;
         }
 
-        return array_values(array_filter($symbols));
+        $legacyDefault = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'AVAXUSDT'];
+        $primeDefault = ['ETHUSDT', 'BTCUSDT', 'SOLUSDT'];
+        $sortedSymbols = array_values(array_unique(array_filter($symbols)));
+        $sortedLegacy = $legacyDefault;
+        $sortedPrime = $primeDefault;
+        sort($sortedSymbols);
+        sort($sortedLegacy);
+        sort($sortedPrime);
+
+        return $sortedSymbols === [] || $sortedSymbols === $sortedLegacy || $sortedSymbols === $sortedPrime;
     }
 
     /**
@@ -414,7 +426,29 @@ class FutureTradeLiveFeedManager
 
     private function phpBinary(): string
     {
-        return PHP_BINARY ?: 'php';
+        $configured = trim((string) config('future_trade.php_binary', ''));
+        if ($configured !== '') {
+            return $configured;
+        }
+
+        $binary = PHP_BINARY ?: 'php';
+        $basename = strtolower(basename(str_replace('\\', '/', $binary)));
+        if (! in_array($basename, ['php-fpm', 'php-fpm.exe', 'php-cgi', 'php-cgi.exe'], true)) {
+            return $binary;
+        }
+
+        $candidate = str_replace('/usr/sbin/php-fpm', '/usr/bin/php', $binary);
+        if ($candidate !== $binary && is_file($candidate) && is_executable($candidate)) {
+            return $candidate;
+        }
+
+        foreach (['/opt/cpanel/ea-php84/root/usr/bin/php', '/opt/cpanel/ea-php83/root/usr/bin/php', '/usr/local/bin/php', '/usr/bin/php'] as $path) {
+            if (is_file($path) && is_executable($path)) {
+                return $path;
+            }
+        }
+
+        return 'php';
     }
 
     private function ageSecondsSince(mixed $timestamp): ?int
