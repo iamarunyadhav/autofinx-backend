@@ -41,6 +41,27 @@ class FutureTradeBotController extends Controller
         return response()->json($this->bot->scannerSnapshotPayload($this->bot->getOrCreateConfig($workspace)));
     }
 
+    public function pineWebhook(Request $request, string $workspace): JsonResponse
+    {
+        $configuredToken = trim((string) config('future_trade.pine_webhook_token', ''));
+        $providedToken = trim((string) ($request->bearerToken() ?: $request->input('token', $request->query('token', ''))));
+
+        if ($configuredToken === '' || ! hash_equals($configuredToken, $providedToken)) {
+            return response()->json([
+                'accepted' => false,
+                'executed' => false,
+                'reason' => 'invalid_or_missing_webhook_token',
+            ], 401);
+        }
+
+        $result = $this->bot->ingestPineWebhook(
+            $this->bot->getOrCreateConfig($workspace),
+            $request->all()
+        );
+
+        return response()->json($result, ($result['accepted'] ?? false) ? 200 : 422);
+    }
+
     public function chart(Request $request, string $workspace): JsonResponse
     {
         return response()->json($this->bot->liveChartPayload(

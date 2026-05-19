@@ -65,6 +65,61 @@ test('realized PnL counts only CLOSED logical trades', function () {
         ->and($summary['openPositions'])->toBe(1);
 });
 
+test('realized PnL includes pre logical legacy close rows without counting new close rows twice', function () {
+    $config = ftMakeConfig();
+    $svc = app(FutureTradePnLService::class);
+
+    $config->trades()->create([
+        'symbol' => 'ETHUSDT',
+        'side' => 'CLOSE_LONG',
+        'entry_price' => 2000,
+        'exit_price' => 2010,
+        'quantity' => 0.1,
+        'net_pnl' => 0.90,
+        'mode' => 'PAPER',
+        'status' => 'FILLED',
+        'created_at' => now()->subDays(2),
+        'updated_at' => now()->subDays(2),
+    ]);
+
+    FutureTradeLogicalTrade::create([
+        'future_trade_bot_config_id' => $config->id,
+        'symbol' => 'ETHUSDT',
+        'side' => 'LONG',
+        'status' => FutureTradeLogicalTrade::STATUS_CLOSED,
+        'mode' => 'PAPER',
+        'signal_key' => 'logical-1',
+        'entry_price' => 2100,
+        'exit_price' => 2102,
+        'quantity' => 0.1,
+        'net_pnl' => 0.12,
+        'opened_at' => now()->subHour(),
+        'closed_at' => now()->subMinutes(50),
+        'created_at' => now()->subHour(),
+        'updated_at' => now()->subMinutes(50),
+    ]);
+
+    $config->trades()->create([
+        'symbol' => 'ETHUSDT',
+        'side' => 'CLOSE_LONG',
+        'entry_price' => 2100,
+        'exit_price' => 2102,
+        'quantity' => 0.1,
+        'net_pnl' => 0.12,
+        'mode' => 'PAPER',
+        'status' => 'FILLED',
+        'created_at' => now()->subMinutes(49),
+        'updated_at' => now()->subMinutes(49),
+    ]);
+
+    $summary = $svc->realizedSummary($config);
+
+    expect($summary['closedCount'])->toBe(2)
+        ->and($summary['logicalClosedCount'])->toBe(1)
+        ->and($summary['legacyClosedCount'])->toBe(1)
+        ->and((float) $summary['totalProfit'])->toEqualWithDelta(1.02, 0.0001);
+});
+
 test('signal_key uniqueness blocks the same signal from creating two logical trades', function () {
     $config = ftMakeConfig();
 

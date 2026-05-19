@@ -98,6 +98,7 @@ Route::prefix('v1')->group(function () {
     Route::post('wallet/withdraw/webhook', [LiveWalletController::class, 'withdrawWebhook'])->middleware('throttle:60,1');
     Route::post('exchange/binance/user-stream/ingest', [BinanceUserStreamController::class, 'ingest'])->middleware('throttle:120,1');
     Route::post('future-trade/user-stream/ingest', [FutureTradeUserStreamController::class, 'ingest'])->middleware('throttle:240,1');
+    Route::post('future-trade/pine-webhook/{workspace}', [FutureTradeBotController::class, 'pineWebhook'])->middleware('throttle:120,1');
 
     Route::middleware('auth:sanctum')->group(function () {
         Route::get('workspaces', [WorkspaceController::class, 'index']);

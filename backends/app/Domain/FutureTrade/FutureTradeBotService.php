@@ -76,9 +76,12 @@ class FutureTradeBotService
     {
         $blockers = [];
         $symbol = strtoupper((string) ($signal['symbol'] ?? $config->state?->current_symbol ?? ''));
-        $feed = $this->feedFreshnessSnapshot($symbol);
-        if (! ($feed['feedFresh'] ?? false)) {
-            $blockers[] = 'stale_feed';
+        $isPineWebhook = (string) ($signal['source'] ?? '') === 'pine_webhook';
+        if (! $isPineWebhook) {
+            $feed = $this->feedFreshnessSnapshot($symbol);
+            if (! ($feed['feedFresh'] ?? false)) {
+                $blockers[] = 'stale_feed';
+            }
         }
         if ($this->isLiveMode($config)) {
             $stream = $this->userStreamSvc()->snapshot($config);
@@ -690,8 +693,29 @@ class FutureTradeBotService
                 ]);
 
                 $autoExecutionEnabled = $this->isLiveMode($config) || (bool) ($settings['autoExecutePaperSignals'] ?? true);
-                if (! $lockedForDay && $allowPaperExecution && $config->enabled && $autoExecutionEnabled) {
+                $signalSource = $this->normalizedSignalSource($settings);
+                $mirrorExecutesEntries = match ($signalSource) {
+                    'webhook' => false,
+                    'webhook_fallback' => ! $this->pineWebhookRecentlyReceived($config, $settings),
+                    default => true,
+                };
+                if (! $lockedForDay && $allowPaperExecution && $config->enabled && $autoExecutionEnabled && $mirrorExecutesEntries) {
                     $this->maybeEnterPaperPosition($config->fresh('state'), $best);
+                } elseif (! $mirrorExecutesEntries) {
+                    // Webhook-only mode: scanner refreshes the UI snapshot above
+                    // but must NOT open positions itself — that's the webhook's
+                    // job. Surface this on the runtime log throttled, so the
+                    // operator sees why the scanner is "quiet" on entries.
+                    $this->logThrottled(
+                        $config,
+                        'MIRROR_EXECUTION_OFF',
+                        (string) ($best['symbol'] ?? null),
+                        (string) ($best['signal'] ?? null),
+                        (float) ($best['confidence'] ?? 0),
+                        'Signal source is set to webhook — backend scanner will not auto-execute entries.',
+                        ['status' => 'INFO', 'signalSource' => $signalSource],
+                        300
+                    );
                 }
             }
 
@@ -919,6 +943,165 @@ class FutureTradeBotService
                     'lastSkipReason' => (string) data_get($signal, 'debug.decisionStatus', ''),
                 ];
             }, $signals),
+        ];
+    }
+
+    public function ingestPineWebhook(FutureTradeBotConfig $config, array $payload): array
+    {
+        $settings = $this->normalizeFutureTradeSettings($config->mergedSettings());
+        $state = $this->state($config);
+
+        if (! $config->enabled) {
+            return $this->rejectPineWebhook($config, $payload, 'bot_disabled');
+        }
+        if (! $this->isPrimeCryptoProfile($settings)) {
+            return $this->rejectPineWebhook($config, $payload, 'profile_not_prime_v617');
+        }
+        if ($this->isLiveMode($config) && ! $this->pineWebhookLiveEnabled()) {
+            return $this->rejectPineWebhook($config, $payload, 'pine_webhook_live_disabled');
+        }
+        // Webhook is only accepted when this config has explicitly opted into
+        // the webhook signal source. This is the "no conflicts" guarantee:
+        // the operator must flip the UI toggle to switch from the backend
+        // mirror scanner to TradingView-fed entries.
+        $signalSource = $this->normalizedSignalSource($settings);
+        if (! in_array($signalSource, ['webhook', 'webhook_fallback'], true)) {
+            return $this->rejectPineWebhook($config, $payload, 'webhook_disabled_in_mirror_mode', [
+                'signalSource' => $signalSource,
+                'hint' => 'Set Future Trade > Settings > Signal source to "Webhook" or "Webhook + Binance fallback" before sending TradingView alerts.',
+            ]);
+        }
+
+        $symbol = $this->normalizePineSymbol((string) ($payload['symbol'] ?? $payload['ticker'] ?? ''));
+        $allowedSymbols = array_values(array_map('strtoupper', (array) ($settings['symbols'] ?? [])));
+        if ($symbol === '' || ! in_array($symbol, $allowedSymbols, true)) {
+            return $this->rejectPineWebhook($config, $payload, 'symbol_not_allowed', ['symbol' => $symbol, 'allowedSymbols' => $allowedSymbols]);
+        }
+
+        $timeframe = strtolower((string) ($payload['timeframe'] ?? $payload['interval'] ?? $settings['timeframe'] ?? '15m'));
+        if (! in_array($timeframe, ['15', '15m'], true)) {
+            return $this->rejectPineWebhook($config, $payload, 'timeframe_must_be_15m', ['timeframe' => $timeframe]);
+        }
+        $timeframe = '15m';
+
+        if (array_key_exists('bar_confirmed', $payload) && ! filter_var($payload['bar_confirmed'], FILTER_VALIDATE_BOOLEAN)) {
+            return $this->rejectPineWebhook($config, $payload, 'bar_not_confirmed');
+        }
+        if (array_key_exists('confirmed', $payload) && ! filter_var($payload['confirmed'], FILTER_VALIDATE_BOOLEAN)) {
+            return $this->rejectPineWebhook($config, $payload, 'bar_not_confirmed');
+        }
+
+        $candle = $this->pineWebhookCandleTimes($payload, $timeframe);
+        if ($candle['close'] === null || $candle['open'] === null) {
+            return $this->rejectPineWebhook($config, $payload, 'candle_time_required');
+        }
+        if ($candle['close']->greaterThan(now()->addSeconds(90))) {
+            return $this->rejectPineWebhook($config, $payload, 'candle_close_in_future', ['candleClose' => $candle['close']->toIso8601String()]);
+        }
+        if (((int) $candle['close']->minute % 15) !== 0) {
+            return $this->rejectPineWebhook($config, $payload, 'candle_close_not_15m_aligned', ['candleClose' => $candle['close']->toIso8601String()]);
+        }
+
+        $decision = strtoupper(trim((string) ($payload['signal'] ?? $payload['action'] ?? $payload['side'] ?? 'WAIT')));
+        $decision = match ($decision) {
+            'LONG' => 'BUY',
+            'SHORT' => 'SELL',
+            'CLOSE', 'WATCH' => 'WAIT',
+            default => $decision,
+        };
+        if (! in_array($decision, ['BUY', 'SELL', 'WAIT'], true)) {
+            return $this->rejectPineWebhook($config, $payload, 'unsupported_signal', ['signal' => $decision]);
+        }
+
+        $price = (float) ($payload['price'] ?? $payload['close'] ?? 0);
+        if ($price <= 0) {
+            return $this->rejectPineWebhook($config, $payload, 'price_required');
+        }
+
+        $longScore = (float) ($payload['longScore'] ?? $payload['long_score'] ?? ($decision === 'BUY' ? ($payload['score'] ?? 0) : 0));
+        $shortScore = (float) ($payload['shortScore'] ?? $payload['short_score'] ?? ($decision === 'SELL' ? ($payload['score'] ?? 0) : 0));
+        $activeScore = max($longScore, $shortScore, (float) ($payload['score'] ?? 0));
+        $confidence = $activeScore > 1 ? $activeScore / 100 : (float) ($payload['confidence'] ?? 0);
+        $confidence = $confidence > 0 ? $this->clamp($confidence, 0.01, 0.99) : ($decision === 'WAIT' ? 0.0 : (float) ($settings['minConfidence'] ?? 0.72));
+
+        $signal = [
+            'symbol' => $symbol,
+            'signal' => $decision,
+            'price' => $price,
+            'changePercent' => (float) ($payload['changePercent'] ?? $payload['change_percent'] ?? 0),
+            'intradayChange' => (float) ($payload['changePercent'] ?? $payload['change_percent'] ?? 0),
+            'volume' => (float) ($payload['volume'] ?? 0),
+            'rangePercent' => (float) ($payload['rangePercent'] ?? $payload['range_percent'] ?? 0),
+            'rangePosition' => (float) ($payload['rangePosition'] ?? $payload['range_position'] ?? 0.5),
+            'confidence' => round($confidence, 4),
+            'effectiveMinConfidence' => (float) ($settings['minConfidence'] ?? 0.72),
+            'timeframe' => $timeframe,
+            'candle_open' => $candle['open']->toIso8601String(),
+            'candle_close' => $candle['close']->toIso8601String(),
+            'source' => 'pine_webhook',
+            'reason' => (string) ($payload['reason'] ?? 'TradingView Pine v6.1.7 webhook'),
+            'debug' => [
+                'profile' => self::PROFILE_PRIME_V617_CRYPTO,
+                'profileName' => (string) ($settings['signalProfileName'] ?? 'AutoFinX Prime v6.1.7 Crypto Stable Default'),
+                'source' => 'pine_webhook',
+                'longScore' => $longScore,
+                'shortScore' => $shortScore,
+                'finalConfidence' => round($confidence, 4),
+                'pinePayload' => Arr::except($payload, ['token', 'secret']),
+                'checks' => [
+                    'barConfirmed' => true,
+                    'timeframe15m' => true,
+                    'symbolAllowed' => true,
+                    'secondaryAiWeightingDisabled' => true,
+                ],
+            ],
+        ];
+
+        $this->persistState($state, [
+            'current_symbol' => $symbol,
+            'current_signal' => $decision,
+            'current_price' => $price,
+            'confidence' => $confidence,
+            'last_scan_at' => now(),
+            'scanner_snapshot' => [$signal],
+        ]);
+
+        if ($decision === 'WAIT') {
+            $this->log($config->fresh('state'), 'PINE_WEBHOOK_WAIT', $symbol, 'WAIT', $confidence, 'Pine webhook produced WAIT/WATCH; no trade executed.', [
+                'source' => 'pine_webhook',
+                'profile' => self::PROFILE_PRIME_V617_CRYPTO,
+                'signalSource' => $signalSource,
+                'candleOpen' => $signal['candle_open'],
+                'candleClose' => $signal['candle_close'],
+            ]);
+
+            return ['accepted' => true, 'executed' => false, 'decision' => 'WAIT', 'reason' => 'wait_signal'];
+        }
+
+        $this->log($config->fresh('state'), 'PINE_WEBHOOK_SIGNAL', $symbol, $decision, $confidence, 'Pine webhook produced executable signal.', [
+            'source' => 'pine_webhook',
+            'profile' => self::PROFILE_PRIME_V617_CRYPTO,
+            'signalSource' => $signalSource,
+            'candleOpen' => $signal['candle_open'],
+            'candleClose' => $signal['candle_close'],
+        ]);
+
+        $beforeTradeCount = (int) $this->state($config)->trade_count_today;
+        $this->maybeEnterPaperPosition($config->fresh('state'), $signal);
+        $afterState = $this->state($config->fresh('state'));
+        $executed = (int) $afterState->trade_count_today > $beforeTradeCount
+            || in_array((string) $afterState->state, ['IN_POSITION', 'LIVE_IN_POSITION'], true);
+
+        return [
+            'accepted' => true,
+            'executed' => $executed,
+            'decision' => $decision,
+            'symbol' => $symbol,
+            'timeframe' => $timeframe,
+            'candleOpen' => $signal['candle_open'],
+            'candleClose' => $signal['candle_close'],
+            'state' => $afterState->state,
+            'currentSignal' => $afterState->current_signal,
         ];
     }
 
@@ -1193,6 +1376,71 @@ class FutureTradeBotService
         return $this->normalizeFutureTradeSettings($settings);
     }
 
+    private function normalizePineSymbol(string $symbol): string
+    {
+        $symbol = strtoupper(trim($symbol));
+        $symbol = preg_replace('/^[A-Z0-9_]+:/', '', $symbol) ?? $symbol;
+        $symbol = str_replace(['.P', 'PERP'], '', $symbol);
+
+        return preg_replace('/[^A-Z0-9]/', '', $symbol) ?? '';
+    }
+
+    /**
+     * @return array{open: ?Carbon, close: ?Carbon}
+     */
+    private function pineWebhookCandleTimes(array $payload, string $timeframe): array
+    {
+        $close = $this->parsePineWebhookTime($payload['candle_close_time'] ?? $payload['time_close'] ?? $payload['close_time'] ?? null);
+        $open = $this->parsePineWebhookTime($payload['candle_open_time'] ?? $payload['candle_open'] ?? $payload['time'] ?? null);
+        $minutes = $this->timeframeMinutes($timeframe);
+
+        if ($close === null && $open !== null) {
+            $close = $open->copy()->addMinutes($minutes);
+        }
+        if ($open === null && $close !== null) {
+            $open = $close->copy()->subMinutes($minutes);
+        }
+
+        return ['open' => $open, 'close' => $close];
+    }
+
+    private function parsePineWebhookTime(mixed $value): ?Carbon
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+
+        try {
+            if (is_numeric($value)) {
+                $number = (int) $value;
+                return $number > 9999999999
+                    ? Carbon::createFromTimestampMs($number)
+                    : Carbon::createFromTimestamp($number);
+            }
+
+            return Carbon::parse((string) $value);
+        } catch (Throwable) {
+            return null;
+        }
+    }
+
+    private function rejectPineWebhook(FutureTradeBotConfig $config, array $payload, string $reason, array $context = []): array
+    {
+        $symbol = $this->normalizePineSymbol((string) ($payload['symbol'] ?? $payload['ticker'] ?? ''));
+        $signal = strtoupper(trim((string) ($payload['signal'] ?? $payload['action'] ?? $payload['side'] ?? 'WAIT')));
+        $this->log($config->fresh('state'), 'PINE_WEBHOOK_REJECTED', $symbol ?: null, $signal ?: null, 0.0, $reason, array_merge([
+            'source' => 'pine_webhook',
+            'profile' => self::PROFILE_PRIME_V617_CRYPTO,
+            'payload' => Arr::except($payload, ['token', 'secret']),
+        ], $context));
+
+        return [
+            'accepted' => false,
+            'executed' => false,
+            'reason' => $reason,
+        ] + $context;
+    }
+
     // -------------------------------------------------------------------------
 
     public function configPayload(FutureTradeBotConfig $config): array
@@ -1320,6 +1568,7 @@ class FutureTradeBotService
     {
         $state = $this->state($config);
         $settings = $this->normalizeFutureTradeSettings($config->mergedSettings());
+        $primePineExecution = $this->isPrimeCryptoProfile($settings);
         $strictEntryGuards = (bool) ($settings['strictEntryGuards'] ?? false);
         $dynamic = $this->dynamicDecision($config, $state, (array) ($state->scanner_snapshot ?? []), $signal, $settings);
         $settings = $dynamic['settings'];
@@ -1368,6 +1617,27 @@ class FutureTradeBotService
                 (string) ($signal['reason'] ?? 'Strategy returned WAIT.'),
                 $this->runtimeContext($dynamic, ['status' => 'SKIPPED'], $signal, ['strategy_wait_signal']),
                 30
+            );
+            return;
+        }
+        if ($this->primeMirrorExecutionBlocked($config, $settings, $signal)) {
+            $reason = $this->isLiveMode($config)
+                ? 'prime_mirror_live_disabled_pending_tv_csv_validation'
+                : 'prime_mirror_execution_disabled_use_tradingview_webhook';
+            $this->recordMissedTradeAudit($config, $signal, $dynamic, [$reason]);
+            $this->emitTradeDecisionDebug($config, $signal, $dynamic, 'BLOCKED', [$reason]);
+            $this->log(
+                $config,
+                'TRADE_BLOCKED',
+                $signal['symbol'],
+                $signal['signal'],
+                (float) ($signal['confidence'] ?? 0),
+                'Prime backend mirror execution is disabled. Use TradingView Pine webhook source.',
+                $this->runtimeContext($dynamic, [
+                    'status' => 'BLOCKED',
+                    'source' => (string) ($signal['source'] ?? 'backend_mirror'),
+                    'requiredSource' => 'pine_webhook',
+                ], $signal, [$reason])
             );
             return;
         }
@@ -1443,7 +1713,7 @@ class FutureTradeBotService
         }
         $rrTp = (float) ($settings['takeProfitPercent'] ?? 0.45);
         $rrRollback = (float) ($settings['rollbackLossPercent'] ?? 0.18);
-        if ($rrTp < $rrRollback * 1.8) {
+        if (! $primePineExecution && $rrTp < $rrRollback * 1.8) {
             $this->emitTradeDecisionDebug($config, $signal, $dynamic, 'BLOCKED', ['risk_reward_guard']);
             $this->logThrottled(
                 $config,
@@ -1650,6 +1920,10 @@ class FutureTradeBotService
                     'signal' => $signal,
                     'dynamic' => $dynamic['public'],
                     'algorithm_mode' => $dynamic['mode'],
+                    'signal_profile' => $settings['signalProfile'] ?? null,
+                    'signal_profile_name' => $settings['signalProfileName'] ?? null,
+                    'market_profile' => $settings['marketProfile'] ?? null,
+                    'timeframe' => $settings['timeframe'] ?? null,
                     'idempotency_key' => (string) Str::uuid(),
                     'signal_key' => $signalKey,
                 ],
@@ -1783,6 +2057,24 @@ class FutureTradeBotService
 
     private function openLivePosition(FutureTradeBotConfig $config, array $signal): void
     {
+        $settings = $this->normalizeFutureTradeSettings($config->mergedSettings());
+        if ($this->primeMirrorExecutionBlocked($config, $settings, $signal)) {
+            $reason = $this->isLiveMode($config)
+                ? 'prime_mirror_live_disabled_pending_tv_csv_validation'
+                : 'prime_mirror_execution_disabled_use_tradingview_webhook';
+            $this->logThrottled(
+                $config->fresh('state'),
+                'TRADE_BLOCKED',
+                (string) ($signal['symbol'] ?? null),
+                (string) ($signal['signal'] ?? null),
+                (float) ($signal['confidence'] ?? 0),
+                'Prime backend mirror execution is disabled. Use TradingView Pine webhook source.',
+                ['status' => 'BLOCKED', 'hardBlockers' => [$reason], 'source' => (string) ($signal['source'] ?? 'backend_mirror')],
+                15
+            );
+            return;
+        }
+
         // Defense-in-depth: re-run the freshness gate here too. Any future
         // caller that bypasses maybeEnterPaperPosition still hits this check
         // before a real order is placed.
@@ -2080,6 +2372,10 @@ class FutureTradeBotService
                 'signal' => $signal,
                 'dynamic' => $dynamic['public'],
                 'algorithm_mode' => $dynamic['mode'],
+                'signal_profile' => $settings['signalProfile'] ?? null,
+                'signal_profile_name' => $settings['signalProfileName'] ?? null,
+                'market_profile' => $settings['marketProfile'] ?? null,
+                'timeframe' => $settings['timeframe'] ?? null,
                 'effective_trade_amount_usdt' => $requiredTradeAmountUsdt,
                 'signal_key' => $signalKey,
                 'client_order_id' => $clientOrderId,
@@ -2245,7 +2541,16 @@ class FutureTradeBotService
             'reason' => $reason,
             'mode' => $settings['forceTestnet'] ?? true ? 'LIVE_TESTNET' : 'LIVE',
             'status' => $positionClosed ? 'FILLED' : 'SUBMITTED',
-            'meta' => ['close_order' => $response, 'exchange_snapshot' => $postCloseExchange, 'dynamic' => $dynamic['public'], 'algorithm_mode' => $dynamic['mode']],
+            'meta' => [
+                'close_order' => $response,
+                'exchange_snapshot' => $postCloseExchange,
+                'dynamic' => $dynamic['public'],
+                'algorithm_mode' => $dynamic['mode'],
+                'signal_profile' => $settings['signalProfile'] ?? null,
+                'signal_profile_name' => $settings['signalProfileName'] ?? null,
+                'market_profile' => $settings['marketProfile'] ?? null,
+                'timeframe' => $settings['timeframe'] ?? null,
+            ],
         ]);
 
         // Record an exit event on the logical trade (whether or not it
@@ -2341,7 +2646,14 @@ class FutureTradeBotService
             'reason' => $reason,
             'mode' => 'PAPER',
 	            'status' => 'FILLED',
-            'meta' => ['dynamic' => $dynamic['public'], 'algorithm_mode' => $dynamic['mode']],
+            'meta' => [
+                'dynamic' => $dynamic['public'],
+                'algorithm_mode' => $dynamic['mode'],
+                'signal_profile' => $settings['signalProfile'] ?? null,
+                'signal_profile_name' => $settings['signalProfileName'] ?? null,
+                'market_profile' => $settings['marketProfile'] ?? null,
+                'timeframe' => $settings['timeframe'] ?? null,
+            ],
 	        ]);
 
         $this->markOpenEntryTradesClosed($config, (string) $state->current_symbol, $side, $price, $net);
@@ -4510,16 +4822,82 @@ class FutureTradeBotService
     private function normalizeFutureTradeSettings(array $settings): array
     {
         $settings['signalProfile'] = (string) ($settings['signalProfile'] ?? config('future_trade.default_signal_profile', self::PROFILE_PRIME_V617_CRYPTO));
-        if ($this->isPrimeCryptoProfile($settings)) {
+        $primeCryptoProfile = $this->isPrimeCryptoProfile($settings);
+        if ($primeCryptoProfile) {
+            $settings = array_merge([
+                'tradeScoreThreshold' => 72,
+                'watchScoreThreshold' => 58,
+                'tradeDirection' => 'Both',
+                'htf1' => '60',
+                'htf2' => '240',
+                'emaFast' => 9,
+                'emaSlow' => 21,
+                'emaTrend' => 50,
+                'emaMajor' => 200,
+                'donchianLength' => 20,
+                'useVWAP' => true,
+                'useDonchianScore' => true,
+                'useVolume' => true,
+                'useVolatilityFilter' => true,
+                'useChopFilter' => true,
+                'chopLength' => 14,
+                'cryptoChopMax' => 61.8,
+                'useMomentumBreakoutFilter' => false,
+                'rsiLength' => 14,
+                'longRsiMin' => 48,
+                'longRsiMax' => 72,
+                'shortRsiMin' => 28,
+                'shortRsiMax' => 52,
+                'adxLength' => 14,
+                'adxSmoothing' => 14,
+                'adxMin' => 20,
+                'volumeLength' => 20,
+                'cryptoRelVolMin' => 1.0,
+                'atrLength' => 14,
+                'atrRegimeLength' => 50,
+                'cryptoMinAtrPct' => 0.06,
+                'cryptoMaxAtrPct' => 3.0,
+                'slAtrMultiplier' => 1.4,
+                'tp1RR' => 1.0,
+                'tp2RR' => 2.0,
+                'useAtrTrailingSecondHalf' => true,
+                'trailAtrMultiplier' => 1.0,
+                'cooldownBars' => 3,
+                'exitOnStrongOppositeScore' => true,
+                'oppositeExitScore' => 78,
+                'signalSource' => 'webhook_fallback',
+                'pineWebhookFallbackTimeoutSeconds' => 1200,
+                'primeMirrorLiveEnabled' => true,
+                'primeMirrorExecutionEnabled' => true,
+            ], $settings);
             $settings['signalProfileName'] = 'AutoFinX Prime v6.1.7 Crypto Stable Default';
             $settings['marketProfile'] = 'Crypto';
             $settings['classicSimpleMode'] = false;
-            $settings['confidenceMode'] = 'fixed';
+            $settings['confidenceMode'] = 'pine_mirror';
             $settings['dynamicSuggestionEnabled'] = false;
+            $settings['bayesianFilter'] = false;
+            $settings['useBayesianFilter'] = false;
+            $settings['utBotFilter'] = false;
+            $settings['useUtBotFilter'] = false;
+            $settings['atrExpansionFilter'] = false;
+            $settings['useAtrExpansionFilter'] = false;
+            $settings['liquidityV7Engine'] = false;
+            $settings['useLiquidityV7Engine'] = false;
+            $settings['fvgEngine'] = false;
+            $settings['useFvgEngine'] = false;
+            $settings['scoreGapFilter'] = false;
+            $settings['heavyAntiChopFilter'] = false;
+            $settings['useMomentumBreakoutFilter'] = false;
             $settings['avoidChoppyMarket'] = false;
             $settings['strictEntryGuards'] = false;
             $settings['weakSetupAction'] = 'hold';
             $settings['minConfidence'] = (float) ($settings['tradeScoreThreshold'] ?? 72) / 100;
+            $settings['timeframe'] = '15m';
+            $settings['secondaryAiWeighting'] = false;
+            $settings['legacyWeightedScoring'] = false;
+            $settings['mode'] = 'pine_mirror_or_webhook_executor';
+            $settings['indicatorInfluence'] = [];
+            $settings['indicatorControls'] = [];
             $symbols = array_values(array_map('strtoupper', (array) ($settings['symbols'] ?? [])));
             $legacyDefaultSymbols = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'AVAXUSDT'];
             sort($symbols);
@@ -4530,10 +4908,17 @@ class FutureTradeBotService
             }
         }
 
-        return $this->indicatorIntelligence->normalizeSettings(
+        $settings = $this->indicatorIntelligence->normalizeSettings(
             IndicatorIntelligenceService::PROFILE_FUTURE_TRADE,
             $settings
         );
+
+        if ($primeCryptoProfile) {
+            $settings['indicatorInfluence'] = [];
+            $settings['indicatorControls'] = [];
+        }
+
+        return $settings;
     }
 
     private function isPrimeCryptoProfile(array $settings): bool
@@ -4545,6 +4930,34 @@ class FutureTradeBotService
     private function indicatorIntelligencePayload(FutureTradeBotConfig $config, array $settings, ?array $bestSignal): array
     {
         $settings = $this->normalizeFutureTradeSettings($settings);
+        if ($this->isPrimeCryptoProfile($settings)) {
+            return [
+                'controls' => [],
+                'hardBlockers' => [],
+                'currentBreakdown' => [],
+                'performance' => [],
+                'validation' => [
+                    'classicSimpleMode' => false,
+                    'normalGraphModeWorks' => true,
+                    'liveSignalFlowDetected' => true,
+                    'blockers' => [],
+                    'trackerAlignedIndicators' => 0,
+                    'highRatedIndicators' => 0,
+                    'overallReadinessScore' => 100,
+                ],
+                'suggestions' => [[
+                    'key' => 'prime_v617_pine_mirror',
+                    'title' => 'Prime v6.1.7 Pine Mirror active',
+                    'reason' => 'Secondary AI weighting and legacy indicator influence controls are disabled for the default crypto profile.',
+                    'action' => 'Use Pine score/debug components instead of MACD/RSI/symbol-performance weights.',
+                ]],
+                'integrationReadiness' => [
+                    'pineScriptImportReady' => true,
+                    'note' => 'Active Signal Brain: AutoFinX Prime v6.1.7 Pine Mirror. Secondary AI Weighting: Disabled.',
+                ],
+            ];
+        }
+
         $controls = array_values($this->indicatorIntelligence->controls(
             IndicatorIntelligenceService::PROFILE_FUTURE_TRADE,
             $settings
@@ -5221,6 +5634,10 @@ class FutureTradeBotService
     private function dynamicDecision(FutureTradeBotConfig $config, FutureTradeBotState $state, array $signals, ?array $best, array $settings): array
     {
         $settings = $this->normalizeFutureTradeSettings($settings);
+        if ($this->isPrimeCryptoProfile($settings)) {
+            return $this->primePineRuntimeDecision($settings, $best);
+        }
+
         $mode = strtolower((string) ($settings['confidenceMode'] ?? 'fixed'));
         if (! in_array($mode, ['fixed', 'semi_dynamic', 'fully_dynamic'], true)) {
             $mode = 'fixed';
@@ -5493,6 +5910,77 @@ class FutureTradeBotService
                 'adjustments' => $adjustments,
                 'suggestion' => $suggestion,
             ],
+        ];
+    }
+
+    private function primePineRuntimeDecision(array $settings, ?array $best): array
+    {
+        $scoreThreshold = (float) ($settings['tradeScoreThreshold'] ?? 72);
+        $confidence = $scoreThreshold / 100;
+        $risk = (array) data_get($best, 'debug.risk', []);
+        $riskPercent = max(0.0, (float) ($risk['riskPercent'] ?? 0.0));
+        $tp1RR = (float) ($settings['tp1RR'] ?? 1.0);
+        $trailMultiplier = (float) ($settings['trailAtrMultiplier'] ?? 1.0);
+
+        $next = $settings;
+        $next['confidenceMode'] = 'pine_mirror';
+        $next['minConfidence'] = $confidence;
+        $next['dynamicSuggestionEnabled'] = false;
+        $next['strictEntryGuards'] = false;
+        $next['avoidChoppyMarket'] = false;
+        $next['weakSetupAction'] = 'hold';
+
+        if ($riskPercent > 0) {
+            $next['stopLossPercent'] = round($riskPercent, 4);
+            $next['rollbackLossPercent'] = round($riskPercent, 4);
+            $next['takeProfitPercent'] = round(max($riskPercent * $tp1RR, $riskPercent), 4);
+            $next['trailingTakeProfitPercent'] = round(max(0.01, $riskPercent * $trailMultiplier), 4);
+        }
+
+        $public = [
+            'mode' => 'pine_mirror',
+            'baseMinConfidence' => $confidence,
+            'effectiveMinConfidence' => $confidence,
+            'recommended' => [
+                'minConfidence' => $confidence,
+                'takeProfitPercent' => (float) ($next['takeProfitPercent'] ?? $settings['takeProfitPercent'] ?? 0),
+                'stopLossPercent' => (float) ($next['stopLossPercent'] ?? $settings['stopLossPercent'] ?? 0),
+                'trailingTakeProfitPercent' => (float) ($next['trailingTakeProfitPercent'] ?? $settings['trailingTakeProfitPercent'] ?? 0),
+                'cooldownSeconds' => (int) ($next['cooldownSeconds'] ?? 900),
+                'tradeAmountUsdt' => (float) ($next['tradeAmountUsdt'] ?? 25),
+            ],
+            'analysis' => [
+                'lookbackMinutes' => 15,
+                'sampleCount' => 0,
+                'usableSignalCount' => $best && ($best['signal'] ?? 'WAIT') !== 'WAIT' ? 1 : 0,
+                'priceChangePercent' => (float) ($best['changePercent'] ?? 0),
+                'volatilityPercent' => $riskPercent,
+                'atrPercent' => (float) ($risk['atrPercent'] ?? 0),
+                'direction' => (string) ($best['signal'] ?? 'WAIT'),
+                'priceDirection' => (string) ($best['signal'] ?? 'WAIT'),
+                'signalDirection' => (string) ($best['signal'] ?? 'WAIT'),
+                'directionSource' => 'pine_v6_1_7_score',
+                'directionAgreement' => 1.0,
+                'confidenceGap' => max(0.0, (float) ($best['confidence'] ?? 0) - $confidence),
+                'trendStrength' => max((float) data_get($best, 'debug.longScore', 0), (float) data_get($best, 'debug.shortScore', 0)) / 100,
+                'choppy' => ! (bool) data_get($best, 'debug.checks.chopOk', true),
+                'regime' => 'pine_mirror',
+                'bestConfidence' => (float) ($best['confidence'] ?? 0),
+                'winRate' => 0,
+                'totalTrades' => 0,
+                'winRateSampleWeight' => 0,
+            ],
+            'adjustments' => [
+                'Prime v6.1.7 Pine mirror: secondary AI weighting, MACD weighting, RSI weighting, symbol-performance penalty and dynamic confidence overrides are disabled.',
+            ],
+            'suggestion' => 'Prime v6.1.7 Pine mirror is the active signal brain. Backend executes Pine score decisions and applies risk/freshness guards only.',
+        ];
+
+        return [
+            'mode' => 'pine_mirror',
+            'effectiveMinConfidence' => $confidence,
+            'settings' => $next,
+            'public' => $public,
         ];
     }
 
@@ -5922,9 +6410,9 @@ class FutureTradeBotService
     {
         if (count($candles) < 40) {
             return [
-                'preset' => 'PRO Scalper',
+                'preset' => 'AutoFinX Prime v6.1.7',
                 'state' => 'warming_up',
-                'summary' => 'Not enough live candles for indicator confirmation yet.',
+                'summary' => 'Not enough live candles for Prime v6.1.7 confirmation yet.',
                 'validations' => [],
                 'backtest' => [
                     'trades' => 0,
@@ -5985,13 +6473,13 @@ class FutureTradeBotService
         $backtest = $this->indicatorBacktestSummary($enriched, $settings);
 
         return [
-            'preset' => 'PRO Scalper',
+            'preset' => 'AutoFinX Prime v6.1.7',
             'state' => $executionReady ? 'confirmed' : (in_array($signal, ['BUY', 'SELL'], true) ? 'mixed' : 'waiting'),
             'summary' => $executionReady
-                ? 'PRO Scalper confirmation layer agrees with the active scanner direction.'
+                ? 'Prime v6.1.7 confirmation layer agrees with the active scanner direction.'
                 : (in_array($signal, ['BUY', 'SELL'], true)
-                    ? 'Scanner found a direction, but PRO Scalper confirmations are still mixed.'
-                    : 'PRO Scalper is waiting for a cleaner execution setup.'),
+                    ? 'Scanner found a direction, but Prime v6.1.7 confirmations are still mixed.'
+                    : 'Prime v6.1.7 is waiting for a cleaner execution setup.'),
             'signal' => $signal,
             'score' => $score,
             'executionReady' => $executionReady,
@@ -6357,6 +6845,7 @@ class FutureTradeBotService
     private function algorithmFlag(string $mode): string
     {
         return match ($mode) {
+            'pine_mirror' => 'PINE',
             'semi_dynamic' => 'SEMI',
             'fully_dynamic' => 'AUTO',
             default => 'NORMAL',
@@ -6470,23 +6959,6 @@ class FutureTradeBotService
         $botProfit = (float) $realized['botProfit'];
         $botLoss = (float) $realized['botLoss'];
 
-        if ($realized['closedCount'] === 0) {
-            $legacyClosed = $config->trades()
-                ->whereNotNull('net_pnl')
-                ->where(function ($q) {
-                    $q->where('status', 'CLOSED')
-                        ->orWhere('side', 'like', '%CLOSE%')
-                        ->orWhere('side', 'like', 'CLOSE_%');
-                })
-                ->get(['net_pnl']);
-            $botProfit = (float) $legacyClosed
-                ->filter(fn ($trade) => (float) $trade->net_pnl > 0)
-                ->sum(fn ($trade) => (float) $trade->net_pnl);
-            $botLoss = (float) $legacyClosed
-                ->filter(fn ($trade) => (float) $trade->net_pnl < 0)
-                ->sum(fn ($trade) => abs((float) $trade->net_pnl));
-        }
-
         $summary = [
             'walletBalance' => null,
             'availableBalance' => null,
@@ -6494,7 +6966,9 @@ class FutureTradeBotService
             'botProfit' => $botProfit,
             'botLoss' => $botLoss,
             'totalProfit' => $botProfit - $botLoss,
-            'realizedSource' => $realized['closedCount'] > 0 ? 'LOGICAL_TRADES' : 'LEGACY_CLOSE_ROWS',
+            'realizedSource' => ((int) ($realized['legacyClosedCount'] ?? 0) > 0 && (int) ($realized['logicalClosedCount'] ?? 0) > 0)
+                ? 'LOGICAL_TRADES_WITH_LEGACY_CLOSE_ROWS'
+                : ((int) ($realized['logicalClosedCount'] ?? 0) > 0 ? 'LOGICAL_TRADES' : 'LEGACY_CLOSE_ROWS'),
             'openLogicalTrades' => (int) $realized['openPositions'],
             'reconciliationRequired' => (int) $realized['reconciliationRequired'],
             'balanceSource' => $this->isLiveMode($config) ? 'BINANCE_FUTURES' : 'PAPER_LEDGER',
@@ -6595,6 +7069,68 @@ class FutureTradeBotService
         return (bool) $config->enable_live_trading
             && (bool) ($settings['liveTrading'] ?? false)
             && $this->environmentTradingReady((bool) ($settings['forceTestnet'] ?? true), $settings);
+    }
+
+    private function primeMirrorExecutionBlocked(FutureTradeBotConfig $config, array $settings, array $signal): bool
+    {
+        if (! $this->isPrimeCryptoProfile($settings)) {
+            return false;
+        }
+
+        if ((string) ($signal['source'] ?? '') === 'pine_webhook') {
+            return false;
+        }
+
+        if ($this->isLiveMode($config)) {
+            return ! $this->primeMirrorLiveEnabled($settings);
+        }
+
+        return ! $this->primeMirrorExecutionEnabled($settings);
+    }
+
+    private function normalizedSignalSource(array $settings): string
+    {
+        $source = strtolower(trim((string) ($settings['signalSource'] ?? 'webhook_fallback')));
+
+        return match ($source) {
+            'webhook', 'pine_webhook' => 'webhook',
+            'webhook_fallback', 'webhook_with_mirror_fallback', 'hybrid', 'auto', 'fallback' => 'webhook_fallback',
+            default => 'mirror',
+        };
+    }
+
+    private function pineWebhookRecentlyReceived(FutureTradeBotConfig $config, array $settings): bool
+    {
+        $timeout = max(60, (int) ($settings['pineWebhookFallbackTimeoutSeconds'] ?? 1200));
+        $latest = $config->logs()
+            ->whereIn('event', ['PINE_WEBHOOK_WAIT', 'PINE_WEBHOOK_SIGNAL'])
+            ->orderByDesc('occurred_at')
+            ->first(['occurred_at']);
+
+        return $latest?->occurred_at !== null
+            && $latest->occurred_at->greaterThanOrEqualTo(now()->subSeconds($timeout));
+    }
+
+    private function primeLiveExecutionBlocked(FutureTradeBotConfig $config, array $settings, array $signal): bool
+    {
+        return $this->primeMirrorExecutionBlocked($config, $settings, $signal);
+    }
+
+    private function primeMirrorExecutionEnabled(array $settings = []): bool
+    {
+        return filter_var($settings['primeMirrorExecutionEnabled'] ?? false, FILTER_VALIDATE_BOOLEAN)
+            || filter_var(config('future_trade.prime_mirror_execution_enabled', false), FILTER_VALIDATE_BOOLEAN);
+    }
+
+    private function primeMirrorLiveEnabled(array $settings = []): bool
+    {
+        return filter_var($settings['primeMirrorLiveEnabled'] ?? false, FILTER_VALIDATE_BOOLEAN)
+            || filter_var(config('future_trade.prime_mirror_live_enabled', false), FILTER_VALIDATE_BOOLEAN);
+    }
+
+    private function pineWebhookLiveEnabled(): bool
+    {
+        return filter_var(config('future_trade.pine_webhook_live_enabled', true), FILTER_VALIDATE_BOOLEAN);
     }
 
     private function liveClient(array $settings): BinanceFuturesClient
