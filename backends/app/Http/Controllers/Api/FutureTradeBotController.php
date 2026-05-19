@@ -290,12 +290,26 @@ class FutureTradeBotController extends Controller
 
     public function logs(Request $request, string $workspace): JsonResponse
     {
-        $query = $this->bot->getOrCreateConfig($workspace)->logs()->orderByDesc('occurred_at');
-        if (! filter_var($request->query('all', false), FILTER_VALIDATE_BOOL)) {
-            $query->limit(max(1, min(1000, (int) $request->query('limit', 100))));
-        }
+        try {
+            $limit = max(1, min(1000, (int) $request->query('limit', 300)));
+            $logs = $this->bot->getOrCreateConfig($workspace)
+                ->logs()
+                ->orderByDesc('occurred_at')
+                ->limit($limit)
+                ->get();
 
-        return response()->json($query->get());
+            return response()->json($logs);
+        } catch (\Throwable $e) {
+            Log::error('[FUTURE TRADE LOGS FAILED]', [
+                'workspace_id' => $workspace,
+                'error' => $e->getMessage(),
+            ]);
+
+            return response()->json([
+                'message' => 'Future Trade logs are temporarily unavailable.',
+                'error' => app()->hasDebugModeEnabled() ? $e->getMessage() : null,
+            ], 500);
+        }
     }
 
     private function envPayload($config): array
