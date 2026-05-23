@@ -7285,6 +7285,21 @@ class FutureTradeBotService
 
     private function log(FutureTradeBotConfig $config, string $event, ?string $symbol, ?string $signal, float $confidence, string $reason, array $context = []): void
     {
+        if (str_starts_with($event, 'PINE_WEBHOOK')) {
+            Log::info('[' . $event . ']', [
+                'workspace_id' => $config->workspace_id,
+                'symbol' => $symbol,
+                'signal' => $signal,
+                'confidence' => $confidence,
+                'reason' => $reason,
+                'source' => $context['source'] ?? null,
+                'profile' => $context['profile'] ?? null,
+                'signal_source' => $context['signalSource'] ?? null,
+                'candle_open' => $context['candleOpen'] ?? null,
+                'candle_close' => $context['candleClose'] ?? null,
+            ]);
+        }
+
         $config->logs()->create([
             'event' => $event,
             'symbol' => $symbol,
