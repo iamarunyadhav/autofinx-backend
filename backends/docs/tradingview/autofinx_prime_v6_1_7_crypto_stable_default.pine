@@ -69,6 +69,7 @@ showDashboard = input.bool(true, "Show Dashboard")
 showSignals = input.bool(true, "Show Buy/Sell Labels")
 showWatch = input.bool(true, "Show Watch Signals")
 colorBars = input.bool(false, "Color Bars By Bias")
+webhookToken = input.string("", "AutoFinX Webhook Token", group="Webhook")
 
 emaFast  = ta.ema(close, emaFastLen)
 emaSlow  = ta.ema(close, emaSlowLen)
@@ -189,6 +190,24 @@ shortScore += momentumShortOk ? 10 : 0
 longWatch = htfBull and longScore >= watchThreshold and longScore < scoreThreshold and longScore > shortScore
 shortWatch = htfBear and shortScore >= watchThreshold and shortScore < scoreThreshold and shortScore > longScore
 
+profileId = "autofinx_prime_v6_1_7_crypto"
+f_webhookPayload(_signal, _longScore, _shortScore) =>
+    _score = math.max(_longScore, _shortScore)
+    "{" +
+      "\"token\":\"" + webhookToken + "\"," +
+      "\"profile\":\"" + profileId + "\"," +
+      "\"symbol\":\"" + syminfo.ticker + "\"," +
+      "\"timeframe\":\"" + timeframe.period + "\"," +
+      "\"signal\":\"" + _signal + "\"," +
+      "\"price\":" + str.tostring(close, format.mintick) + "," +
+      "\"score\":" + str.tostring(_score, "#.##") + "," +
+      "\"longScore\":" + str.tostring(_longScore, "#.##") + "," +
+      "\"shortScore\":" + str.tostring(_shortScore, "#.##") + "," +
+      "\"bar_confirmed\":true," +
+      "\"candle_open_time\":" + str.tostring(time) + "," +
+      "\"source\":\"tradingview_pine_v617\"" +
+    "}"
+
 var int lastEntryBar = na
 canEnter = na(lastEntryBar) or bar_index - lastEntryBar >= cooldownBars
 hardLongFilter = allowLong and htfBull and emaBull and vwapBull and adxBull and volumeOk and volatilityOk and chopOk and momentumLongOk
@@ -210,12 +229,12 @@ if longEntrySignal and strategy.position_size <= 0
     entryAtr := atrVal
     entrySlMult := dynamicSlMult
     lastEntryBar := bar_index
-    strategy.entry("LONG", strategy.long, alert_message="AutoFinX Prime v6.1.7 BUY on {{ticker}}")
+    strategy.entry("LONG", strategy.long, alert_message=f_webhookPayload("BUY", longScore, shortScore))
 if shortEntrySignal and strategy.position_size >= 0
     entryAtr := atrVal
     entrySlMult := dynamicSlMult
     lastEntryBar := bar_index
-    strategy.entry("SHORT", strategy.short, alert_message="AutoFinX Prime v6.1.7 SELL on {{ticker}}")
+    strategy.entry("SHORT", strategy.short, alert_message=f_webhookPayload("SELL", longScore, shortScore))
 
 riskAtr = na(entryAtr) ? atrVal : entryAtr
 riskMult = na(entrySlMult) ? dynamicSlMult : entrySlMult
@@ -233,7 +252,7 @@ if strategy.position_size > 0
     else
         strategy.exit("L-TP2", from_entry="LONG", qty_percent=50, stop=stopPrice, limit=tp2Price)
     if exitOnStrongOpposite and shortScore >= oppositeExitThreshold and shortScore > longScore
-        strategy.close("LONG", comment="Opposite SELL score")
+        strategy.close("LONG", comment="Opposite SELL score", alert_message=f_webhookPayload("CLOSE", longScore, shortScore))
 
 if strategy.position_size < 0
     avg = strategy.position_avg_price
@@ -246,7 +265,7 @@ if strategy.position_size < 0
     else
         strategy.exit("S-TP2", from_entry="SHORT", qty_percent=50, stop=stopPrice, limit=tp2Price)
     if exitOnStrongOpposite and longScore >= oppositeExitThreshold and longScore > shortScore
-        strategy.close("SHORT", comment="Opposite BUY score")
+        strategy.close("SHORT", comment="Opposite BUY score", alert_message=f_webhookPayload("CLOSE", longScore, shortScore))
 
 emaFastColor = emaFast > emaSlow ? color.lime : color.red
 emaSlowColor = emaFast > emaSlow ? color.green : color.orange

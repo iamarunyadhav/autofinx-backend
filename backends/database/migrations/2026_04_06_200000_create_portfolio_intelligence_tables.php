@@ -44,7 +44,7 @@ return new class extends Migration
             Schema::create('portfolio_intelligence_runs', function (Blueprint $table) {
                 $table->uuid('id')->primary();
                 $table->uuid('workspace_id')->index();
-                $table->uuid('portfolio_intelligence_config_id')->nullable()->index();
+                $table->uuid('portfolio_intelligence_config_id')->nullable();
                 $table->string('trigger_type', 32)->default('manual')->index();
                 $table->string('status', 32)->default('completed')->index();
                 $table->string('correlation_id', 100)->unique();
@@ -70,7 +70,11 @@ return new class extends Migration
                 $table->timestamps();
 
                 $table->foreign('workspace_id')->references('id')->on('workspaces')->cascadeOnDelete();
-                $table->foreign('portfolio_intelligence_config_id')->references('id')->on('portfolio_intelligence_configs')->nullOnDelete();
+                $table->index('portfolio_intelligence_config_id', 'pi_runs_config_idx');
+                $table->foreign('portfolio_intelligence_config_id', 'pi_runs_config_fk')
+                    ->references('id')
+                    ->on('portfolio_intelligence_configs')
+                    ->nullOnDelete();
             });
         }
     }

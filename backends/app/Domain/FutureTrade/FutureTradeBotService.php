@@ -957,6 +957,13 @@ class FutureTradeBotService
         if (! $this->isPrimeCryptoProfile($settings)) {
             return $this->rejectPineWebhook($config, $payload, 'profile_not_prime_v617');
         }
+        $payloadProfile = trim((string) ($payload['profile'] ?? $payload['profile_id'] ?? ''));
+        if ($payloadProfile !== '' && $payloadProfile !== self::PROFILE_PRIME_V617_CRYPTO) {
+            return $this->rejectPineWebhook($config, $payload, 'payload_profile_not_prime_v617', [
+                'payloadProfile' => $payloadProfile,
+                'expectedProfile' => self::PROFILE_PRIME_V617_CRYPTO,
+            ]);
+        }
         if ($this->isLiveMode($config) && ! $this->pineWebhookLiveEnabled()) {
             return $this->rejectPineWebhook($config, $payload, 'pine_webhook_live_disabled');
         }
@@ -1003,10 +1010,11 @@ class FutureTradeBotService
         }
 
         $decision = strtoupper(trim((string) ($payload['signal'] ?? $payload['action'] ?? $payload['side'] ?? 'WAIT')));
+        $isCloseSignal = in_array($decision, ['CLOSE', 'EXIT', 'FLAT'], true);
         $decision = match ($decision) {
             'LONG' => 'BUY',
             'SHORT' => 'SELL',
-            'CLOSE', 'WATCH' => 'WAIT',
+            'CLOSE', 'EXIT', 'FLAT', 'WATCH' => 'WAIT',
             default => $decision,
         };
         if (! in_array($decision, ['BUY', 'SELL', 'WAIT'], true)) {
@@ -1067,7 +1075,11 @@ class FutureTradeBotService
         ]);
 
         if ($decision === 'WAIT') {
-            $this->log($config->fresh('state'), 'PINE_WEBHOOK_WAIT', $symbol, 'WAIT', $confidence, 'Pine webhook produced WAIT/WATCH; no trade executed.', [
+            $event = $isCloseSignal ? 'PINE_WEBHOOK_CLOSE' : 'PINE_WEBHOOK_WAIT';
+            $reason = $isCloseSignal
+                ? 'Pine webhook produced CLOSE/EXIT; backend does not open a reverse trade.'
+                : 'Pine webhook produced WAIT/WATCH; no trade executed.';
+            $this->log($config->fresh('state'), $event, $symbol, $isCloseSignal ? 'CLOSE' : 'WAIT', $confidence, $reason, [
                 'source' => 'pine_webhook',
                 'profile' => self::PROFILE_PRIME_V617_CRYPTO,
                 'signalSource' => $signalSource,
@@ -1075,7 +1087,12 @@ class FutureTradeBotService
                 'candleClose' => $signal['candle_close'],
             ]);
 
-            return ['accepted' => true, 'executed' => false, 'decision' => 'WAIT', 'reason' => 'wait_signal'];
+            return [
+                'accepted' => true,
+                'executed' => false,
+                'decision' => $isCloseSignal ? 'CLOSE' : 'WAIT',
+                'reason' => $isCloseSignal ? 'close_signal_logged_only' : 'wait_signal',
+            ];
         }
 
         $this->log($config->fresh('state'), 'PINE_WEBHOOK_SIGNAL', $symbol, $decision, $confidence, 'Pine webhook produced executable signal.', [
