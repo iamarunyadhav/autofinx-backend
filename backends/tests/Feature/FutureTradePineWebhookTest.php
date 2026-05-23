@@ -106,6 +106,17 @@ test('pine webhook rejects non 15m or unconfirmed candles', function () {
         ->assertJsonPath('reason', 'bar_not_confirmed');
 });
 
+test('pine webhook rejects wrong payload profile', function () {
+    config(['future_trade.pine_webhook_token' => 'pine-secret']);
+    Carbon::setTestNow('2026-05-19 10:30:05');
+    $workspace = Workspace::factory()->create();
+    createPrimeWebhookConfig($workspace->id);
+
+    $this->postJson("/api/v1/future-trade/pine-webhook/{$workspace->id}", pineWebhookPayload(['profile' => 'old_weighted_ai']))
+        ->assertStatus(422)
+        ->assertJsonPath('reason', 'payload_profile_not_prime_v617');
+});
+
 test('pine webhook wait signal is accepted but does not open a trade', function () {
     config(['future_trade.pine_webhook_token' => 'pine-secret']);
     Carbon::setTestNow('2026-05-19 10:30:05');
@@ -120,6 +131,23 @@ test('pine webhook wait signal is accepted but does not open a trade', function 
 
     expect((float) ($config->state()->first()?->quantity ?? 0))->toBe(0.0)
         ->and($config->logicalTrades()->count())->toBe(0);
+});
+
+test('pine webhook close signal is accepted as log only and does not open reverse trade', function () {
+    config(['future_trade.pine_webhook_token' => 'pine-secret']);
+    Carbon::setTestNow('2026-05-19 10:30:05');
+    $workspace = Workspace::factory()->create();
+    $config = createPrimeWebhookConfig($workspace->id);
+
+    $this->postJson("/api/v1/future-trade/pine-webhook/{$workspace->id}", pineWebhookPayload(['signal' => 'CLOSE', 'score' => 82]))
+        ->assertOk()
+        ->assertJsonPath('accepted', true)
+        ->assertJsonPath('executed', false)
+        ->assertJsonPath('decision', 'CLOSE');
+
+    expect((float) ($config->state()->first()?->quantity ?? 0))->toBe(0.0)
+        ->and($config->logicalTrades()->count())->toBe(0)
+        ->and($config->logs()->where('event', 'PINE_WEBHOOK_CLOSE')->exists())->toBeTrue();
 });
 
 test('pine webhook is accepted in webhook fallback mode', function () {
