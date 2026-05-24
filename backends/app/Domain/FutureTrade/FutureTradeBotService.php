@@ -2573,11 +2573,20 @@ class FutureTradeBotService
         // Record an exit event on the logical trade (whether or not it
         // confirmed) so reconciliation/audit always has a paper trail.
         if ($logicalForClose) {
-            $logicalForClose->update([
+            $logicalUpdate = [
                 'exit_client_order_id' => $closeClientOrderId,
                 'exit_exchange_order_id' => (string) ($response['orderId'] ?? $logicalForClose->exit_exchange_order_id ?? ''),
                 'status' => $positionClosed ? FutureTradeLogicalTrade::STATUS_CLOSED : FutureTradeLogicalTrade::STATUS_CLOSING,
-            ]);
+            ];
+
+            if ($positionClosed) {
+                $logicalUpdate['exit_price'] = $price;
+                $logicalUpdate['gross_pnl'] = $gross;
+                $logicalUpdate['net_pnl'] = $net;
+                $logicalUpdate['closed_at'] = now();
+            }
+
+            $logicalForClose->update($logicalUpdate);
             FutureTradeLogicalTradeEvent::create([
                 'future_trade_logical_trade_id' => $logicalForClose->id,
                 'future_trade_bot_config_id' => $config->id,
@@ -3524,6 +3533,7 @@ class FutureTradeBotService
     {
         $symbols = array_map('strtoupper', (array) ($settings['symbols'] ?? []));
         $cacheKey = 'future_trade_market_snapshot_' . md5(implode(',', $symbols));
+        $dataBase = null;
         try {
             // Execution base: testnet or live depending on settings
             $execBase = rtrim((string) (($settings['forceTestnet'] ?? true)
@@ -3578,6 +3588,21 @@ class FutureTradeBotService
             return $result;
         } catch (Throwable $e) {
             $cached = Cache::get($cacheKey, []);
+            $isTransient = $this->isTransientNetworkException($e);
+            $derived = $this->fallbackMarketSnapshotFromCache($config, $symbols, $settings, (string) $dataBase);
+
+            if ($isTransient && ! empty($derived)) {
+                if (! empty($cached)) {
+                    return $cached;
+                }
+
+                return $derived;
+            }
+
+            if ($isTransient && ! empty($cached)) {
+                return $cached;
+            }
+
             $this->logThrottled(
                 $config->fresh('state'),
                 'MARKET_SNAPSHOT_FAILED',
@@ -3586,15 +3611,47 @@ class FutureTradeBotService
                 0,
                 $e->getMessage(),
                 [
-                    'status' => 'ERROR',
+                    'status' => $isTransient ? 'WARNING' : 'ERROR',
                     'cachedSymbols' => is_array($cached) ? count($cached) : 0,
                     'requestedSymbols' => count($symbols),
+                    'transient' => $isTransient,
                 ],
-                60
+                $isTransient ? 180 : 60
             );
 
             return $cached;
         }
+    }
+
+    private function fallbackMarketSnapshotFromCache(FutureTradeBotConfig $config, array $symbols, array $settings, string $dataBase): array
+    {
+        $sequenceSnapshots = $this->sequenceSnapshots($symbols, $settings, $dataBase);
+        $structureSnapshots = $this->structureSnapshots($symbols, $dataBase);
+        $htfSnapshots = $this->higherTfSnapshots($symbols, $settings, $dataBase);
+        $configId = (string) $config->id;
+        $rows = [];
+
+        foreach ($symbols as $symbol) {
+            $feedPrice = $this->cachedLatestPrice($symbol);
+            if (! $feedPrice || (float) ($feedPrice['price'] ?? 0) <= 0) {
+                continue;
+            }
+
+            $price = (float) $feedPrice['price'];
+            $rows[] = [
+                'symbol' => $symbol,
+                'lastPrice' => (string) $price,
+                'price' => (string) $price,
+                'priceChangePercent' => '0',
+                'quoteVolume' => '0',
+                'sequence' => $sequenceSnapshots[$symbol] ?? $this->emptySequenceSnapshot(),
+                'structure' => $structureSnapshots[$symbol] ?? $this->emptyStructureSnapshot(),
+                'htf' => $htfSnapshots[$symbol] ?? ['emaBullish' => null, 'h4EmaBullish' => null, 'ema200Bullish' => null, 'ema50_1h' => 0.0, 'ema50_4h' => 0.0, 'ema200_1h' => 0.0, 'lastCandleTime_1h' => null, 'lastCandleTime_4h' => null],
+                'symbolPerfAdjust' => $configId !== '' ? $this->symbolPerformanceAdjustment($symbol, $configId) : 0,
+            ];
+        }
+
+        return $rows;
     }
 
     private function sequenceSnapshots(array $symbols, array $settings, string $base): array
@@ -3776,11 +3833,12 @@ class FutureTradeBotService
         $lastOpen = (float) (end($opens) ?: $last);
         $lastHigh = (float) (end($highs) ?: $last);
         $lastLow = (float) (end($lows) ?: $last);
+        $minBodyRatio = (float) ($settings['minBodyRatio'] ?? 0.55);
         $bodyRatio = ($lastHigh - $lastLow) > 0 ? abs($last - $lastOpen) / ($lastHigh - $lastLow) : 0.0;
         $recentHighs = array_slice($highs, -6, 5);
         $recentLows = array_slice($lows, -6, 5);
-        $momentumLongOk = $emaSlope > 0 && $last > $lastOpen && $bodyRatio >= 0.55 && count($recentHighs) > 0 && $last > max($recentHighs);
-        $momentumShortOk = $emaSlope < 0 && $last < $lastOpen && $bodyRatio >= 0.55 && count($recentLows) > 0 && $last < min($recentLows);
+        $momentumLongOk = $emaSlope > 0 && $last > $lastOpen && $bodyRatio >= $minBodyRatio && count($recentHighs) > 0 && $last > max($recentHighs);
+        $momentumShortOk = $emaSlope < 0 && $last < $lastOpen && $bodyRatio >= $minBodyRatio && count($recentLows) > 0 && $last < min($recentLows);
         $extendedFromEma = $atr14 > 0 && $ema9 > 0 ? abs($last - $ema9) >= ($atr14 * 1.2) : false;
         $extendedFromVwap = $atr14 > 0 && $sessionVwap > 0 ? abs($last - $sessionVwap) >= ($atr14 * 1.4) : false;
         $utBot = count($closes) >= 12 ? $this->calcUtBot($closes, 10, 3.0) : ['signal' => 'WAIT', 'bias' => 'NEUTRAL', 'stop' => 0.0];
@@ -4904,9 +4962,9 @@ class FutureTradeBotService
             $settings['useFvgEngine'] = false;
             $settings['scoreGapFilter'] = false;
             $settings['heavyAntiChopFilter'] = false;
-            $settings['useMomentumBreakoutFilter'] = false;
-            $settings['avoidChoppyMarket'] = false;
-            $settings['strictEntryGuards'] = false;
+            $settings['useMomentumBreakoutFilter'] = (bool) ($settings['useMomentumBreakoutFilter'] ?? false);
+            $settings['avoidChoppyMarket'] = (bool) ($settings['avoidChoppyMarket'] ?? true);
+            $settings['strictEntryGuards'] = (bool) ($settings['strictEntryGuards'] ?? true);
             $settings['weakSetupAction'] = 'hold';
             $settings['minConfidence'] = (float) ($settings['tradeScoreThreshold'] ?? 72) / 100;
             $settings['timeframe'] = '15m';
@@ -5943,8 +6001,8 @@ class FutureTradeBotService
         $next['confidenceMode'] = 'pine_mirror';
         $next['minConfidence'] = $confidence;
         $next['dynamicSuggestionEnabled'] = false;
-        $next['strictEntryGuards'] = false;
-        $next['avoidChoppyMarket'] = false;
+        $next['strictEntryGuards'] = (bool) ($settings['strictEntryGuards'] ?? true);
+        $next['avoidChoppyMarket'] = (bool) ($settings['avoidChoppyMarket'] ?? true);
         $next['weakSetupAction'] = 'hold';
 
         if ($riskPercent > 0) {
