@@ -3833,11 +3833,12 @@ class FutureTradeBotService
         $lastOpen = (float) (end($opens) ?: $last);
         $lastHigh = (float) (end($highs) ?: $last);
         $lastLow = (float) (end($lows) ?: $last);
+        $minBodyRatio = (float) ($settings['minBodyRatio'] ?? 0.55);
         $bodyRatio = ($lastHigh - $lastLow) > 0 ? abs($last - $lastOpen) / ($lastHigh - $lastLow) : 0.0;
         $recentHighs = array_slice($highs, -6, 5);
         $recentLows = array_slice($lows, -6, 5);
-        $momentumLongOk = $emaSlope > 0 && $last > $lastOpen && $bodyRatio >= 0.55 && count($recentHighs) > 0 && $last > max($recentHighs);
-        $momentumShortOk = $emaSlope < 0 && $last < $lastOpen && $bodyRatio >= 0.55 && count($recentLows) > 0 && $last < min($recentLows);
+        $momentumLongOk = $emaSlope > 0 && $last > $lastOpen && $bodyRatio >= $minBodyRatio && count($recentHighs) > 0 && $last > max($recentHighs);
+        $momentumShortOk = $emaSlope < 0 && $last < $lastOpen && $bodyRatio >= $minBodyRatio && count($recentLows) > 0 && $last < min($recentLows);
         $extendedFromEma = $atr14 > 0 && $ema9 > 0 ? abs($last - $ema9) >= ($atr14 * 1.2) : false;
         $extendedFromVwap = $atr14 > 0 && $sessionVwap > 0 ? abs($last - $sessionVwap) >= ($atr14 * 1.4) : false;
         $utBot = count($closes) >= 12 ? $this->calcUtBot($closes, 10, 3.0) : ['signal' => 'WAIT', 'bias' => 'NEUTRAL', 'stop' => 0.0];
@@ -4961,9 +4962,9 @@ class FutureTradeBotService
             $settings['useFvgEngine'] = false;
             $settings['scoreGapFilter'] = false;
             $settings['heavyAntiChopFilter'] = false;
-            $settings['useMomentumBreakoutFilter'] = false;
-            $settings['avoidChoppyMarket'] = false;
-            $settings['strictEntryGuards'] = false;
+            $settings['useMomentumBreakoutFilter'] = (bool) ($settings['useMomentumBreakoutFilter'] ?? false);
+            $settings['avoidChoppyMarket'] = (bool) ($settings['avoidChoppyMarket'] ?? true);
+            $settings['strictEntryGuards'] = (bool) ($settings['strictEntryGuards'] ?? true);
             $settings['weakSetupAction'] = 'hold';
             $settings['minConfidence'] = (float) ($settings['tradeScoreThreshold'] ?? 72) / 100;
             $settings['timeframe'] = '15m';
@@ -6000,8 +6001,8 @@ class FutureTradeBotService
         $next['confidenceMode'] = 'pine_mirror';
         $next['minConfidence'] = $confidence;
         $next['dynamicSuggestionEnabled'] = false;
-        $next['strictEntryGuards'] = false;
-        $next['avoidChoppyMarket'] = false;
+        $next['strictEntryGuards'] = (bool) ($settings['strictEntryGuards'] ?? true);
+        $next['avoidChoppyMarket'] = (bool) ($settings['avoidChoppyMarket'] ?? true);
         $next['weakSetupAction'] = 'hold';
 
         if ($riskPercent > 0) {
