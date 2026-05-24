@@ -123,3 +123,37 @@ test('mirror-mode rejection payload includes a hint pointing operators at the UI
     expect($result['reason'])->toBe('webhook_disabled_in_mirror_mode')
         ->and(isset($result['signalSource']) || isset($result['details']) || isset($result['hint']))->toBeTrue();
 });
+
+test('webhook fallback ignores recent WAIT webhooks but respects recent executable webhooks', function () {
+    $config = sigSrcConfig('webhook_fallback');
+    $settings = array_merge($config->mergedSettings(), [
+        'pineWebhookFallbackTimeoutSeconds' => 1200,
+    ]);
+    $bot = app(FutureTradeBotService::class);
+    $method = new ReflectionMethod(FutureTradeBotService::class, 'pineWebhookRecentlyReceived');
+    $method->setAccessible(true);
+
+    $config->logs()->create([
+        'event' => 'PINE_WEBHOOK_WAIT',
+        'symbol' => 'ETHUSDT',
+        'signal' => 'WAIT',
+        'confidence' => 0.63,
+        'reason' => 'WAIT should not suppress mirror fallback.',
+        'context' => [],
+        'occurred_at' => now(),
+    ]);
+
+    expect($method->invoke($bot, $config->fresh(), $settings))->toBeFalse();
+
+    $config->logs()->create([
+        'event' => 'PINE_WEBHOOK_SIGNAL',
+        'symbol' => 'ETHUSDT',
+        'signal' => 'BUY',
+        'confidence' => 0.82,
+        'reason' => 'Executable webhook should suppress mirror fallback briefly.',
+        'context' => [],
+        'occurred_at' => now(),
+    ]);
+
+    expect($method->invoke($bot, $config->fresh(), $settings))->toBeTrue();
+});
