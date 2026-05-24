@@ -691,6 +691,7 @@ class FutureTradeBotService
                     'scanner_snapshot' => array_slice($signals, 0, 12),
                     'chart_points' => $chart,
                 ]);
+                $this->logScanStatus($config->fresh('state'), $best, $dynamic);
 
                 $autoExecutionEnabled = $this->isLiveMode($config) || (bool) ($settings['autoExecutePaperSignals'] ?? true);
                 $signalSource = $this->normalizedSignalSource($settings);
@@ -3592,9 +3593,7 @@ class FutureTradeBotService
             $derived = $this->fallbackMarketSnapshotFromCache($config, $symbols, $settings, (string) $dataBase);
 
             if ($isTransient && ! empty($derived)) {
-                if (! empty($cached)) {
-                    return $cached;
-                }
+                Cache::put($cacheKey, $derived, max(3, min(10, (int) ($settings['scanIntervalSeconds'] ?? 3) * 2)));
 
                 return $derived;
             }
@@ -3625,9 +3624,23 @@ class FutureTradeBotService
 
     private function fallbackMarketSnapshotFromCache(FutureTradeBotConfig $config, array $symbols, array $settings, string $dataBase): array
     {
-        $sequenceSnapshots = $this->sequenceSnapshots($symbols, $settings, $dataBase);
-        $structureSnapshots = $this->structureSnapshots($symbols, $dataBase);
-        $htfSnapshots = $this->higherTfSnapshots($symbols, $settings, $dataBase);
+        try {
+            $sequenceSnapshots = $this->sequenceSnapshots($symbols, $settings, $dataBase);
+        } catch (Throwable) {
+            $sequenceSnapshots = [];
+        }
+
+        try {
+            $structureSnapshots = $this->structureSnapshots($symbols, $dataBase);
+        } catch (Throwable) {
+            $structureSnapshots = [];
+        }
+
+        try {
+            $htfSnapshots = $this->higherTfSnapshots($symbols, $settings, $dataBase);
+        } catch (Throwable) {
+            $htfSnapshots = [];
+        }
         $configId = (string) $config->id;
         $rows = [];
 
@@ -4940,10 +4953,10 @@ class FutureTradeBotService
                 'cooldownBars' => 3,
                 'exitOnStrongOppositeScore' => true,
                 'oppositeExitScore' => 78,
-                'signalSource' => 'webhook_fallback',
+                'signalSource' => 'webhook',
                 'pineWebhookFallbackTimeoutSeconds' => 1200,
-                'primeMirrorLiveEnabled' => true,
-                'primeMirrorExecutionEnabled' => true,
+                'primeMirrorLiveEnabled' => false,
+                'primeMirrorExecutionEnabled' => false,
             ], $settings);
             $settings['signalProfileName'] = 'AutoFinX Prime v6.1.7 Crypto Stable Default';
             $settings['marketProfile'] = 'Crypto';
@@ -7165,7 +7178,7 @@ class FutureTradeBotService
 
     private function normalizedSignalSource(array $settings): string
     {
-        $source = strtolower(trim((string) ($settings['signalSource'] ?? 'webhook_fallback')));
+        $source = strtolower(trim((string) ($settings['signalSource'] ?? 'webhook')));
 
         return match ($source) {
             'webhook', 'pine_webhook' => 'webhook',
@@ -7178,7 +7191,7 @@ class FutureTradeBotService
     {
         $timeout = max(60, (int) ($settings['pineWebhookFallbackTimeoutSeconds'] ?? 1200));
         $latest = $config->logs()
-            ->whereIn('event', ['PINE_WEBHOOK_WAIT', 'PINE_WEBHOOK_SIGNAL'])
+            ->where('event', 'PINE_WEBHOOK_SIGNAL')
             ->orderByDesc('occurred_at')
             ->first(['occurred_at']);
 
@@ -7368,6 +7381,45 @@ class FutureTradeBotService
             'context' => $context,
             'occurred_at' => now(),
         ]);
+    }
+
+    private function logScanStatus(FutureTradeBotConfig $config, array $signal, array $dynamic): void
+    {
+        $public = (array) ($dynamic['public'] ?? []);
+        $recommended = (array) ($dynamic['recommended'] ?? []);
+        $analysis = (array) ($dynamic['analysis'] ?? []);
+        $checks = (array) data_get($signal, 'debug.checks', []);
+
+        $this->logThrottled(
+            $config,
+            'SCAN_STATUS',
+            (string) ($signal['symbol'] ?? null),
+            (string) ($signal['signal'] ?? 'WAIT'),
+            (float) ($signal['confidence'] ?? 0),
+            'Scanner refreshed current runtime values.',
+            [
+                'status' => (string) ($signal['signal'] ?? 'WAIT'),
+                'algorithmFlag' => 'PINE',
+                'effectiveMinConfidence' => (float) ($dynamic['effectiveMinConfidence'] ?? $signal['effectiveMinConfidence'] ?? 0),
+                'activeTakeProfitPercent' => (float) ($public['takeProfitPercent'] ?? $recommended['takeProfitPercent'] ?? 0),
+                'activeStopLossPercent' => (float) ($public['stopLossPercent'] ?? $recommended['stopLossPercent'] ?? 0),
+                'activeTrailingTakeProfitPercent' => (float) ($public['trailingTakeProfitPercent'] ?? $recommended['trailingTakeProfitPercent'] ?? 0),
+                'activeCooldownSeconds' => (int) ($public['cooldownSeconds'] ?? $recommended['cooldownSeconds'] ?? 0),
+                'activeTradeAmountUsdt' => (float) ($public['tradeAmountUsdt'] ?? $recommended['tradeAmountUsdt'] ?? 0),
+                'trendStrength' => (float) ($analysis['trendStrength'] ?? 0),
+                'choppy' => (bool) ($analysis['choppy'] ?? false),
+                'vwapAligned' => $checks['vwapAligned'] ?? null,
+                'emaAligned' => $checks['emaAligned'] ?? null,
+                'adxValue' => $checks['adxValue'] ?? null,
+                'macdDirection' => $checks['macdDirection'] ?? null,
+                'rsiValue' => $checks['rsiValue'] ?? null,
+                'volumeAligned' => $checks['volumeAligned'] ?? null,
+                'volumeRatio' => $checks['volumeRatio'] ?? null,
+                'htfAligned' => $checks['htfAligned'] ?? null,
+                'hardBlocker' => (string) ($signal['reason'] ?? ''),
+            ],
+            10
+        );
     }
 
     private function emitConfigAuditLogs(FutureTradeBotConfig $config, array $changes, string|int|null $userId): void

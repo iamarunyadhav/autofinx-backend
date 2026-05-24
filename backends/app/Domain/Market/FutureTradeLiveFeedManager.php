@@ -69,6 +69,9 @@ class FutureTradeLiveFeedManager
             'startedAt' => $meta['started_at'] ?? null,
             'command' => $meta['command'] ?? $this->commandLine($desiredSymbols),
             'manualCommand' => $this->manualStartCommand($desiredSymbols),
+            'runtimeScheduled' => (bool) config('future_trade.schedule_runtime_commands', false),
+            'schedulerCommand' => $this->schedulerCommand(),
+            'tickCommand' => $this->tickCommand(),
             'logPath' => $meta['log_path'] ?? $this->outLogPath(),
             'errorLogPath' => $meta['error_log_path'] ?? $this->errLogPath(),
             'workspaceScope' => 'global_shared',
@@ -421,6 +424,24 @@ class FutureTradeLiveFeedManager
             self::STREAMS,
             $this->outLogPath(),
             $this->errLogPath()
+        ));
+    }
+
+    private function schedulerCommand(): string
+    {
+        if (PHP_OS_FAMILY === 'Windows') {
+            return trim(sprintf('%s %s schedule:run', $this->phpBinary(), base_path('artisan')));
+        }
+
+        return trim(sprintf('cd %s && %s %s schedule:run >> /dev/null 2>&1', base_path(), $this->phpBinary(), base_path('artisan')));
+    }
+
+    private function tickCommand(): string
+    {
+        return trim(sprintf(
+            '%s %s future-trade:tick --duration=55 --sleep-ms=1000',
+            $this->phpBinary(),
+            base_path('artisan')
         ));
     }
 
