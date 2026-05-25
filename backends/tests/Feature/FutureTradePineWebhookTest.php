@@ -91,6 +91,19 @@ test('pine webhook rejects missing or invalid token', function () {
         ->assertJsonPath('reason', 'invalid_or_missing_webhook_token');
 });
 
+test('pine webhook accepts body token even when a wrong inherited bearer token is present', function () {
+    config(['future_trade.pine_webhook_token' => 'pine-secret']);
+    Carbon::setTestNow('2026-05-19 10:30:05');
+    $workspace = Workspace::factory()->create();
+    createPrimeWebhookConfig($workspace->id);
+
+    $this->withHeader('Authorization', 'Bearer wrong-parent-token')
+        ->postJson("/api/v1/future-trade/pine-webhook/{$workspace->id}", pineWebhookPayload())
+        ->assertOk()
+        ->assertJsonPath('accepted', true)
+        ->assertJsonPath('decision', 'BUY');
+});
+
 test('pine webhook rejects non 15m or unconfirmed candles', function () {
     config(['future_trade.pine_webhook_token' => 'pine-secret']);
     Carbon::setTestNow('2026-05-19 10:30:05');

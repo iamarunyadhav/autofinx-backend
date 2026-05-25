@@ -45,9 +45,20 @@ class FutureTradeBotController extends Controller
     public function pineWebhook(Request $request, string $workspace): JsonResponse
     {
         $configuredToken = trim((string) config('future_trade.pine_webhook_token', ''));
-        $providedToken = trim((string) ($request->bearerToken() ?: $request->input('token', $request->query('token', ''))));
+        $providedTokens = array_filter(array_map(
+            static fn ($token): string => trim((string) $token),
+            [
+                $request->bearerToken(),
+                $request->header('X-Webhook-Token'),
+                $request->input('token'),
+                $request->query('token'),
+            ]
+        ));
 
-        if ($configuredToken === '' || ! hash_equals($configuredToken, $providedToken)) {
+        $tokenMatched = $configuredToken !== '' && collect($providedTokens)
+            ->contains(static fn (string $token): bool => hash_equals($configuredToken, $token));
+
+        if (! $tokenMatched) {
             return response()->json([
                 'accepted' => false,
                 'executed' => false,

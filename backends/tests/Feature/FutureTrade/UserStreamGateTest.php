@@ -52,6 +52,20 @@ test('snapshot reports fresh when recordEvent ran moments ago', function () {
         ->and((int) ($snap['ageSeconds'] ?? 999))->toBeLessThanOrEqual(2);
 });
 
+test('snapshot reports fresh when only heartbeat ran and no account event arrived yet', function () {
+    $config = userStreamConfig();
+    $svc = app(FutureTradeUserStreamService::class);
+    $svc->recordHeartbeat($config, 'connect');
+
+    $snap = $svc->snapshot($config);
+    expect($snap['configured'])->toBeTrue()
+        ->and($snap['status'])->toBe(FutureTradeUserStreamService::STATUS_CONNECTED)
+        ->and($snap['fresh'])->toBeTrue()
+        ->and($snap['eventFresh'])->toBeFalse()
+        ->and($snap['heartbeatFresh'])->toBeTrue()
+        ->and((int) ($snap['heartbeatAgeSeconds'] ?? 999))->toBeLessThanOrEqual(2);
+});
+
 test('ingestEvent on ORDER_TRADE_UPDATE with FILLED exit closes the linked logical_trade', function () {
     $config = userStreamConfig();
     $svc = app(FutureTradeUserStreamService::class);

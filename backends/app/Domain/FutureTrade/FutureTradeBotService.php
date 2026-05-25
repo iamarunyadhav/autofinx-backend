@@ -31,6 +31,7 @@ use Throwable;
 class FutureTradeBotService
 {
     public const PROFILE_PRIME_V617_CRYPTO = 'autofinx_prime_v6_1_7_crypto';
+    private const REST_STATE_FRESHNESS_SECONDS = 45;
 
     public function __construct(
         private readonly LivePortfolioGuardService $liveGuard,
@@ -74,33 +75,138 @@ class FutureTradeBotService
      */
     private function preExecutionFreshnessBlockers(FutureTradeBotConfig $config, ?array $signal): array
     {
+        return $this->preExecutionFreshnessSnapshot($config, $signal)['blockers'];
+    }
+
+    private function preExecutionFreshnessSnapshot(FutureTradeBotConfig $config, ?array $signal): array
+    {
         $blockers = [];
         $symbol = strtoupper((string) ($signal['symbol'] ?? $config->state?->current_symbol ?? ''));
         $isPineWebhook = (string) ($signal['source'] ?? '') === 'pine_webhook';
-        if (! $isPineWebhook) {
-            $feed = $this->feedFreshnessSnapshot($symbol);
-            if (! ($feed['feedFresh'] ?? false)) {
-                $blockers[] = 'stale_feed';
-            }
+        $feed = $this->feedFreshnessSnapshot($symbol);
+        $stream = $this->userStreamSvc()->snapshot($config);
+        $account = $this->isLiveMode($config) ? $this->accountSummary($config) : null;
+        $restState = $this->restStateSyncSnapshot($account);
+        $freshnessGateSource = 'user_stream';
+        $usedRestFallback = false;
+
+        if (! $isPineWebhook && ! ($feed['feedFresh'] ?? false)) {
+            $blockers[] = 'stale_feed';
+            $freshnessGateSource = 'blocked';
         }
+
         if ($this->isLiveMode($config)) {
-            $stream = $this->userStreamSvc()->snapshot($config);
-            // Only enforce stream freshness once credentials are configured.
-            if ($stream['configured'] && ! $stream['fresh']) {
-                $blockers[] = 'user_stream_stale';
-            }
             if (! $stream['configured']) {
-                // Credentials missing — let live execution proceed via REST only
-                // if the bot operator explicitly accepted that risk. By default
-                // we still hard block: live trading without a stream blinds the
-                // bot to fills it didn't initiate.
                 $allowRestOnly = (bool) ($config->mergedSettings()['allowLiveWithoutUserStream'] ?? false);
                 if (! $allowRestOnly) {
                     $blockers[] = 'user_stream_not_configured';
+                    $freshnessGateSource = 'blocked';
+                }
+            } else {
+                $heartbeatFresh = (bool) ($stream['heartbeatFresh'] ?? false);
+                $eventFresh = (bool) ($stream['eventFresh'] ?? false);
+                $streamFresh = $heartbeatFresh || $eventFresh;
+
+                if ($streamFresh) {
+                    $freshnessGateSource = 'user_stream';
+                } elseif ($restState['fresh']) {
+                    $freshnessGateSource = 'rest_sync';
+                    $usedRestFallback = true;
+                } else {
+                    $blockers[] = 'user_stream_stale_and_state_sync_stale';
+                    $freshnessGateSource = 'blocked';
                 }
             }
+
+            if (! $restState['keyedRequestHealthy']) {
+                $blockers[] = 'binance_state_sync_failed';
+                $freshnessGateSource = 'blocked';
+            } elseif (! $restState['verified']) {
+                $blockers[] = 'binance_state_unverified';
+                $freshnessGateSource = 'blocked';
+            }
         }
-        return $blockers;
+
+        return [
+            'blockers' => array_values(array_unique($blockers)),
+            'feed' => $feed,
+            'userStream' => $stream,
+            'restSync' => $restState,
+            'freshnessGateSource' => $blockers === [] ? $freshnessGateSource : 'blocked',
+            'usedRestFallback' => $usedRestFallback && $blockers === [],
+        ];
+    }
+
+    private function restStateSyncSnapshot(?array $account): array
+    {
+        if ($account === null) {
+            return [
+                'verified' => true,
+                'fresh' => true,
+                'keyedRequestHealthy' => true,
+                'syncedAt' => null,
+                'ageSeconds' => null,
+                'source' => 'paper',
+            ];
+        }
+
+        $syncedAt = isset($account['binanceStateSyncedAt']) && $account['binanceStateSyncedAt']
+            ? Carbon::parse((string) $account['binanceStateSyncedAt'])
+            : null;
+        $ageSeconds = $syncedAt ? max(0, $syncedAt->diffInSeconds(now())) : null;
+        $balanceSource = (string) ($account['balanceSource'] ?? '');
+        $keyedRequestHealthy = ! in_array($balanceSource, ['BINANCE_UNAVAILABLE', 'BINANCE_TEMPORARILY_UNAVAILABLE'], true);
+        $verified = $syncedAt !== null || in_array($balanceSource, ['BINANCE_FUTURES', 'BINANCE_CACHE_STALE'], true);
+
+        return [
+            'verified' => $verified,
+            'fresh' => $ageSeconds !== null && $ageSeconds <= self::REST_STATE_FRESHNESS_SECONDS,
+            'keyedRequestHealthy' => $keyedRequestHealthy,
+            'syncedAt' => $syncedAt?->toIso8601String(),
+            'ageSeconds' => $ageSeconds,
+            'source' => $balanceSource !== '' ? strtolower($balanceSource) : 'unknown',
+        ];
+    }
+
+    private function freshnessContext(array $freshness): array
+    {
+        $stream = (array) ($freshness['userStream'] ?? []);
+        $rest = (array) ($freshness['restSync'] ?? []);
+
+        return [
+            'freshnessGateSource' => $freshness['freshnessGateSource'] ?? 'blocked',
+            'userStreamConfigured' => (bool) ($stream['configured'] ?? false),
+            'userStreamFresh' => (bool) ($stream['fresh'] ?? false),
+            'userStreamEventFresh' => (bool) ($stream['eventFresh'] ?? false),
+            'userStreamHeartbeatFresh' => (bool) ($stream['heartbeatFresh'] ?? false),
+            'userStreamLastSeenAt' => $stream['lastEventAt'] ?? null,
+            'userStreamHeartbeatAt' => $stream['lastHeartbeatAt'] ?? null,
+            'userStreamHeartbeatAgeSec' => $stream['heartbeatAgeSeconds'] ?? null,
+            'binanceStateSyncedAt' => $rest['syncedAt'] ?? null,
+            'binanceStateAgeSec' => $rest['ageSeconds'] ?? null,
+            'binanceStateVerified' => (bool) ($rest['verified'] ?? false),
+            'binanceStateFresh' => (bool) ($rest['fresh'] ?? false),
+            'binanceKeyedRequestHealthy' => (bool) ($rest['keyedRequestHealthy'] ?? false),
+            'usedRestFallback' => (bool) ($freshness['usedRestFallback'] ?? false),
+        ];
+    }
+
+    private function logFreshnessFallbackIfNeeded(FutureTradeBotConfig $config, array $signal, array $freshness): void
+    {
+        if (! (bool) ($freshness['usedRestFallback'] ?? false)) {
+            return;
+        }
+
+        $this->logThrottled(
+            $config->fresh('state'),
+            'FUTURE_TRADE_FRESHNESS_REST_FALLBACK_USED',
+            (string) ($signal['symbol'] ?? null),
+            (string) ($signal['signal'] ?? null),
+            (float) ($signal['confidence'] ?? 0),
+            'User stream heartbeat was stale, but Binance REST state sync was fresh so execution remained allowed.',
+            $this->freshnessContext($freshness),
+            30
+        );
     }
 
     /**
@@ -1204,6 +1310,7 @@ class FutureTradeBotService
         $envReady = $this->environmentTradingReady($forceTestnet, $settings);
         $liveGuard = $this->liveGuard->canActivate($config->workspace_id, 'future_trade');
         $requiredTradeAmountUsdt = (float) ($effectiveSettings['tradeAmountUsdt'] ?? $settings['tradeAmountUsdt'] ?? 0);
+        $runtimeHealth = $this->buildRuntimeHealthSnapshot($config, $state, $bestSignal);
 
         $botBlockers = [];
         $botWarnings = [];
@@ -1321,6 +1428,24 @@ class FutureTradeBotService
             ? 'blocked'
             : (($health['state'] ?? 'healthy') !== 'healthy' || $botWarnings !== [] ? 'warning' : 'healthy');
 
+        $tradeEligibility = $this->tradeEligibilitySnapshot(
+            $config,
+            $state,
+            $settings,
+            $bestSignal,
+            $webhookTelemetry,
+            $runtimeHealth,
+            $health,
+            $walletState,
+            $botBlockers,
+            $botWarnings,
+            $latestAlert ? [
+                'event' => $latestAlert->event,
+                'reason' => $latestAlert->reason,
+                'occurredAt' => optional($latestAlert->occurred_at)->toIso8601String(),
+            ] : null
+        );
+
         $summary = match ($stateName) {
             'blocked' => 'Trade automation is blocked by runtime or server checks. Review the blocker list below.',
             'warning' => 'Trade automation is running with warnings. Review runtime and server signals before trusting entries.',
@@ -1353,6 +1478,7 @@ class FutureTradeBotService
                 'streams' => $health['checks']['streams'] ?? null,
             ],
             'webhook' => $webhookTelemetry,
+            'tradeEligibility' => $tradeEligibility,
             'latestAlert' => $latestAlert ? [
                 'event' => $latestAlert->event,
                 'reason' => $latestAlert->reason,
@@ -1377,12 +1503,139 @@ class FutureTradeBotService
                     'serverBlockers' => $payload['server']['blockers'],
                     'walletState' => $payload['wallet']['state'],
                     'webhook' => $webhookTelemetry,
+                    'tradeEligibility' => $tradeEligibility,
                 ],
                 240
             );
         }
 
         return $payload;
+    }
+
+    /**
+     * Human-facing explanation of why the bot is not opening a position now.
+     * This does not change trading decisions; it mirrors the same guards used
+     * elsewhere so support/debug screens can identify the first real blocker.
+     */
+    private function tradeEligibilitySnapshot(
+        FutureTradeBotConfig $config,
+        FutureTradeBotState $state,
+        array $settings,
+        ?array $bestSignal,
+        array $webhookTelemetry,
+        array $runtimeHealth,
+        array $health,
+        string $walletState,
+        array $botBlockers,
+        array $botWarnings,
+        ?array $latestAlert
+    ): array {
+        $signalSource = $this->normalizedSignalSource($settings);
+        $webhookAuthority = in_array($signalSource, ['webhook', 'webhook_fallback'], true);
+        $latestWebhookEvent = (string) ($webhookTelemetry['latestEvent'] ?? '');
+        $latestWebhookSignal = strtoupper((string) ($webhookTelemetry['signal'] ?? ''));
+        $runtimeBlockers = array_values((array) ($runtimeHealth['activeBlockers'] ?? []));
+        $serverBlockers = array_values((array) ($health['blockers'] ?? []));
+        $serverWarnings = array_values((array) ($health['warnings'] ?? []));
+
+        $blockers = [];
+        $warnings = [];
+        $checks = [];
+
+        $checks[] = [
+            'label' => 'Signal authority',
+            'state' => $webhookAuthority ? 'ok' : 'warning',
+            'message' => $webhookAuthority
+                ? 'TradingView webhook is the entry authority; backend scanner is diagnostic only.'
+                : 'Backend scanner can control entries because webhook source is not selected.',
+        ];
+
+        if ($webhookAuthority) {
+            if ($latestWebhookEvent === '') {
+                $warnings[] = 'waiting_for_tradingview_webhook';
+                $checks[] = ['label' => 'Latest webhook', 'state' => 'warning', 'message' => 'No TradingView webhook has reached this workspace yet.'];
+            } elseif ($latestWebhookEvent === 'PINE_WEBHOOK_REJECTED') {
+                $reason = (string) ($webhookTelemetry['reason'] ?? 'unknown_rejection');
+                $blockers[] = 'latest_webhook_rejected';
+                $checks[] = ['label' => 'Latest webhook', 'state' => 'blocked', 'message' => "Latest webhook was rejected: {$reason}."];
+            } elseif (in_array($latestWebhookEvent, ['PINE_WEBHOOK_WAIT', 'PINE_WEBHOOK_CLOSE'], true)) {
+                $warnings[] = strtolower($latestWebhookEvent);
+                $checks[] = ['label' => 'Latest webhook', 'state' => 'warning', 'message' => 'Latest webhook was accepted but it was WAIT/CLOSE, so no entry should open.'];
+            } elseif ($latestWebhookEvent === 'PINE_WEBHOOK_SIGNAL') {
+                $checks[] = ['label' => 'Latest webhook', 'state' => 'ok', 'message' => "Latest webhook was accepted as {$latestWebhookSignal}."];
+            }
+        }
+
+        foreach ($runtimeBlockers as $blocker) {
+            $blockers[] = strtolower((string) $blocker);
+            $checks[] = ['label' => 'Live safety', 'state' => 'blocked', 'message' => 'Runtime safety blocker active: '.(string) $blocker.'.'];
+        }
+
+        if ($walletState === 'blocked') {
+            $blockers[] = 'wallet_blocked';
+        } elseif ($walletState === 'warning') {
+            $warnings[] = 'wallet_warning';
+        }
+
+        foreach ($serverBlockers as $blocker) {
+            $blockers[] = (string) $blocker;
+        }
+        foreach ($serverWarnings as $warning) {
+            $warnings[] = (string) $warning;
+        }
+
+        foreach ($botBlockers as $blocker) {
+            $blockers[] = (string) $blocker;
+        }
+        foreach ($botWarnings as $warning) {
+            $warnings[] = (string) $warning;
+        }
+
+        $bestSignalName = strtoupper((string) ($bestSignal['signal'] ?? $state->current_signal ?? 'WAIT'));
+        if ($webhookAuthority && $bestSignalName === 'WAIT') {
+            $warnings[] = 'scanner_wait_diagnostic_only';
+            $checks[] = ['label' => 'Scanner mirror', 'state' => 'warning', 'message' => 'Scanner mirror is WAIT; in webhook mode this is diagnostic and does not reject a valid webhook entry.'];
+        }
+
+        if ($latestAlert && (string) ($latestAlert['event'] ?? '') === 'BALANCE_SYNC_FAILED') {
+            $warnings[] = 'binance_balance_sync_failed';
+            $checks[] = ['label' => 'Binance time/balance', 'state' => 'warning', 'message' => (string) ($latestAlert['reason'] ?? 'Balance sync failed.')];
+        }
+
+        $blockers = array_values(array_unique(array_filter($blockers)));
+        $warnings = array_values(array_unique(array_filter($warnings)));
+        $hasExecutableWebhook = $webhookAuthority && $latestWebhookEvent === 'PINE_WEBHOOK_SIGNAL' && in_array($latestWebhookSignal, ['BUY', 'SELL'], true);
+        $canOpenNow = $blockers === [] && (! $webhookAuthority || $hasExecutableWebhook);
+
+        $decision = $canOpenNow
+            ? 'eligible'
+            : ($blockers !== [] ? 'blocked' : 'waiting');
+
+        $summary = match ($decision) {
+            'eligible' => 'Trade flow is eligible for the latest executable signal.',
+            'blocked' => 'Trade flow is blocked; fix the first blocker before forcing entries.',
+            default => $webhookAuthority
+                ? 'Waiting for an accepted BUY/SELL TradingView webhook.'
+                : 'Waiting for backend scanner signal to pass.',
+        };
+
+        return [
+            'decision' => $decision,
+            'summary' => $summary,
+            'canOpenNow' => $canOpenNow,
+            'signalSource' => $signalSource,
+            'webhookAuthority' => $webhookAuthority,
+            'latestWebhookEvent' => $latestWebhookEvent ?: null,
+            'latestWebhookSignal' => $latestWebhookSignal ?: null,
+            'latestWebhookReason' => $webhookTelemetry['reason'] ?? null,
+            'bestSignal' => $bestSignalName,
+            'bestConfidence' => (float) ($bestSignal['confidence'] ?? $state->confidence ?? 0),
+            'activeMinimum' => (float) data_get($bestSignal, 'effectiveMinConfidence', $settings['minConfidence'] ?? 0),
+            'runtimeBlockers' => $runtimeBlockers,
+            'blockers' => $blockers,
+            'warnings' => $warnings,
+            'checks' => $checks,
+        ];
     }
 
     // -------------------------------------------------------------------------
@@ -1835,7 +2088,8 @@ class FutureTradeBotService
         // === Hard freshness gates (feed + Binance user stream) ===
         // These block BEFORE we evaluate idempotency, so a stale stream cannot
         // ever produce a real exchange order even if everything else is OK.
-        $freshnessBlockers = $this->preExecutionFreshnessBlockers($config, $signal);
+        $freshness = $this->preExecutionFreshnessSnapshot($config, $signal);
+        $freshnessBlockers = $freshness['blockers'];
         if ($freshnessBlockers !== []) {
             $this->emitTradeDecisionDebug($config, $signal, $dynamic, 'BLOCKED', $freshnessBlockers);
             $this->logThrottled(
@@ -1845,11 +2099,12 @@ class FutureTradeBotService
                 (string) ($signal['signal'] ?? null),
                 (float) ($signal['confidence'] ?? 0),
                 'Execution blocked by freshness gate: ' . implode(', ', $freshnessBlockers),
-                $this->runtimeContext($dynamic, ['status' => 'BLOCKED'], $signal, $freshnessBlockers),
+                $this->runtimeContext($dynamic, array_merge(['status' => 'BLOCKED'], $this->freshnessContext($freshness)), $signal, $freshnessBlockers),
                 30
             );
             return;
         }
+        $this->logFreshnessFallbackIfNeeded($config, $signal, $freshness);
 
         // === Hard duplicate-prevention gates (apply before LIVE or PAPER) ===
         $symbolUpper = strtoupper((string) ($signal['symbol'] ?? ''));
@@ -2143,7 +2398,8 @@ class FutureTradeBotService
         // Defense-in-depth: re-run the freshness gate here too. Any future
         // caller that bypasses maybeEnterPaperPosition still hits this check
         // before a real order is placed.
-        $freshnessBlockers = $this->preExecutionFreshnessBlockers($config, $signal);
+        $freshness = $this->preExecutionFreshnessSnapshot($config, $signal);
+        $freshnessBlockers = $freshness['blockers'];
         if ($freshnessBlockers !== []) {
             $this->logThrottled(
                 $config->fresh('state'),
@@ -2152,11 +2408,12 @@ class FutureTradeBotService
                 (string) ($signal['signal'] ?? null),
                 (float) ($signal['confidence'] ?? 0),
                 'Live entry blocked: ' . implode(', ', $freshnessBlockers),
-                ['status' => 'BLOCKED', 'hardBlockers' => $freshnessBlockers],
+                array_merge(['status' => 'BLOCKED', 'hardBlockers' => $freshnessBlockers], $this->freshnessContext($freshness)),
                 15
             );
             return;
         }
+        $this->logFreshnessFallbackIfNeeded($config, $signal, $freshness);
 
         // Per-symbol entry lock with mandatory re-check inside the lock. This
         // closes the 1–2 second duplicate-entry window that previously allowed
@@ -5523,6 +5780,7 @@ class FutureTradeBotService
     {
         $symbol = (string) ($state->current_symbol ?? ($bestSignal['symbol'] ?? ''));
         $feed = $this->feedFreshnessSnapshot($symbol);
+        $freshness = $this->preExecutionFreshnessSnapshot($config, $bestSignal);
         $openLogical = FutureTradeLogicalTrade::query()
             ->where('future_trade_bot_config_id', $config->id)
             ->whereIn('status', FutureTradeLogicalTrade::ACTIVE_STATUSES)
@@ -5532,7 +5790,8 @@ class FutureTradeBotService
             ->where('status', FutureTradeLogicalTrade::STATUS_RECONCILIATION_REQUIRED)
             ->count();
 
-        $userStream = $this->userStreamSvc()->snapshot($config);
+        $userStream = (array) ($freshness['userStream'] ?? $this->userStreamSvc()->snapshot($config));
+        $restSync = (array) ($freshness['restSync'] ?? []);
         $isLive = $this->isLiveMode($config);
 
         $blockers = [];
@@ -5551,16 +5810,8 @@ class FutureTradeBotService
         if ($state->daily_stop_until && $state->daily_stop_until->isFuture()) {
             $blockers[] = 'DAILY_LOSS_LOCKED';
         }
-        if ($isLive) {
-            if ($userStream['configured'] && ! $userStream['fresh']) {
-                $blockers[] = 'USER_STREAM_STALE';
-            }
-            if (! $userStream['configured']) {
-                $allowRestOnly = (bool) ($config->mergedSettings()['allowLiveWithoutUserStream'] ?? false);
-                if (! $allowRestOnly) {
-                    $blockers[] = 'USER_STREAM_NOT_CONFIGURED';
-                }
-            }
+        foreach ((array) ($freshness['blockers'] ?? []) as $freshnessBlocker) {
+            $blockers[] = Str::upper((string) $freshnessBlocker);
         }
 
         return [
@@ -5575,8 +5826,15 @@ class FutureTradeBotService
             'dailyLossLocked' => (bool) ($state->daily_stop_until && $state->daily_stop_until->isFuture()),
             'liveMode' => $isLive,
             'userStream' => $userStream,
+            'restSync' => $restSync,
+            'freshnessGateSource' => $freshness['freshnessGateSource'] ?? 'blocked',
+            'user_stream_last_seen_at' => $userStream['lastEventAt'] ?? null,
+            'user_stream_heartbeat_age_sec' => $userStream['heartbeatAgeSeconds'] ?? null,
+            'binance_state_synced_at' => $restSync['syncedAt'] ?? null,
+            'binance_state_age_sec' => $restSync['ageSeconds'] ?? null,
+            'freshness_gate_source' => $freshness['freshnessGateSource'] ?? 'blocked',
             'webhook' => $this->latestWebhookTelemetry($config),
-            'activeBlockers' => $blockers,
+            'activeBlockers' => array_values(array_unique($blockers)),
             'healthy' => $blockers === [],
         ];
     }
@@ -7369,6 +7627,8 @@ class FutureTradeBotService
             'balanceError' => null,
             'balanceWarning' => null,
             'balanceTransient' => false,
+            'binanceStateSyncedAt' => null,
+            'binanceStateAgeSec' => null,
         ];
 
         if (! $this->isLiveMode($config)) {
@@ -7378,13 +7638,16 @@ class FutureTradeBotService
         try {
             $cacheKey = 'future_trade_account_summary:' . $config->workspace_id . ':' . ($config->executionMode());
             $staleCacheKey = $cacheKey . ':stale';
+            $metaCacheKey = $cacheKey . ':meta';
             $transientMarkerKey = $cacheKey . ':transient_warning';
-            $account = $this->cacheRemember($cacheKey, 10, function () use ($config, $staleCacheKey) {
+            $account = $this->cacheRemember($cacheKey, 10, function () use ($config, $staleCacheKey, $metaCacheKey) {
                 $fresh = $this->liveClient($config->mergedSettings())->fetchAccountInfo();
                 $this->cachePut($staleCacheKey, $fresh, 300);
+                $this->cachePut($metaCacheKey, ['synced_at' => now()->toIso8601String()], 300);
 
                 return $fresh;
             });
+            $meta = (array) ($this->cacheGet($metaCacheKey, []) ?: []);
             $asset = collect((array) ($account['assets'] ?? []))
                 ->first(fn ($row) => strtoupper((string) ($row['asset'] ?? '')) === 'USDT');
 
@@ -7398,6 +7661,10 @@ class FutureTradeBotService
                 ? (float) $account['totalMarginBalance']
                 : (isset($asset['marginBalance']) ? (float) $asset['marginBalance'] : null);
             $summary['accountAsset'] = strtoupper((string) ($asset['asset'] ?? 'USDT')) ?: 'USDT';
+            $summary['binanceStateSyncedAt'] = $meta['synced_at'] ?? null;
+            $summary['binanceStateAgeSec'] = $summary['binanceStateSyncedAt']
+                ? max(0, Carbon::parse((string) $summary['binanceStateSyncedAt'])->diffInSeconds(now()))
+                : null;
             if ($this->cachePull($transientMarkerKey)) {
                 $this->logThrottled(
                     $config->fresh('state'),
@@ -7413,9 +7680,14 @@ class FutureTradeBotService
         } catch (Throwable $e) {
             $cacheKey = 'future_trade_account_summary:' . $config->workspace_id . ':' . ($config->executionMode());
             $staleAccount = $this->cacheGet($cacheKey . ':stale');
+            $meta = (array) ($this->cacheGet($cacheKey . ':meta', []) ?: []);
             $isTransient = $this->isTransientNetworkException($e);
             $summary['balanceTransient'] = $isTransient;
             $summary['balanceError'] = $e->getMessage();
+            $summary['binanceStateSyncedAt'] = $meta['synced_at'] ?? null;
+            $summary['binanceStateAgeSec'] = $summary['binanceStateSyncedAt']
+                ? max(0, Carbon::parse((string) $summary['binanceStateSyncedAt'])->diffInSeconds(now()))
+                : null;
             if (is_array($staleAccount) && $staleAccount !== []) {
                 $asset = collect((array) ($staleAccount['assets'] ?? []))
                     ->first(fn ($row) => strtoupper((string) ($row['asset'] ?? '')) === 'USDT');
