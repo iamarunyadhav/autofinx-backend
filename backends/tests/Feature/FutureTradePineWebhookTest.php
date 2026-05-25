@@ -268,7 +268,7 @@ test('pine webhook risk payload can override manual values only when explicitly 
     expect(data_get($trade->meta, 'dynamic.recommended.takeProfitPercent'))->toBe(0.72)
         ->and(data_get($trade->meta, 'dynamic.recommended.stopLossPercent'))->toBe(0.31)
         ->and(data_get($trade->meta, 'dynamic.recommended.trailingTakeProfitPercent'))->toBe(0.26)
-        ->and(data_get($trade->meta, 'dynamic.recommended.rollbackLossPercent'))->toBe(0.21);
+        ->and(data_get($trade->meta, 'signal.debug.riskOverrides.rollbackLossPercent'))->toBe(0.21);
 });
 
 test('pine webhook sell with strong score and low opposite score opens short and is not hard blocked', function () {
