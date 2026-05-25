@@ -11,6 +11,7 @@ use App\Models\WorkspaceMember;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Log;
 
 class FutureTradeBotController extends Controller
@@ -90,6 +91,25 @@ class FutureTradeBotController extends Controller
     public function restartLiveFeed(string $workspace): JsonResponse
     {
         return response()->json($this->liveFeedManager->restart());
+    }
+
+    public function recoverRuntime(string $workspace): JsonResponse
+    {
+        $feed = $this->liveFeedManager->restart();
+        $exitCode = Artisan::call('future-trade:tick', [
+            '--workspace' => $workspace,
+            '--duration' => 8,
+            '--sleep-ms' => 1000,
+        ]);
+
+        return response()->json([
+            'recovered' => $exitCode === 0,
+            'message' => $exitCode === 0
+                ? 'Future Trade runtime recovery ran: live feed restart requested and scanner tick refreshed.'
+                : 'Future Trade runtime recovery attempted, but scanner tick returned a non-zero exit code.',
+            'feed' => $feed,
+            'tickExitCode' => $exitCode,
+        ]);
     }
 
     public function start(string $workspace): JsonResponse

@@ -845,6 +845,7 @@ class FutureTradeBotService
             'indicatorIntelligence' => $this->indicatorIntelligencePayload($config, $effectiveSettings, $bestSignal),
             'researchLab' => $this->researchLabPayload($config, $effectiveSettings),
             'missedTradeAudit' => $this->missedTradeAuditPayload($config, $effectiveSettings),
+            'performanceFeedback' => $this->performanceFeedbackPayload($config),
             'levels' => [
                 'entry' => $entry ?: null,
 	                'stopLoss' => $entry ? $this->stopLossPrice($entry, (string) $state->position_side, $effectiveSettings) : null,
@@ -949,6 +950,7 @@ class FutureTradeBotService
 
     public function ingestPineWebhook(FutureTradeBotConfig $config, array $payload): array
     {
+        $receivedAt = now();
         $settings = $this->normalizeFutureTradeSettings($config->mergedSettings());
         $state = $this->state($config);
 
@@ -1003,7 +1005,7 @@ class FutureTradeBotService
         if ($candle['close'] === null || $candle['open'] === null) {
             return $this->rejectPineWebhook($config, $payload, 'candle_time_required');
         }
-        if ($candle['close']->greaterThan(now()->addSeconds(90))) {
+        if ($candle['close']->greaterThan($receivedAt->copy()->addSeconds(90))) {
             return $this->rejectPineWebhook($config, $payload, 'candle_close_in_future', ['candleClose' => $candle['close']->toIso8601String()]);
         }
         if (((int) $candle['close']->minute % 15) !== 0) {
@@ -1026,6 +1028,8 @@ class FutureTradeBotService
         if ($price <= 0) {
             return $this->rejectPineWebhook($config, $payload, 'price_required');
         }
+
+        $webhookTiming = $this->pineWebhookTiming($payload, $candle, $receivedAt);
 
         $longScore = (float) ($payload['longScore'] ?? $payload['long_score'] ?? ($decision === 'BUY' ? ($payload['score'] ?? 0) : 0));
         $shortScore = (float) ($payload['shortScore'] ?? $payload['short_score'] ?? ($decision === 'SELL' ? ($payload['score'] ?? 0) : 0));
@@ -1053,9 +1057,16 @@ class FutureTradeBotService
                 'profile' => self::PROFILE_PRIME_V617_CRYPTO,
                 'profileName' => (string) ($settings['signalProfileName'] ?? 'AutoFinX Prime v6.1.7 Crypto Stable Default'),
                 'source' => 'pine_webhook',
+                'webhookTiming' => $webhookTiming,
                 'longScore' => $longScore,
                 'shortScore' => $shortScore,
                 'finalConfidence' => round($confidence, 4),
+                'riskOverrides' => array_filter([
+                    'takeProfitPercent' => $this->positivePercentOrNull($payload['takeProfitPercent'] ?? $payload['take_profit_percent'] ?? $payload['tp'] ?? null),
+                    'stopLossPercent' => $this->positivePercentOrNull($payload['stopLossPercent'] ?? $payload['stop_loss_percent'] ?? $payload['sl'] ?? null),
+                    'trailingTakeProfitPercent' => $this->positivePercentOrNull($payload['trailingTakeProfitPercent'] ?? $payload['trailing_take_profit_percent'] ?? $payload['trailing'] ?? null),
+                    'rollbackLossPercent' => $this->positivePercentOrNull($payload['rollbackLossPercent'] ?? $payload['rollback_loss_percent'] ?? $payload['rollback'] ?? null),
+                ], static fn ($value) => $value !== null),
                 'pinePayload' => Arr::except($payload, ['token', 'secret']),
                 'checks' => [
                     'barConfirmed' => true,
@@ -1071,7 +1082,7 @@ class FutureTradeBotService
             'current_signal' => $decision,
             'current_price' => $price,
             'confidence' => $confidence,
-            'last_scan_at' => now(),
+            'last_scan_at' => $receivedAt,
             'scanner_snapshot' => [$signal],
         ]);
 
@@ -1086,6 +1097,7 @@ class FutureTradeBotService
                 'signalSource' => $signalSource,
                 'candleOpen' => $signal['candle_open'],
                 'candleClose' => $signal['candle_close'],
+                'webhookTiming' => $webhookTiming,
             ]);
 
             return [
@@ -1102,6 +1114,7 @@ class FutureTradeBotService
             'signalSource' => $signalSource,
             'candleOpen' => $signal['candle_open'],
             'candleClose' => $signal['candle_close'],
+            'webhookTiming' => $webhookTiming,
         ]);
 
         $beforeTradeCount = (int) $this->state($config)->trade_count_today;
@@ -1186,6 +1199,7 @@ class FutureTradeBotService
         $effectiveMinConfidence = (float) ($dynamic['effectiveMinConfidence'] ?? ($settings['minConfidence'] ?? 0));
         $account = $this->accountSummary($config);
         $health = $this->operationalHealth->summary($config->workspace_id);
+        $webhookTelemetry = $this->latestWebhookTelemetry($config);
         $forceTestnet = (bool) ($settings['forceTestnet'] ?? true);
         $envReady = $this->environmentTradingReady($forceTestnet, $settings);
         $liveGuard = $this->liveGuard->canActivate($config->workspace_id, 'future_trade');
@@ -1338,6 +1352,7 @@ class FutureTradeBotService
                 'rest' => $health['checks']['rest_health'] ?? null,
                 'streams' => $health['checks']['streams'] ?? null,
             ],
+            'webhook' => $webhookTelemetry,
             'latestAlert' => $latestAlert ? [
                 'event' => $latestAlert->event,
                 'reason' => $latestAlert->reason,
@@ -1361,6 +1376,7 @@ class FutureTradeBotService
                     'serverState' => $payload['server']['state'],
                     'serverBlockers' => $payload['server']['blockers'],
                     'walletState' => $payload['wallet']['state'],
+                    'webhook' => $webhookTelemetry,
                 ],
                 240
             );
@@ -1440,6 +1456,36 @@ class FutureTradeBotService
         } catch (Throwable) {
             return null;
         }
+    }
+
+    private function pineWebhookTiming(array $payload, array $candle, Carbon $receivedAt): array
+    {
+        $sentAt = $this->parsePineWebhookTime(
+            $payload['sent_at']
+                ?? $payload['alert_time']
+                ?? $payload['webhook_sent_at']
+                ?? $payload['timestamp']
+                ?? null
+        );
+        $closeAt = $candle['close'] ?? null;
+
+        $timing = [
+            'receivedAt' => $receivedAt->toIso8601String(),
+            'payloadSentAt' => $sentAt?->toIso8601String(),
+            'candleCloseAt' => $closeAt instanceof Carbon ? $closeAt->toIso8601String() : null,
+            'transportLatencyMs' => $sentAt ? $this->positiveMillisecondsBetween($sentAt, $receivedAt) : null,
+            'signalLatencyMs' => $closeAt instanceof Carbon ? $this->positiveMillisecondsBetween($closeAt, $receivedAt) : null,
+        ];
+
+        return array_filter($timing, static fn ($value) => $value !== null);
+    }
+
+    private function positiveMillisecondsBetween(Carbon $from, Carbon $to): int
+    {
+        $fromSeconds = (float) $from->format('U.u');
+        $toSeconds = (float) $to->format('U.u');
+
+        return max(0, (int) round(($toSeconds - $fromSeconds) * 1000));
     }
 
     private function rejectPineWebhook(FutureTradeBotConfig $config, array $payload, string $reason, array $context = []): array
@@ -2027,7 +2073,8 @@ class FutureTradeBotService
     {
         $state = $this->state($config);
         $settings = $this->normalizeFutureTradeSettings($config->mergedSettings());
-        $dynamic = $this->dynamicDecision($config, $state, (array) ($state->scanner_snapshot ?? []), null, $settings);
+        $lastSignals = (array) ($state->scanner_snapshot ?? []);
+        $dynamic = $this->dynamicDecision($config, $state, $lastSignals, $lastSignals[0] ?? null, $settings);
         $settings = $dynamic['settings'];
         $entry = (float) $state->entry_price;
         $qty = (float) $state->quantity;
@@ -2545,6 +2592,8 @@ class FutureTradeBotService
         $gross = ($price - $entry) * (float) $state->quantity * $direction;
         $fees = ($entry + $price) * (float) $state->quantity * 0.0004;
         $net = $gross - $fees;
+        $moveStats = $this->positionMoveStats($state);
+        $sourceSignal = (array) data_get($state->scanner_snapshot, '0', []);
 
         $config->trades()->create([
             'symbol' => (string) $state->current_symbol,
@@ -2568,6 +2617,9 @@ class FutureTradeBotService
                 'signal_profile_name' => $settings['signalProfileName'] ?? null,
                 'market_profile' => $settings['marketProfile'] ?? null,
                 'timeframe' => $settings['timeframe'] ?? null,
+                'move_stats' => $moveStats,
+                'source_signal' => $sourceSignal,
+                'webhook_timing' => data_get($sourceSignal, 'debug.webhookTiming'),
             ],
         ]);
 
@@ -2659,6 +2711,8 @@ class FutureTradeBotService
         $gross = ($price - $entry) * $qty * $direction;
         $fees = ($entry + $price) * $qty * 0.0004;
         $net = $gross - $fees;
+        $moveStats = $this->positionMoveStats($state);
+        $sourceSignal = (array) data_get($state->scanner_snapshot, '0', []);
 
         $config->trades()->create([
             'symbol' => (string) $state->current_symbol,
@@ -2680,6 +2734,9 @@ class FutureTradeBotService
                 'signal_profile_name' => $settings['signalProfileName'] ?? null,
                 'market_profile' => $settings['marketProfile'] ?? null,
                 'timeframe' => $settings['timeframe'] ?? null,
+                'move_stats' => $moveStats,
+                'source_signal' => $sourceSignal,
+                'webhook_timing' => data_get($sourceSignal, 'debug.webhookTiming'),
             ],
 	        ]);
 
@@ -5518,8 +5575,61 @@ class FutureTradeBotService
             'dailyLossLocked' => (bool) ($state->daily_stop_until && $state->daily_stop_until->isFuture()),
             'liveMode' => $isLive,
             'userStream' => $userStream,
+            'webhook' => $this->latestWebhookTelemetry($config),
             'activeBlockers' => $blockers,
             'healthy' => $blockers === [],
+        ];
+    }
+
+    private function latestWebhookTelemetry(FutureTradeBotConfig $config): array
+    {
+        $latest = $config->logs()
+            ->whereIn('event', ['PINE_WEBHOOK_SIGNAL', 'PINE_WEBHOOK_WAIT', 'PINE_WEBHOOK_CLOSE', 'PINE_WEBHOOK_REJECTED'])
+            ->orderByDesc('occurred_at')
+            ->first();
+
+        if (! $latest) {
+            return [
+                'state' => 'waiting',
+                'summary' => 'No TradingView webhook received yet.',
+                'latestEvent' => null,
+                'ageSeconds' => null,
+                'signalLatencyMs' => null,
+                'transportLatencyMs' => null,
+            ];
+        }
+
+        $context = $this->arrayContext($latest->context ?? []);
+        $timing = (array) ($context['webhookTiming'] ?? []);
+        $age = $this->ageSecondsSince($latest->occurred_at);
+        $signalLatency = is_numeric($timing['signalLatencyMs'] ?? null) ? (float) $timing['signalLatencyMs'] : null;
+        $transportLatency = is_numeric($timing['transportLatencyMs'] ?? null) ? (float) $timing['transportLatencyMs'] : null;
+        $state = 'healthy';
+        $summary = 'Latest webhook latency is acceptable.';
+
+        if ((string) $latest->event === 'PINE_WEBHOOK_REJECTED') {
+            $state = 'warning';
+            $summary = 'Latest webhook was rejected; check profile, symbol, timeframe, and source mode.';
+        } elseif ($signalLatency !== null && $signalLatency > 30000) {
+            $state = 'warning';
+            $summary = 'Webhook arrived more than 30 seconds after candle close.';
+        } elseif ($age !== null && $age > 1800) {
+            $state = 'stale';
+            $summary = 'No recent webhook in the last 30 minutes.';
+        }
+
+        return [
+            'state' => $state,
+            'summary' => $summary,
+            'latestEvent' => $latest->event,
+            'symbol' => $latest->symbol,
+            'signal' => $latest->signal,
+            'reason' => $latest->reason,
+            'occurredAt' => optional($latest->occurred_at)->toIso8601String(),
+            'ageSeconds' => $age,
+            'signalLatencyMs' => $signalLatency,
+            'transportLatencyMs' => $transportLatency,
+            'candleCloseAt' => $timing['candleCloseAt'] ?? ($context['candleClose'] ?? null),
         ];
     }
 
@@ -6009,6 +6119,9 @@ class FutureTradeBotService
         $riskPercent = max(0.0, (float) ($risk['riskPercent'] ?? 0.0));
         $tp1RR = (float) ($settings['tp1RR'] ?? 1.0);
         $trailMultiplier = (float) ($settings['trailAtrMultiplier'] ?? 1.0);
+        $useAtrRiskTargets = filter_var($settings['useAtrRiskTargets'] ?? false, FILTER_VALIDATE_BOOLEAN);
+        $useWebhookRiskOverrides = filter_var($settings['useWebhookRiskOverrides'] ?? false, FILTER_VALIDATE_BOOLEAN);
+        $webhookRisk = (array) data_get($best, 'debug.riskOverrides', []);
 
         $next = $settings;
         $next['confidenceMode'] = 'pine_mirror';
@@ -6018,11 +6131,19 @@ class FutureTradeBotService
         $next['avoidChoppyMarket'] = (bool) ($settings['avoidChoppyMarket'] ?? true);
         $next['weakSetupAction'] = 'hold';
 
-        if ($riskPercent > 0) {
+        if ($riskPercent > 0 && $useAtrRiskTargets) {
             $next['stopLossPercent'] = round($riskPercent, 4);
             $next['rollbackLossPercent'] = round($riskPercent, 4);
             $next['takeProfitPercent'] = round(max($riskPercent * $tp1RR, $riskPercent), 4);
             $next['trailingTakeProfitPercent'] = round(max(0.01, $riskPercent * $trailMultiplier), 4);
+        }
+        if ($useWebhookRiskOverrides && $webhookRisk !== []) {
+            foreach (['takeProfitPercent', 'stopLossPercent', 'trailingTakeProfitPercent', 'rollbackLossPercent'] as $key) {
+                $value = $this->positivePercentOrNull($webhookRisk[$key] ?? null);
+                if ($value !== null) {
+                    $next[$key] = $value;
+                }
+            }
         }
 
         $public = [
@@ -6059,7 +6180,9 @@ class FutureTradeBotService
                 'winRateSampleWeight' => 0,
             ],
             'adjustments' => [
-                'Prime v6.1.7 Pine mirror: secondary AI weighting, MACD weighting, RSI weighting, symbol-performance penalty and dynamic confidence overrides are disabled.',
+                $useWebhookRiskOverrides
+                    ? 'Prime v6.1.7 Pine mirror: TradingView webhook decides direction; webhook risk values are allowed to override manual exits when present.'
+                    : 'Prime v6.1.7 Pine mirror: TradingView webhook decides direction; manual Prime Risk values control exits unless ATR risk targets are explicitly enabled.',
             ],
             'suggestion' => 'Prime v6.1.7 Pine mirror is the active signal brain. Backend executes Pine score decisions and applies risk/freshness guards only.',
         ];
@@ -6233,6 +6356,188 @@ class FutureTradeBotService
     private function clamp(float $value, float $min, float $max): float
     {
         return max($min, min($max, $value));
+    }
+
+    private function positivePercentOrNull(mixed $value): ?float
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+        $numeric = (float) $value;
+        if ($numeric <= 0) {
+            return null;
+        }
+
+        return round($this->clamp($numeric, 0.01, 5.0), 4);
+    }
+
+    private function positionMoveStats(FutureTradeBotState $state): array
+    {
+        $entry = (float) ($state->entry_price ?? 0);
+        $peak = (float) ($state->peak_price ?? 0);
+        $bottom = (float) ($state->bottom_price ?? 0);
+        $side = (string) ($state->position_side ?? '');
+
+        if ($entry <= 0 || $side === '') {
+            return [];
+        }
+
+        $peak = $peak > 0 ? $peak : $entry;
+        $bottom = $bottom > 0 ? $bottom : $entry;
+        $favorable = $side === 'SHORT'
+            ? (($entry - $bottom) / $entry) * 100
+            : (($peak - $entry) / $entry) * 100;
+        $adverse = $side === 'SHORT'
+            ? (($peak - $entry) / $entry) * 100
+            : (($entry - $bottom) / $entry) * 100;
+
+        return [
+            'side' => $side,
+            'entry' => round($entry, 8),
+            'peak' => round($peak, 8),
+            'bottom' => round($bottom, 8),
+            'maxFavorableMovePercent' => round(max(0.0, $favorable), 4),
+            'maxAdverseMovePercent' => round(max(0.0, $adverse), 4),
+        ];
+    }
+
+    private function performanceFeedbackPayload(FutureTradeBotConfig $config): array
+    {
+        $trades = $config->trades()
+            ->whereNotNull('exit_price')
+            ->whereIn('status', ['FILLED', 'CLOSED'])
+            ->where(function ($query): void {
+                $query->where('side', 'like', 'CLOSE_%')
+                    ->orWhere('side', 'like', 'LIVE_CLOSE_%');
+            })
+            ->orderByDesc('created_at')
+            ->limit(50)
+            ->get();
+
+        $sampleSize = $trades->count();
+        if ($sampleSize === 0) {
+            return [
+                'sampleSize' => 0,
+                'summary' => 'No closed trades yet. Collect 30-50 paper/testnet trades before tuning risk automatically.',
+                'exitReasons' => [],
+                'sides' => [],
+                'latency' => null,
+                'suggestions' => ['Collect closed trade data first.'],
+            ];
+        }
+
+        $wins = 0;
+        $net = 0.0;
+        $latencies = [];
+        $byReason = [];
+        $bySide = [];
+        $favorableBeforeLoss = [];
+
+        foreach ($trades as $trade) {
+            $tradeNet = (float) ($trade->net_pnl ?? 0);
+            $isWin = $tradeNet > 0;
+            $wins += $isWin ? 1 : 0;
+            $net += $tradeNet;
+
+            $reason = (string) ($trade->reason ?: 'UNKNOWN');
+            $side = str_contains((string) $trade->side, 'SHORT') ? 'SHORT' : 'LONG';
+            $meta = $this->arrayContext($trade->meta ?? []);
+            $timing = (array) ($meta['webhook_timing'] ?? []);
+            $signalLatency = $timing['signalLatencyMs'] ?? null;
+            if (is_numeric($signalLatency)) {
+                $latencies[] = (float) $signalLatency;
+            }
+
+            if (! isset($byReason[$reason])) {
+                $byReason[$reason] = ['count' => 0, 'wins' => 0, 'netPnl' => 0.0];
+            }
+            $byReason[$reason]['count']++;
+            $byReason[$reason]['wins'] += $isWin ? 1 : 0;
+            $byReason[$reason]['netPnl'] += $tradeNet;
+
+            if (! isset($bySide[$side])) {
+                $bySide[$side] = ['count' => 0, 'wins' => 0, 'netPnl' => 0.0];
+            }
+            $bySide[$side]['count']++;
+            $bySide[$side]['wins'] += $isWin ? 1 : 0;
+            $bySide[$side]['netPnl'] += $tradeNet;
+
+            if (! $isWin) {
+                $moveStats = (array) ($meta['move_stats'] ?? []);
+                if (is_numeric($moveStats['maxFavorableMovePercent'] ?? null)) {
+                    $favorableBeforeLoss[] = (float) $moveStats['maxFavorableMovePercent'];
+                }
+            }
+        }
+
+        $formatBucket = static function (array $bucket): array {
+            ksort($bucket);
+
+            return array_map(static function (array $row): array {
+                $count = max(1, (int) $row['count']);
+
+                return [
+                    'count' => (int) $row['count'],
+                    'wins' => (int) $row['wins'],
+                    'winRate' => round(((int) $row['wins'] / $count) * 100, 2),
+                    'netPnl' => round((float) $row['netPnl'], 6),
+                ];
+            }, $bucket);
+        };
+
+        $stopHits = (int) ($byReason['STOP_LOSS_HIT']['count'] ?? 0);
+        $tpHits = (int) ($byReason['TAKE_PROFIT_HIT']['count'] ?? 0);
+        $trailHits = (int) ($byReason['TRAILING_PROFIT_HIT']['count'] ?? 0);
+        $avgLatency = count($latencies) > 0 ? array_sum($latencies) / count($latencies) : null;
+        $avgFavorableBeforeLoss = count($favorableBeforeLoss) > 0 ? array_sum($favorableBeforeLoss) / count($favorableBeforeLoss) : null;
+        $suggestions = [];
+
+        if ($sampleSize < 30) {
+            $suggestions[] = 'Sample is still small; keep changes conservative until 30-50 closed trades.';
+        }
+        if ($stopHits / max(1, $sampleSize) > 0.45) {
+            $suggestions[] = 'Stop-loss hits are high; reduce size or loosen SL only after checking max adverse move.';
+        }
+        if ($tpHits + $trailHits > $stopHits) {
+            $suggestions[] = 'Profit exits are beating stop exits; keep current risk profile and monitor latency.';
+        }
+        if ($avgLatency !== null && $avgLatency > 30000) {
+            $suggestions[] = 'Webhook signal latency is high; check TradingView alert delay and queue backlog.';
+        }
+        if ($suggestions === []) {
+            $suggestions[] = 'No automatic risk change suggested from the current sample.';
+        }
+
+        return [
+            'sampleSize' => $sampleSize,
+            'wins' => $wins,
+            'losses' => $sampleSize - $wins,
+            'winRate' => round(($wins / max(1, $sampleSize)) * 100, 2),
+            'netPnl' => round($net, 6),
+            'avgNetPnl' => round($net / max(1, $sampleSize), 6),
+            'exitReasons' => $formatBucket($byReason),
+            'sides' => $formatBucket($bySide),
+            'latency' => $avgLatency !== null ? [
+                'avgSignalLatencyMs' => round($avgLatency, 2),
+                'samples' => count($latencies),
+            ] : null,
+            'avgFavorableMoveBeforeLossPercent' => $avgFavorableBeforeLoss !== null ? round($avgFavorableBeforeLoss, 4) : null,
+            'summary' => sprintf('Last %d closed trades: %.1f%% win rate, net %.4f USDT.', $sampleSize, ($wins / max(1, $sampleSize)) * 100, $net),
+            'suggestions' => $suggestions,
+        ];
+    }
+
+    private function arrayContext(mixed $value): array
+    {
+        if (is_array($value)) {
+            return $value;
+        }
+        if (is_string($value) && $value !== '') {
+            $decoded = json_decode($value, true);
+            return is_array($decoded) ? $decoded : [];
+        }
+
+        return [];
     }
 
     private function atrPercentProxy(array $points, ?array $best): float
@@ -7368,6 +7673,7 @@ class FutureTradeBotService
                 'signal_source' => $context['signalSource'] ?? null,
                 'candle_open' => $context['candleOpen'] ?? null,
                 'candle_close' => $context['candleClose'] ?? null,
+                'webhook_timing' => $context['webhookTiming'] ?? null,
             ]);
         }
 
@@ -7386,9 +7692,11 @@ class FutureTradeBotService
     private function logScanStatus(FutureTradeBotConfig $config, array $signal, array $dynamic): void
     {
         $public = (array) ($dynamic['public'] ?? []);
-        $recommended = (array) ($dynamic['recommended'] ?? []);
-        $analysis = (array) ($dynamic['analysis'] ?? []);
+        $recommended = (array) ($public['recommended'] ?? []);
+        $analysis = (array) ($public['analysis'] ?? []);
         $checks = (array) data_get($signal, 'debug.checks', []);
+        $signalReason = (string) ($signal['reason'] ?? '');
+        $isBlockedSignal = (string) ($signal['signal'] ?? 'WAIT') === 'WAIT';
 
         $this->logThrottled(
             $config,
@@ -7401,11 +7709,11 @@ class FutureTradeBotService
                 'status' => (string) ($signal['signal'] ?? 'WAIT'),
                 'algorithmFlag' => 'PINE',
                 'effectiveMinConfidence' => (float) ($dynamic['effectiveMinConfidence'] ?? $signal['effectiveMinConfidence'] ?? 0),
-                'activeTakeProfitPercent' => (float) ($public['takeProfitPercent'] ?? $recommended['takeProfitPercent'] ?? 0),
-                'activeStopLossPercent' => (float) ($public['stopLossPercent'] ?? $recommended['stopLossPercent'] ?? 0),
-                'activeTrailingTakeProfitPercent' => (float) ($public['trailingTakeProfitPercent'] ?? $recommended['trailingTakeProfitPercent'] ?? 0),
-                'activeCooldownSeconds' => (int) ($public['cooldownSeconds'] ?? $recommended['cooldownSeconds'] ?? 0),
-                'activeTradeAmountUsdt' => (float) ($public['tradeAmountUsdt'] ?? $recommended['tradeAmountUsdt'] ?? 0),
+                'activeTakeProfitPercent' => (float) ($recommended['takeProfitPercent'] ?? 0),
+                'activeStopLossPercent' => (float) ($recommended['stopLossPercent'] ?? 0),
+                'activeTrailingTakeProfitPercent' => (float) ($recommended['trailingTakeProfitPercent'] ?? 0),
+                'activeCooldownSeconds' => (int) ($recommended['cooldownSeconds'] ?? 0),
+                'activeTradeAmountUsdt' => (float) ($recommended['tradeAmountUsdt'] ?? 0),
                 'trendStrength' => (float) ($analysis['trendStrength'] ?? 0),
                 'choppy' => (bool) ($analysis['choppy'] ?? false),
                 'vwapAligned' => $checks['vwapAligned'] ?? null,
@@ -7416,7 +7724,9 @@ class FutureTradeBotService
                 'volumeAligned' => $checks['volumeAligned'] ?? null,
                 'volumeRatio' => $checks['volumeRatio'] ?? null,
                 'htfAligned' => $checks['htfAligned'] ?? null,
-                'hardBlocker' => (string) ($signal['reason'] ?? ''),
+                'decisionReason' => $signalReason,
+                'hardBlocker' => $isBlockedSignal ? $signalReason : null,
+                'hardBlockers' => $isBlockedSignal && $signalReason !== '' ? [$signalReason] : null,
             ],
             10
         );
