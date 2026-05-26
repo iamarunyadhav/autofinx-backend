@@ -51,6 +51,7 @@ class FutureTradePnLService
             ->get(['symbol', 'side', 'entry_price', 'exit_price', 'net_pnl', 'created_at']);
 
         $usedLegacyIndexes = [];
+        $includedLegacyIndexes = [];
         $resolvedRows = collect();
 
         foreach ($closedLogicalTrades as $trade) {
@@ -104,6 +105,7 @@ class FutureTradePnLService
                 continue;
             }
 
+            $includedLegacyIndexes[] = $index;
             $resolvedRows->push((object) ['net_pnl' => (float) $legacy->net_pnl]);
         }
 
@@ -123,7 +125,7 @@ class FutureTradePnLService
         return [
             'closedCount' => $resolvedRows->count(),
             'logicalClosedCount' => $closedLogicalTrades->whereNotNull('net_pnl')->count(),
-            'legacyClosedCount' => $legacyCloseRows->count(),
+            'legacyClosedCount' => count($includedLegacyIndexes) + count($usedLegacyIndexes),
             'recoveredLogicalCount' => $closedLogicalTrades->whereNull('net_pnl')->count(),
             'botProfit' => round($profit, 8),
             'botLoss' => round($loss, 8),

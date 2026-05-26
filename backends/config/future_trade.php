@@ -13,6 +13,10 @@ return [
     'prime_mirror_execution_enabled' => env('FUTURE_TRADE_PRIME_MIRROR_EXECUTION_ENABLED', false),
     'prime_mirror_live_enabled' => env('FUTURE_TRADE_PRIME_MIRROR_LIVE_ENABLED', false),
     'pine_webhook_live_enabled' => env('FUTURE_TRADE_PINE_WEBHOOK_LIVE_ENABLED', true),
+    'webhook_fallback_enabled' => env('FUTURE_TRADE_WEBHOOK_FALLBACK_ENABLED', false),
+    'webhook_risk_overrides' => env('FUTURE_TRADE_WEBHOOK_RISK_OVERRIDES', false),
+    'atr_dynamic_risk_targets' => env('FUTURE_TRADE_ATR_DYNAMIC_RISK_TARGETS', false),
+    'confirmed_candle_only' => env('FUTURE_TRADE_CONFIRMED_CANDLE_ONLY', true),
 
     // All futures symbols available in the UI selector
     'available_symbols' => [
@@ -45,8 +49,9 @@ return [
         'signalProfile' => env('FUTURE_TRADE_SIGNAL_PROFILE', env('FUTURE_TRADE_DEFAULT_SIGNAL_PROFILE', 'autofinx_prime_v6_1_7_crypto')),
         'signalProfileName' => 'AutoFinX Prime v6.1.7 Crypto Stable Default',
         'marketProfile' => 'Crypto',
-        'signalSource' => 'webhook',
+        'signalSource' => env('FUTURE_TRADE_SIGNAL_SOURCE', 'webhook'),
         'pineWebhookFallbackTimeoutSeconds' => (int) env('FUTURE_TRADE_PINE_WEBHOOK_FALLBACK_TIMEOUT_SECONDS', 1200),
+        'webhookFallbackEnabled' => env('FUTURE_TRADE_WEBHOOK_FALLBACK_ENABLED', false),
         'primeMirrorLiveEnabled' => false,
         'validatedDefaultSymbols' => ['ETHUSDT', 'BTCUSDT', 'SOLUSDT'],
         'validationSymbols' => ['ETHUSDT', 'BTCUSDT', 'SOLUSDT', 'BNBUSDT'],
@@ -99,20 +104,29 @@ return [
         'tp2RR' => 2.0,
         'useAtrTrailingSecondHalf' => true,
         'trailAtrMultiplier' => 0.8,
-        'useAtrRiskTargets' => false,
-        'useWebhookRiskOverrides' => false,
+        'useAtrRiskTargets' => env('FUTURE_TRADE_ATR_DYNAMIC_RISK_TARGETS', false),
+        'useWebhookRiskOverrides' => env('FUTURE_TRADE_WEBHOOK_RISK_OVERRIDES', false),
+        'confirmedCandleOnly' => env('FUTURE_TRADE_CONFIRMED_CANDLE_ONLY', true),
         'cooldownBars' => 3,
         'exitOnStrongOppositeScore' => true,
         'oppositeExitScore' => 78,
         // Prime default: webhook decides direction; these manual exits control risk.
         'takeProfitPercent' => 0.5,
         'stopLossPercent' => 0.25,
-        'trailingTakeProfitPercent' => 0.22,
+        'trailingTakeProfitPercent' => 0.18,
         'rollbackLossPercent' => 0.15,
-        'maxDailyLossPercent' => 0.3,
+        'maxDailyLossPercent' => 0.5,
+        // 3-tier daily-loss guard:
+        //   <= softDailyLossWarnPercent      → log warning only, all trades allowed
+        //   >= maxDailyLossPercent           → block new entries, allow exits / close webhooks
+        //   >= hardDailyLossBlockPercent     → block all webhook-driven trades (entries AND exits)
+        // Automated stop-loss / trailing exits run independently via the exit monitor.
+        'softDailyLossWarnPercent' => 0.3,
+        'hardDailyLossBlockPercent' => 0.8,
         'maxOpenPositions' => 1,
-        // Fewer high-quality trades rather than many low-quality ones
-        'maxTradesPerDay' => 3,
+        'reversalMode' => 'close_only',
+        // Webhook-only mode can accept more Pine entries; loss/cooldown/open-position guards still apply.
+        'maxTradesPerDay' => 50,
         'maxLeverage' => 2,
         'maxSpreadPercent' => 0.12,
         // Longer cooldown prevents chasing failed trades
@@ -129,8 +143,9 @@ return [
         // trades; 'mirror' = backend self-generated scanner signals execute;
         // 'webhook_fallback' = webhook is accepted when available, otherwise the
         // Binance-backed mirror scanner may execute after the webhook stale window.
-        'signalSource' => 'webhook',
+        'signalSource' => env('FUTURE_TRADE_SIGNAL_SOURCE', 'webhook'),
         'pineWebhookFallbackTimeoutSeconds' => (int) env('FUTURE_TRADE_PINE_WEBHOOK_FALLBACK_TIMEOUT_SECONDS', 1200),
+        'webhookFallbackEnabled' => env('FUTURE_TRADE_WEBHOOK_FALLBACK_ENABLED', false),
         'primeMirrorExecutionEnabled' => false,
         'avoidChoppyMarket' => true,
         'strictEntryGuards' => true,

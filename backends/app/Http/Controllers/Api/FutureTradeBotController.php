@@ -44,6 +44,7 @@ class FutureTradeBotController extends Controller
 
     public function pineWebhook(Request $request, string $workspace): JsonResponse
     {
+        $config = $this->bot->getOrCreateConfig($workspace);
         $configuredToken = trim((string) config('future_trade.pine_webhook_token', ''));
         $providedTokens = array_filter(array_map(
             static fn ($token): string => trim((string) $token),
@@ -58,6 +59,22 @@ class FutureTradeBotController extends Controller
         $tokenMatched = $configuredToken !== '' && collect($providedTokens)
             ->contains(static fn (string $token): bool => hash_equals($configuredToken, $token));
 
+        $rawBody = (string) $request->getContent();
+        $decoded = $rawBody !== '' ? json_decode($rawBody, true) : null;
+        $headersSummary = [];
+        foreach (['content-type', 'user-agent', 'x-forwarded-for', 'cf-connecting-ip'] as $header) {
+            if ($request->headers->has($header)) {
+                $headersSummary[$header] = $request->headers->get($header);
+            }
+        }
+        $this->bot->recordRawPineWebhookRequest($config, is_array($decoded) ? $decoded : $request->all(), [
+            'rawBody' => $rawBody,
+            'remoteIp' => $request->ip(),
+            'headersSummary' => $headersSummary,
+            'parseStatus' => $rawBody === '' ? 'empty' : (json_last_error() === JSON_ERROR_NONE ? 'json' : 'invalid_json'),
+            'tokenStatus' => $tokenMatched ? 'valid' : 'invalid_or_missing',
+        ]);
+
         if (! $tokenMatched) {
             return response()->json([
                 'accepted' => false,
@@ -67,11 +84,26 @@ class FutureTradeBotController extends Controller
         }
 
         $result = $this->bot->ingestPineWebhook(
-            $this->bot->getOrCreateConfig($workspace),
+            $config,
             $request->all()
         );
 
         return response()->json($result, ($result['accepted'] ?? false) ? 200 : 422);
+    }
+
+    public function lastWebhookPayload(string $workspace): JsonResponse
+    {
+        return response()->json($this->bot->lastWebhookPayload($this->bot->getOrCreateConfig($workspace)));
+    }
+
+    public function binanceHealth(string $workspace): JsonResponse
+    {
+        return response()->json($this->bot->binanceHealthPayload($this->bot->getOrCreateConfig($workspace)));
+    }
+
+    public function runtimeHealth(string $workspace): JsonResponse
+    {
+        return response()->json($this->bot->runtimeHealthPayload($this->bot->getOrCreateConfig($workspace)));
     }
 
     public function chart(Request $request, string $workspace): JsonResponse
