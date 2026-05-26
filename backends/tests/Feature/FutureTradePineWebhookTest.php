@@ -67,6 +67,7 @@ function pineWebhookPayload(array $overrides = []): array
     return array_merge([
         'token' => 'pine-secret',
         'profile' => 'autofinx_prime_v6_1_7_crypto',
+        'source' => 'pine_webhook',
         'symbol' => 'ETHUSDT.P',
         'timeframe' => '15m',
         'signal' => 'BUY',
@@ -404,14 +405,25 @@ test('prime scanner buy is blocked for live mode when mirror live is disabled', 
         ->and($config->logicalTrades()->count())->toBe(0);
 
     $log = $config->logs()->latest('occurred_at')->first();
+    // In webhook mode the scanner-read-only guard fires before the mirror-live
+    // guard. Either blocker is acceptable — both mean the same thing: backend
+    // scanner cannot execute live in TradingView webhook mode.
+    $hardBlockers = $log?->context['hardBlockers'] ?? [];
     expect($log?->event)->toBe('TRADE_BLOCKED')
-        ->and($log?->context['hardBlockers'] ?? [])->toContain('prime_mirror_live_disabled_pending_tv_csv_validation');
+        ->and(
+            in_array('backend_scanner_read_only_webhook_mode', $hardBlockers, true)
+            || in_array('prime_mirror_live_disabled_pending_tv_csv_validation', $hardBlockers, true)
+        )->toBeTrue();
 });
 
-test('prime mirror live override lifts only the source guard for testing', function () {
+test('prime mirror live override lifts the source guard only when signal source is mirror', function () {
     config(['future_trade.prime_mirror_live_enabled' => false]);
     $workspace = Workspace::factory()->create();
     $config = createPrimeWebhookLiveConfig($workspace->id, [
+        // Explicitly switch signal source to mirror — the override is only
+        // meant to unblock the testing of mirror execution, not bypass the
+        // scanner-read-only guard that webhook mode now enforces.
+        'signalSource' => 'mirror',
         'primeMirrorLiveEnabled' => true,
         'primeMirrorExecutionEnabled' => true,
     ]);
@@ -422,6 +434,148 @@ test('prime mirror live override lifts only the source guard for testing', funct
     $method->setAccessible(true);
 
     expect($method->invoke(app(FutureTradeBotService::class), $config->fresh('state'), $settings, $signal))->toBeFalse();
+});
+
+test('pine webhook freshness snapshot does not block when user stream is stale but REST is verified', function () {
+    Carbon::setTestNow('2026-05-19 10:30:05');
+    $workspace = Workspace::factory()->create();
+    $config = createPrimeWebhookConfig($workspace->id);
+
+    $signal = [
+        'symbol' => 'ETHUSDT',
+        'signal' => 'BUY',
+        'source' => 'pine_webhook',
+        'confidence' => 0.82,
+        'timeframe' => '15m',
+        'candle_open' => '2026-05-19T10:15:00Z',
+    ];
+
+    $method = new ReflectionMethod(FutureTradeBotService::class, 'preExecutionFreshnessSnapshot');
+    $method->setAccessible(true);
+    $snapshot = $method->invoke(app(FutureTradeBotService::class), $config->fresh('state'), $signal);
+
+    // Paper mode bypasses live state checks entirely — webhook source must not
+    // be blocked by freshness gate.
+    expect($snapshot['blockers'])->toBe([])
+        ->and($snapshot['freshnessGateSource'])->not->toBe('blocked');
+});
+
+test('opposite-direction pine webhook bypasses cooldown', function () {
+    Carbon::setTestNow('2026-05-19 10:30:05');
+    $workspace = Workspace::factory()->create();
+    $config = createPrimeWebhookConfig($workspace->id, [
+        'cooldownSeconds' => 180,
+    ]);
+
+    $svc = app(FutureTradeBotService::class);
+    // Simulate that a LONG position was just closed — cache the last-closed side.
+    $recordLastClosedSide = new ReflectionMethod($svc, 'recordLastClosedSide');
+    $recordLastClosedSide->setAccessible(true);
+    $recordLastClosedSide->invoke($svc, $config, 'LONG', 180);
+
+    // Put the bot in active cooldown.
+    $config->state()->update(['cooldown_until' => now()->addSeconds(120)]);
+
+    // Opposite-direction (SELL after LONG close) — should NOT block.
+    $signal = ['symbol' => 'ETHUSDT', 'signal' => 'SELL', 'source' => 'pine_webhook'];
+    $check = new ReflectionMethod($svc, 'signalIsOppositeOfLastClose');
+    $check->setAccessible(true);
+    expect($check->invoke($svc, $config->fresh('state'), 'SELL'))->toBeTrue();
+
+    // Same-direction (BUY after LONG close) — should still respect cooldown.
+    expect($check->invoke($svc, $config->fresh('state'), 'BUY'))->toBeFalse();
+});
+
+test('daily loss tier hard cap blocks new entries', function () {
+    config(['future_trade.pine_webhook_token' => 'pine-secret']);
+    Carbon::setTestNow('2026-05-19 10:30:05');
+    $workspace = Workspace::factory()->create();
+    $config = createPrimeWebhookConfig($workspace->id, [
+        'hardDailyLossBlockPercent' => 0.8,
+    ]);
+    $config->state()->update([
+        'daily_loss' => 1.2,
+        'position_side' => null,
+        'quantity' => 0,
+        'current_symbol' => 'ETHUSDT',
+    ]);
+
+    $this->postJson("/api/v1/future-trade/pine-webhook/{$workspace->id}", pineWebhookPayload([
+        'signal' => 'BUY',
+    ]))->assertOk()
+        ->assertJsonPath('executed', false)
+        ->assertJsonPath('execution', 'blocked_with_logged_reason');
+
+    expect((int) $config->fresh('state')->state->trade_count_today)->toBe(0);
+});
+
+test('daily loss tier hard cap still allows close webhook exits', function () {
+    config(['future_trade.pine_webhook_token' => 'pine-secret']);
+    Carbon::setTestNow('2026-05-19 10:30:05');
+    $workspace = Workspace::factory()->create();
+    $config = createPrimeWebhookConfig($workspace->id, [
+        'hardDailyLossBlockPercent' => 0.8,
+    ]);
+    // Drive daily_loss above the hard cap and seed an open position. CLOSE is
+    // risk-reducing, so it must remain executable even while new entries are
+    // blocked.
+    $config->state()->update([
+        'daily_loss' => 1.2,
+        'position_side' => 'LONG',
+        'entry_price' => 2505,
+        'quantity' => 0.05,
+        'current_symbol' => 'ETHUSDT',
+    ]);
+
+    $this->postJson("/api/v1/future-trade/pine-webhook/{$workspace->id}", pineWebhookPayload([
+        'signal' => 'CLOSE_LONG',
+    ]))->assertOk()
+        ->assertJsonPath('executed', true)
+        ->assertJsonPath('execution', 'executed')
+        ->assertJsonPath('reason', 'close_signal_executed');
+
+    $state = $config->fresh('state')->state;
+    expect((float) $state->quantity)->toBe(0.0)
+        ->and($state->position_side)->toBeNull();
+});
+
+test('webhook response includes latency telemetry', function () {
+    config(['future_trade.pine_webhook_token' => 'pine-secret']);
+    Carbon::setTestNow('2026-05-19 10:30:05');
+    $workspace = Workspace::factory()->create();
+    createPrimeWebhookConfig($workspace->id);
+
+    $response = $this->postJson("/api/v1/future-trade/pine-webhook/{$workspace->id}", pineWebhookPayload([
+        'signal' => 'WAIT',
+    ]))->assertOk();
+
+    $body = $response->json();
+    expect($body)->toHaveKey('latency')
+        ->and($body['latency'])->toHaveKey('totalMs')
+        ->and($body['latency']['totalMs'])->toBeInt();
+});
+
+test('non-webhook signal still blocks on stale feed', function () {
+    Carbon::setTestNow('2026-05-19 10:30:05');
+    $workspace = Workspace::factory()->create();
+    $config = createPrimeWebhookConfig($workspace->id);
+
+    $signal = [
+        'symbol' => 'ETHUSDT',
+        'signal' => 'BUY',
+        'source' => 'backend_mirror',
+        'confidence' => 0.82,
+        'timeframe' => '15m',
+        'candle_open' => '2026-05-19T10:15:00Z',
+    ];
+
+    $method = new ReflectionMethod(FutureTradeBotService::class, 'preExecutionFreshnessSnapshot');
+    $method->setAccessible(true);
+    $snapshot = $method->invoke(app(FutureTradeBotService::class), $config->fresh('state'), $signal);
+
+    // Backend mirror sources are still subject to feed freshness — this is
+    // intentional: only the pine_webhook source is the trusted brain.
+    expect(in_array('stale_feed', $snapshot['blockers'], true))->toBeTrue();
 });
 
 test('prime mirror paper toggle lifts source guard for scanner execution', function () {

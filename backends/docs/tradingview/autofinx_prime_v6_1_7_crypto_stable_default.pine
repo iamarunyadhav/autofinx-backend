@@ -201,11 +201,14 @@ f_webhookPayload(_signal, _longScore, _shortScore) =>
       "\"signal\":\"" + _signal + "\"," +
       "\"price\":" + str.tostring(close, format.mintick) + "," +
       "\"score\":" + str.tostring(_score, "#.##") + "," +
+      "\"confidence\":" + str.tostring(_score, "#.##") + "," +
       "\"longScore\":" + str.tostring(_longScore, "#.##") + "," +
       "\"shortScore\":" + str.tostring(_shortScore, "#.##") + "," +
       "\"bar_confirmed\":true," +
       "\"candle_open_time\":" + str.tostring(time) + "," +
-      "\"source\":\"tradingview_pine_v617\"" +
+      "\"strategy_order_id\":\"" + _signal + "-" + str.tostring(time) + "\"," +
+      "\"strategy_version\":\"v6.1.7\"," +
+      "\"source\":\"pine_webhook\"" +
     "}"
 
 var int lastEntryBar = na
@@ -251,8 +254,8 @@ if strategy.position_size > 0
         strategy.exit("L-TRAIL", from_entry="LONG", qty_percent=50, stop=stopPrice, trail_points=trailTicks, trail_offset=trailTicks)
     else
         strategy.exit("L-TP2", from_entry="LONG", qty_percent=50, stop=stopPrice, limit=tp2Price)
-    if exitOnStrongOpposite and shortScore >= oppositeExitThreshold and shortScore > longScore
-        strategy.close("LONG", comment="Opposite SELL score", alert_message=f_webhookPayload("CLOSE", longScore, shortScore))
+    if exitOnStrongOpposite and shortScore >= oppositeExitThreshold and shortScore > longScore and barstate.isconfirmed
+        strategy.close("LONG", comment="Opposite SELL score", alert_message=f_webhookPayload("CLOSE_LONG", longScore, shortScore))
 
 if strategy.position_size < 0
     avg = strategy.position_avg_price
@@ -264,8 +267,8 @@ if strategy.position_size < 0
         strategy.exit("S-TRAIL", from_entry="SHORT", qty_percent=50, stop=stopPrice, trail_points=trailTicks, trail_offset=trailTicks)
     else
         strategy.exit("S-TP2", from_entry="SHORT", qty_percent=50, stop=stopPrice, limit=tp2Price)
-    if exitOnStrongOpposite and longScore >= oppositeExitThreshold and longScore > shortScore
-        strategy.close("SHORT", comment="Opposite BUY score", alert_message=f_webhookPayload("CLOSE", longScore, shortScore))
+    if exitOnStrongOpposite and longScore >= oppositeExitThreshold and longScore > shortScore and barstate.isconfirmed
+        strategy.close("SHORT", comment="Opposite BUY score", alert_message=f_webhookPayload("CLOSE_SHORT", longScore, shortScore))
 
 emaFastColor = emaFast > emaSlow ? color.lime : color.red
 emaSlowColor = emaFast > emaSlow ? color.green : color.orange

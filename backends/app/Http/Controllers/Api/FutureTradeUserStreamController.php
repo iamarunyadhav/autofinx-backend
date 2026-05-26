@@ -70,4 +70,22 @@ class FutureTradeUserStreamController extends Controller
             ->firstOrFail();
         return response()->json($userStream->snapshot($config));
     }
+
+    public function restart(Request $request, string $workspace, FutureTradeUserStreamService $userStream): JsonResponse
+    {
+        $config = FutureTradeBotConfig::query()
+            ->where('workspace_id', $workspace)
+            ->where('slot_index', 0)
+            ->firstOrFail();
+
+        $listenKey = $userStream->ensureListenKey($config);
+
+        return response()->json([
+            'configured' => $listenKey !== null,
+            'message' => $listenKey !== null
+                ? 'Binance Futures user stream listen key refreshed.'
+                : 'User stream not configured. REST polling fallback remains active when Binance REST health is OK.',
+            'snapshot' => $userStream->snapshot($config),
+        ]);
+    }
 }

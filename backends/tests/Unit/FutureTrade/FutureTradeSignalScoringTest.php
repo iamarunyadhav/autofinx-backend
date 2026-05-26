@@ -8,11 +8,14 @@ use App\Domain\Portfolio\LivePortfolioGuardService;
 use App\Domain\Signals\IndicatorIntelligenceService;
 use App\Domain\Signals\StrategyResearchLabService;
 use App\Domain\Trading\FuturesOrderSizingService;
-use PHPUnit\Framework\TestCase;
+use Illuminate\Foundation\Testing\TestCase as LaravelTestCase;
 use ReflectionMethod;
+use Tests\CreatesApplication;
 
-class FutureTradeSignalScoringTest extends TestCase
+class FutureTradeSignalScoringTest extends LaravelTestCase
 {
+    use CreatesApplication;
+
     public function test_sequence_only_bearish_snapshot_stays_conservative_without_structure_confirmation(): void
     {
         $service = $this->service();
