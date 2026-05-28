@@ -1204,17 +1204,6 @@ class FutureTradeBotService
             return $this->rejectPineWebhook($config, $payload, 'bar_not_confirmed');
         }
 
-        $candle = $this->pineWebhookCandleTimes($payload, $timeframe);
-        if ($candle['close'] === null || $candle['open'] === null) {
-            return $this->rejectPineWebhook($config, $payload, 'candle_time_required');
-        }
-        if ($candle['close']->greaterThan($receivedAt->copy()->addSeconds(90))) {
-            return $this->rejectPineWebhook($config, $payload, 'candle_close_in_future', ['candleClose' => $candle['close']->toIso8601String()]);
-        }
-        if (((int) $candle['close']->minute % 15) !== 0) {
-            return $this->rejectPineWebhook($config, $payload, 'candle_close_not_15m_aligned', ['candleClose' => $candle['close']->toIso8601String()]);
-        }
-
         $rawDecision = strtoupper(trim((string) ($payload['signal'] ?? $payload['action'] ?? $payload['side'] ?? 'WAIT')));
         $positionSide = strtoupper((string) ($state->position_side ?? ''));
         $isCloseSignal = false;
@@ -1237,6 +1226,20 @@ class FutureTradeBotService
         }
         if (! in_array($decision, ['BUY', 'SELL', 'WAIT', 'CLOSE', 'CLOSE_LONG', 'CLOSE_SHORT'], true)) {
             return $this->rejectPineWebhook($config, $payload, 'unsupported_signal', ['signal' => $decision]);
+        }
+
+        $candle = $this->pineWebhookCandleTimes($payload, $timeframe);
+        if ($candle['close'] === null || $candle['open'] === null) {
+            return $this->rejectPineWebhook($config, $payload, 'candle_time_required');
+        }
+        $futureCloseAllowedForExit = $isCloseSignal
+            && $candle['open']->lessThanOrEqualTo($receivedAt->copy()->addSeconds(90))
+            && $candle['close']->lessThanOrEqualTo($receivedAt->copy()->addMinutes($this->timeframeMinutes($timeframe))->addSeconds(90));
+        if ($candle['close']->greaterThan($receivedAt->copy()->addSeconds(90)) && ! $futureCloseAllowedForExit) {
+            return $this->rejectPineWebhook($config, $payload, 'candle_close_in_future', ['candleClose' => $candle['close']->toIso8601String()]);
+        }
+        if (((int) $candle['close']->minute % 15) !== 0) {
+            return $this->rejectPineWebhook($config, $payload, 'candle_close_not_15m_aligned', ['candleClose' => $candle['close']->toIso8601String()]);
         }
 
         $price = (float) ($payload['price'] ?? $payload['close'] ?? 0);
