@@ -9,8 +9,11 @@
 # ============================================================
 set -euo pipefail
 
-PHP="/usr/local/bin/ea-php82"
 APP_DIR="/home/zcadmin/public_html/api.autofinx.arunyadhav.dev/autofinx-backend/backends"
+PHP="/usr/local/bin/ea-php82"
+if [ ! -x "$PHP" ] && [ -x "/opt/cpanel/ea-php82/root/usr/bin/php" ]; then
+  PHP="/opt/cpanel/ea-php82/root/usr/bin/php"
+fi
 INSTALL_CRON=0
 
 for arg in "$@"; do
@@ -80,27 +83,8 @@ echo "   Stopped."
 # 6. Start workers
 # ----------------------------------------------------------
 echo "[6/7] Starting workers..."
-nohup "$PHP" artisan queue:work \
-  --queue=critical,execution,reconcile,monitoring \
-  --sleep=1 --tries=3 --timeout=120 --max-time=3600 \
-  >> storage/logs/worker-critical.log 2>&1 &
-
-nohup "$PHP" artisan queue:work \
-  --queue=market,signals,strategies,ratio_bot,ops,intelligence,risk,billing,copytrading \
-  --sleep=1 --tries=3 --timeout=120 --max-time=3600 \
-  >> storage/logs/worker-market.log 2>&1 &
-
-nohup "$PHP" artisan queue:work \
-  --queue=analytics,notifications,default,monitoring_safe \
-  --sleep=1 --tries=3 --timeout=120 --max-time=3600 \
-  >> storage/logs/worker-safe.log 2>&1 &
-
-nohup "$PHP" artisan schedule:work \
-  >> storage/logs/schedule-work.log 2>&1 &
-
-nohup "$PHP" artisan future-trade:live-feed --reconnect-sleep=2 \
-  >> storage/logs/future-trade-live-feed.log \
-  2>> storage/logs/future-trade-live-feed.error.log &
+chmod +x start-workers.sh future-trade-heartbeat.sh future-trade-maintenance.sh
+./start-workers.sh
 
 echo "   Workers started."
 sleep 3
@@ -122,9 +106,7 @@ echo "[7/7] Smoke tests..."
 # Crontab
 # ----------------------------------------------------------
 CRON_LINES=$(cat <<'CRON'
-* * * * * cd /home/zcadmin/public_html/api.autofinx.arunyadhav.dev/autofinx-backend/backends && /usr/local/bin/ea-php82 artisan schedule:run >> storage/logs/cron-schedule-run.log 2>&1
-* * * * * cd /home/zcadmin/public_html/api.autofinx.arunyadhav.dev/autofinx-backend/backends && /usr/local/bin/ea-php82 artisan future-trade:tick --duration=55 --sleep-ms=1000 >> storage/logs/future-trade-tick.log 2>&1
-*/2 * * * * /home/zcadmin/public_html/api.autofinx.arunyadhav.dev/autofinx-backend/backends/future-trade-heartbeat.sh >> /home/zcadmin/public_html/api.autofinx.arunyadhav.dev/autofinx-backend/backends/storage/logs/future-trade-heartbeat.log 2>&1
+* * * * * /home/zcadmin/public_html/api.autofinx.arunyadhav.dev/autofinx-backend/backends/future-trade-heartbeat.sh >> /home/zcadmin/public_html/api.autofinx.arunyadhav.dev/autofinx-backend/backends/storage/logs/future-trade-heartbeat.log 2>&1
 */5 * * * * /home/zcadmin/public_html/api.autofinx.arunyadhav.dev/autofinx-backend/backends/future-trade-maintenance.sh >> /home/zcadmin/public_html/api.autofinx.arunyadhav.dev/autofinx-backend/backends/storage/logs/future-trade-cron.log 2>&1
 CRON
 )
@@ -134,6 +116,7 @@ if [ "$INSTALL_CRON" -eq 1 ]; then
   echo "Installing crontab..."
   (crontab -l 2>/dev/null \
     | grep -v "future-trade:tick" \
+    | grep -v "future-trade:user-stream" \
     | grep -v "future-trade-heartbeat.sh" \
     | grep -v "future-trade-maintenance.sh" \
     | grep -v "artisan schedule:run"
@@ -142,7 +125,7 @@ if [ "$INSTALL_CRON" -eq 1 ]; then
 else
   echo ""
   echo "============================================"
-  echo " ADD THESE 4 LINES IN cPanel > Cron Jobs:"
+  echo " ADD THESE 2 LINES IN cPanel > Cron Jobs:"
   echo "============================================"
   echo "$CRON_LINES"
   echo "============================================"
