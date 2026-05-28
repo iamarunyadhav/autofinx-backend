@@ -173,9 +173,6 @@ if ! pgrep -f "artisan schedule:run" >/dev/null 2>&1; then
   "$PHP" artisan schedule:run >> storage/logs/cron-schedule-run.log 2>&1 || true
 fi
 
-"$PHP" artisan future-trade:queue-health >/dev/null 2>&1 || true
-"$PHP" artisan future-trade:diagnostics --persist >/dev/null 2>&1 || true
-
 queue_count="$(count_processes "artisan queue:work")"
 feed_count="$(count_processes "artisan future-trade:live-feed")"
 tick_count="$(count_processes "artisan future-trade:tick")"
