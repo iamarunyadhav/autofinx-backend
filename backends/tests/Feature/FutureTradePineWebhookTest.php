@@ -164,6 +164,36 @@ test('pine webhook close signal is accepted as log only and does not open revers
         ->and($config->logs()->where('event', 'PINE_WEBHOOK_CLOSE')->exists())->toBeTrue();
 });
 
+test('pine webhook rejects future candle close for entries but allows close exits', function () {
+    config(['future_trade.pine_webhook_token' => 'pine-secret']);
+    Carbon::setTestNow('2026-05-19 10:30:05');
+    $workspace = Workspace::factory()->create();
+    $config = createPrimeWebhookConfig($workspace->id);
+
+    $futureCandle = [
+        'candle_open_time' => '2026-05-19T10:30:00Z',
+        'candle_close_time' => '2026-05-19T10:45:00Z',
+    ];
+
+    $this->postJson("/api/v1/future-trade/pine-webhook/{$workspace->id}", pineWebhookPayload($futureCandle + [
+        'signal' => 'BUY',
+    ]))->assertStatus(422)
+        ->assertJsonPath('reason', 'candle_close_in_future');
+
+    $config->state()->update([
+        'position_side' => 'SHORT',
+        'entry_price' => 2500,
+        'quantity' => 0.02,
+        'current_symbol' => 'ETHUSDT',
+    ]);
+
+    $this->postJson("/api/v1/future-trade/pine-webhook/{$workspace->id}", pineWebhookPayload($futureCandle + [
+        'signal' => 'CLOSE_SHORT',
+    ]))->assertOk()
+        ->assertJsonPath('accepted', true)
+        ->assertJsonPath('decision', 'CLOSE_SHORT');
+});
+
 test('pine webhook is accepted in webhook fallback mode', function () {
     config(['future_trade.pine_webhook_token' => 'pine-secret']);
     Carbon::setTestNow('2026-05-19 10:30:05');
