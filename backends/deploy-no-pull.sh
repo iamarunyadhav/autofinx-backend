@@ -106,8 +106,8 @@ echo "[7/7] Smoke tests..."
 # Crontab
 # ----------------------------------------------------------
 CRON_LINES=$(cat <<'CRON'
-* * * * * /home/zcadmin/public_html/api.autofinx.arunyadhav.dev/autofinx-backend/backends/future-trade-heartbeat.sh >> /home/zcadmin/public_html/api.autofinx.arunyadhav.dev/autofinx-backend/backends/storage/logs/future-trade-heartbeat.log 2>&1
-*/5 * * * * /home/zcadmin/public_html/api.autofinx.arunyadhav.dev/autofinx-backend/backends/future-trade-maintenance.sh >> /home/zcadmin/public_html/api.autofinx.arunyadhav.dev/autofinx-backend/backends/storage/logs/future-trade-cron.log 2>&1
+* * * * * bash /home/zcadmin/public_html/api.autofinx.arunyadhav.dev/autofinx-backend/backends/future-trade-heartbeat.sh >> /home/zcadmin/public_html/api.autofinx.arunyadhav.dev/autofinx-backend/backends/storage/logs/future-trade-heartbeat.log 2>&1
+*/10 * * * * flock -n /tmp/autofinx-maintenance.lock -c 'bash /home/zcadmin/public_html/api.autofinx.arunyadhav.dev/autofinx-backend/backends/future-trade-maintenance.sh >> /home/zcadmin/public_html/api.autofinx.arunyadhav.dev/autofinx-backend/backends/storage/logs/future-trade-cron.log 2>&1'
 CRON
 )
 
@@ -117,6 +117,7 @@ if [ "$INSTALL_CRON" -eq 1 ]; then
   (crontab -l 2>/dev/null \
     | grep -v "future-trade:tick" \
     | grep -v "future-trade:user-stream" \
+    | grep -v "future-trade:live-feed" \
     | grep -v "future-trade-heartbeat.sh" \
     | grep -v "future-trade-maintenance.sh" \
     | grep -v "artisan schedule:run"
