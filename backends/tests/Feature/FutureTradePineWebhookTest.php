@@ -744,6 +744,128 @@ test('pine webhook close_short signal is mapped and accepted', function () {
         ->and($response->json('decision'))->toBe('CLOSE_SHORT');
 });
 
+test('findSlotForSymbol returns first FLAT slot when no slot owns the symbol', function () {
+    Carbon::setTestNow('2026-05-19 10:30:05');
+    $workspace = Workspace::factory()->create();
+    $primary = createPrimeWebhookConfig($workspace->id, [
+        'maxOpenPositions' => 5,
+        'symbols' => ['ETHUSDT', 'BTCUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT'],
+    ]);
+
+    $svc = app(FutureTradeBotService::class);
+    // Trigger shadow-slot creation.
+    $svc->syncSlots($primary);
+
+    // First webhook for BNBUSDT → should land in some slot (slot 0 is FLAT).
+    $slot = $svc->findSlotForSymbol($workspace->id, 'BNBUSDT');
+    expect($slot)->not->toBeNull()
+        ->and((int) $slot->slot_index)->toBe(0);
+});
+
+test('findSlotForSymbol returns the slot that already owns the symbol', function () {
+    Carbon::setTestNow('2026-05-19 10:30:05');
+    $workspace = Workspace::factory()->create();
+    $primary = createPrimeWebhookConfig($workspace->id, [
+        'maxOpenPositions' => 5,
+    ]);
+    $svc = app(FutureTradeBotService::class);
+    $svc->syncSlots($primary);
+
+    // Mark slot 0 as having an open BNBUSDT position.
+    $primary->state()->update([
+        'state' => 'IN_POSITION',
+        'current_symbol' => 'BNBUSDT',
+        'position_side' => 'SHORT',
+        'quantity' => 0.05,
+    ]);
+
+    $slot = $svc->findSlotForSymbol($workspace->id, 'BNBUSDT');
+    expect($slot)->not->toBeNull()
+        ->and((int) $slot->slot_index)->toBe(0);
+
+    // A different symbol should be routed to the next FLAT slot (slot 1).
+    $otherSlot = $svc->findSlotForSymbol($workspace->id, 'ETHUSDT');
+    expect($otherSlot)->not->toBeNull()
+        ->and((int) $otherSlot->slot_index)->toBe(1);
+});
+
+test('findSlotForSymbol returns null when all 5 slots are busy with different symbols', function () {
+    Carbon::setTestNow('2026-05-19 10:30:05');
+    $workspace = Workspace::factory()->create();
+    $primary = createPrimeWebhookConfig($workspace->id, [
+        'maxOpenPositions' => 5,
+    ]);
+    $svc = app(FutureTradeBotService::class);
+    $svc->syncSlots($primary);
+
+    $symbols = ['ETHUSDT', 'BTCUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT'];
+    $slots = \App\Models\FutureTradeBotConfig::query()
+        ->where('workspace_id', $workspace->id)
+        ->orderBy('slot_index')->get();
+    foreach ($slots as $i => $slot) {
+        $slot->state()->update([
+            'state' => 'IN_POSITION',
+            'current_symbol' => $symbols[$i],
+            'position_side' => 'LONG',
+            'quantity' => 1.0,
+        ]);
+    }
+
+    // A new 6th symbol has nowhere to go.
+    $slot = $svc->findSlotForSymbol($workspace->id, 'ADAUSDT');
+    expect($slot)->toBeNull();
+});
+
+test('activePositionCount aggregates across slots', function () {
+    Carbon::setTestNow('2026-05-19 10:30:05');
+    $workspace = Workspace::factory()->create();
+    $primary = createPrimeWebhookConfig($workspace->id, [
+        'maxOpenPositions' => 5,
+    ]);
+    $svc = app(FutureTradeBotService::class);
+    $svc->syncSlots($primary);
+
+    // Open positions on slot 0 and slot 2 only.
+    \App\Models\FutureTradeBotConfig::where('workspace_id', $workspace->id)
+        ->where('slot_index', 0)->first()->state()
+        ->update(['state' => 'IN_POSITION', 'quantity' => 0.5]);
+    \App\Models\FutureTradeBotConfig::where('workspace_id', $workspace->id)
+        ->where('slot_index', 2)->first()->state()
+        ->update(['state' => 'IN_POSITION', 'quantity' => 0.3]);
+
+    expect($svc->activePositionCount($workspace->id))->toBe(2);
+});
+
+test('webhook for new symbol when all 5 slots busy returns max_concurrent_positions_reached', function () {
+    config(['future_trade.pine_webhook_token' => 'pine-secret']);
+    Carbon::setTestNow('2026-05-19 10:30:05');
+    $workspace = Workspace::factory()->create();
+    $primary = createPrimeWebhookConfig($workspace->id, [
+        'maxOpenPositions' => 5,
+    ]);
+    $svc = app(FutureTradeBotService::class);
+    $svc->syncSlots($primary);
+
+    $symbols = ['ETHUSDT', 'BTCUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT'];
+    $slots = \App\Models\FutureTradeBotConfig::query()
+        ->where('workspace_id', $workspace->id)
+        ->orderBy('slot_index')->get();
+    foreach ($slots as $i => $slot) {
+        $slot->state()->update([
+            'state' => 'IN_POSITION',
+            'current_symbol' => $symbols[$i],
+            'quantity' => 1.0,
+        ]);
+    }
+
+    $this->postJson("/api/v1/future-trade/pine-webhook/{$workspace->id}", pineWebhookPayload([
+        'symbol' => 'ADAUSDT',
+        'signal' => 'BUY',
+    ]))
+        ->assertStatus(422)
+        ->assertJsonPath('reason', 'max_concurrent_positions_reached');
+});
+
 test('non-webhook signal still blocks on stale feed', function () {
     Carbon::setTestNow('2026-05-19 10:30:05');
     $workspace = Workspace::factory()->create();

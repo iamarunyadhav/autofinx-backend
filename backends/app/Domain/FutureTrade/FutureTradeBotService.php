@@ -380,6 +380,92 @@ class FutureTradeBotService
             ->update(['enabled' => false]);
     }
 
+    /**
+     * Find the slot config that should receive an incoming Pine webhook for
+     * the given symbol. Resolution order:
+     *
+     *   1. If any slot already has an OPEN logical_trade for this symbol,
+     *      route to that slot (so close / opposite-reversal goes to the
+     *      right book entry).
+     *   2. Else, find the first FLAT slot (state IDLE / SCANNING / COOLDOWN,
+     *      quantity == 0) under maxOpenPositions — assign the symbol there.
+     *   3. Else (every slot busy with a different symbol), return null →
+     *      the controller surfaces `max_concurrent_positions_reached`.
+     *
+     * Slot 0 always exists; shadow slots are created on-demand by syncSlots
+     * whenever the primary's maxOpenPositions setting changes.
+     */
+    public function findSlotForSymbol(string $workspaceId, string $symbol): ?FutureTradeBotConfig
+    {
+        $symbol = strtoupper(trim($symbol));
+        if ($workspaceId === '' || $symbol === '') {
+            return null;
+        }
+
+        // Ensure shadow slots exist for the current maxOpenPositions setting.
+        $primary = FutureTradeBotConfig::query()
+            ->with('state')
+            ->where('workspace_id', $workspaceId)
+            ->where('slot_index', 0)
+            ->first();
+        if (! $primary) {
+            return null;
+        }
+        $this->syncSlots($primary);
+
+        $settings = $this->normalizeFutureTradeSettings($primary->mergedSettings());
+        $maxSlots = max(1, (int) ($settings['maxOpenPositions'] ?? 1));
+
+        $slots = FutureTradeBotConfig::query()
+            ->with('state')
+            ->where('workspace_id', $workspaceId)
+            ->where('slot_index', '<', $maxSlots)
+            ->orderBy('slot_index')
+            ->get();
+
+        // Layer 1: slot that already owns this symbol (open or pending).
+        foreach ($slots as $slot) {
+            if ($this->lockSvc()->hasActiveLogicalTrade((string) $slot->id, $symbol)) {
+                return $slot;
+            }
+            $state = $slot->state;
+            if ($state && strtoupper((string) ($state->current_symbol ?? '')) === $symbol
+                && (float) ($state->quantity ?? 0) > 0) {
+                return $slot;
+            }
+        }
+
+        // Layer 2: first FLAT slot we can assign.
+        foreach ($slots as $slot) {
+            $state = $slot->state;
+            $quantity = (float) ($state->quantity ?? 0);
+            $slotState = (string) ($state->state ?? 'IDLE');
+            $isFlat = $quantity <= 0 && ! in_array($slotState, ['IN_POSITION', 'LIVE_IN_POSITION'], true);
+            if ($isFlat && ! $this->lockSvc()->hasActiveLogicalTrade((string) $slot->id, $symbol)) {
+                return $slot;
+            }
+        }
+
+        // Layer 3: no slot available.
+        return null;
+    }
+
+    /**
+     * Count concurrently open positions across all slots in a workspace.
+     */
+    public function activePositionCount(string $workspaceId): int
+    {
+        return (int) FutureTradeBotConfig::query()
+            ->where('workspace_id', $workspaceId)
+            ->whereHas('state', function ($q) {
+                $q->where(function ($qq) {
+                    $qq->whereIn('state', ['IN_POSITION', 'LIVE_IN_POSITION'])
+                       ->orWhere('quantity', '>', 0);
+                });
+            })
+            ->count();
+    }
+
     public function updateConfig(FutureTradeBotConfig $config, array $payload): FutureTradeBotConfig
     {
         $beforeSettings = $this->normalizeFutureTradeSettings($config->mergedSettings());
@@ -1584,14 +1670,14 @@ class FutureTradeBotService
         $beforeTradeCount = (int) $this->state($config)->trade_count_today;
         // Milestone: state-sync prep done; about to enter execution path.
         $latency['stateSyncedMs'] = (int) round((microtime(true) - $t0) * 1000);
-        $this->maybeEnterPaperPosition($config->fresh('state'), array_merge($signal, ['signal_key' => $signalKey]));
+        $blockCode = $this->maybeEnterPaperPosition($config->fresh('state'), array_merge($signal, ['signal_key' => $signalKey]));
         $afterState = $this->state($config->fresh('state'));
         $executed = (int) $afterState->trade_count_today > $beforeTradeCount
             || in_array((string) $afterState->state, ['IN_POSITION', 'LIVE_IN_POSITION'], true);
         // Milestone: execution path returned (order placed if executed=true).
         $latency['orderPlacedMs'] = (int) round((microtime(true) - $t0) * 1000);
 
-        return $this->finalizeWebhookLatency($config, $signal, $t0, $latency, [
+        $responseBase = [
             'accepted' => true,
             'executed' => $executed,
             'eligible' => $executed,
@@ -1605,7 +1691,17 @@ class FutureTradeBotService
             'state' => $afterState->state,
             'currentSignal' => $afterState->current_signal,
             'execution' => $executed ? 'executed' : 'blocked_with_logged_reason',
-        ]);
+        ];
+        if (! $executed && $blockCode !== null) {
+            // Surface the machine-readable block code so operators can see WHY
+            // the trade didn't execute without having to dig into logs.
+            $responseBase['blockReason'] = $blockCode;
+            if (str_starts_with($blockCode, 'freshness_gate:')) {
+                $responseBase['freshnessBlockers'] = explode(',', substr($blockCode, strlen('freshness_gate:')));
+            }
+        }
+
+        return $this->finalizeWebhookLatency($config, $signal, $t0, $latency, $responseBase);
     }
 
     public function recordRawPineWebhookRequest(FutureTradeBotConfig $config, array $payload, array $context = []): void
@@ -1660,6 +1756,17 @@ class FutureTradeBotService
             ->where('occurred_at', '>=', $latest->occurred_at)
             ->orderBy('occurred_at')
             ->first();
+        // For PINE_WEBHOOK_SIGNAL events, also look for the execution outcome
+        // (TRADE_BLOCKED, SIGNAL_SKIPPED, BUY_EXECUTED, SELL_EXECUTED) so the UI
+        // shows why a signal was accepted but didn't open a position.
+        $executionOutcome = null;
+        if ($nextDecision?->event === 'PINE_WEBHOOK_SIGNAL') {
+            $executionOutcome = $config->logs()
+                ->whereIn('event', ['TRADE_BLOCKED', 'SIGNAL_SKIPPED', 'BUY_EXECUTED', 'SELL_EXECUTED', 'COOLDOWN_BYPASSED_OPPOSITE_SIGNAL'])
+                ->where('occurred_at', '>=', $nextDecision->occurred_at)
+                ->orderBy('occurred_at')
+                ->first();
+        }
         $decisionEvent = $nextDecision?->event;
         $rejected = $decisionEvent === 'PINE_WEBHOOK_REJECTED';
         $duplicate = $decisionEvent === 'DUPLICATE_WEBHOOK_IGNORED';
@@ -1707,6 +1814,9 @@ class FutureTradeBotService
             'parsedJsonValid' => ($context['parseStatus'] ?? null) === 'json',
             'rejectedReason' => $rejected ? $nextDecision?->reason : null,
             'finalReason' => $nextDecision?->reason,
+            'executionOutcomeEvent' => $executionOutcome?->event,
+            'executionOutcomeReason' => $executionOutcome?->reason,
+            'tradeBlocked' => in_array($executionOutcome?->event, ['TRADE_BLOCKED', 'SIGNAL_SKIPPED'], true),
             'latency' => $latency !== [] ? $latency : null,
             'dailyLossTier' => $dailyLossTier,
             'dailyLossPercent' => $dailyLossPct,
@@ -2237,6 +2347,17 @@ class FutureTradeBotService
 
     private function normalizePineSymbol(string $symbol): string
     {
+        return $this->normalizeIncomingSymbol($symbol);
+    }
+
+    /**
+     * Public symbol normalizer — strips TradingView prefixes (`BINANCE:`),
+     * the perp suffix (`.P` / `PERP`), and any non-alphanumeric noise.
+     * Used by the controller to figure out which slot a Pine webhook
+     * belongs to BEFORE invoking ingestPineWebhook.
+     */
+    public function normalizeIncomingSymbol(string $symbol): string
+    {
         $symbol = strtoupper(trim($symbol));
         $symbol = preg_replace('/^[A-Z0-9_]+:/', '', $symbol) ?? $symbol;
         $symbol = str_replace(['.P', 'PERP'], '', $symbol);
@@ -2456,7 +2577,7 @@ class FutureTradeBotService
         ];
     }
 
-    private function maybeEnterPaperPosition(FutureTradeBotConfig $config, array $signal): void
+    private function maybeEnterPaperPosition(FutureTradeBotConfig $config, array $signal): ?string
     {
         $state = $this->state($config);
         $settings = $this->normalizeFutureTradeSettings($config->mergedSettings());
@@ -2467,7 +2588,7 @@ class FutureTradeBotService
         $analysis = (array) ($dynamic['public']['analysis'] ?? []);
         if ((string) $state->state === 'IN_POSITION' || (float) $state->quantity > 0) {
             $this->emitTradeDecisionDebug($config, $signal, $dynamic, 'BLOCKED', ['open_position_exists']);
-            return;
+            return 'open_position_exists';
         }
         if (! $this->isWithinTradingHours($settings)) {
             $this->emitTradeDecisionDebug($config, $signal, $dynamic, 'BLOCKED', ['outside_trading_hours']);
@@ -2481,7 +2602,7 @@ class FutureTradeBotService
                 $this->runtimeContext($dynamic, ['status' => 'BLOCKED_HOURS'], $signal, ['outside_trading_hours']),
                 300
             );
-            return;
+            return 'outside_trading_hours';
         }
         if (($settings['emergencyStop'] ?? false)) {
             $this->emitTradeDecisionDebug($config, $signal, $dynamic, 'BLOCKED', ['emergency_stop']);
@@ -2495,7 +2616,7 @@ class FutureTradeBotService
                 $this->runtimeContext($dynamic, ['status' => 'BLOCKED'], $signal, ['emergency_stop']),
                 30
             );
-            return;
+            return 'emergency_stop';
         }
         if ($signal['signal'] === 'WAIT') {
             $this->recordMissedTradeAudit($config, $signal, $dynamic, ['strategy_wait_signal']);
@@ -2510,7 +2631,7 @@ class FutureTradeBotService
                 $this->runtimeContext($dynamic, ['status' => 'SKIPPED'], $signal, ['strategy_wait_signal']),
                 30
             );
-            return;
+            return 'wait_signal';
         }
         if ($this->primeMirrorExecutionBlocked($config, $settings, $signal)) {
             $sourceMode = $this->normalizedSignalSource($settings);
@@ -2536,7 +2657,7 @@ class FutureTradeBotService
                     'requiredSource' => 'pine_webhook',
                 ], $signal, [$reason])
             );
-            return;
+            return $reason;
         }
         if ((float) $signal['confidence'] < (float) ($settings['minConfidence'] ?? 0.68)) {
             $this->recordMissedTradeAudit($config, $signal, $dynamic, ['confidence_below_threshold']);
@@ -2550,7 +2671,7 @@ class FutureTradeBotService
                 'Confidence below dynamic threshold: needs ' . round((float) $settings['minConfidence'], 4),
                 $this->runtimeContext($dynamic, ['status' => 'SKIPPED'], $signal, ['confidence_below_threshold'])
             );
-            return;
+            return 'confidence_below_threshold';
         }
         if (
             $strictEntryGuards
@@ -2572,7 +2693,7 @@ class FutureTradeBotService
                 $this->runtimeContext($dynamic, ['status' => 'SKIPPED'], $signal, ['weak_setup_hard_block']),
                 45
             );
-            return;
+            return 'weak_setup_hard_block';
         }
         if ($strictEntryGuards && (float) ($analysis['trendStrength'] ?? 0) < 0.45) {
             $this->recordMissedTradeAudit($config, $signal, $dynamic, ['trend_strength_too_low']);
@@ -2587,7 +2708,7 @@ class FutureTradeBotService
                 $this->runtimeContext($dynamic, ['status' => 'SKIPPED'], $signal, ['trend_strength_too_low']),
                 45
             );
-            return;
+            return 'trend_strength_too_low';
         }
         if (
             $strictEntryGuards
@@ -2606,7 +2727,7 @@ class FutureTradeBotService
                 $this->runtimeContext($dynamic, ['status' => 'SKIPPED'], $signal, ['poor_regime_guard']),
                 60
             );
-            return;
+            return 'poor_regime_guard';
         }
         $rrTp = (float) ($settings['takeProfitPercent'] ?? 0.45);
         $rrRollback = (float) ($settings['rollbackLossPercent'] ?? 0.18);
@@ -2622,7 +2743,7 @@ class FutureTradeBotService
                 $this->runtimeContext($dynamic, ['status' => 'BLOCKED'], $signal, ['risk_reward_guard']),
                 60
             );
-            return;
+            return 'risk_reward_guard';
         }
         if ($state->cooldown_until && $state->cooldown_until->isFuture()) {
             // Opposite-direction Pine webhook signals bypass the cooldown.
@@ -2655,7 +2776,7 @@ class FutureTradeBotService
                     $this->runtimeContext($dynamic, ['status' => 'BLOCKED'], $signal, ['cooldown_active']),
                     30
                 );
-                return;
+                return 'cooldown_active';
             }
         }
         if ((int) $state->trade_count_today >= (int) ($settings['maxTradesPerDay'] ?? 25)) {
@@ -2669,7 +2790,7 @@ class FutureTradeBotService
                 'Max trades per day reached.',
                 $this->runtimeContext($dynamic, ['status' => 'BLOCKED'], $signal, ['max_trades_per_day'])
             );
-            return;
+            return 'max_trades_per_day';
         }
         $dailyLossPct = (float) $state->daily_loss;
         $softWarnPct = (float) ($settings['softDailyLossWarnPercent'] ?? 0.3);
@@ -2689,7 +2810,7 @@ class FutureTradeBotService
                 sprintf('Daily loss hard cap reached: %.2f%% >= %.2f%%. Manual review required.', $dailyLossPct, $hardBlockPct),
                 $this->runtimeContext($dynamic, ['status' => 'BLOCKED', 'dailyLossTier' => 'hard_block', 'dailyLossPercent' => $dailyLossPct], $signal, ['daily_loss_hard_block'])
             );
-            return;
+            return 'daily_loss_hard_block';
         }
 
         // Tier 2: block new entries. Exits / close webhooks still proceed
@@ -2705,7 +2826,7 @@ class FutureTradeBotService
                 sprintf('Daily loss guard active: %.2f%% >= %.2f%%. New entries blocked; exits remain allowed.', $dailyLossPct, $blockEntriesPct),
                 $this->runtimeContext($dynamic, ['status' => 'BLOCKED', 'dailyLossTier' => 'block_entries', 'dailyLossPercent' => $dailyLossPct], $signal, ['daily_loss_guard'])
             );
-            return;
+            return 'daily_loss_guard';
         }
 
         // Tier 1 (soft): log warning at first crossing then allow trade. The
@@ -2753,7 +2874,7 @@ class FutureTradeBotService
                 $this->runtimeContext($dynamic, array_merge(['status' => 'BLOCKED'], $this->freshnessContext($freshness)), $signal, $freshnessBlockers),
                 30
             );
-            return;
+            return 'freshness_gate:' . implode(',', $freshnessBlockers);
         }
         $this->logFreshnessFallbackIfNeeded($config, $signal, $freshness);
 
@@ -2777,7 +2898,7 @@ class FutureTradeBotService
                 $this->runtimeContext($dynamic, ['status' => 'BLOCKED', 'signalKey' => $signalKey, 'candleOpen' => $candleOpen], $signal, ['same_candle_reentry_blocked']),
                 30
             );
-            return;
+            return 'same_candle_reentry_blocked';
         }
 
         // DB-level idempotency: signal_key must be unique per config.
@@ -2793,7 +2914,7 @@ class FutureTradeBotService
                 $this->runtimeContext($dynamic, ['status' => 'BLOCKED', 'signalKey' => $signalKey], $signal, ['duplicate_signal_key']),
                 30
             );
-            return;
+            return 'duplicate_signal_key';
         }
 
         if ($this->isLiveMode($config)) {
@@ -2820,7 +2941,7 @@ class FutureTradeBotService
                     30
                 );
             }
-            return;
+            return null;
         }
 
         // === Paper entry path (locked + DB-level idempotent) ===
@@ -2962,10 +3083,10 @@ class FutureTradeBotService
                 $this->runtimeContext($dynamic, ['status' => 'BLOCKED'], $signal, ['entry_lock_active']),
                 30
             );
-            return;
+            return 'entry_lock_active';
         }
         if ($lockResult === false) {
-            return;
+            return 'open_position_exists_locked';
         }
 
         $allowedBecause = ['paper_entry_allowed'];
@@ -2973,6 +3094,7 @@ class FutureTradeBotService
             $allowedBecause[] = 'weak_setup_allowed_with_reduced_size';
         }
         $this->emitTradeDecisionDebug($config, $signal, $dynamic, 'OPEN', [], $allowedBecause);
+        return null;
     }
 
     private function manageOpenPosition(FutureTradeBotConfig $config, float $price): void
@@ -6002,9 +6124,14 @@ class FutureTradeBotService
             $settings['reversalMode'] = in_array(strtolower((string) ($settings['reversalMode'] ?? 'close_only')), ['close_only', 'close_then_reverse'], true)
                 ? strtolower((string) $settings['reversalMode'])
                 : 'close_only';
-            $requestedMaxOpen = max(1, min(2, (int) ($settings['maxOpenPositions'] ?? 1)));
-            $hedgeVerified = filter_var($settings['hedgeModeVerified'] ?? false, FILTER_VALIDATE_BOOLEAN);
-            $settings['maxOpenPositions'] = $requestedMaxOpen > 1 && ! $hedgeVerified ? 1 : $requestedMaxOpen;
+            // maxOpenPositions controls the number of concurrent slots. Each slot
+            // can hold ONE position for any symbol. With one-way Binance mode
+            // (the default), holding 5 positions across 5 different symbols is
+            // perfectly safe — hedge mode is only required when you want LONG
+            // and SHORT on the same symbol at the same time, which this bot
+            // does NOT currently do (close-then-reverse pattern instead).
+            $requestedMaxOpen = max(1, min(5, (int) ($settings['maxOpenPositions'] ?? 1)));
+            $settings['maxOpenPositions'] = $requestedMaxOpen;
         }
 
         $settings = $this->indicatorIntelligence->normalizeSettings(

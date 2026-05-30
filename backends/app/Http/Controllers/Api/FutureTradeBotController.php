@@ -44,7 +44,9 @@ class FutureTradeBotController extends Controller
 
     public function pineWebhook(Request $request, string $workspace): JsonResponse
     {
-        $config = $this->bot->getOrCreateConfig($workspace);
+        // Primary slot 0 always exists — used for token validation, raw audit
+        // logging, and as fallback when no symbol-specific slot is available.
+        $primary = $this->bot->getOrCreateConfig($workspace);
         $configuredToken = trim((string) config('future_trade.pine_webhook_token', ''));
         $providedTokens = array_filter(array_map(
             static fn ($token): string => trim((string) $token),
@@ -67,7 +69,9 @@ class FutureTradeBotController extends Controller
                 $headersSummary[$header] = $request->headers->get($header);
             }
         }
-        $this->bot->recordRawPineWebhookRequest($config, is_array($decoded) ? $decoded : $request->all(), [
+        // Raw payload always recorded against slot 0 for a single source of
+        // truth audit trail, regardless of which slot ultimately executes.
+        $this->bot->recordRawPineWebhookRequest($primary, is_array($decoded) ? $decoded : $request->all(), [
             'rawBody' => $rawBody,
             'remoteIp' => $request->ip(),
             'headersSummary' => $headersSummary,
@@ -83,10 +87,42 @@ class FutureTradeBotController extends Controller
             ], 401);
         }
 
+        // Slot routing: find the slot that owns the incoming symbol, or
+        // assign the first FLAT slot. If every slot is busy with a
+        // different symbol, reject with a clear reason.
+        $payload = $request->all();
+        $rawSymbol = (string) ($payload['symbol'] ?? $payload['ticker'] ?? '');
+        $symbol = $this->bot->normalizeIncomingSymbol($rawSymbol);
+        $targetConfig = $symbol !== ''
+            ? $this->bot->findSlotForSymbol($workspace, $symbol)
+            : null;
+
+        if ($symbol !== '' && $targetConfig === null) {
+            $activeCount = $this->bot->activePositionCount($workspace);
+            return response()->json([
+                'accepted' => false,
+                'executed' => false,
+                'eligible' => false,
+                'source' => 'pine_webhook',
+                'execution' => 'rejected',
+                'reason' => 'max_concurrent_positions_reached',
+                'symbol' => $symbol,
+                'activePositions' => $activeCount,
+            ], 422);
+        }
+
+        // Fallback to primary (slot 0) when no symbol could be parsed —
+        // ingestPineWebhook will validate and reject with the right code.
         $result = $this->bot->ingestPineWebhook(
-            $config,
-            $request->all()
+            $targetConfig ?? $primary,
+            $payload
         );
+
+        // Surface which slot handled the signal so the operator can debug
+        // multi-position behaviour from the API response.
+        if ($targetConfig !== null) {
+            $result['slotIndex'] = (int) $targetConfig->slot_index;
+        }
 
         return response()->json($result, ($result['accepted'] ?? false) ? 200 : 422);
     }

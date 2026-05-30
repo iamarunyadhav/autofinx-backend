@@ -148,7 +148,10 @@ return [
         // Automated stop-loss / trailing exits run independently via the exit monitor.
         'softDailyLossWarnPercent' => 0.3,
         'hardDailyLossBlockPercent' => 0.8,
-        'maxOpenPositions' => 1,
+        // Up to 5 concurrent open positions, one per symbol. Each Pine webhook
+        // for a different symbol gets routed to its own slot automatically.
+        // Same-symbol re-entry is still blocked while that symbol's slot is busy.
+        'maxOpenPositions' => 5,
         'reversalMode' => 'close_only',
         // Webhook-only mode can accept more Pine entries; loss/cooldown/open-position guards still apply.
         'maxTradesPerDay' => 50,
