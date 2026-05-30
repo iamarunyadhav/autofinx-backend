@@ -98,6 +98,7 @@ Route::prefix('v1')->group(function () {
     Route::post('wallet/withdraw/webhook', [LiveWalletController::class, 'withdrawWebhook'])->middleware('throttle:60,1');
     Route::post('exchange/binance/user-stream/ingest', [BinanceUserStreamController::class, 'ingest'])->middleware('throttle:120,1');
     Route::post('future-trade/user-stream/ingest', [FutureTradeUserStreamController::class, 'ingest'])->middleware('throttle:240,1');
+    Route::post('future-trade/pine-webhook/{workspace}', [FutureTradeBotController::class, 'pineWebhook'])->middleware('throttle:120,1');
 
     Route::middleware('auth:sanctum')->group(function () {
         Route::get('workspaces', [WorkspaceController::class, 'index']);
@@ -450,14 +451,19 @@ Route::prefix('v1')->group(function () {
         // ---- Future Trade Bot ----------------------------------------------
         Route::get('workspaces/{workspace}/future-trade/status', [FutureTradeBotController::class, 'status']);
         Route::get('workspaces/{workspace}/future-trade/dashboard', [FutureTradeBotController::class, 'dashboard']);
+        Route::get('workspaces/{workspace}/future-trade/webhook/last', [FutureTradeBotController::class, 'lastWebhookPayload']);
+        Route::get('workspaces/{workspace}/future-trade/binance-health', [FutureTradeBotController::class, 'binanceHealth']);
+        Route::get('workspaces/{workspace}/future-trade/runtime-health', [FutureTradeBotController::class, 'runtimeHealth']);
         Route::get('workspaces/{workspace}/future-trade/live-status', [FutureTradeBotController::class, 'liveStatus']);
         Route::get('workspaces/{workspace}/future-trade/scanner-snapshot', [FutureTradeBotController::class, 'scannerSnapshot']);
         Route::get('workspaces/{workspace}/future-trade/chart', [FutureTradeBotController::class, 'chart']);
         Route::get('workspaces/{workspace}/future-trade/live-feed', [FutureTradeBotController::class, 'liveFeedStatus']);
         Route::get('workspaces/{workspace}/future-trade/user-stream', [FutureTradeUserStreamController::class, 'snapshot']);
+        Route::post('workspaces/{workspace}/future-trade/user-stream/restart', [FutureTradeUserStreamController::class, 'restart'])->middleware('require.2fa');
         Route::post('workspaces/{workspace}/future-trade/live-feed/start', [FutureTradeBotController::class, 'startLiveFeed'])->middleware('require.2fa');
         Route::post('workspaces/{workspace}/future-trade/live-feed/stop', [FutureTradeBotController::class, 'stopLiveFeed'])->middleware('require.2fa');
         Route::post('workspaces/{workspace}/future-trade/live-feed/restart', [FutureTradeBotController::class, 'restartLiveFeed'])->middleware('require.2fa');
+        Route::post('workspaces/{workspace}/future-trade/runtime/recover', [FutureTradeBotController::class, 'recoverRuntime'])->middleware(['require.2fa','throttle:10,1']);
         Route::post('workspaces/{workspace}/future-trade/start', [FutureTradeBotController::class, 'start'])->middleware('require.2fa');
         Route::post('workspaces/{workspace}/future-trade/stop', [FutureTradeBotController::class, 'stop'])->middleware('require.2fa');
         Route::post('workspaces/{workspace}/future-trade/emergency-stop', [FutureTradeBotController::class, 'emergencyStop'])->middleware('require.2fa');

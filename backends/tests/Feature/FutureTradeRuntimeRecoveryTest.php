@@ -228,9 +228,10 @@ test('future trade scan command refreshes scanner snapshot and graph from fake B
         ->and($state->connection_status)->toBe('Connected');
 });
 
-test('future trade scheduler command is registered without long-running loop option', function () {
+test('shared hosting scheduler does not own future trade runtime loops by default', function () {
     $this->artisan('schedule:list')
-        ->expectsOutputToContain('future-trade:tick --duration=55 --sleep-ms=1000')
+        ->doesntExpectOutputToContain('future-trade:tick --duration=55 --sleep-ms=1000')
+        ->doesntExpectOutputToContain('future-trade:user-stream --duration=55')
         ->doesntExpectOutputToContain('future-trade:scan-all')
         ->doesntExpectOutputToContain('future-trade:scan-all --loop')
         ->assertExitCode(0);

@@ -1,17 +1,46 @@
 <?php
 
 return [
+    'default_signal_profile' => env('FUTURE_TRADE_DEFAULT_SIGNAL_PROFILE', 'autofinx_prime_v6_1_7_crypto'),
     'paper_trading' => env('FUTURE_TRADE_PAPER_TRADING', true),
     'enable_testnet_trading' => env('FUTURE_TRADE_ENABLE_TESTNET_TRADING', false),
     'enable_live_trading' => env('FUTURE_TRADE_ENABLE_LIVE_TRADING', false),
     'force_testnet' => env('FUTURE_TRADE_FORCE_TESTNET', true),
+    'shared_hosting_mode' => env('AUTOFINX_SHARED_HOSTING_MODE', true),
+    'schedule_runtime_commands' => env('FUTURE_TRADE_SCHEDULE_RUNTIME_COMMANDS', false),
+    'php_binary' => env('FUTURE_TRADE_PHP_BINARY'),
+    'pine_webhook_token' => env('FUTURE_TRADE_PINE_WEBHOOK_TOKEN'),
+    'prime_mirror_execution_enabled' => env('FUTURE_TRADE_PRIME_MIRROR_EXECUTION_ENABLED', false),
+    'prime_mirror_live_enabled' => env('FUTURE_TRADE_PRIME_MIRROR_LIVE_ENABLED', false),
+    'pine_webhook_live_enabled' => env('FUTURE_TRADE_PINE_WEBHOOK_LIVE_ENABLED', true),
+    'webhook_fallback_enabled' => env('FUTURE_TRADE_WEBHOOK_FALLBACK_ENABLED', false),
+    'webhook_risk_overrides' => env('FUTURE_TRADE_WEBHOOK_RISK_OVERRIDES', false),
+    'atr_dynamic_risk_targets' => env('FUTURE_TRADE_ATR_DYNAMIC_RISK_TARGETS', false),
+    'confirmed_candle_only' => env('FUTURE_TRADE_CONFIRMED_CANDLE_ONLY', true),
 
-    // All futures symbols available in the UI selector
+    // Permissive symbol mode (default true): when on, any incoming Pine webhook
+    // symbol that matches the Binance-futures pattern `<TICKER>USDT|USDC` is
+    // accepted even if it is not in `available_symbols`. Set to false to
+    // require strict registry membership.
+    'permissive_symbol_mode' => env('FUTURE_TRADE_PERMISSIVE_SYMBOL_MODE', true),
+
+    // Curated Binance USDT-M perpetuals registry — the "global allowlist" the
+    // UI selector reads from. Pine webhooks for symbols not in this list will
+    // still be accepted via the permissive regex above unless the operator
+    // disables permissive_symbol_mode or sets restrictToWorkspaceSymbols=true.
     'available_symbols' => [
+        // Top 25 majors
         'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT',
         'ADAUSDT', 'AVAXUSDT', 'DOTUSDT', 'LINKUSDT', 'MATICUSDT',
         'DOGEUSDT', 'LTCUSDT', 'UNIUSDT', 'ATOMUSDT', 'NEARUSDT',
         'APTUSDT', 'ARBUSDT', 'OPUSDT', 'SUIUSDT', 'SEIUSDT',
+        'TRXUSDT', 'TONUSDT', 'BCHUSDT', 'ETCUSDT', 'FILUSDT',
+        // Next 25 actively traded perps
+        'AAVEUSDT', 'INJUSDT', 'TIAUSDT', 'PEPEUSDT', '1000PEPEUSDT',
+        'SHIBUSDT', '1000SHIBUSDT', 'WIFUSDT', 'BONKUSDT', '1000BONKUSDT',
+        'FLOKIUSDT', '1000FLOKIUSDT', 'ORDIUSDT', 'JUPUSDT', 'WLDUSDT',
+        'RNDRUSDT', 'FETUSDT', 'ARKMUSDT', 'TAOUSDT', 'STRKUSDT',
+        'PYTHUSDT', 'JTOUSDT', 'IMXUSDT', 'SANDUSDT', 'MANAUSDT',
     ],
 
     'presets' => [
@@ -34,8 +63,25 @@ return [
 
     'defaults' => [
         // Scan these 6 coins by default — diversified across sectors
-        'symbols' => ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'AVAXUSDT'],
-        'timeframe' => '5m',
+        'signalProfile' => env('FUTURE_TRADE_SIGNAL_PROFILE', env('FUTURE_TRADE_DEFAULT_SIGNAL_PROFILE', 'autofinx_prime_v6_1_7_crypto')),
+        'signalProfileName' => 'AutoFinX Prime v6.1.7 Crypto Stable Default',
+        'marketProfile' => 'Crypto',
+        'signalSource' => env('FUTURE_TRADE_SIGNAL_SOURCE', 'webhook'),
+        'pineWebhookFallbackTimeoutSeconds' => (int) env('FUTURE_TRADE_PINE_WEBHOOK_FALLBACK_TIMEOUT_SECONDS', 1200),
+        'webhookFallbackEnabled' => env('FUTURE_TRADE_WEBHOOK_FALLBACK_ENABLED', false),
+        'primeMirrorLiveEnabled' => false,
+        'validatedDefaultSymbols' => ['ETHUSDT', 'BTCUSDT', 'SOLUSDT'],
+        'validationSymbols' => ['ETHUSDT', 'BTCUSDT', 'SOLUSDT', 'BNBUSDT'],
+        // Curated default — covers the common Pine alert majors. Any symbol
+        // in `available_symbols` is also accepted automatically unless the
+        // operator flips `restrictToWorkspaceSymbols` to true.
+        'symbols' => ['ETHUSDT', 'BTCUSDT', 'SOLUSDT', 'BNBUSDT'],
+        // When true, only symbols in this workspace's curated `symbols` list
+        // execute. When false (default), any symbol in the global
+        // `available_symbols` registry is accepted from a Pine webhook so
+        // TradingView alerts on majors don't silently 422.
+        'restrictToWorkspaceSymbols' => false,
+        'timeframe' => '15m',
         'paperTrading' => true,
         'liveTrading' => false,
         'forceTestnet' => true,
@@ -44,22 +90,75 @@ return [
         'tradeAmountUsdt' => 25,
         'classicSimpleMode' => false,
         // Higher confidence threshold — only enter on strong signals
-        'minConfidence' => 0.58,
-        // TP at 1.2% with 3x leverage = 3.6% on notional — worthwhile
-        'takeProfitPercent' => 1.2,
-        // Tighter SL: 0.4% stop, keeping R:R at 3:1
-        'stopLossPercent' => 0.4,
-        'trailingTakeProfitPercent' => 0.30,
-        // Tighter rollback — cut losses sooner
-        'rollbackLossPercent' => 0.25,
-        'maxDailyLossPercent' => 2,
-        'maxOpenPositions' => 1,
-        // Fewer high-quality trades rather than many low-quality ones
-        'maxTradesPerDay' => 25,
-        'maxLeverage' => 5,
+        'minConfidence' => 0.72,
+        'tradeScoreThreshold' => 72,
+        'watchScoreThreshold' => 58,
+        'tradeDirection' => 'Both',
+        'htf1' => '60',
+        'htf2' => '240',
+        'emaFast' => 9,
+        'emaSlow' => 21,
+        'emaTrend' => 50,
+        'emaMajor' => 200,
+        'donchianLength' => 20,
+        'useVWAP' => true,
+        'useDonchianScore' => true,
+        'useVolume' => true,
+        'useVolatilityFilter' => true,
+        'useChopFilter' => true,
+        'chopLength' => 14,
+        'cryptoChopMax' => 61.8,
+        'useMomentumBreakoutFilter' => false,
+        'minBodyRatio' => 0.55,
+        'rsiLength' => 14,
+        'longRsiMin' => 48,
+        'longRsiMax' => 72,
+        'shortRsiMin' => 28,
+        'shortRsiMax' => 52,
+        'adxLength' => 14,
+        'adxSmoothing' => 14,
+        'adxMin' => 20,
+        'volumeLength' => 20,
+        'cryptoRelVolMin' => 1.00,
+        'atrLength' => 14,
+        'atrRegimeLength' => 50,
+        'cryptoMinAtrPct' => 0.06,
+        'cryptoMaxAtrPct' => 3.00,
+        'slAtrMultiplier' => 1.4,
+        'tp1RR' => 2.0,
+        'tp2RR' => 2.0,
+        'useAtrTrailingSecondHalf' => true,
+        'trailAtrMultiplier' => 0.8,
+        'useAtrRiskTargets' => env('FUTURE_TRADE_ATR_DYNAMIC_RISK_TARGETS', false),
+        'useWebhookRiskOverrides' => env('FUTURE_TRADE_WEBHOOK_RISK_OVERRIDES', false),
+        'confirmedCandleOnly' => env('FUTURE_TRADE_CONFIRMED_CANDLE_ONLY', true),
+        'cooldownBars' => 3,
+        'exitOnStrongOppositeScore' => true,
+        'oppositeExitScore' => 78,
+        // Prime default: webhook decides direction; these manual exits control risk.
+        'takeProfitPercent' => 0.5,
+        'stopLossPercent' => 0.25,
+        'trailingTakeProfitPercent' => 0.18,
+        'rollbackLossPercent' => 0.15,
+        'maxDailyLossPercent' => 0.5,
+        // 3-tier daily-loss guard:
+        //   <= softDailyLossWarnPercent      → log warning only, all trades allowed
+        //   >= maxDailyLossPercent           → block new entries, allow exits / close webhooks
+        //   >= hardDailyLossBlockPercent     → block all webhook-driven trades (entries AND exits)
+        // Automated stop-loss / trailing exits run independently via the exit monitor.
+        'softDailyLossWarnPercent' => 0.3,
+        'hardDailyLossBlockPercent' => 0.8,
+        // Up to 5 concurrent open positions, one per symbol. Each Pine webhook
+        // for a different symbol gets routed to its own slot automatically.
+        // Same-symbol re-entry is still blocked while that symbol's slot is busy.
+        'maxOpenPositions' => 5,
+        'reversalMode' => 'close_only',
+        // Webhook-only mode can accept more Pine entries; loss/cooldown/open-position guards still apply.
+        'maxTradesPerDay' => 50,
+        'maxLeverage' => 2,
         'maxSpreadPercent' => 0.12,
         // Longer cooldown prevents chasing failed trades
-        'cooldownSeconds' => 15,
+        'cooldownSeconds' => 180,
         'scanIntervalSeconds' => 3,
         'confidenceMode' => 'fixed',
         'dynamicLookbackMinutes' => 10,
@@ -68,8 +167,14 @@ return [
         'dynamicReentryBuffer' => 0.005,
         'dynamicSuggestionEnabled' => false,
         'autoExecutePaperSignals' => true,
-        'avoidChoppyMarket' => false,
-        'strictEntryGuards' => false,
+        // signalSource, pineWebhookFallbackTimeoutSeconds, and
+        // webhookFallbackEnabled are declared earlier in the defaults array
+        // (above, around the env() block). They are NOT re-declared here to
+        // keep this map duplicate-free. See top of `defaults` for the active
+        // values that the bot reads at runtime.
+        'primeMirrorExecutionEnabled' => false,
+        'avoidChoppyMarket' => true,
+        'strictEntryGuards' => true,
         'weakSetupAction' => 'reduce_size',
         'directionalMinScore5m' => 5,
         'directionalMinVoteGap5m' => 1,
@@ -86,7 +191,7 @@ return [
         'missedTradeAuditEstimatedFeePercent' => 0.08,
         'missedTradeAuditEstimatedSlippagePercent' => 0.03,
         'missedTradeAuditMinNetProfitPercent' => 0.05,
-        'preset' => 'balanced_live_test',
+        'preset' => null,
         'emergencyStop' => false,
         'indicatorInfluence' => [
             'vwapPositive' => 7,

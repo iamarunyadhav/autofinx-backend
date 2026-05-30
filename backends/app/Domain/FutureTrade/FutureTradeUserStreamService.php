@@ -22,11 +22,12 @@ use Throwable;
  *   - account/order event ingestion that updates linked logical_trades
  *
  * Heartbeat cache layout:
- *   autofinx_ft:user_stream:{config_id}:state  =>  ['status' => ..., 'last_event_at' => ISO, 'last_keepalive_at' => ISO, 'listen_key' => ...]
+ *   autofinx_ft:user_stream:{config_id}:state  =>  ['status' => ..., 'last_event_at' => ISO, 'last_heartbeat_at' => ISO, 'last_keepalive_at' => ISO, 'listen_key' => ...]
  *
- * The bot treats the stream as "fresh" if last_event_at is within the freshness
- * window (default 30s). When credentials are present but the stream has gone
- * stale, the bot HARD-blocks live execution until the stream recovers.
+ * The bot treats the stream as "fresh" if either a real user-stream event or a
+ * consumer heartbeat is within the freshness window (default 30s). This avoids
+ * false blocks on shared-host cron consumers that stay connected but only see
+ * events when orders actually fill.
  */
 class FutureTradeUserStreamService
 {
@@ -56,7 +57,11 @@ class FutureTradeUserStreamService
             ? ($settings['testnetApiUrl'] ?? config('services.binance.futures_testnet_api_url') ?? 'https://testnet.binancefuture.com')
             : ($settings['liveApiUrl'] ?? config('services.binance.futures_api_url') ?? 'https://fapi.binance.com'));
 
-        return new BinanceFuturesClient($baseUrl, $apiKey, $apiSecret);
+        return new BinanceFuturesClient(
+            apiKey: $apiKey,
+            apiSecret: $apiSecret,
+            baseUrl: $baseUrl,
+        );
     }
 
     /**
@@ -83,16 +88,24 @@ class FutureTradeUserStreamService
 
         $state = (array) Cache::get($this->stateKey((string) $config->id), []);
         $lastEventAt = isset($state['last_event_at']) ? Carbon::parse((string) $state['last_event_at']) : null;
+        $lastHeartbeatAt = isset($state['last_heartbeat_at']) ? Carbon::parse((string) $state['last_heartbeat_at']) : null;
         $ageSeconds = $lastEventAt ? max(0, $lastEventAt->diffInSeconds(now())) : null;
+        $heartbeatAgeSeconds = $lastHeartbeatAt ? max(0, $lastHeartbeatAt->diffInSeconds(now())) : null;
         $status = (string) ($state['status'] ?? ($hasCreds ? self::STATUS_DISCONNECTED : self::STATUS_NOT_CONFIGURED));
-        $fresh = $ageSeconds !== null && $ageSeconds <= self::FRESHNESS_SECONDS;
+        $eventFresh = $ageSeconds !== null && $ageSeconds <= self::FRESHNESS_SECONDS;
+        $heartbeatFresh = $heartbeatAgeSeconds !== null && $heartbeatAgeSeconds <= self::FRESHNESS_SECONDS;
+        $fresh = $eventFresh || $heartbeatFresh;
         // If creds aren't configured we still mark "fresh = true for PAPER-only"
         // — the gate logic decides whether to enforce.
         return [
             'configured' => $hasCreds,
             'status' => $status,
             'lastEventAt' => $lastEventAt?->toIso8601String(),
+            'lastHeartbeatAt' => $lastHeartbeatAt?->toIso8601String(),
             'ageSeconds' => $ageSeconds,
+            'heartbeatAgeSeconds' => $heartbeatAgeSeconds,
+            'eventFresh' => $eventFresh,
+            'heartbeatFresh' => $heartbeatFresh,
             'fresh' => $fresh,
             'lastKeepAliveAt' => isset($state['last_keepalive_at']) ? (string) $state['last_keepalive_at'] : null,
         ];
@@ -110,9 +123,20 @@ class FutureTradeUserStreamService
         $state = (array) Cache::get($this->stateKey((string) $config->id), []);
         $state['status'] = self::STATUS_CONNECTED;
         $state['last_event_at'] = now()->toIso8601String();
+        $state['last_heartbeat_at'] = now()->toIso8601String();
+        $state['last_heartbeat_source'] = 'event';
         if ($payload !== null) {
             $state['last_event_type'] = (string) ($payload['e'] ?? '');
         }
+        Cache::put($this->stateKey((string) $config->id), $state, self::STATE_TTL_SECONDS);
+    }
+
+    public function recordHeartbeat(FutureTradeBotConfig $config, string $source = 'runtime'): void
+    {
+        $state = (array) Cache::get($this->stateKey((string) $config->id), []);
+        $state['status'] = self::STATUS_CONNECTED;
+        $state['last_heartbeat_at'] = now()->toIso8601String();
+        $state['last_heartbeat_source'] = $source;
         Cache::put($this->stateKey((string) $config->id), $state, self::STATE_TTL_SECONDS);
     }
 
@@ -120,6 +144,8 @@ class FutureTradeUserStreamService
     {
         $state = (array) Cache::get($this->stateKey((string) $config->id), []);
         $state['last_keepalive_at'] = now()->toIso8601String();
+        $state['last_heartbeat_at'] = now()->toIso8601String();
+        $state['last_heartbeat_source'] = 'keepalive';
         Cache::put($this->stateKey((string) $config->id), $state, self::STATE_TTL_SECONDS);
     }
 
@@ -269,6 +295,7 @@ class FutureTradeUserStreamService
             $listenKey = $client->createListenKey();
             $this->rememberListenKey($config, $listenKey);
             $this->setStatus($config, self::STATUS_CONNECTED);
+            $this->recordHeartbeat($config, 'listen_key');
             return $listenKey;
         } catch (Throwable $e) {
             Log::warning('[FT USER STREAM] createListenKey failed', [

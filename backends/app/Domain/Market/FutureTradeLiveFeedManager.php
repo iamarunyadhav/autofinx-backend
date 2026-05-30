@@ -69,6 +69,9 @@ class FutureTradeLiveFeedManager
             'startedAt' => $meta['started_at'] ?? null,
             'command' => $meta['command'] ?? $this->commandLine($desiredSymbols),
             'manualCommand' => $this->manualStartCommand($desiredSymbols),
+            'runtimeScheduled' => (bool) config('future_trade.schedule_runtime_commands', false),
+            'schedulerCommand' => $this->schedulerCommand(),
+            'tickCommand' => $this->tickCommand(),
             'logPath' => $meta['log_path'] ?? $this->outLogPath(),
             'errorLogPath' => $meta['error_log_path'] ?? $this->errLogPath(),
             'workspaceScope' => 'global_shared',
@@ -151,8 +154,10 @@ class FutureTradeLiveFeedManager
                     static fn ($symbol) => strtoupper(trim((string) $symbol)),
                     (array) ($settings['symbols'] ?? config('future_trade.defaults.symbols', []))
                 );
+                $primeDefaultSymbols = $this->usesPrimeDefaultSymbols($settings, $configured);
+                $configured = $this->normalizePrimeDefaultSymbols($settings, $configured);
                 $currentSymbol = strtoupper(trim((string) ($config->state?->current_symbol ?? '')));
-                if ($currentSymbol !== '') {
+                if ($currentSymbol !== '' && (! $primeDefaultSymbols || in_array($currentSymbol, $configured, true))) {
                     $configured[] = $currentSymbol;
                 }
 
@@ -163,6 +168,47 @@ class FutureTradeLiveFeedManager
             ->all();
 
         return $symbols !== [] ? $symbols : ['BTCUSDT', 'ETHUSDT'];
+    }
+
+    /**
+     * Existing configs can still contain the old broad experiment basket. When
+     * Prime v6.1.7 is the active crypto profile, the live-feed daemon should
+     * follow the validated default symbols unless the operator picked a custom
+     * set.
+     *
+     * @param  string[]  $symbols
+     * @return string[]
+     */
+    private function normalizePrimeDefaultSymbols(array $settings, array $symbols): array
+    {
+        if (! $this->usesPrimeDefaultSymbols($settings, $symbols)) {
+            return array_values(array_filter($symbols));
+        }
+
+        return ['ETHUSDT', 'BTCUSDT', 'SOLUSDT'];
+    }
+
+    /**
+     * @param  string[]  $symbols
+     */
+    private function usesPrimeDefaultSymbols(array $settings, array $symbols): bool
+    {
+        $profile = strtolower(trim((string) ($settings['signalProfile'] ?? config('future_trade.default_signal_profile', ''))));
+        $market = strtolower(trim((string) ($settings['marketProfile'] ?? 'crypto')));
+        if ($profile !== 'autofinx_prime_v6_1_7_crypto' || $market !== 'crypto') {
+            return false;
+        }
+
+        $legacyDefault = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'AVAXUSDT'];
+        $primeDefault = ['ETHUSDT', 'BTCUSDT', 'SOLUSDT'];
+        $sortedSymbols = array_values(array_unique(array_filter($symbols)));
+        $sortedLegacy = $legacyDefault;
+        $sortedPrime = $primeDefault;
+        sort($sortedSymbols);
+        sort($sortedLegacy);
+        sort($sortedPrime);
+
+        return $sortedSymbols === [] || $sortedSymbols === $sortedLegacy || $sortedSymbols === $sortedPrime;
     }
 
     /**
@@ -381,9 +427,49 @@ class FutureTradeLiveFeedManager
         ));
     }
 
+    private function schedulerCommand(): string
+    {
+        if (PHP_OS_FAMILY === 'Windows') {
+            return trim(sprintf('%s %s schedule:run', $this->phpBinary(), base_path('artisan')));
+        }
+
+        return trim(sprintf('cd %s && %s %s schedule:run >> /dev/null 2>&1', base_path(), $this->phpBinary(), base_path('artisan')));
+    }
+
+    private function tickCommand(): string
+    {
+        return trim(sprintf(
+            '%s %s future-trade:tick --duration=55 --sleep-ms=1000',
+            $this->phpBinary(),
+            base_path('artisan')
+        ));
+    }
+
     private function phpBinary(): string
     {
-        return PHP_BINARY ?: 'php';
+        $configured = trim((string) config('future_trade.php_binary', ''));
+        if ($configured !== '') {
+            return $configured;
+        }
+
+        $binary = PHP_BINARY ?: 'php';
+        $basename = strtolower(basename(str_replace('\\', '/', $binary)));
+        if (! in_array($basename, ['php-fpm', 'php-fpm.exe', 'php-cgi', 'php-cgi.exe'], true)) {
+            return $binary;
+        }
+
+        $candidate = str_replace('/usr/sbin/php-fpm', '/usr/bin/php', $binary);
+        if ($candidate !== $binary && is_file($candidate) && is_executable($candidate)) {
+            return $candidate;
+        }
+
+        foreach (['/opt/cpanel/ea-php84/root/usr/bin/php', '/opt/cpanel/ea-php83/root/usr/bin/php', '/usr/local/bin/php', '/usr/bin/php'] as $path) {
+            if (is_file($path) && is_executable($path)) {
+                return $path;
+            }
+        }
+
+        return 'php';
     }
 
     private function ageSecondsSince(mixed $timestamp): ?int

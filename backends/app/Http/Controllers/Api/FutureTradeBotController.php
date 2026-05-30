@@ -11,6 +11,7 @@ use App\Models\WorkspaceMember;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Log;
 
 class FutureTradeBotController extends Controller
@@ -41,6 +42,106 @@ class FutureTradeBotController extends Controller
         return response()->json($this->bot->scannerSnapshotPayload($this->bot->getOrCreateConfig($workspace)));
     }
 
+    public function pineWebhook(Request $request, string $workspace): JsonResponse
+    {
+        // Primary slot 0 always exists — used for token validation, raw audit
+        // logging, and as fallback when no symbol-specific slot is available.
+        $primary = $this->bot->getOrCreateConfig($workspace);
+        $configuredToken = trim((string) config('future_trade.pine_webhook_token', ''));
+        $providedTokens = array_filter(array_map(
+            static fn ($token): string => trim((string) $token),
+            [
+                $request->bearerToken(),
+                $request->header('X-Webhook-Token'),
+                $request->input('token'),
+                $request->query('token'),
+            ]
+        ));
+
+        $tokenMatched = $configuredToken !== '' && collect($providedTokens)
+            ->contains(static fn (string $token): bool => hash_equals($configuredToken, $token));
+
+        $rawBody = (string) $request->getContent();
+        $decoded = $rawBody !== '' ? json_decode($rawBody, true) : null;
+        $headersSummary = [];
+        foreach (['content-type', 'user-agent', 'x-forwarded-for', 'cf-connecting-ip'] as $header) {
+            if ($request->headers->has($header)) {
+                $headersSummary[$header] = $request->headers->get($header);
+            }
+        }
+        // Raw payload always recorded against slot 0 for a single source of
+        // truth audit trail, regardless of which slot ultimately executes.
+        $this->bot->recordRawPineWebhookRequest($primary, is_array($decoded) ? $decoded : $request->all(), [
+            'rawBody' => $rawBody,
+            'remoteIp' => $request->ip(),
+            'headersSummary' => $headersSummary,
+            'parseStatus' => $rawBody === '' ? 'empty' : (json_last_error() === JSON_ERROR_NONE ? 'json' : 'invalid_json'),
+            'tokenStatus' => $tokenMatched ? 'valid' : 'invalid_or_missing',
+        ]);
+
+        if (! $tokenMatched) {
+            return response()->json([
+                'accepted' => false,
+                'executed' => false,
+                'reason' => 'invalid_or_missing_webhook_token',
+            ], 401);
+        }
+
+        // Slot routing: find the slot that owns the incoming symbol, or
+        // assign the first FLAT slot. If every slot is busy with a
+        // different symbol, reject with a clear reason.
+        $payload = $request->all();
+        $rawSymbol = (string) ($payload['symbol'] ?? $payload['ticker'] ?? '');
+        $symbol = $this->bot->normalizeIncomingSymbol($rawSymbol);
+        $targetConfig = $symbol !== ''
+            ? $this->bot->findSlotForSymbol($workspace, $symbol)
+            : null;
+
+        if ($symbol !== '' && $targetConfig === null) {
+            $activeCount = $this->bot->activePositionCount($workspace);
+            return response()->json([
+                'accepted' => false,
+                'executed' => false,
+                'eligible' => false,
+                'source' => 'pine_webhook',
+                'execution' => 'rejected',
+                'reason' => 'max_concurrent_positions_reached',
+                'symbol' => $symbol,
+                'activePositions' => $activeCount,
+            ], 422);
+        }
+
+        // Fallback to primary (slot 0) when no symbol could be parsed —
+        // ingestPineWebhook will validate and reject with the right code.
+        $result = $this->bot->ingestPineWebhook(
+            $targetConfig ?? $primary,
+            $payload
+        );
+
+        // Surface which slot handled the signal so the operator can debug
+        // multi-position behaviour from the API response.
+        if ($targetConfig !== null) {
+            $result['slotIndex'] = (int) $targetConfig->slot_index;
+        }
+
+        return response()->json($result, ($result['accepted'] ?? false) ? 200 : 422);
+    }
+
+    public function lastWebhookPayload(string $workspace): JsonResponse
+    {
+        return response()->json($this->bot->lastWebhookPayload($this->bot->getOrCreateConfig($workspace)));
+    }
+
+    public function binanceHealth(string $workspace): JsonResponse
+    {
+        return response()->json($this->bot->binanceHealthPayload($this->bot->getOrCreateConfig($workspace)));
+    }
+
+    public function runtimeHealth(string $workspace): JsonResponse
+    {
+        return response()->json($this->bot->runtimeHealthPayload($this->bot->getOrCreateConfig($workspace)));
+    }
+
     public function chart(Request $request, string $workspace): JsonResponse
     {
         return response()->json($this->bot->liveChartPayload(
@@ -69,6 +170,25 @@ class FutureTradeBotController extends Controller
     public function restartLiveFeed(string $workspace): JsonResponse
     {
         return response()->json($this->liveFeedManager->restart());
+    }
+
+    public function recoverRuntime(string $workspace): JsonResponse
+    {
+        $feed = $this->liveFeedManager->restart();
+        $exitCode = Artisan::call('future-trade:tick', [
+            '--workspace' => $workspace,
+            '--duration' => 8,
+            '--sleep-ms' => 1000,
+        ]);
+
+        return response()->json([
+            'recovered' => $exitCode === 0,
+            'message' => $exitCode === 0
+                ? 'Future Trade runtime recovery ran: live feed restart requested and scanner tick refreshed.'
+                : 'Future Trade runtime recovery attempted, but scanner tick returned a non-zero exit code.',
+            'feed' => $feed,
+            'tickExitCode' => $exitCode,
+        ]);
     }
 
     public function start(string $workspace): JsonResponse
@@ -269,12 +389,26 @@ class FutureTradeBotController extends Controller
 
     public function logs(Request $request, string $workspace): JsonResponse
     {
-        $query = $this->bot->getOrCreateConfig($workspace)->logs()->orderByDesc('occurred_at');
-        if (! filter_var($request->query('all', false), FILTER_VALIDATE_BOOL)) {
-            $query->limit(max(1, min(1000, (int) $request->query('limit', 100))));
-        }
+        try {
+            $limit = max(1, min(1000, (int) $request->query('limit', 300)));
+            $logs = $this->bot->getOrCreateConfig($workspace)
+                ->logs()
+                ->orderByDesc('occurred_at')
+                ->limit($limit)
+                ->get();
 
-        return response()->json($query->get());
+            return response()->json($logs);
+        } catch (\Throwable $e) {
+            Log::error('[FUTURE TRADE LOGS FAILED]', [
+                'workspace_id' => $workspace,
+                'error' => $e->getMessage(),
+            ]);
+
+            return response()->json([
+                'message' => 'Future Trade logs are temporarily unavailable.',
+                'error' => app()->hasDebugModeEnabled() ? $e->getMessage() : null,
+            ], 500);
+        }
     }
 
     private function envPayload($config): array

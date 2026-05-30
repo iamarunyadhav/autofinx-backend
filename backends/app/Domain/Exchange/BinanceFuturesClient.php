@@ -9,11 +9,19 @@ use RuntimeException;
 
 class BinanceFuturesClient
 {
+    private readonly string $apiKey;
+    private readonly string $apiSecret;
+    private readonly string $baseUrl;
+
     public function __construct(
-        private readonly string $apiKey,
-        private readonly string $apiSecret,
-        private readonly string $baseUrl,
+        string $apiKey,
+        string $apiSecret,
+        string $baseUrl,
     ) {
+        $this->apiKey = trim($apiKey);
+        $this->apiSecret = trim($apiSecret);
+        $this->baseUrl = rtrim(trim($baseUrl), '/');
+
         if ($this->apiKey === '' || $this->apiSecret === '') {
             throw new RuntimeException('Binance futures API credentials are required.');
         }
@@ -266,6 +274,33 @@ class BinanceFuturesClient
         return rtrim($this->baseUrl, '/') . $path;
     }
 
+    /**
+     * Best-effort DNS pre-warm. Resolves the API host once per minute and
+     * stores nothing more than a "did we already warm it" marker. The actual
+     * cURL stack still does the resolution; this just primes the OS resolver
+     * cache so the first signed request doesn't pay the cold-resolver tax.
+     */
+    private function prewarmDns(): void
+    {
+        try {
+            $host = parse_url($this->baseUrl, PHP_URL_HOST);
+            if (! is_string($host) || $host === '') {
+                return;
+            }
+            $cacheKey = 'binance_dns_warm:' . $host;
+            if (Cache::get($cacheKey)) {
+                return;
+            }
+            $resolved = @gethostbyname($host);
+            // gethostbyname returns the input on failure — treat that as a miss.
+            if ($resolved && $resolved !== $host) {
+                Cache::put($cacheKey, $resolved, 60);
+            }
+        } catch (\Throwable $e) {
+            // Pre-warm is best-effort; never propagate failures.
+        }
+    }
+
     private function request(string $method, string $path, array $params = [], bool $authenticated = false): Response
     {
         $host = (string) (parse_url($this->baseUrl, PHP_URL_HOST) ?: '');
@@ -293,15 +328,33 @@ class BinanceFuturesClient
                     default => $pending->asForm()->post($this->url($path), $params),
                 };
 
+<<<<<<< HEAD
                 // Success — reset circuit breaker failure counter
                 $this->circuitSuccess($host);
                 return $response;
 
+=======
+                if ($this->isRetryableStatus($response) && $index !== array_key_last($delaysMs)) {
+                    $lastException = new RuntimeException('Binance futures REST returned retryable HTTP ' . $response->status());
+                    continue;
+                }
+
+                if (! $this->isRetryableStatus($response)) {
+                    $this->clearCircuit($circuitKey);
+                } elseif ($index === array_key_last($delaysMs)) {
+                    $this->recordCircuitFailure($circuitKey);
+                }
+
+                return $response;
+>>>>>>> 95af6096633884447218f798bb86245650285172
             } catch (\Throwable $exception) {
                 $lastException = $exception;
                 $this->circuitRecordFailure($host);
 
                 if (! $this->isRetryableException($exception) || $index === array_key_last($delaysMs)) {
+                    if ($this->isRetryableException($exception)) {
+                        $this->recordCircuitFailure($circuitKey);
+                    }
                     throw $exception;
                 }
             }
@@ -400,5 +453,30 @@ class BinanceFuturesClient
         }
 
         return false;
+    }
+
+    private function isRetryableStatus(Response $response): bool
+    {
+        return in_array($response->status(), [408, 425, 429, 500, 502, 503, 504], true);
+    }
+
+    private function circuitKey(string $path, bool $authenticated): string
+    {
+        return 'binance_futures_rest_circuit:' . md5($this->baseUrl . '|' . $path . '|' . ($authenticated ? 'auth' : 'public'));
+    }
+
+    private function recordCircuitFailure(string $key): void
+    {
+        $count = (int) Cache::increment($key . ':failures');
+        Cache::put($key . ':failures', $count, now()->addSeconds(300));
+        if ($count >= 3) {
+            Cache::put($key . ':open', true, now()->addSeconds(45));
+        }
+    }
+
+    private function clearCircuit(string $key): void
+    {
+        Cache::forget($key . ':failures');
+        Cache::forget($key . ':open');
     }
 }

@@ -8,11 +8,14 @@ use App\Domain\Portfolio\LivePortfolioGuardService;
 use App\Domain\Signals\IndicatorIntelligenceService;
 use App\Domain\Signals\StrategyResearchLabService;
 use App\Domain\Trading\FuturesOrderSizingService;
-use PHPUnit\Framework\TestCase;
+use Illuminate\Foundation\Testing\TestCase as LaravelTestCase;
 use ReflectionMethod;
+use Tests\CreatesApplication;
 
-class FutureTradeSignalScoringTest extends TestCase
+class FutureTradeSignalScoringTest extends LaravelTestCase
 {
+    use CreatesApplication;
+
     public function test_sequence_only_bearish_snapshot_stays_conservative_without_structure_confirmation(): void
     {
         $service = $this->service();
@@ -36,6 +39,7 @@ class FutureTradeSignalScoringTest extends TestCase
             'openPrice' => 99.8,
             'sequence' => $sequence,
         ], [
+            'signalProfile' => 'legacy_future_trade',
             'avoidChoppyMarket' => true,
             'timeframe' => '5m',
         ]]);
@@ -67,6 +71,7 @@ class FutureTradeSignalScoringTest extends TestCase
             'openPrice' => 99.98,
             'sequence' => $sequence,
         ], [
+            'signalProfile' => 'legacy_future_trade',
             'avoidChoppyMarket' => true,
             'timeframe' => '5m',
         ]]);
@@ -98,12 +103,70 @@ class FutureTradeSignalScoringTest extends TestCase
             'openPrice' => 100.0,
             'sequence' => $sequence,
         ], [
+            'signalProfile' => 'legacy_future_trade',
             'avoidChoppyMarket' => true,
             'timeframe' => '5m',
         ]]);
 
         $this->assertSame('WAIT', $signal['signal']);
         $this->assertLessThan(0.55, $signal['confidence']);
+    }
+
+    public function test_prime_crypto_profile_scores_hard_filtered_long_signal(): void
+    {
+        $service = $this->service();
+
+        $signal = $this->invoke($service, 'scoreTicker', [[
+            'symbol' => 'ETHUSDT',
+            'lastPrice' => 110,
+            'priceChangePercent' => 1.2,
+            'quoteVolume' => 250000000,
+            'highPrice' => 112,
+            'lowPrice' => 100,
+            'weightedAvgPrice' => 105,
+            'openPrice' => 101,
+            'sequence' => [
+                'ema9' => 108,
+                'ema21' => 106,
+                'ema50' => 103,
+                'ema200' => 95,
+                'sessionVwap' => 104,
+                'rsi14' => 61,
+                'adx14' => 28,
+                'diPlus14' => 31,
+                'diMinus14' => 12,
+                'atr14' => 1.1,
+                'atrPercent' => 1.0,
+                'relativeVolume' => 1.4,
+                'choppiness14' => 48,
+                'donchianBullCount' => 9,
+                'donchianBearCount' => 0,
+                'momentumLongOk' => true,
+                'momentumShortOk' => false,
+            ],
+            'htf' => ['trend1h' => 1, 'trend4h' => 1],
+        ], [
+            'signalProfile' => 'autofinx_prime_v6_1_7_crypto',
+            'marketProfile' => 'Crypto',
+        ]]);
+
+        $this->assertSame('BUY', $signal['signal']);
+        $this->assertSame('autofinx_prime_v6_1_7_crypto', $signal['debug']['profile']);
+        $this->assertGreaterThanOrEqual(0.72, $signal['confidence']);
+        $this->assertTrue($signal['debug']['hardLongFilter']);
+    }
+
+    public function test_prime_crypto_profile_is_not_default_for_forex_market_profile(): void
+    {
+        $service = $this->service();
+
+        $settings = $this->invoke($service, 'normalizeFutureTradeSettings', [[
+            'signalProfile' => 'autofinx_prime_v6_1_7_crypto',
+            'marketProfile' => 'Forex',
+        ]]);
+
+        $this->assertSame('Forex', $settings['marketProfile']);
+        $this->assertSame('autofinx_prime_v6_1_7_crypto', $settings['signalProfile']);
     }
 
     private function invoke(FutureTradeBotService $service, string $method, array $arguments): mixed

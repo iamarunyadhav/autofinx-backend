@@ -38,15 +38,13 @@ chmod +x start-workers.sh stop-workers.sh restart-workers.sh future-trade-heartb
 "$PHP" artisan future-trade:queue-health
 
 CRON_LINES=$(cat <<'CRON'
-* * * * * cd /home/zcadmin/public_html/api.autofinx.arunyadhav.dev/autofinx-backend/backends && /usr/local/bin/ea-php82 artisan schedule:run >> storage/logs/cron-schedule-run.log 2>&1
-* * * * * cd /home/zcadmin/public_html/api.autofinx.arunyadhav.dev/autofinx-backend/backends && /usr/local/bin/ea-php82 artisan future-trade:tick --duration=55 --sleep-ms=1000 >> storage/logs/future-trade-tick.log 2>&1
-*/2 * * * * /home/zcadmin/public_html/api.autofinx.arunyadhav.dev/autofinx-backend/backends/future-trade-heartbeat.sh >> /home/zcadmin/public_html/api.autofinx.arunyadhav.dev/autofinx-backend/backends/storage/logs/future-trade-heartbeat.log 2>&1
-*/5 * * * * /home/zcadmin/public_html/api.autofinx.arunyadhav.dev/autofinx-backend/backends/future-trade-maintenance.sh >> /home/zcadmin/public_html/api.autofinx.arunyadhav.dev/autofinx-backend/backends/storage/logs/future-trade-cron.log 2>&1
+* * * * * bash /home/zcadmin/public_html/api.autofinx.arunyadhav.dev/autofinx-backend/backends/future-trade-heartbeat.sh >> /home/zcadmin/public_html/api.autofinx.arunyadhav.dev/autofinx-backend/backends/storage/logs/future-trade-heartbeat.log 2>&1
+*/10 * * * * flock -n /tmp/autofinx-maintenance.lock -c 'bash /home/zcadmin/public_html/api.autofinx.arunyadhav.dev/autofinx-backend/backends/future-trade-maintenance.sh >> /home/zcadmin/public_html/api.autofinx.arunyadhav.dev/autofinx-backend/backends/storage/logs/future-trade-cron.log 2>&1'
 CRON
 )
 
 if [ "$INSTALL_CRON" -eq 1 ]; then
-  (crontab -l 2>/dev/null | grep -v "future-trade:tick" | grep -v "future-trade-heartbeat.sh" | grep -v "future-trade-maintenance.sh" | grep -v "artisan schedule:run"; echo "$CRON_LINES") | crontab -
+  (crontab -l 2>/dev/null | grep -v "future-trade:tick" | grep -v "future-trade:user-stream" | grep -v "future-trade:live-feed" | grep -v "future-trade-heartbeat.sh" | grep -v "future-trade-maintenance.sh" | grep -v "artisan schedule:run"; echo "$CRON_LINES") | crontab -
   echo "Crontab installed."
 else
   echo "Add these cPanel cron lines:"

@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_DIR="/home/zcadmin/public_html/api.autofinx.arunyadhav.dev/autofinx-backend/backends"
-PHP="/usr/local/bin/ea-php82"
+APP_DIR="${APP_DIR:-/home/zcadmin/public_html/api.autofinx.arunyadhav.dev/autofinx-backend/backends}"
+PHP="${PHP:-/usr/local/bin/ea-php82}"
+if [ ! -x "$PHP" ] && [ -x "/opt/cpanel/ea-php82/root/usr/bin/php" ]; then
+  PHP="/opt/cpanel/ea-php82/root/usr/bin/php"
+fi
+
+FT_SYMBOLS="${FT_SYMBOLS:-ETHUSDT,BTCUSDT,SOLUSDT,BNBUSDT}"
+FT_STREAMS="${FT_STREAMS:-trade,kline_1m,kline_5m,kline_15m,kline_1h,kline_4h}"
 
 cd "$APP_DIR"
 mkdir -p storage/logs
@@ -34,13 +40,8 @@ start_if_missing \
   >> storage/logs/worker-safe.log 2>&1
 
 start_if_missing \
-  "artisan schedule:work" \
-  "$PHP" artisan schedule:work \
-  >> storage/logs/schedule-work.log 2>&1
-
-start_if_missing \
   "future-trade:live-feed" \
-  "$PHP" artisan future-trade:live-feed --reconnect-sleep=2 \
+  "$PHP" artisan future-trade:live-feed --symbols="$FT_SYMBOLS" --streams="$FT_STREAMS" --reconnect-sleep=2 \
   >> storage/logs/future-trade-live-feed.log 2>> storage/logs/future-trade-live-feed.error.log
 
 echo "AutoFinX workers started."

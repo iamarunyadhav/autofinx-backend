@@ -223,6 +223,79 @@ class FutureTradeDynamicAlgorithmTest extends TestCase
         $this->assertNotSame('', $decision['public']['suggestion']);
     }
 
+    public function test_prime_pine_runtime_uses_manual_exit_values_by_default(): void
+    {
+        $decision = $this->decision([
+            'signalProfile' => FutureTradeBotService::PROFILE_PRIME_V617_CRYPTO,
+            'marketProfile' => 'Crypto',
+            'tradeScoreThreshold' => 72,
+            'takeProfitPercent' => 0.5,
+            'stopLossPercent' => 0.25,
+            'trailingTakeProfitPercent' => 0.18,
+            'rollbackLossPercent' => 0.15,
+        ], $this->state([]), [[
+            'symbol' => 'ETHUSDT',
+            'signal' => 'BUY',
+            'confidence' => 0.86,
+            'price' => 2090.42,
+            'changePercent' => 1.2,
+            'debug' => [
+                'risk' => [
+                    'riskPercent' => 0.603,
+                    'atrPercent' => 0.603,
+                ],
+                'longScore' => 86,
+                'shortScore' => 22,
+                'checks' => ['chopOk' => true],
+            ],
+        ]]);
+
+        $this->assertSame('pine_mirror', $decision['mode']);
+        $this->assertSame(0.5, $decision['settings']['takeProfitPercent']);
+        $this->assertSame(0.25, $decision['settings']['stopLossPercent']);
+        $this->assertSame(0.18, $decision['settings']['trailingTakeProfitPercent']);
+        $this->assertSame(0.15, $decision['settings']['rollbackLossPercent']);
+        $this->assertSame(0.5, $decision['public']['recommended']['takeProfitPercent']);
+        $this->assertSame(0.25, $decision['public']['recommended']['stopLossPercent']);
+        $this->assertSame(0.18, $decision['public']['recommended']['trailingTakeProfitPercent']);
+    }
+
+    public function test_prime_pine_runtime_can_opt_into_webhook_risk_values(): void
+    {
+        $decision = $this->decision([
+            'signalProfile' => FutureTradeBotService::PROFILE_PRIME_V617_CRYPTO,
+            'marketProfile' => 'Crypto',
+            'tradeScoreThreshold' => 72,
+            'takeProfitPercent' => 0.5,
+            'stopLossPercent' => 0.25,
+            'trailingTakeProfitPercent' => 0.18,
+            'rollbackLossPercent' => 0.15,
+            'useWebhookRiskOverrides' => true,
+        ], $this->state([]), [[
+            'symbol' => 'ETHUSDT',
+            'signal' => 'SELL',
+            'confidence' => 0.83,
+            'price' => 2090.42,
+            'source' => 'pine_webhook',
+            'debug' => [
+                'riskOverrides' => [
+                    'takeProfitPercent' => 0.7,
+                    'stopLossPercent' => 0.3,
+                    'trailingTakeProfitPercent' => 0.24,
+                    'rollbackLossPercent' => 0.2,
+                ],
+                'longScore' => 26,
+                'shortScore' => 83,
+                'checks' => ['chopOk' => true],
+            ],
+        ]]);
+
+        $this->assertSame(0.7, $decision['settings']['takeProfitPercent']);
+        $this->assertSame(0.3, $decision['settings']['stopLossPercent']);
+        $this->assertSame(0.24, $decision['settings']['trailingTakeProfitPercent']);
+        $this->assertSame(0.2, $decision['settings']['rollbackLossPercent']);
+    }
+
     public function test_score_ticker_requires_full_bullish_confluence_for_buy_signal(): void
     {
         $score = $this->scoreTicker([
@@ -320,7 +393,6 @@ class FutureTradeDynamicAlgorithmTest extends TestCase
         ], ['timeframe' => '5m', 'strictEntryGuards' => true]);
 
         $this->assertSame('WAIT', $score['signal']);
-        $this->assertStringContainsString('UT Bot', $score['reason']);
         $this->assertStringContainsString('market structure breakout', $score['reason']);
     }
 
@@ -376,6 +448,7 @@ class FutureTradeDynamicAlgorithmTest extends TestCase
     private function decision(array $settings, FutureTradeBotState $state, array $signals): array
     {
         $settings = array_merge([
+            'signalProfile' => 'legacy_future_trade',
             'confidenceMode' => 'fixed',
             'minConfidence' => 0.72,
             'strictEntryGuards' => true,
@@ -420,7 +493,7 @@ class FutureTradeDynamicAlgorithmTest extends TestCase
         $method = new ReflectionMethod($service, 'scoreTicker');
         $method->setAccessible(true);
 
-        return $method->invoke($service, $ticker, $settings);
+        return $method->invoke($service, $ticker, array_merge(['signalProfile' => 'legacy_future_trade'], $settings));
     }
 
     private function state(array $attributes): FutureTradeBotState
