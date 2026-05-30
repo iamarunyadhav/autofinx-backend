@@ -110,7 +110,10 @@ tail -n 2 storage/logs/worker-all.log 2>/dev/null || echo "(no log yet)"
 
 echo ""
 echo "=== 6. Recent Laravel Errors (top 3) ==="
-grep -E "SQLSTATE|ERROR|CRITICAL" storage/logs/laravel.log 2>/dev/null | tail -n 3 \
+grep -E "SQLSTATE|\.ERROR:|CRITICAL" storage/logs/laravel.log 2>/dev/null \
+  | grep -v "stty 2>" \
+  | grep -v "Terminal\.php" \
+  | tail -n 3 \
   || echo "No errors"
 
 echo ""

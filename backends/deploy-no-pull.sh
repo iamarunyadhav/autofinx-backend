@@ -160,7 +160,7 @@ install_clean_crontab() {
   TMPFILE=$(mktemp)
   # Remove all existing AutoFinX lines (old and new formats)
   crontab -l 2>/dev/null \
-    | grep -vE "future-trade|autofinx|heartbeat\.sh|maintenance\.sh|master_check|schedule:run.*artisan|start-workers|reconcile.*artisan" \
+    | grep -vE "future-trade|autofinx|heartbeat\.sh|maintenance\.sh|master_check|schedule:run.*artisan|start-workers|reconcile.*artisan|^# AutoFinX" \
     > "$TMPFILE" || true
 
   cat >> "$TMPFILE" <<CRON
