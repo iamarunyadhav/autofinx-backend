@@ -120,7 +120,7 @@ class BinanceFuturesClient
     public function setLeverage(string $symbol, int|float $leverage): array
     {
         $response = $this->signedRequest('POST', '/fapi/v1/leverage', [
-            'symbol' => BinanceSymbolNormalizer::normalize($symbol),
+            'symbol'   => BinanceSymbolNormalizer::normalize($symbol),
             'leverage' => (int) round($leverage),
         ]);
 
@@ -130,7 +130,7 @@ class BinanceFuturesClient
     public function setMarginType(string $symbol, string $marginMode): array
     {
         $response = $this->signedRequest('POST', '/fapi/v1/marginType', [
-            'symbol' => BinanceSymbolNormalizer::normalize($symbol),
+            'symbol'     => BinanceSymbolNormalizer::normalize($symbol),
             'marginType' => strtoupper($marginMode),
         ], false);
 
@@ -203,7 +203,7 @@ class BinanceFuturesClient
     {
         $params = [
             'symbol' => BinanceSymbolNormalizer::normalize($symbol),
-            'limit' => max(1, min(1000, $limit)),
+            'limit'  => max(1, min(1000, $limit)),
         ];
         if ($startTimeMs !== null) {
             $params['startTime'] = $startTimeMs;
@@ -216,13 +216,15 @@ class BinanceFuturesClient
         }
 
         $body = $response->json();
+
         return is_array($body) ? $body : [];
     }
+
+    // ── Private helpers ───────────────────────────────────────────────────────
 
     private function signedRequest(string $method, string $path, array $params = [], bool $throw = true): Response
     {
         $signedPayload = $this->sign($params);
-
         $response = $this->request($method, $path, $signedPayload, true);
 
         if ($throw) {
@@ -271,35 +273,35 @@ class BinanceFuturesClient
 
     private function url(string $path): string
     {
-        return rtrim($this->baseUrl, '/') . $path;
+        return $this->baseUrl . $path;
     }
 
-    /**
-     * Best-effort DNS pre-warm. Resolves the API host once per minute and
-     * stores nothing more than a "did we already warm it" marker. The actual
-     * cURL stack still does the resolution; this just primes the OS resolver
-     * cache so the first signed request doesn't pay the cold-resolver tax.
-     */
-    private function prewarmDns(): void
+    // ── DNS pre-warm ─────────────────────────────────────────────────────────
+    // Primes the OS resolver cache once per minute so the first request per
+    // deploy/restart does not pay the cold-DNS latency penalty.
+
+    private function prewarmDns(string $host): void
     {
+        if ($host === '') {
+            return;
+        }
         try {
-            $host = parse_url($this->baseUrl, PHP_URL_HOST);
-            if (! is_string($host) || $host === '') {
-                return;
-            }
             $cacheKey = 'binance_dns_warm:' . $host;
-            if (Cache::get($cacheKey)) {
-                return;
+            if (! Cache::has($cacheKey)) {
+                $resolved = @gethostbyname($host);
+                if ($resolved && $resolved !== $host) {
+                    Cache::put($cacheKey, $resolved, 60);
+                }
             }
-            $resolved = @gethostbyname($host);
-            // gethostbyname returns the input on failure — treat that as a miss.
-            if ($resolved && $resolved !== $host) {
-                Cache::put($cacheKey, $resolved, 60);
-            }
-        } catch (\Throwable $e) {
-            // Pre-warm is best-effort; never propagate failures.
+        } catch (\Throwable) {
+            // Best-effort; never block a request
         }
     }
+
+    // ── Core HTTP request with retry + circuit breaker ────────────────────────
+    // Retry delays: 0 ms → 300 ms → 900 ms → 2000 ms (exponential backoff).
+    // Circuit breaker opens after 5 consecutive failures (exceptions OR 5xx/429).
+    // Stays open 45 s, then resets so the next request probes liveness.
 
     private function request(string $method, string $path, array $params = [], bool $authenticated = false): Response
     {
@@ -307,7 +309,6 @@ class BinanceFuturesClient
         $this->prewarmDns($host);
         $this->assertCircuitClosed($host);
 
-        // Delays: immediate, 300ms, 900ms, 2000ms (exponential backoff)
         $delaysMs = [0, 300, 900, 2000];
         $lastException = null;
 
@@ -322,39 +323,30 @@ class BinanceFuturesClient
                     ->connectTimeout(5);
 
                 $response = match (strtoupper($method)) {
-                    'GET' => $pending->get($this->url($path), $params),
-                    'PUT' => $pending->asForm()->put($this->url($path), $params),
+                    'GET'    => $pending->get($this->url($path), $params),
+                    'PUT'    => $pending->asForm()->put($this->url($path), $params),
                     'DELETE' => $pending->delete($this->url($path), $params),
-                    default => $pending->asForm()->post($this->url($path), $params),
+                    default  => $pending->asForm()->post($this->url($path), $params),
                 };
 
-<<<<<<< HEAD
-                // Success — reset circuit breaker failure counter
-                $this->circuitSuccess($host);
-                return $response;
-
-=======
+                // Retry on transient HTTP errors (rate-limit, gateway errors, etc.)
                 if ($this->isRetryableStatus($response) && $index !== array_key_last($delaysMs)) {
-                    $lastException = new RuntimeException('Binance futures REST returned retryable HTTP ' . $response->status());
+                    $lastException = new RuntimeException(
+                        'Binance futures REST returned retryable status ' . $response->status()
+                    );
                     continue;
                 }
 
-                if (! $this->isRetryableStatus($response)) {
-                    $this->clearCircuit($circuitKey);
-                } elseif ($index === array_key_last($delaysMs)) {
-                    $this->recordCircuitFailure($circuitKey);
-                }
+                // Success (or non-retryable response) — reset circuit breaker
+                $this->circuitSuccess($host);
 
                 return $response;
->>>>>>> 95af6096633884447218f798bb86245650285172
+
             } catch (\Throwable $exception) {
                 $lastException = $exception;
                 $this->circuitRecordFailure($host);
 
                 if (! $this->isRetryableException($exception) || $index === array_key_last($delaysMs)) {
-                    if ($this->isRetryableException($exception)) {
-                        $this->recordCircuitFailure($circuitKey);
-                    }
                     throw $exception;
                 }
             }
@@ -365,27 +357,7 @@ class BinanceFuturesClient
             : new RuntimeException('Binance futures request failed without a response.');
     }
 
-    private function prewarmDns(string $host): void
-    {
-        if ($host === '') {
-            return;
-        }
-        try {
-            $cacheKey = 'binance_dns_warm:' . $host;
-            if (! Cache::has($cacheKey)) {
-                $resolved = gethostbyname($host);
-                if ($resolved !== $host) {
-                    Cache::put($cacheKey, $resolved, 60);
-                }
-            }
-        } catch (\Throwable) {
-            // DNS pre-warm is best-effort; never block a request
-        }
-    }
-
-    // ── Simple app-cache circuit breaker ──────────────────────────────────────
-    // Opens after 5 consecutive failures; stays open 45s; then half-open (1 probe).
-    // Prevents 4-retry × 12s timeout storms when Binance is unreachable.
+    // ── Circuit breaker ───────────────────────────────────────────────────────
 
     private function assertCircuitClosed(string $host): void
     {
@@ -393,7 +365,8 @@ class BinanceFuturesClient
         if (($state['open'] ?? false) && time() < (int) ($state['until'] ?? 0)) {
             $remaining = (int) ($state['until'] ?? 0) - time();
             throw new RuntimeException(
-                "binance_rest_circuit_open: Binance API circuit breaker is open ({$remaining}s remaining). Last error: " .
+                'binance_rest_circuit_open: Binance API circuit breaker is open (' .
+                $remaining . 's remaining). Last error: ' .
                 (string) ($state['last_error'] ?? 'unknown')
             );
         }
@@ -402,9 +375,10 @@ class BinanceFuturesClient
     private function circuitRecordFailure(string $host): void
     {
         try {
-            $key = 'binance_cb:' . $host;
-            $state = (array) (Cache::get($key, []));
+            $key      = 'binance_cb:' . $host;
+            $state    = (array) (Cache::get($key, []));
             $failures = (int) ($state['failures'] ?? 0) + 1;
+
             if ($failures >= 5) {
                 Cache::put($key, [
                     'open'       => true,
@@ -416,7 +390,7 @@ class BinanceFuturesClient
                 Cache::put($key, array_merge($state, ['failures' => $failures]), 120);
             }
         } catch (\Throwable) {
-            // Circuit breaker is best-effort
+            // Best-effort
         }
     }
 
@@ -428,24 +402,31 @@ class BinanceFuturesClient
         }
     }
 
+    // ── Retry helpers ─────────────────────────────────────────────────────────
+
+    private function isRetryableStatus(Response $response): bool
+    {
+        return in_array($response->status(), [408, 425, 429, 500, 502, 503, 504], true);
+    }
+
     private function isRetryableException(\Throwable $exception): bool
     {
         $message = strtolower($exception->getMessage());
 
         foreach ([
             'curl error 6',
-            'curl error 28',     // timeout
-            'curl error 35',     // SSL handshake
+            'curl error 28',
+            'curl error 35',
             'getaddrinfo',
             'could not resolve host',
             'timed out',
+            'operation timed out',
             'connection refused',
             'connection reset',
             'failed to connect',
             'temporary failure',
             'name or service not known',
             'network is unreachable',
-            'operation timed out',
         ] as $needle) {
             if (str_contains($message, $needle)) {
                 return true;
@@ -453,30 +434,5 @@ class BinanceFuturesClient
         }
 
         return false;
-    }
-
-    private function isRetryableStatus(Response $response): bool
-    {
-        return in_array($response->status(), [408, 425, 429, 500, 502, 503, 504], true);
-    }
-
-    private function circuitKey(string $path, bool $authenticated): string
-    {
-        return 'binance_futures_rest_circuit:' . md5($this->baseUrl . '|' . $path . '|' . ($authenticated ? 'auth' : 'public'));
-    }
-
-    private function recordCircuitFailure(string $key): void
-    {
-        $count = (int) Cache::increment($key . ':failures');
-        Cache::put($key . ':failures', $count, now()->addSeconds(300));
-        if ($count >= 3) {
-            Cache::put($key . ':open', true, now()->addSeconds(45));
-        }
-    }
-
-    private function clearCircuit(string $key): void
-    {
-        Cache::forget($key . ':failures');
-        Cache::forget($key . ':open');
     }
 }
