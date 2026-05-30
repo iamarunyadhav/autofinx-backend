@@ -2011,8 +2011,22 @@ class FutureTradeBotService
             return;
         }
 
-        $client->setLeverage($symbol, $leverage);
-        $client->setMarginType($symbol, (string) ($settings['marginMode'] ?? 'isolated'));
+        // setLeverage/setMarginType: Binance returns -4046 if already set to the
+        // requested value. Ignore that specific error — it is not a failure.
+        try {
+            $client->setLeverage($symbol, $leverage);
+        } catch (Throwable $e) {
+            if (! str_contains($e->getMessage(), '-4046') && ! str_contains($e->getMessage(), 'No need to change leverage')) {
+                throw $e;
+            }
+        }
+        try {
+            $client->setMarginType($symbol, (string) ($settings['marginMode'] ?? 'isolated'));
+        } catch (Throwable $e) {
+            if (! str_contains($e->getMessage(), '-4046') && ! str_contains($e->getMessage(), 'No need to change margin type')) {
+                throw $e;
+            }
+        }
 
         // Deterministic clientOrderId — if a retry fires on the same signal_key
         // Binance will reject the duplicate instead of opening a second order.
@@ -6546,11 +6560,30 @@ class FutureTradeBotService
 
     private function exchangePositionSnapshot(BinanceFuturesClient $client, string $symbol): array
     {
-        $riskPayload = $client->fetchPositionRisk($symbol);
+        // Both API calls are wrapped individually so a failure on open-orders
+        // does not also wipe out the position-risk data (and vice versa).
+        try {
+            $riskPayload = $client->fetchPositionRisk($symbol);
+        } catch (Throwable $e) {
+            Log::warning('[FT EXCHANGE SNAPSHOT] fetchPositionRisk failed', [
+                'symbol' => $symbol, 'error' => $e->getMessage(),
+            ]);
+            $riskPayload = [];
+        }
+
+        try {
+            $openOrdersPayload = $client->fetchOpenOrders($symbol);
+        } catch (Throwable $e) {
+            Log::warning('[FT EXCHANGE SNAPSHOT] fetchOpenOrders failed', [
+                'symbol' => $symbol, 'error' => $e->getMessage(),
+            ]);
+            $openOrdersPayload = [];
+        }
+
         $riskRows = collect(is_array($riskPayload) && array_is_list($riskPayload) ? $riskPayload : [$riskPayload])
             ->filter(fn ($row) => is_array($row) && strtoupper((string) ($row['symbol'] ?? '')) === strtoupper($symbol));
         $activeRisk = $riskRows->first(fn ($row) => abs((float) ($row['positionAmt'] ?? 0)) > 0);
-        $openOrdersPayload = $client->fetchOpenOrders($symbol);
+
         $openOrders = collect(is_array($openOrdersPayload) && array_is_list($openOrdersPayload) ? $openOrdersPayload : [$openOrdersPayload])
             ->filter(fn ($row) => is_array($row) && strtoupper((string) ($row['symbol'] ?? '')) === strtoupper($symbol))
             ->values();
@@ -6569,6 +6602,7 @@ class FutureTradeBotService
             'unrealized_pnl' => (float) ($activeRisk['unRealizedProfit'] ?? 0),
             'reduce_only_orders' => $reduceOnlyOrders,
             'open_orders' => $openOrders->all(),
+            'snapshot_partial' => $riskPayload === [] || $openOrdersPayload === [],
         ];
     }
 
