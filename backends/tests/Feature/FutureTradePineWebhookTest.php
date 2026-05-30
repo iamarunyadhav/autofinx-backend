@@ -585,6 +585,165 @@ test('webhook response includes latency telemetry', function () {
         ->and($body['latency']['totalMs'])->toBeInt();
 });
 
+test('pine webhook permissive mode accepts any USDT perp symbol not in any list', function () {
+    config([
+        'future_trade.pine_webhook_token' => 'pine-secret',
+        // Tight global registry — the symbol below is not in it.
+        'future_trade.available_symbols' => ['BTCUSDT', 'ETHUSDT'],
+        'future_trade.permissive_symbol_mode' => true,
+    ]);
+    Carbon::setTestNow('2026-05-19 10:30:05');
+    $workspace = Workspace::factory()->create();
+    $config = createPrimeWebhookConfig($workspace->id, [
+        'symbols' => ['ETHUSDT'],
+        'restrictToWorkspaceSymbols' => false,
+        'permissiveSymbolMode' => true,
+    ]);
+
+    // 1000PEPEUSDT is a real Binance perp that does NOT need to be in any list
+    // — the permissive pattern accepts it.
+    $response = $this->postJson("/api/v1/future-trade/pine-webhook/{$workspace->id}", pineWebhookPayload([
+        'symbol' => '1000PEPEUSDT.P',
+        'signal' => 'WAIT',
+    ]))->assertOk();
+
+    expect($response->json('accepted'))->toBeTrue();
+
+    $note = $config->logs()->where('event', 'WEBHOOK_SYMBOL_AUTO_ACCEPTED')->latest('occurred_at')->first();
+    expect($note)->not->toBeNull()
+        ->and($note->context['acceptedVia'] ?? null)->toBe('permissive_pattern');
+});
+
+test('pine webhook permissive mode rejects garbage that does not match futures pattern', function () {
+    config([
+        'future_trade.pine_webhook_token' => 'pine-secret',
+        'future_trade.available_symbols' => ['BTCUSDT', 'ETHUSDT'],
+        'future_trade.permissive_symbol_mode' => true,
+    ]);
+    Carbon::setTestNow('2026-05-19 10:30:05');
+    $workspace = Workspace::factory()->create();
+    createPrimeWebhookConfig($workspace->id, ['symbols' => ['ETHUSDT']]);
+
+    // Random non-futures-looking ticker — does not match the permissive regex.
+    $this->postJson("/api/v1/future-trade/pine-webhook/{$workspace->id}", pineWebhookPayload([
+        'symbol' => 'XX!!??',
+    ]))
+        ->assertStatus(422)
+        ->assertJsonPath('reason', 'symbol_not_allowed');
+});
+
+test('pine webhook permissive mode disabled falls back to allowlist behavior', function () {
+    config([
+        'future_trade.pine_webhook_token' => 'pine-secret',
+        'future_trade.available_symbols' => ['BTCUSDT', 'ETHUSDT'],
+        'future_trade.permissive_symbol_mode' => false,
+    ]);
+    Carbon::setTestNow('2026-05-19 10:30:05');
+    $workspace = Workspace::factory()->create();
+    createPrimeWebhookConfig($workspace->id, [
+        'symbols' => ['ETHUSDT'],
+        'permissiveSymbolMode' => false,
+    ]);
+
+    // Valid futures pattern but not in any allowlist AND permissive mode off → reject.
+    $this->postJson("/api/v1/future-trade/pine-webhook/{$workspace->id}", pineWebhookPayload([
+        'symbol' => 'WIFUSDT',
+    ]))
+        ->assertStatus(422)
+        ->assertJsonPath('reason', 'symbol_not_allowed');
+});
+
+test('pine webhook accepts symbol not in workspace list but in global available_symbols', function () {
+    config([
+        'future_trade.pine_webhook_token' => 'pine-secret',
+        // Ensure BNBUSDT is in the global registry (it already is by default).
+        'future_trade.available_symbols' => ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT'],
+    ]);
+    Carbon::setTestNow('2026-05-19 10:30:05');
+    $workspace = Workspace::factory()->create();
+    // Workspace has a narrow `symbols` list — BNBUSDT is intentionally NOT here.
+    $config = createPrimeWebhookConfig($workspace->id, [
+        'symbols' => ['ETHUSDT', 'BTCUSDT', 'SOLUSDT'],
+        'restrictToWorkspaceSymbols' => false,
+    ]);
+
+    $response = $this->postJson("/api/v1/future-trade/pine-webhook/{$workspace->id}", pineWebhookPayload([
+        'symbol' => 'BNBUSDT.P',
+        'signal' => 'WAIT',
+    ]))->assertOk();
+
+    expect($response->json('accepted'))->toBeTrue()
+        ->and($response->json('execution'))->not->toBe('rejected');
+
+    // Soft notice should have been logged so the operator knows.
+    expect($config->logs()->where('event', 'WEBHOOK_SYMBOL_AUTO_ACCEPTED')->exists())->toBeTrue();
+});
+
+test('pine webhook rejects symbol when restrictToWorkspaceSymbols is enabled', function () {
+    config([
+        'future_trade.pine_webhook_token' => 'pine-secret',
+        'future_trade.available_symbols' => ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT'],
+    ]);
+    Carbon::setTestNow('2026-05-19 10:30:05');
+    $workspace = Workspace::factory()->create();
+    $config = createPrimeWebhookConfig($workspace->id, [
+        'symbols' => ['ETHUSDT', 'BTCUSDT', 'SOLUSDT'],
+        // Operator wants strict workspace allowlist.
+        'restrictToWorkspaceSymbols' => true,
+    ]);
+
+    $this->postJson("/api/v1/future-trade/pine-webhook/{$workspace->id}", pineWebhookPayload([
+        'symbol' => 'BNBUSDT.P',
+    ]))
+        ->assertStatus(422)
+        ->assertJsonPath('reason', 'symbol_not_allowed');
+});
+
+test('pine webhook rejects symbol not in global registry when permissive mode is off', function () {
+    config([
+        'future_trade.pine_webhook_token' => 'pine-secret',
+        'future_trade.available_symbols' => ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT'],
+        // With permissive mode on (the new default), ABCXYZUSDT would match the
+        // regex and be accepted. Turn it off here to test the strict allowlist
+        // path, which is what an operator who wants exchange-list-only safety
+        // would set.
+        'future_trade.permissive_symbol_mode' => false,
+    ]);
+    Carbon::setTestNow('2026-05-19 10:30:05');
+    $workspace = Workspace::factory()->create();
+    createPrimeWebhookConfig($workspace->id, [
+        'symbols' => ['ETHUSDT'],
+        'restrictToWorkspaceSymbols' => false,
+        'permissiveSymbolMode' => false,
+    ]);
+
+    // ABCXYZUSDT is not in workspace symbols AND not in global registry —
+    // with permissive mode off it must be rejected.
+    $this->postJson("/api/v1/future-trade/pine-webhook/{$workspace->id}", pineWebhookPayload([
+        'symbol' => 'ABCXYZUSDT',
+    ]))
+        ->assertStatus(422)
+        ->assertJsonPath('reason', 'symbol_not_allowed');
+});
+
+test('pine webhook close_short signal is mapped and accepted', function () {
+    config(['future_trade.pine_webhook_token' => 'pine-secret']);
+    Carbon::setTestNow('2026-05-19 10:30:05');
+    $workspace = Workspace::factory()->create();
+    $config = createPrimeWebhookConfig($workspace->id, [
+        'symbols' => ['BNBUSDT', 'ETHUSDT'],
+    ]);
+
+    $response = $this->postJson("/api/v1/future-trade/pine-webhook/{$workspace->id}", pineWebhookPayload([
+        'symbol' => 'BNBUSDT.P',
+        'signal' => 'CLOSE_SHORT',
+    ]))->assertOk();
+
+    // No open position → CLOSE_SHORT is accepted (not 422) but logged-only.
+    expect($response->json('accepted'))->toBeTrue()
+        ->and($response->json('decision'))->toBe('CLOSE_SHORT');
+});
+
 test('non-webhook signal still blocks on stale feed', function () {
     Carbon::setTestNow('2026-05-19 10:30:05');
     $workspace = Workspace::factory()->create();

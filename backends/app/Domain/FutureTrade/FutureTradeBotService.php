@@ -1185,9 +1185,70 @@ class FutureTradeBotService
         }
 
         $symbol = $this->normalizePineSymbol((string) ($payload['symbol'] ?? $payload['ticker'] ?? ''));
-        $allowedSymbols = array_values(array_map('strtoupper', (array) ($settings['symbols'] ?? [])));
-        if ($symbol === '' || ! in_array($symbol, $allowedSymbols, true)) {
-            return $this->rejectPineWebhook($config, $payload, 'symbol_not_allowed', ['symbol' => $symbol, 'allowedSymbols' => $allowedSymbols]);
+        $workspaceSymbols = array_values(array_map('strtoupper', (array) ($settings['symbols'] ?? [])));
+        $globalSymbols = array_values(array_map('strtoupper', (array) config('future_trade.available_symbols', [])));
+        $restrictToWorkspace = filter_var(
+            $settings['restrictToWorkspaceSymbols'] ?? false,
+            FILTER_VALIDATE_BOOLEAN
+        );
+        $permissiveSymbolMode = filter_var(
+            $settings['permissiveSymbolMode'] ?? config('future_trade.permissive_symbol_mode', true),
+            FILTER_VALIDATE_BOOLEAN
+        );
+
+        // Three-layer symbol acceptance with strictness flag for operators who want a tight allowlist.
+        //
+        // Layer 1 — workspace `symbols` (the operator's curated short-list)
+        // Layer 2 — global `available_symbols` (config registry of 50+ majors)
+        // Layer 3 — permissive regex: any Binance-style USDT/USDC perpetual
+        //
+        // restrictToWorkspaceSymbols=true  → only Layer 1 (strict operator mode)
+        // restrictToWorkspaceSymbols=false + permissiveSymbolMode=true → all three (default)
+        // restrictToWorkspaceSymbols=false + permissiveSymbolMode=false → Layers 1 + 2 only
+        $allowedSymbols = $restrictToWorkspace
+            ? $workspaceSymbols
+            : array_values(array_unique(array_merge($workspaceSymbols, $globalSymbols)));
+        $inAllowlist = $symbol !== '' && in_array($symbol, $allowedSymbols, true);
+
+        // Layer 3: permissive Binance-futures regex. Matches `<TICKER>USDT` /
+        // `<TICKER>USDC` style pairs (e.g. BNBUSDT, ETHUSDC, 1000PEPEUSDT).
+        // Length 6–24, uppercase alphanumeric only — the `.P`, prefix, and
+        // separators are already stripped by normalizePineSymbol().
+        $matchesFuturesPattern = $symbol !== ''
+            && preg_match('/^[A-Z0-9]{2,18}(USDT|USDC)$/', $symbol) === 1;
+        $permissivelyAccepted = ! $restrictToWorkspace
+            && $permissiveSymbolMode
+            && ! $inAllowlist
+            && $matchesFuturesPattern;
+
+        if (! $inAllowlist && ! $permissivelyAccepted) {
+            return $this->rejectPineWebhook($config, $payload, 'symbol_not_allowed', [
+                'symbol' => $symbol,
+                'allowedSymbols' => $allowedSymbols,
+                'restrictToWorkspaceSymbols' => $restrictToWorkspace,
+                'permissiveSymbolMode' => $permissiveSymbolMode,
+                'matchesFuturesPattern' => $matchesFuturesPattern,
+            ]);
+        }
+
+        // Soft-notice when accepted from outside the workspace curated list so
+        // the operator can see how their TradingView alerts are routing.
+        if (! in_array($symbol, $workspaceSymbols, true)) {
+            $acceptedVia = $inAllowlist ? 'global_registry' : 'permissive_pattern';
+            $this->logThrottled(
+                $config,
+                'WEBHOOK_SYMBOL_AUTO_ACCEPTED',
+                $symbol,
+                null,
+                0,
+                sprintf('Pine webhook symbol %s accepted via %s (not in this workspace\'s curated list).', $symbol, $acceptedVia),
+                [
+                    'symbol' => $symbol,
+                    'workspaceSymbols' => $workspaceSymbols,
+                    'acceptedVia' => $acceptedVia,
+                ],
+                300
+            );
         }
 
         $timeframe = strtolower((string) ($payload['timeframe'] ?? $payload['interval'] ?? $settings['timeframe'] ?? '15m'));
@@ -3131,7 +3192,7 @@ class FutureTradeBotService
             return;
         }
 
-        $filters = $this->orderSizing->extractFilters($client->fetchExchangeInfo($symbol), $symbol);
+        $filters = $this->orderSizing->extractFilters($this->cachedExchangeInfo($client, $symbol), $symbol);
         $account = $client->fetchAccountInfo();
         $asset = collect((array) ($account['assets'] ?? []))
             ->first(fn ($row) => strtoupper((string) ($row['asset'] ?? '')) === 'USDT');
@@ -3385,7 +3446,7 @@ class FutureTradeBotService
         $dynamic = $this->dynamicDecision($config, $state, (array) ($state->scanner_snapshot ?? []), null, $settings);
         $client = $this->liveClient($settings);
         $symbol = (string) $state->current_symbol;
-        $filters = $this->symbolFilters($client->fetchExchangeInfo($symbol), $symbol);
+        $filters = $this->symbolFilters($this->cachedExchangeInfo($client, $symbol), $symbol);
         $exchange = $this->exchangePositionSnapshot($client, $symbol);
 
         if ((float) ($exchange['quantity'] ?? 0) <= 0) {
@@ -8582,6 +8643,30 @@ class FutureTradeBotService
         }
 
         Cache::forget($key);
+    }
+
+    /**
+     * Per-symbol Binance exchangeInfo with a 60-minute cache. Saves a
+     * synchronous Binance REST round-trip (~100-300ms) on every order
+     * placement after the first. Binance updates step-size / tick-size
+     * very rarely, so a one-hour TTL is safe for execution sizing.
+     *
+     * When the cache misses we still fetch synchronously so the first call
+     * for a new symbol works the same as before. Subsequent calls within
+     * the hour skip the network entirely.
+     */
+    private function cachedExchangeInfo(BinanceFuturesClient $client, string $symbol): array
+    {
+        $key = 'future_trade_exchange_info:' . strtoupper($symbol);
+        $cached = $this->cacheGet($key);
+        if (is_array($cached) && $cached !== []) {
+            return $cached;
+        }
+        $fresh = $client->fetchExchangeInfo($symbol);
+        if (is_array($fresh) && $fresh !== []) {
+            $this->cachePut($key, $fresh, 3600);
+        }
+        return $fresh;
     }
 
     /**
