@@ -18,12 +18,29 @@ return [
     'atr_dynamic_risk_targets' => env('FUTURE_TRADE_ATR_DYNAMIC_RISK_TARGETS', false),
     'confirmed_candle_only' => env('FUTURE_TRADE_CONFIRMED_CANDLE_ONLY', true),
 
-    // All futures symbols available in the UI selector
+    // Permissive symbol mode (default true): when on, any incoming Pine webhook
+    // symbol that matches the Binance-futures pattern `<TICKER>USDT|USDC` is
+    // accepted even if it is not in `available_symbols`. Set to false to
+    // require strict registry membership.
+    'permissive_symbol_mode' => env('FUTURE_TRADE_PERMISSIVE_SYMBOL_MODE', true),
+
+    // Curated Binance USDT-M perpetuals registry — the "global allowlist" the
+    // UI selector reads from. Pine webhooks for symbols not in this list will
+    // still be accepted via the permissive regex above unless the operator
+    // disables permissive_symbol_mode or sets restrictToWorkspaceSymbols=true.
     'available_symbols' => [
+        // Top 25 majors
         'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT',
         'ADAUSDT', 'AVAXUSDT', 'DOTUSDT', 'LINKUSDT', 'MATICUSDT',
         'DOGEUSDT', 'LTCUSDT', 'UNIUSDT', 'ATOMUSDT', 'NEARUSDT',
         'APTUSDT', 'ARBUSDT', 'OPUSDT', 'SUIUSDT', 'SEIUSDT',
+        'TRXUSDT', 'TONUSDT', 'BCHUSDT', 'ETCUSDT', 'FILUSDT',
+        // Next 25 actively traded perps
+        'AAVEUSDT', 'INJUSDT', 'TIAUSDT', 'PEPEUSDT', '1000PEPEUSDT',
+        'SHIBUSDT', '1000SHIBUSDT', 'WIFUSDT', 'BONKUSDT', '1000BONKUSDT',
+        'FLOKIUSDT', '1000FLOKIUSDT', 'ORDIUSDT', 'JUPUSDT', 'WLDUSDT',
+        'RNDRUSDT', 'FETUSDT', 'ARKMUSDT', 'TAOUSDT', 'STRKUSDT',
+        'PYTHUSDT', 'JTOUSDT', 'IMXUSDT', 'SANDUSDT', 'MANAUSDT',
     ],
 
     'presets' => [
@@ -55,7 +72,15 @@ return [
         'primeMirrorLiveEnabled' => false,
         'validatedDefaultSymbols' => ['ETHUSDT', 'BTCUSDT', 'SOLUSDT'],
         'validationSymbols' => ['ETHUSDT', 'BTCUSDT', 'SOLUSDT', 'BNBUSDT'],
-        'symbols' => ['ETHUSDT', 'BTCUSDT', 'SOLUSDT'],
+        // Curated default — covers the common Pine alert majors. Any symbol
+        // in `available_symbols` is also accepted automatically unless the
+        // operator flips `restrictToWorkspaceSymbols` to true.
+        'symbols' => ['ETHUSDT', 'BTCUSDT', 'SOLUSDT', 'BNBUSDT'],
+        // When true, only symbols in this workspace's curated `symbols` list
+        // execute. When false (default), any symbol in the global
+        // `available_symbols` registry is accepted from a Pine webhook so
+        // TradingView alerts on majors don't silently 422.
+        'restrictToWorkspaceSymbols' => false,
         'timeframe' => '15m',
         'paperTrading' => true,
         'liveTrading' => false,
@@ -123,7 +148,10 @@ return [
         // Automated stop-loss / trailing exits run independently via the exit monitor.
         'softDailyLossWarnPercent' => 0.3,
         'hardDailyLossBlockPercent' => 0.8,
-        'maxOpenPositions' => 1,
+        // Up to 5 concurrent open positions, one per symbol. Each Pine webhook
+        // for a different symbol gets routed to its own slot automatically.
+        // Same-symbol re-entry is still blocked while that symbol's slot is busy.
+        'maxOpenPositions' => 5,
         'reversalMode' => 'close_only',
         // Webhook-only mode can accept more Pine entries; loss/cooldown/open-position guards still apply.
         'maxTradesPerDay' => 50,
@@ -139,13 +167,11 @@ return [
         'dynamicReentryBuffer' => 0.005,
         'dynamicSuggestionEnabled' => false,
         'autoExecutePaperSignals' => true,
-        // Signal source: 'webhook' = only TradingView Pine webhook posts execute
-        // trades; 'mirror' = backend self-generated scanner signals execute;
-        // 'webhook_fallback' = webhook is accepted when available, otherwise the
-        // Binance-backed mirror scanner may execute after the webhook stale window.
-        'signalSource' => env('FUTURE_TRADE_SIGNAL_SOURCE', 'webhook'),
-        'pineWebhookFallbackTimeoutSeconds' => (int) env('FUTURE_TRADE_PINE_WEBHOOK_FALLBACK_TIMEOUT_SECONDS', 1200),
-        'webhookFallbackEnabled' => env('FUTURE_TRADE_WEBHOOK_FALLBACK_ENABLED', false),
+        // signalSource, pineWebhookFallbackTimeoutSeconds, and
+        // webhookFallbackEnabled are declared earlier in the defaults array
+        // (above, around the env() block). They are NOT re-declared here to
+        // keep this map duplicate-free. See top of `defaults` for the active
+        // values that the bot reads at runtime.
         'primeMirrorExecutionEnabled' => false,
         'avoidChoppyMarket' => true,
         'strictEntryGuards' => true,
