@@ -165,11 +165,19 @@ install_clean_crontab() {
 
   cat >> "$TMPFILE" <<CRON
 # === AutoFinX Trading Bot — managed by deploy-no-pull.sh ===
+# 1. Heartbeat every 1 min — workers + live-feed + tick + schedule:run
 * * * * * flock -n $APP_DIR/storage/framework/heartbeat.lock bash $APP_DIR/future-trade-heartbeat.sh >> $APP_DIR/storage/logs/future-trade-heartbeat.log 2>&1
+# 2. Maintenance every 5 min — diagnostics + light log trim
 */5 * * * * flock -n $APP_DIR/storage/framework/maintenance.lock bash $APP_DIR/future-trade-maintenance.sh >> $APP_DIR/storage/logs/future-trade-maintenance.log 2>&1
+# 3. Reconcile every 5 min — phantom trade cleanup
 */5 * * * * flock -n $APP_DIR/storage/framework/reconcile.lock $PHP $APP_DIR/artisan future-trade:reconcile --workspace=$WS_ID >> $APP_DIR/storage/logs/future-trade-reconcile.log 2>&1
+# 4. Master health check every 15 min
 */15 * * * * flock -n $APP_DIR/storage/framework/master-check.lock bash $APP_DIR/autofinx_master_check.sh >> $APP_DIR/storage/logs/master-check.log 2>&1
-0 3 * * * find $APP_DIR/storage/logs -name "*.log" -size +50M -exec truncate -s 10485760 {} \;
+# 5. Deep cleanup every Sunday 3 AM — trims DB logs, cache, sessions
+0 3 * * 0 bash $APP_DIR/autofinx_cleanup.sh >> $APP_DIR/storage/logs/autofinx-cleanup.log 2>&1
+# 6. Daily log rotation 3 AM (Mon-Sat) — truncate logs > 50 MB
+0 3 * * 1-6 find $APP_DIR/storage/logs -name "*.log" -size +50M -exec truncate -s 10485760 {} \;
+# 7. @reboot workers
 @reboot bash $APP_DIR/start-workers.sh >> $APP_DIR/storage/logs/start-workers.log 2>&1
 CRON
 
