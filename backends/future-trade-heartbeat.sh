@@ -95,8 +95,19 @@ restart_live_feed_if_needed() {
     return 0
   fi
 
-  feed_age="$({ "$PHP" artisan tinker --execute='$feed=\App\Models\MarketFeedStatus::where("market_type","futures")->whereNotNull("last_tick_at")->latest("last_tick_at")->first(); echo $feed && $feed->last_tick_at ? (int) now()->diffInSeconds($feed->last_tick_at, true) : 999999;' 2>/dev/null | grep -Eo '[0-9]+' | tail -n 1; } || true)"
-  feed_age="${feed_age:-999999}"
+  # Use log file modification time instead of DB query.
+  # DB-based tinker call hangs when MySQL is overloaded, causing heartbeat
+  # to hold its lock and skip all subsequent cron fires (stale for hours).
+  local log_file="$APP_DIR/storage/logs/future-trade-live-feed.log"
+  local now_epoch_tmp
+  now_epoch_tmp="$(date +%s)"
+  if [ -f "$log_file" ]; then
+    local log_mtime
+    log_mtime="$(stat -c %Y "$log_file" 2>/dev/null || echo 0)"
+    feed_age=$(( now_epoch_tmp - log_mtime ))
+  else
+    feed_age=999999
+  fi
   now_epoch="$(date +%s)"
   last_restart="$(cat "$RESTART_STAMP" 2>/dev/null || echo 0)"
 
