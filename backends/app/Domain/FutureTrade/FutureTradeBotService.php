@@ -3369,23 +3369,53 @@ class FutureTradeBotService
         $minNotional = (float) $sizing['minOpenNotional'];
 
         if ($qtyFloat <= 0) {
-            $this->log(
-                $config->fresh('state'),
-                'TRADE_BLOCKED',
-                $symbol,
-                $signal['signal'],
-                (float) ($signal['confidence'] ?? 0),
-                'Rounded quantity became zero after symbol step-size formatting.',
-                $this->runtimeContext($dynamic, [
-                    'status' => 'BLOCKED',
-                    'price' => $price,
-                    'quantity' => $qtyFloat,
-                    'stepSize' => $sizing['stepSize'],
-                    'recommendedTradeAmountUsdt' => $this->minimumSafeTradeAmountUsdt((float) ($settings['tradeAmountUsdt'] ?? 25), $leverage, $price, $filters),
-                ], $signal, ['rounded_quantity_zero'])
+            // Auto-scale: bump trade amount to the minimum needed for this symbol's
+            // step size and retry once. Prevents BTC/high-price assets being silently
+            // skipped when the configured trade size is too small.
+            $safeAmount = $this->minimumSafeTradeAmountUsdt(
+                (float) ($settings['tradeAmountUsdt'] ?? 25),
+                $leverage,
+                $price,
+                $filters
             );
-
-            return;
+            if ($safeAmount > (float) ($settings['tradeAmountUsdt'] ?? 25) && $safeAmount <= ($availableBalance ?? PHP_FLOAT_MAX)) {
+                $this->logThrottled(
+                    $config->fresh('state'),
+                    'TRADE_SIZE_AUTO_SCALED',
+                    $symbol,
+                    $signal['signal'],
+                    (float) ($signal['confidence'] ?? 0),
+                    sprintf('Trade amount auto-scaled %.2f → %.2f USDT to meet %s step-size minimum.', (float) $settings['tradeAmountUsdt'], $safeAmount, $symbol),
+                    ['original' => $settings['tradeAmountUsdt'], 'scaled' => $safeAmount, 'price' => $price, 'stepSize' => $sizing['stepSize']],
+                    300
+                );
+                $sizing = $this->orderSizing->evaluate(
+                    ($safeAmount * $leverage) / max($price, 0.00000001),
+                    $price,
+                    $filters,
+                );
+                $qty = $sizing['quantity'];
+                $qtyFloat = (float) $sizing['quantity_float'];
+                $notional = (float) $sizing['notional'];
+            }
+            if ($qtyFloat <= 0) {
+                $this->log(
+                    $config->fresh('state'),
+                    'TRADE_BLOCKED',
+                    $symbol,
+                    $signal['signal'],
+                    (float) ($signal['confidence'] ?? 0),
+                    sprintf('Rounded quantity is zero even after auto-scale. Symbol %s requires at least %.2f USDT trade size.', $symbol, $safeAmount),
+                    $this->runtimeContext($dynamic, [
+                        'status' => 'BLOCKED',
+                        'price' => $price,
+                        'quantity' => $qtyFloat,
+                        'stepSize' => $sizing['stepSize'],
+                        'recommendedTradeAmountUsdt' => $safeAmount,
+                    ], $signal, ['rounded_quantity_zero'])
+                );
+                return;
+            }
         }
 
         if ($minNotional > 0 && $notional < $minNotional) {

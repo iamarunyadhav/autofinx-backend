@@ -27,9 +27,13 @@ if [ ! -x "$PHP" ]; then
   fi
 fi
 
-# Count single helper — uses pgrep -c (single fork) instead of pgrep | wc -l (two forks)
+# Reliable process counter — pgrep -f lists PIDs, wc -l counts them.
+# Avoids pgrep -c which on CentOS/RHEL exits with code 1 when count=0
+# (causing "|| echo 0" to fire and produce "0\n0" instead of just "0").
 proc_count() {
-  pgrep -fc "$1" 2>/dev/null || echo 0
+  local n
+  n=$(pgrep -f "$1" 2>/dev/null | wc -l)
+  echo "${n//[[:space:]]/}"
 }
 
 # Cached counts — call once, reuse
@@ -56,10 +60,10 @@ echo "Total system PIDs: $TOTAL_N"
 
 echo ""
 echo "=== 2. Worker Counts ==="
-echo "queue:work    = $QUEUE_N (want: 1)"
-echo "live-feed     = $FEED_N  (want: 1)"
-echo "tick          = $TICK_N  (want: 0 or 1, transient)"
-echo "user-stream   = $STREAM_N  (want: 0 or 1, optional)"
+printf "queue:work   = %s (want: 1)\n" "$QUEUE_N"
+printf "live-feed    = %s (want: 1)\n" "$FEED_N"
+printf "tick         = %s (want: 0 or 1, transient)\n" "$TICK_N"
+printf "user-stream  = %s (want: 0 or 1, optional)\n" "$STREAM_N"
 
 NEED_RESTART=0
 
