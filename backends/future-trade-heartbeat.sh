@@ -9,7 +9,7 @@ fi
 
 FT_SYMBOLS="${FT_SYMBOLS:-ETHUSDT,BTCUSDT,SOLUSDT,BNBUSDT}"
 FT_STREAMS="${FT_STREAMS:-trade,kline_1m,kline_5m,kline_15m,kline_1h,kline_4h}"
-LIVE_FEED_STALE_SECONDS="${LIVE_FEED_STALE_SECONDS:-60}"
+LIVE_FEED_STALE_SECONDS="${LIVE_FEED_STALE_SECONDS:-90}"
 LIVE_FEED_RESTART_COOLDOWN_SECONDS="${LIVE_FEED_RESTART_COOLDOWN_SECONDS:-60}"
 
 LOCK_DIR="$APP_DIR/storage/framework/future-trade-heartbeat.lock"
@@ -180,8 +180,11 @@ start_runtime_slice_if_missing \
   "storage/logs/future-trade-user-stream.log" \
   "$PHP" artisan future-trade:user-stream --duration=55
 
+# schedule:run: timeout 30s so a hung artisan call never blocks the heartbeat.
+# On shared hosting a slow DB at schedule-run time would otherwise hold the
+# heartbeat lock and prevent all worker restarts for the next few minutes.
 if ! pgrep -f "artisan schedule:run" >/dev/null 2>&1; then
-  "$PHP" artisan schedule:run >> storage/logs/cron-schedule-run.log 2>&1 || true
+  timeout 30 "$PHP" artisan schedule:run >> storage/logs/cron-schedule-run.log 2>&1 || true
 fi
 
 queue_count="$(count_processes "artisan queue:work")"

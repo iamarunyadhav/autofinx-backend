@@ -1193,27 +1193,70 @@ class FutureTradeBotService
     public function scannerSnapshotPayload(FutureTradeBotConfig $config): array
     {
         $config = $config->fresh('state');
-        $state = $this->state($config);
         $settings = $this->normalizeFutureTradeSettings($config->mergedSettings());
-        $signals = array_slice((array) ($state->scanner_snapshot ?? []), 0, 20);
-        $dynamic = $this->dynamicDecision($config, $state, $signals, $signals[0] ?? null, $settings);
+
+        // Aggregate scanner snapshots from ALL slots in this workspace so the
+        // Signal Scanner shows every active symbol (not just slot 0's last signal).
+        // Each Pine webhook updates its target slot's scanner_snapshot; merging
+        // across slots gives a real-time multi-symbol view sorted by confidence.
+        $allSlots = FutureTradeBotConfig::query()
+            ->with('state')
+            ->where('workspace_id', $config->workspace_id)
+            ->orderBy('slot_index')
+            ->get();
+
+        $bySymbol = [];   // symbol → signal (most recent per symbol)
+        $latestScanAt = null;
+
+        foreach ($allSlots as $slot) {
+            $slotState = $this->state($slot->fresh('state'));
+            $slotSignals = (array) ($slotState->scanner_snapshot ?? []);
+            $slotScanAt = $slotState->last_scan_at;
+
+            if ($latestScanAt === null || ($slotScanAt && $slotScanAt->gt($latestScanAt))) {
+                $latestScanAt = $slotScanAt;
+            }
+
+            foreach ($slotSignals as $sig) {
+                if (! is_array($sig) || empty($sig['symbol'])) {
+                    continue;
+                }
+                $sym = strtoupper((string) $sig['symbol']);
+                // Keep the most recently scanned signal for each symbol
+                $existingAt = $bySymbol[$sym]['_scanned_at'] ?? null;
+                $thisAt = $slotScanAt?->timestamp ?? 0;
+                if (! isset($bySymbol[$sym]) || $thisAt >= ($existingAt ?? 0)) {
+                    $bySymbol[$sym] = array_merge($sig, ['_scanned_at' => $thisAt]);
+                }
+            }
+        }
+
+        // Also include the primary slot's dynamic decision for the effective minimum
+        $primaryState = $this->state($config);
+        $primary = array_values($bySymbol)[0] ?? null;
+        $dynamic = $this->dynamicDecision($config, $primaryState, array_values($bySymbol), $primary, $settings);
         $activeMinimum = (float) ($dynamic['effectiveMinConfidence'] ?? ($settings['minConfidence'] ?? 0));
 
+        // Sort by confidence descending so highest-confidence signal is first
+        $signals = array_values($bySymbol);
+        usort($signals, static fn ($a, $b): int => (float) ($b['confidence'] ?? 0) <=> (float) ($a['confidence'] ?? 0));
+        $signals = array_slice($signals, 0, 20);
+
         return [
-            'updatedAt' => $this->isoTimestamp($state->last_scan_at),
-            'scanAgeSeconds' => (int) ($this->ageSecondsSince($state->last_scan_at) ?? 0),
-            'symbols' => array_map(function (array $signal) use ($activeMinimum): array {
+            'updatedAt'      => $this->isoTimestamp($latestScanAt),
+            'scanAgeSeconds' => (int) ($this->ageSecondsSince($latestScanAt) ?? 0),
+            'symbols'        => array_map(function (array $signal) use ($activeMinimum): array {
                 return [
-                    'symbol' => (string) ($signal['symbol'] ?? ''),
-                    'price' => (float) ($signal['price'] ?? 0),
-                    'signal' => (string) ($signal['signal'] ?? 'WAIT'),
-                    'confidence' => (float) ($signal['confidence'] ?? 0),
-                    'activeMinimum' => (float) ($signal['effectiveMinConfidence'] ?? $activeMinimum),
+                    'symbol'          => (string) ($signal['symbol'] ?? ''),
+                    'price'           => (float) ($signal['price'] ?? 0),
+                    'signal'          => (string) ($signal['signal'] ?? 'WAIT'),
+                    'confidence'      => (float) ($signal['confidence'] ?? 0),
+                    'activeMinimum'   => (float) ($signal['effectiveMinConfidence'] ?? $activeMinimum),
                     'coreEntryPassed' => (bool) data_get($signal, 'debug.checks.coreEntryPassed', false),
                     'componentScores' => (array) data_get($signal, 'debug.componentScores', []),
                     'positiveFactors' => (array) data_get($signal, 'debug.positiveFactors', []),
                     'negativeFactors' => (array) data_get($signal, 'debug.negativeFactors', []),
-                    'lastSkipReason' => (string) data_get($signal, 'debug.decisionStatus', ''),
+                    'lastSkipReason'  => (string) data_get($signal, 'debug.decisionStatus', ''),
                 ];
             }, $signals),
         ];
