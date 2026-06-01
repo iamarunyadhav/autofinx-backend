@@ -3188,6 +3188,8 @@ class FutureTradeBotService
             } else {
                 $this->closePaperPosition($config->fresh('state'), $price, $reason);
             }
+        } elseif ($this->isLiveMode($config) && $pct > 0) {
+            $this->maybeUpdateExchangeTrailingSL($config, $state, $peak, $settings);
         }
     }
 
@@ -3638,10 +3640,14 @@ class FutureTradeBotService
             $signal['signal'],
             (float) $signal['confidence'],
             $confirmedOpen
-                ? 'Live futures entry confirmed from Binance position snapshot. TP/SL/trailing are managed by the bot loop.'
+                ? 'Live futures entry confirmed. Exchange-side SL/TP orders being placed; server loop handles trailing and backup management.'
                 : 'Live futures entry submitted, but Binance has not yet confirmed an open position snapshot.',
             $this->runtimeContext($dynamic, ['status' => $confirmedOpen ? 'OPEN' : 'SUBMITTED', 'side' => $positionSide, 'entryPrice' => $entry, 'quantity' => (float) ($exchange['quantity'] ?? $qty), 'mode' => $settings['forceTestnet'] ?? true ? 'LIVE_TESTNET' : 'LIVE'], $signal)
         );
+
+        if ($confirmedOpen) {
+            $this->placeExchangeSLTPOrders($config, $client, $logical, $symbol, $positionSide, $entry, $settings, $signalKey);
+        }
     }
 
     private function closeLivePosition(FutureTradeBotConfig $config, float $price, string $reason): void
@@ -9247,6 +9253,181 @@ class FutureTradeBotService
             'exchange_side' => $side,
             'message' => sprintf('Binance still has an open %s position of %.8f. Bot state was synced to exchange.', strtolower($side), $exchangeQty),
         ];
+    }
+
+    /**
+     * After a confirmed live entry, place exchange-native STOP_MARKET (SL) and
+     * TAKE_PROFIT_MARKET (TP) orders on Binance so the position is protected even
+     * if the server loop is down or the websocket drops.
+     *
+     * Both orders use closePosition=true + MARK_PRICE to avoid wick liquidations.
+     * Order IDs are stored in the logical trade meta so the user stream can match
+     * and cancel the sibling when one fires.
+     *
+     * Failures are logged but never thrown — server-side SL/TP continues as backup.
+     */
+    private function placeExchangeSLTPOrders(
+        FutureTradeBotConfig $config,
+        BinanceFuturesClient $client,
+        FutureTradeLogicalTrade $logical,
+        string $symbol,
+        string $positionSide,
+        float $entry,
+        array $settings,
+        string $signalKey,
+    ): void {
+        $closeSide = $positionSide === 'LONG' ? 'SELL' : 'BUY';
+        $filters   = $this->symbolFilters($this->cachedExchangeInfo($client, $symbol), $symbol);
+        $tickSize  = (float) ($filters['tickSize'] ?? 0.01);
+
+        $slPrice = (float) $this->formatStep($this->stopLossPrice($entry, $positionSide, $settings), $tickSize);
+        $tpPrice = (float) $this->formatStep($this->takeProfitPrice($entry, $positionSide, $settings), $tickSize);
+
+        $baseKey    = $signalKey ?: 'sltp-' . substr((string) $logical->id, 0, 12);
+        $slClientId = $this->stabilitySvc()->deterministicClientOrderId($baseKey, 'sl');
+        $tpClientId = $this->stabilitySvc()->deterministicClientOrderId($baseKey, 'tp');
+
+        $metaUpdate = [];
+
+        try {
+            $slResponse = $client->placeReduceOnlyStopOrder($symbol, $closeSide, 'STOP_MARKET', $slPrice, $slClientId);
+            $metaUpdate['sl_client_order_id']   = $slClientId;
+            $metaUpdate['sl_exchange_order_id'] = (string) ($slResponse['orderId'] ?? '');
+            $this->log($config->fresh('state'), 'EXCHANGE_SL_PLACED', $symbol, null, 0,
+                "Exchange-side SL placed at {$slPrice} (clientOrderId: {$slClientId})",
+                ['orderId' => $slResponse['orderId'] ?? null, 'price' => $slPrice]);
+        } catch (Throwable $e) {
+            $this->log($config->fresh('state'), 'EXCHANGE_SL_FAILED', $symbol, null, 0,
+                'Exchange-side SL placement failed (server loop is backup): ' . $e->getMessage());
+        }
+
+        try {
+            $tpResponse = $client->placeReduceOnlyStopOrder($symbol, $closeSide, 'TAKE_PROFIT_MARKET', $tpPrice, $tpClientId);
+            $metaUpdate['tp_client_order_id']   = $tpClientId;
+            $metaUpdate['tp_exchange_order_id'] = (string) ($tpResponse['orderId'] ?? '');
+            $this->log($config->fresh('state'), 'EXCHANGE_TP_PLACED', $symbol, null, 0,
+                "Exchange-side TP placed at {$tpPrice} (clientOrderId: {$tpClientId})",
+                ['orderId' => $tpResponse['orderId'] ?? null, 'price' => $tpPrice]);
+        } catch (Throwable $e) {
+            $this->log($config->fresh('state'), 'EXCHANGE_TP_FAILED', $symbol, null, 0,
+                'Exchange-side TP placement failed (server loop is backup): ' . $e->getMessage());
+        }
+
+        if ($metaUpdate !== []) {
+            $logical->update(['meta' => array_merge((array) ($logical->meta ?? []), $metaUpdate + ['sl_base_key' => $baseKey])]);
+        }
+    }
+
+    /**
+     * Called every scan tick when position is in profit (pct > 0) and no close
+     * reason triggered. Moves the exchange-side STOP_MARKET order up (LONG) or
+     * down (SHORT) to lock in gains as price moves in our favour.
+     *
+     * Throttle: only fires when peak has moved ≥ 0.2% from the last SL update
+     * anchor, preventing excessive cancel+replace API calls every second.
+     *
+     * Never worsens the SL — only moves it toward break-even / profit.
+     * Failures are caught and logged; server-side trailing remains the backup.
+     */
+    private function maybeUpdateExchangeTrailingSL(
+        FutureTradeBotConfig $config,
+        FutureTradeBotState $state,
+        float $currentPeak,
+        array $settings,
+    ): void {
+        $symbol       = (string) $state->current_symbol;
+        $positionSide = (string) $state->position_side;
+        $entry        = (float) $state->entry_price;
+
+        if (! $symbol || ! $positionSide || $entry <= 0 || $currentPeak <= 0) {
+            return;
+        }
+
+        $logical = FutureTradeLogicalTrade::query()
+            ->where('future_trade_bot_config_id', $config->id)
+            ->where('symbol', $symbol)
+            ->where('side', $positionSide)
+            ->whereIn('status', FutureTradeLogicalTrade::ACTIVE_STATUSES)
+            ->orderByDesc('opened_at')
+            ->first();
+
+        if (! $logical) {
+            return;
+        }
+
+        $meta              = (array) ($logical->meta ?? []);
+        $currentSlClientId = (string) ($meta['sl_client_order_id'] ?? '');
+
+        if ($currentSlClientId === '') {
+            return;
+        }
+
+        // Throttle: skip if peak hasn't moved 0.2% from last anchor
+        $lastAnchor   = (float) ($meta['sl_update_peak'] ?? $entry);
+        $peakMovePct  = abs($currentPeak - $lastAnchor) / max($lastAnchor, 0.00001) * 100;
+
+        if ($peakMovePct < 0.2) {
+            return;
+        }
+
+        // New SL follows peak with the trailing gap
+        $trailPct   = (float) ($settings['trailingTakeProfitPercent'] ?? 0.18) / 100;
+        $newSlPrice = $positionSide === 'SHORT'
+            ? $currentPeak * (1 + $trailPct)
+            : $currentPeak * (1 - $trailPct);
+
+        // Never move SL in the wrong direction
+        $oldSlPrice = (float) ($meta['sl_update_price'] ?? $this->stopLossPrice($entry, $positionSide, $settings));
+        $isBetter   = $positionSide === 'SHORT'
+            ? $newSlPrice < $oldSlPrice
+            : $newSlPrice > $oldSlPrice;
+
+        if (! $isBetter) {
+            return;
+        }
+
+        $client    = $this->liveClient($settings);
+        $filters   = $this->symbolFilters($this->cachedExchangeInfo($client, $symbol), $symbol);
+        $tickSize  = (float) ($filters['tickSize'] ?? 0.01);
+        $newSlFmt  = (float) $this->formatStep($newSlPrice, $tickSize);
+        $closeSide = $positionSide === 'LONG' ? 'SELL' : 'BUY';
+
+        $updateCount   = (int) ($meta['sl_update_count'] ?? 0) + 1;
+        $baseKey       = (string) ($meta['sl_base_key'] ?? ($logical->signal_key ?: 'sltp-' . substr((string) $logical->id, 0, 12)));
+        $newSlClientId = $this->stabilitySvc()->deterministicClientOrderId($baseKey, 'sl-t' . $updateCount);
+
+        // Cancel old SL — if this fails the old order is likely already filled,
+        // so we abort to avoid placing a stale new order.
+        try {
+            $client->cancelOrder($symbol, null, $currentSlClientId);
+        } catch (Throwable $e) {
+            $this->log($config->fresh('state'), 'TRAILING_SL_CANCEL_FAILED', $symbol, null, 0,
+                'Old SL cancel failed during trailing update (may already be filled): ' . $e->getMessage());
+            return;
+        }
+
+        // Place new trailed SL
+        try {
+            $slResponse = $client->placeReduceOnlyStopOrder($symbol, $closeSide, 'STOP_MARKET', $newSlFmt, $newSlClientId);
+
+            $logical->update(['meta' => array_merge($meta, [
+                'sl_client_order_id'   => $newSlClientId,
+                'sl_exchange_order_id' => (string) ($slResponse['orderId'] ?? ''),
+                'sl_update_peak'       => $currentPeak,
+                'sl_update_price'      => $newSlFmt,
+                'sl_update_count'      => $updateCount,
+                'sl_base_key'          => $baseKey,
+            ])]);
+
+            $this->log($config->fresh('state'), 'TRAILING_SL_UPDATED', $symbol, null, 0,
+                "Trailing SL moved {$oldSlPrice} → {$newSlFmt} (peak: {$currentPeak}, update #{$updateCount})",
+                ['oldSL' => $oldSlPrice, 'newSL' => $newSlFmt, 'peak' => $currentPeak, 'updateCount' => $updateCount]);
+
+        } catch (Throwable $e) {
+            // Old order already cancelled — server-side trailing is now the only protection.
+            $this->log($config->fresh('state'), 'TRAILING_SL_PLACE_FAILED', $symbol, null, 0,
+                'Failed to place new trailed SL (server loop is backup): ' . $e->getMessage());
+        }
     }
 
     private function cancelReduceOnlyOrders(

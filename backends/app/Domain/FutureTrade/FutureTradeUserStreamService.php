@@ -278,6 +278,75 @@ class FutureTradeUserStreamService
             }
         }
 
+        // Exchange-fired SL/TP: check if this order matches IDs stored in logical trade meta.
+        // This path fires when Binance executed our STOP_MARKET or TAKE_PROFIT_MARKET order
+        // directly — i.e. the server loop was down or websocket dropped.
+        if ($clientOrderId !== '' && $status === 'FILLED' && $avgPrice > 0 && $trade->isOpen()) {
+            $meta     = (array) ($trade->meta ?? []);
+            $isSLHit  = $clientOrderId === (string) ($meta['sl_client_order_id'] ?? '');
+            $isTPHit  = $clientOrderId === (string) ($meta['tp_client_order_id'] ?? '');
+
+            if ($isSLHit || $isTPHit) {
+                $existingFees = (float) ($trade->fees ?? 0);
+                $direction    = $trade->side === 'LONG' ? 1 : -1;
+                $entryPrice   = (float) $trade->entry_price;
+                $qty          = $cumQty ?: (float) $trade->quantity;
+                $gross        = ($avgPrice - $entryPrice) * $qty * $direction;
+                $fees         = $existingFees + abs($commission);
+                $net          = ($realizedPnl !== 0.0) ? $realizedPnl - $fees : $gross - $fees;
+                $reason       = $isSLHit ? 'EXCHANGE_SL_FILLED' : 'EXCHANGE_TP_FILLED';
+
+                $trade->update([
+                    'exit_price'              => $avgPrice,
+                    'exit_exchange_order_id'  => $orderId,
+                    'exit_client_order_id'    => $clientOrderId,
+                    'gross_pnl'               => $gross,
+                    'fees'                    => $fees,
+                    'net_pnl'                 => $net,
+                    'status'                  => FutureTradeLogicalTrade::STATUS_CLOSED,
+                    'closed_at'               => now(),
+                ]);
+
+                FutureTradeLogicalTradeEvent::create([
+                    'future_trade_logical_trade_id' => $trade->id,
+                    'future_trade_bot_config_id'    => $config->id,
+                    'symbol'                        => $symbol,
+                    'event_type'                    => FutureTradeLogicalTradeEvent::EVENT_EXIT_FILLED,
+                    'client_order_id'               => $clientOrderId,
+                    'exchange_order_id'             => $orderId,
+                    'exchange_status'               => $status,
+                    'price'                         => $avgPrice,
+                    'quantity'                      => $cumQty,
+                    'payload'                       => ['execType' => $execType, 'order' => $order, 'realizedPnl' => $realizedPnl, 'reason' => $reason],
+                ]);
+
+                // Cancel the sibling order (TP if SL fired, SL if TP fired).
+                // Binance usually auto-cancels when closePosition=true closes the position,
+                // but an explicit cancel prevents any edge-case double-fill.
+                $siblingClientId = $isSLHit
+                    ? (string) ($meta['tp_client_order_id'] ?? '')
+                    : (string) ($meta['sl_client_order_id'] ?? '');
+
+                if ($siblingClientId !== '') {
+                    try {
+                        $client = $this->clientFor($config);
+                        if ($client) {
+                            $client->cancelOrder($symbol, null, $siblingClientId);
+                        }
+                    } catch (Throwable $e) {
+                        Log::warning('[EXCHANGE_SLTP_SIBLING_CANCEL_FAILED]', [
+                            'symbol'   => $symbol,
+                            'sibling'  => $siblingClientId,
+                            'reason'   => $reason,
+                            'error'    => $e->getMessage(),
+                        ]);
+                    }
+                }
+
+                return true;
+            }
+        }
+
         return false;
     }
 

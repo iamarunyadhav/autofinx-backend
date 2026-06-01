@@ -155,6 +155,32 @@ class BinanceFuturesClient
         return (array) $response->json();
     }
 
+    /**
+     * Place a reduce-only STOP_MARKET or TAKE_PROFIT_MARKET order on Binance Futures.
+     * Uses closePosition=true so the full position is closed regardless of quantity.
+     * workingType=MARK_PRICE avoids wick-triggered liquidations.
+     */
+    public function placeReduceOnlyStopOrder(
+        string $symbol,
+        string $side,
+        string $type,
+        float $stopPrice,
+        string $clientOrderId,
+        string $workingType = 'MARK_PRICE',
+    ): array {
+        $response = $this->signedRequest('POST', '/fapi/v1/order', [
+            'symbol'           => BinanceSymbolNormalizer::normalize($symbol),
+            'side'             => $side,
+            'type'             => $type,
+            'stopPrice'        => number_format(round($stopPrice, 8), 8, '.', ''),
+            'closePosition'    => 'true',
+            'workingType'      => $workingType,
+            'newClientOrderId' => $clientOrderId,
+        ]);
+
+        return (array) $response->json();
+    }
+
     public function fetchOrder(string $symbol, ?string $orderId = null, ?string $clientOrderId = null): array
     {
         $params = ['symbol' => BinanceSymbolNormalizer::normalize($symbol)];
