@@ -37,6 +37,7 @@ echo "[1/7] Syntax check..."
 CHANGED_FILES=(
   "app/Domain/FutureTrade/FutureTradeBotService.php"
   "app/Domain/FutureTrade/FutureTradeBacktestEngine.php"
+  "app/Domain/FutureTrade/FutureTradeUserStreamService.php"
   "app/Domain/Exchange/BinanceFuturesClient.php"
   "app/Console/Commands/FutureTradeTickCommand.php"
   "app/Console/Commands/FutureTradeBacktestCommand.php"
@@ -160,7 +161,7 @@ install_clean_crontab() {
   TMPFILE=$(mktemp)
   # Remove all existing AutoFinX lines (old and new formats)
   crontab -l 2>/dev/null \
-    | grep -vE "future-trade|autofinx|heartbeat\.sh|maintenance\.sh|master_check|schedule:run.*artisan|start-workers|reconcile.*artisan|^# AutoFinX" \
+    | grep -vE "future-trade|autofinx|heartbeat\.sh|maintenance\.sh|master_check|schedule:run.*artisan|start-workers|reconcile.*artisan|^# AutoFinX|^# ===|^# [0-9]+\.|SHELL=\"/usr/local/cpanel" \
     > "$TMPFILE" || true
 
   cat >> "$TMPFILE" <<CRON
