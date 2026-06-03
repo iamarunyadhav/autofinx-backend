@@ -35,6 +35,7 @@ use App\Console\Commands\FutureTradeDiagnosticsCommand;
 use App\Console\Commands\FutureTradeQueueCleanupCommand;
 use App\Console\Commands\FutureTradeQueueHealthCommand;
 use App\Console\Commands\FutureTradeReconcileCommand;
+use App\Console\Commands\FutureTradeRuntimeStatusCommand;
 use App\Console\Commands\FutureTradeScanAllCommand;
 use App\Console\Commands\FutureTradeTickCommand;
 use App\Console\Commands\FutureTradeUserStreamCommand;
@@ -88,6 +89,7 @@ class Kernel extends ConsoleKernel
         FutureTradeQueueCleanupCommand::class,
         FutureTradeQueueHealthCommand::class,
         FutureTradeReconcileCommand::class,
+        FutureTradeRuntimeStatusCommand::class,
         FutureTradeScanAllCommand::class,
         FutureTradeTickCommand::class,
         FutureTradeUserStreamCommand::class,

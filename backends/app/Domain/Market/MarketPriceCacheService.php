@@ -8,6 +8,14 @@ use Illuminate\Support\Str;
 
 class MarketPriceCacheService
 {
+    /**
+     * Throttle MarketPriceCache DB writes per exchange:symbol.
+     * Redis is always written immediately; DB is only written every 30 s.
+     * This eliminates 30-50 spurious DB writes/minute from the live-feed trade stream.
+     */
+    private static array $dbWriteLastAt = [];
+    private const DB_WRITE_INTERVAL_S = 30;
+
     public function setLatestPrice(string $exchange, string $symbol, float $price, ?int $tsMs = null): void
     {
         $exchange = strtolower($exchange);
@@ -17,21 +25,34 @@ class MarketPriceCacheService
         $priceKey = $this->priceKey($exchange, $symbol);
         $tsKey = $this->tsKey($exchange, $symbol);
 
+        $redisOk = false;
         try {
             Redis::set($priceKey, (string) $price);
             Redis::set($tsKey, (string) $tsMs);
+            $redisOk = true;
         } catch (\Throwable) {
-            // Keep DB cache as fallback even if Redis is unavailable.
+            // Redis unavailable — fall through to unconditional DB write below.
         }
 
-        MarketPriceCache::updateOrCreate(
-            ['exchange' => $exchange, 'symbol' => $symbol],
-            [
-                'id' => MarketPriceCache::query()->where('exchange', $exchange)->where('symbol', $symbol)->value('id') ?: (string) Str::uuid(),
-                'last_price' => $price,
-                'last_ts' => now(),
-            ]
-        );
+        // Only hit the DB when Redis is unavailable (fallback) or the per-symbol
+        // throttle window has expired.  During normal operation the trade stream
+        // for 4 symbols fires 2-5 times/second; without throttling that equals
+        // ~600-900 MarketPriceCache DB writes/minute — unnecessary given Redis.
+        $throttleKey = "{$exchange}:{$symbol}";
+        $now = time();
+        $lastWrite = self::$dbWriteLastAt[$throttleKey] ?? 0;
+
+        if (! $redisOk || ($now - $lastWrite) >= self::DB_WRITE_INTERVAL_S) {
+            self::$dbWriteLastAt[$throttleKey] = $now;
+            MarketPriceCache::updateOrCreate(
+                ['exchange' => $exchange, 'symbol' => $symbol],
+                [
+                    'id' => MarketPriceCache::query()->where('exchange', $exchange)->where('symbol', $symbol)->value('id') ?: (string) Str::uuid(),
+                    'last_price' => $price,
+                    'last_ts' => now(),
+                ]
+            );
+        }
     }
 
     public function getLatestPrice(string $exchange, string $symbol): ?array

@@ -17,6 +17,18 @@ use Illuminate\Support\Str;
 
 class RealtimeMarketFeedService
 {
+    /** Throttle DB writes for MarketFeedStatus: workspace:symbol:exchange:type → epoch second of last write */
+    private static array $feedStatusWriteThrottle = [];
+
+    /** Throttle state->update() for RatioBotConfig: config_id → epoch second of last write */
+    private static array $ratioBotStateWriteThrottle = [];
+
+    /** In-process symbol ID cache to avoid repeated firstOrCreate DB hits */
+    private static array $symbolIdCache = [];
+
+    private const FEED_STATUS_WRITE_INTERVAL_S = 12;
+    private const RATIO_STATE_WRITE_INTERVAL_S  = 30;
+
     public function __construct(
         private readonly MarketPriceCacheService $prices,
     ) {
@@ -133,27 +145,32 @@ class RealtimeMarketFeedService
             $timeframe = strtolower((string) ($kline['i'] ?? '1m'));
             $openTs = Carbon::createFromTimestampMs((int) ($kline['t'] ?? $eventTimestampMs));
 
-            MarketOhlc::updateOrCreate(
-                [
-                    'exchange' => $exchangeKey,
-                    'symbol' => $symbol,
-                    'timeframe' => $timeframe,
-                    'ts' => $openTs,
-                ],
-                [
-                    'id' => MarketOhlc::query()
-                        ->where('exchange', $exchangeKey)
-                        ->where('symbol', $symbol)
-                        ->where('timeframe', $timeframe)
-                        ->where('ts', $openTs)
-                        ->value('id') ?: (string) Str::uuid(),
-                    'open' => (float) ($kline['o'] ?? 0),
-                    'high' => (float) ($kline['h'] ?? 0),
-                    'low' => (float) ($kline['l'] ?? 0),
-                    'close' => (float) ($kline['c'] ?? 0),
-                    'volume' => (float) ($kline['v'] ?? 0),
-                ]
-            );
+            // Only persist to DB when the candle is closed — open-candle updates are already
+            // cached in Redis via setLatestPrice(). Writing on every tick caused 30-50+ DB
+            // writes/second on a 4-symbol × 6-stream setup and saturated MariaDB.
+            if ($closedKline) {
+                MarketOhlc::updateOrCreate(
+                    [
+                        'exchange' => $exchangeKey,
+                        'symbol' => $symbol,
+                        'timeframe' => $timeframe,
+                        'ts' => $openTs,
+                    ],
+                    [
+                        'id' => MarketOhlc::query()
+                            ->where('exchange', $exchangeKey)
+                            ->where('symbol', $symbol)
+                            ->where('timeframe', $timeframe)
+                            ->where('ts', $openTs)
+                            ->value('id') ?: (string) Str::uuid(),
+                        'open' => (float) ($kline['o'] ?? 0),
+                        'high' => (float) ($kline['h'] ?? 0),
+                        'low' => (float) ($kline['l'] ?? 0),
+                        'close' => (float) ($kline['c'] ?? 0),
+                        'volume' => (float) ($kline['v'] ?? 0),
+                    ]
+                );
+            }
 
             if ((float) ($kline['c'] ?? 0) > 0) {
                 $price = (float) $kline['c'];
@@ -371,18 +388,19 @@ class RealtimeMarketFeedService
         );
 
         $tickAt = $timestampMs ? Carbon::createFromTimestampMs($timestampMs) : now();
-        $symbolModel = Symbol::firstOrCreate(
-            ['symbol' => $config->normalizedSymbol()],
-            [
-                'id' => (string) Str::uuid(),
-                'type' => 'crypto',
-                'exchange' => $config->exchangeKey(),
-                'metadata' => ['auto_created' => true],
-            ]
-        );
         $previousStatus = (string) ($config->state?->feed_status ?? '');
 
-        if ($config->state) {
+        // Throttle state updates — only write to DB once per RATIO_STATE_WRITE_INTERVAL_S,
+        // OR immediately on status change (healthy↔degraded). Prevents 1-2 DB writes/second
+        // per ratio bot config from the WebSocket ingest loop.
+        $stateThrottleKey = (string) $config->id;
+        $now = time();
+        $lastStateWrite = self::$ratioBotStateWriteThrottle[$stateThrottleKey] ?? 0;
+        $statusChanged = $previousStatus !== $status;
+
+        if ($config->state && ($statusChanged || ($now - $lastStateWrite) >= self::RATIO_STATE_WRITE_INTERVAL_S)) {
+            self::$ratioBotStateWriteThrottle[$stateThrottleKey] = $now;
+
             $config->state->update([
                 'last_seen_price' => $price ?? $config->state->last_seen_price,
                 'last_price_source' => $source,
@@ -399,7 +417,7 @@ class RealtimeMarketFeedService
             ]);
         }
 
-        if ($previousStatus !== $status) {
+        if ($statusChanged) {
             RatioBotEvent::create([
                 'ratio_bot_config_id' => $config->id,
                 'event_type' => RatioBotEvent::EVENT_FEED_HEALTH_CHANGED,
@@ -424,33 +442,57 @@ class RealtimeMarketFeedService
         string $status,
         array $context = [],
     ): void {
-        $symbolModel = Symbol::firstOrCreate(
-            ['symbol' => strtoupper(trim($symbol))],
-            [
-                'id' => (string) Str::uuid(),
-                'type' => 'crypto',
-                'exchange' => $this->exchangeKey($marketType),
-                'metadata' => ['auto_created' => true],
-            ]
-        );
+        $exchangeKey = $this->exchangeKey($marketType);
+        $symbolUpper = strtoupper(trim($symbol));
+
+        // Throttle DB writes — the price is already in Redis; writing to MarketFeedStatus
+        // on every WebSocket frame (trade stream = multiple per second) caused 30-50 DB
+        // writes/second. Writes are capped to once per FEED_STATUS_WRITE_INTERVAL_S seconds
+        // per workspace/symbol. A status downgrade (healthy→degraded) always writes immediately.
+        $throttleKey = "{$workspaceId}:{$symbolUpper}:{$exchangeKey}:" . strtolower($marketType);
+        $now = time();
+        $lastWrite = self::$feedStatusWriteThrottle[$throttleKey] ?? 0;
+        $isDowngrade = $status !== 'healthy' && $lastWrite > 0;
+
+        if (! $isDowngrade && ($now - $lastWrite) < self::FEED_STATUS_WRITE_INTERVAL_S) {
+            return;
+        }
+
+        self::$feedStatusWriteThrottle[$throttleKey] = $now;
+
+        // Cache symbol IDs in-process to avoid firstOrCreate DB hits on every message.
+        $symbolCacheKey = $symbolUpper;
+        if (! isset(self::$symbolIdCache[$symbolCacheKey])) {
+            $symbolModel = Symbol::firstOrCreate(
+                ['symbol' => $symbolUpper],
+                [
+                    'id' => (string) Str::uuid(),
+                    'type' => 'crypto',
+                    'exchange' => $exchangeKey,
+                    'metadata' => ['auto_created' => true],
+                ]
+            );
+            self::$symbolIdCache[$symbolCacheKey] = $symbolModel->id;
+        }
+        $symbolId = self::$symbolIdCache[$symbolCacheKey];
 
         $tickAt = $timestampMs ? Carbon::createFromTimestampMs($timestampMs) : now();
 
         MarketFeedStatus::updateOrCreate(
             [
                 'workspace_id' => $workspaceId,
-                'symbol_id' => $symbolModel->id,
-                'exchange' => $this->exchangeKey($marketType),
+                'symbol_id' => $symbolId,
+                'exchange' => $exchangeKey,
                 'market_type' => strtolower($marketType),
             ],
             [
                 'id' => MarketFeedStatus::query()
                     ->where('workspace_id', $workspaceId)
-                    ->where('symbol_id', $symbolModel->id)
-                    ->where('exchange', $this->exchangeKey($marketType))
+                    ->where('symbol_id', $symbolId)
+                    ->where('exchange', $exchangeKey)
                     ->where('market_type', strtolower($marketType))
                     ->value('id') ?: (string) Str::uuid(),
-                'symbol' => strtoupper(trim($symbol)),
+                'symbol' => $symbolUpper,
                 'last_tick_at' => $tickAt,
                 'last_price' => $price,
                 'source' => $source,

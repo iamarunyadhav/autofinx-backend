@@ -91,7 +91,12 @@ class FutureTradeUserStreamCommand extends Command
                     $userStream->setStatus($config, FutureTradeUserStreamService::STATUS_CONNECTED);
                     $userStream->recordHeartbeat($config, 'connect');
                     $lastHeartbeat = time();
-                    $this->line('[FT USER STREAM] connected — ' . $config->workspace_id);
+                    $stableConnectedSince = time();
+                    $this->line(sprintf(
+                        '[FT USER STREAM] connected — %s (reconnect #%d)',
+                        $config->workspace_id,
+                        $reconnects
+                    ));
 
                     while (true) {
                         if ($duration > 0 && (time() - $startedAt) >= $duration) {
@@ -132,21 +137,39 @@ class FutureTradeUserStreamCommand extends Command
                                 'error' => $e->getMessage(),
                             ]);
                         }
+
+                        // Reset reconnect counter after 60 s of stable messages.
+                        if ($reconnects > 0 && (time() - $stableConnectedSince) >= 60) {
+                            $reconnects = 0;
+                        }
                     }
                 } catch (Throwable $e) {
                     $userStream->setStatus($config, FutureTradeUserStreamService::STATUS_DEGRADED, [
                         'last_error' => $e->getMessage(),
                     ]);
-                    $this->warn('[FT USER STREAM ERROR] ' . $config->workspace_id . ': ' . $e->getMessage());
+                    $this->warn(sprintf(
+                        '[FT USER STREAM ERROR] %s (reconnect #%d): %s',
+                        $config->workspace_id,
+                        $reconnects + 1,
+                        $e->getMessage()
+                    ));
                 } finally {
                     $client->close();
                 }
 
+                // Exponential backoff — no hard cap on reconnect attempts.
+                // Supervisor restarts the process when --duration expires; the 5-reconnect
+                // hard limit was preventing recovery after transient network outages.
                 $reconnects++;
-                if ($reconnects > 5) {
-                    return;
-                }
-                sleep($reconnectSleep);
+                $backoff = min(30, $reconnectSleep * (int) pow(2, min($reconnects - 1, 4)));
+                $jitter   = rand(0, (int) ceil($backoff * 0.25));
+                $sleepFor = $backoff + $jitter;
+                $this->line(sprintf(
+                    '[FT USER STREAM] Reconnecting in %d s (attempt %d)...',
+                    $sleepFor,
+                    $reconnects
+                ));
+                sleep($sleepFor);
             }
         } finally {
             $client->close();

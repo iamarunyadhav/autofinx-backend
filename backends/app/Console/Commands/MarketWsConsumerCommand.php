@@ -54,15 +54,23 @@ class MarketWsConsumerCommand extends Command
             explode(',', (string) $this->option('streams'))
         )));
         $maxRuntime = max(0, (int) $this->option('max-runtime'));
-        $reconnectSleep = max(1, (int) $this->option('reconnect-sleep'));
+        $reconnectSleepBase = max(1, (int) $this->option('reconnect-sleep'));
         $startedAt = time();
         $testnet = (bool) $this->option('testnet');
         $client = new SimpleWebSocketClient();
 
+        // Reconnect tracking for exponential backoff and heartbeat reporting.
+        $reconnectCount = 0;
+        $msgCount = 0;
+        $connectedAt = null;
+        $lastHeartbeatWrite = 0;
+        $heartbeatPath = storage_path('framework/autofinx-live-feed-heartbeat.json');
+
         $this->info(sprintf(
-            'Starting realtime market feed consumer market_type=%s symbols=%s',
+            'Starting realtime market feed consumer market_type=%s symbols=%s streams=%s',
             $marketType,
-            implode(',', $symbols)
+            implode(',', $symbols),
+            implode(',', $streams)
         ));
 
         try {
@@ -75,7 +83,12 @@ class MarketWsConsumerCommand extends Command
                 try {
                     $wsUrl = $feeds->buildStreamUrl($symbols, $marketType, $streams, $testnet);
                     $client->connect($wsUrl);
-                    $this->line('Connected to Binance market websocket.');
+                    $connectedAt = time();
+                    $stableConnectedSince = time();
+                    $this->line(sprintf(
+                        '[WS] Connected to Binance market websocket. reconnect_count=%d',
+                        $reconnectCount
+                    ));
 
                     while (true) {
                         if ($maxRuntime > 0 && (time() - $startedAt) >= $maxRuntime) {
@@ -100,15 +113,55 @@ class MarketWsConsumerCommand extends Command
                         }
 
                         $feeds->ingest($payload, $marketType, $dispatchEvaluations);
+                        $msgCount++;
+
+                        // Reset backoff counter after 60 s of stable messages.
+                        if ($reconnectCount > 0 && (time() - $stableConnectedSince) >= 60) {
+                            $reconnectCount = 0;
+                        }
+
+                        // Write heartbeat file at most once per second — the watchdog and UI
+                        // use this to detect a stale live-feed without relying on log mtime.
+                        $now = time();
+                        if ($now - $lastHeartbeatWrite >= 1) {
+                            $lastHeartbeatWrite = $now;
+                            $streamName = (string) ($payload['stream'] ?? '');
+                            $symbolName = strtoupper((string) (
+                                $payload['data']['s'] ?? $payload['s'] ?? ''
+                            ));
+                            @file_put_contents($heartbeatPath, json_encode([
+                                'last_message_at'    => date('c', $now),
+                                'last_message_epoch' => $now,
+                                'symbol'             => $symbolName,
+                                'stream'             => $streamName,
+                                'reconnect_count'    => $reconnectCount,
+                                'message_count'      => $msgCount,
+                                'connected_at'       => $connectedAt ? date('c', $connectedAt) : null,
+                                'market_type'        => $marketType,
+                                'symbols'            => $symbols,
+                            ], JSON_UNESCAPED_SLASHES));
+                        }
                     }
                 } catch (\Throwable $e) {
                     $feeds->markDisconnected($symbols, $marketType, $e->getMessage());
-                    $this->warn('Market websocket error: ' . $e->getMessage());
+                    $this->warn(sprintf(
+                        '[WS] Market websocket error (reconnect #%d): %s',
+                        $reconnectCount + 1,
+                        $e->getMessage()
+                    ));
                 } finally {
                     $client->close();
+                    $connectedAt = null;
                 }
 
-                sleep($reconnectSleep);
+                // Exponential backoff with ±25 % jitter:
+                // attempt 0→1s, 1→2s, 2→4s, 3→8s, 4+→15s  (scaled by reconnectSleepBase)
+                $backoff = min(15 * $reconnectSleepBase, $reconnectSleepBase * (int) pow(2, min($reconnectCount, 4)));
+                $jitter   = rand(0, (int) ceil($backoff * 0.25));
+                $sleepFor = $backoff + $jitter;
+                $reconnectCount++;
+                $this->line(sprintf('[WS] Reconnecting in %d s (backoff attempt %d)...', $sleepFor, $reconnectCount));
+                sleep($sleepFor);
             }
         } finally {
             $client->close();

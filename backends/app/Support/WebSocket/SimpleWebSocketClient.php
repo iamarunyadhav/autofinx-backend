@@ -68,11 +68,32 @@ class SimpleWebSocketClient
         $this->socket = null;
     }
 
+    public function isConnected(): bool
+    {
+        return is_resource($this->socket);
+    }
+
+    /** Send a PING frame to keep the connection alive (opcode 0x9). */
+    public function sendPing(string $payload = ''): void
+    {
+        if (! is_resource($this->socket)) {
+            return;
+        }
+        $this->sendFrame($payload, 0x9);
+    }
+
     public function readFrame(int $timeoutSeconds = 1): ?array
     {
         if (! is_resource($this->socket)) {
             throw new RuntimeException('WebSocket is not connected.');
         }
+
+        // Short timeout for the 2-byte header — if no data arrives in $timeoutSeconds,
+        // return null (normal idle poll).  Once the header is received we know a full
+        // frame is coming, so use a longer deadline for the payload so that large Binance
+        // messages (deep order-book snapshots, multi-symbol combined streams) on a slow
+        // link don't throw a false "Incomplete websocket frame" and cause a reconnect.
+        $payloadTimeout = max($timeoutSeconds, 8);
 
         $header = $this->readBytes(2, $timeoutSeconds);
         if ($header === null) {
@@ -86,13 +107,13 @@ class SimpleWebSocketClient
         $length = $byte2 & 0x7F;
 
         if ($length === 126) {
-            $extended = $this->readBytes(2, $timeoutSeconds);
+            $extended = $this->readBytes(2, $payloadTimeout);
             if ($extended === null) {
                 return null;
             }
             $length = unpack('n', $extended)[1];
         } elseif ($length === 127) {
-            $extended = $this->readBytes(8, $timeoutSeconds);
+            $extended = $this->readBytes(8, $payloadTimeout);
             if ($extended === null) {
                 return null;
             }
@@ -100,12 +121,12 @@ class SimpleWebSocketClient
             $length = ((int) $parts[1] << 32) + (int) $parts[2];
         }
 
-        $mask = $masked ? $this->readBytes(4, $timeoutSeconds) : null;
+        $mask = $masked ? $this->readBytes(4, $payloadTimeout) : null;
         if ($masked && $mask === null) {
             return null;
         }
 
-        $payload = $length > 0 ? $this->readBytes($length, $timeoutSeconds) : '';
+        $payload = $length > 0 ? $this->readBytes($length, $payloadTimeout) : '';
         if ($payload === null) {
             return null;
         }
