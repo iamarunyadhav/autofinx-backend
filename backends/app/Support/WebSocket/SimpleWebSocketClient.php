@@ -129,6 +129,15 @@ class SimpleWebSocketClient
         $masked = ($byte2 & 0x80) !== 0;
         $length = $byte2 & 0x7F;
 
+        // Handle CLOSE *before* reading the payload.  Binance sends the 2-byte
+        // close-code payload and then closes the TCP connection in the same SSL
+        // record.  Attempting a second fread() for the payload hits feof() and
+        // throws "WebSocket connection closed while reading frame." before we ever
+        // reach the opcode == 0x8 check further below.
+        if ($opcode === 0x8) {
+            return ['type' => 'close'];
+        }
+
         if ($length === 126) {
             $extended = $this->readBytes(2, $payloadTimeout);
             if ($extended === null) {

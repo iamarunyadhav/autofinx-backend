@@ -165,7 +165,13 @@ class MarketWsConsumerCommand extends Command
                         }
                     }
                 } catch (\Throwable $e) {
-                    $feeds->markDisconnected($symbols, $marketType, $e->getMessage());
+                    // Guard: markDisconnected hits the DB; a DB outage must not kill
+                    // the reconnect loop and force a supervisor process restart.
+                    try {
+                        $feeds->markDisconnected($symbols, $marketType, $e->getMessage());
+                    } catch (\Throwable) {
+                        // DB unavailable — swallow and keep reconnecting.
+                    }
                     $this->warn(sprintf(
                         '[WS] Market websocket error (reconnect #%d): %s',
                         $reconnectCount + 1,
@@ -176,12 +182,26 @@ class MarketWsConsumerCommand extends Command
                     $connectedAt = null;
                 }
 
+                $reconnectCount++;
+
+                // Circuit breaker: if the server has rejected 8+ consecutive connections
+                // (Binance IP-rate-limiting after rapid reconnects), back off for 5 minutes
+                // instead of hammering the endpoint every few seconds — which makes the ban
+                // last longer.
+                if ($reconnectCount > 0 && $reconnectCount % 8 === 0) {
+                    $this->warn(sprintf(
+                        '[WS] Circuit breaker: %d consecutive failures — pausing 300 s to let Binance lift the connection-rate limit.',
+                        $reconnectCount
+                    ));
+                    sleep(300);
+                    $this->line('[WS] Circuit breaker pause over, resuming reconnect loop.');
+                }
+
                 // Exponential backoff with ±25 % jitter:
-                // attempt 0→1s, 1→2s, 2→4s, 3→8s, 4+→15s  (scaled by reconnectSleepBase)
-                $backoff = min(15 * $reconnectSleepBase, $reconnectSleepBase * (int) pow(2, min($reconnectCount, 4)));
+                // attempt 1→2s, 2→4s, 3→8s, 4+→30s  (scaled by reconnectSleepBase)
+                $backoff  = min(15 * $reconnectSleepBase, $reconnectSleepBase * (int) pow(2, min($reconnectCount, 4)));
                 $jitter   = rand(0, (int) ceil($backoff * 0.25));
                 $sleepFor = $backoff + $jitter;
-                $reconnectCount++;
                 $this->line(sprintf('[WS] Reconnecting in %d s (backoff attempt %d)...', $sleepFor, $reconnectCount));
                 sleep($sleepFor);
             }
