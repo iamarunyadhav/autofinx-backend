@@ -28,8 +28,10 @@ class SimpleWebSocketClient
             throw new RuntimeException("WebSocket connect failed ({$errno}): {$errstr}");
         }
 
-        stream_set_timeout($socket, 1);
-        stream_set_blocking($socket, false);
+        // Keep blocking mode — stream_select() handles read timeouts in readBytes().
+        // Non-blocking mode caused fread() to return '' on SSL internal frames even
+        // after stream_select() reported the socket as readable, triggering false
+        // "connection closed" exceptions every 3-4 seconds on wss:// streams.
 
         $key = base64_encode(random_bytes(16));
         $headers = "GET {$path}{$query} HTTP/1.1\r\n"
@@ -40,12 +42,33 @@ class SimpleWebSocketClient
             . "Sec-WebSocket-Version: 13\r\n\r\n";
 
         fwrite($socket, $headers);
+
+        // Read HTTP 101 response using stream_select so we respect the deadline
+        // even in blocking mode (avoids hanging if the server never responds).
         $response = '';
-        $deadline = time() + 8;
-        while (time() < $deadline && ! str_contains($response, "\r\n\r\n")) {
-            $chunk = fread($socket, 1024);
-            if ($chunk === false || $chunk === '') {
-                usleep(50_000);
+        $deadline = microtime(true) + 8;
+        while (microtime(true) < $deadline && ! str_contains($response, "\r\n\r\n")) {
+            $remaining = $deadline - microtime(true);
+            if ($remaining <= 0) {
+                break;
+            }
+            $read    = [$socket];
+            $write   = null;
+            $except  = null;
+            $sec     = (int) floor($remaining);
+            $usec    = (int) max(0, ($remaining - $sec) * 1_000_000);
+            $ready   = @stream_select($read, $write, $except, $sec, $usec);
+            if ($ready === false || $ready === 0) {
+                continue;
+            }
+            $chunk = fread($socket, 4096);
+            if ($chunk === false) {
+                break;
+            }
+            if ($chunk === '') {
+                if (feof($socket)) {
+                    break;
+                }
                 continue;
             }
             $response .= $chunk;
@@ -214,8 +237,21 @@ class SimpleWebSocketClient
             }
 
             $chunk = fread($this->socket, $length - strlen($buffer));
-            if ($chunk === false || $chunk === '') {
-                throw new RuntimeException('WebSocket connection closed while reading frame.');
+
+            if ($chunk === false) {
+                throw new RuntimeException('WebSocket read error (fread returned false).');
+            }
+
+            if ($chunk === '') {
+                // On TLS/SSL sockets (wss://) stream_select can report the socket as
+                // readable for an internal TLS control frame while fread() returns ''
+                // because there is no application-layer data yet.  Treat this as a
+                // transient SSL buffering event — only throw if we are truly at EOF.
+                if (feof($this->socket)) {
+                    throw new RuntimeException('WebSocket connection closed while reading frame.');
+                }
+                usleep(500);
+                continue;
             }
 
             $buffer .= $chunk;

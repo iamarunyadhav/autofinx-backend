@@ -64,6 +64,7 @@ class MarketWsConsumerCommand extends Command
         $msgCount = 0;
         $connectedAt = null;
         $lastHeartbeatWrite = 0;
+        $lastPingAt = 0;
         $heartbeatPath = storage_path('framework/autofinx-live-feed-heartbeat.json');
 
         $this->info(sprintf(
@@ -82,9 +83,16 @@ class MarketWsConsumerCommand extends Command
 
                 try {
                     $wsUrl = $feeds->buildStreamUrl($symbols, $marketType, $streams, $testnet);
+                    $this->line(sprintf(
+                        '[WS] Connecting: market_type=%s symbols=%s streams=%s',
+                        $marketType,
+                        implode(',', $symbols),
+                        implode(',', $streams)
+                    ));
                     $client->connect($wsUrl);
                     $connectedAt = time();
                     $stableConnectedSince = time();
+                    $lastPingAt = time();
                     $this->line(sprintf(
                         '[WS] Connected to Binance market websocket. reconnect_count=%d',
                         $reconnectCount
@@ -94,6 +102,20 @@ class MarketWsConsumerCommand extends Command
                         if ($maxRuntime > 0 && (time() - $startedAt) >= $maxRuntime) {
                             $client->close();
                             break 2;
+                        }
+
+                        // Proactive client→server ping every 30 s.
+                        // Binance closes connections that go silent; sending a ping
+                        // prevents the server from treating the stream as idle/dead.
+                        $now = time();
+                        if ($now - $lastPingAt >= 30) {
+                            try {
+                                $client->sendPing();
+                            } catch (\Throwable) {
+                                // If sendPing fails, the connection is dead.
+                                // readFrame() will throw on the next call below.
+                            }
+                            $lastPingAt = $now;
                         }
 
                         $frame = $client->readFrame(1);
