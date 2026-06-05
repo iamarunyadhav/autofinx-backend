@@ -229,6 +229,9 @@ class FutureTradeDynamicAlgorithmTest extends TestCase
             'signalProfile' => FutureTradeBotService::PROFILE_PRIME_V617_CRYPTO,
             'marketProfile' => 'Crypto',
             'tradeScoreThreshold' => 72,
+            'leverage' => 5,
+            'maxLeverage' => 5,
+            'tradeAmountUsdt' => 40,
             'takeProfitPercent' => 0.5,
             'stopLossPercent' => 0.25,
             'trailingTakeProfitPercent' => 0.18,
@@ -258,6 +261,10 @@ class FutureTradeDynamicAlgorithmTest extends TestCase
         $this->assertSame(0.5, $decision['public']['recommended']['takeProfitPercent']);
         $this->assertSame(0.25, $decision['public']['recommended']['stopLossPercent']);
         $this->assertSame(0.18, $decision['public']['recommended']['trailingTakeProfitPercent']);
+        $this->assertSame(5, $decision['settings']['leverage']);
+        $this->assertSame(5, $decision['settings']['maxLeverage']);
+        $this->assertSame(40.0, $decision['public']['recommended']['tradeAmountUsdt']);
+        $this->assertSame(5.0, $decision['public']['recommended']['leverage']);
     }
 
     public function test_prime_pine_runtime_can_opt_into_webhook_risk_values(): void

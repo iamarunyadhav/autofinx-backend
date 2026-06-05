@@ -31,7 +31,7 @@ if [ "$SKIP_TESTS" -eq 0 ]; then
   "$PHP" artisan test --filter=FutureTrade
 fi
 
-chmod +x start-workers.sh stop-workers.sh restart-workers.sh future-trade-heartbeat.sh future-trade-maintenance.sh future-trade-setup.sh
+chmod +x start-workers.sh stop-workers.sh restart-workers.sh future-trade-heartbeat.sh future-trade-maintenance.sh future-trade-refresh.sh future-trade-setup.sh future-trade-full-server-run.sh
 ./restart-workers.sh
 "$PHP" artisan future-trade:tick --duration=10 --sleep-ms=1000
 "$PHP" artisan future-trade:diagnostics --persist

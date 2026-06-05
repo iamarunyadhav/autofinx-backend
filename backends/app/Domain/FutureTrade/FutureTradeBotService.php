@@ -470,7 +470,14 @@ class FutureTradeBotService
     {
         $beforeSettings = $this->normalizeFutureTradeSettings($config->mergedSettings());
         $beforeNotes = (string) ($config->algorithm_notes ?? '');
-        $settings = $this->normalizeFutureTradeSettings(array_merge($config->mergedSettings(), (array) ($payload['settings'] ?? [])));
+        $requestedSettings = array_merge($config->mergedSettings(), (array) ($payload['settings'] ?? []));
+        if (
+            array_key_exists('leverage', (array) ($payload['settings'] ?? []))
+            && (int) ($requestedSettings['leverage'] ?? 0) > (int) ($requestedSettings['maxLeverage'] ?? 0)
+        ) {
+            $requestedSettings['maxLeverage'] = (int) $requestedSettings['leverage'];
+        }
+        $settings = $this->normalizeFutureTradeSettings($requestedSettings);
         $liveRequested = (bool) ($settings['liveTrading'] ?? false);
         $forceTestnet = array_key_exists('forceTestnet', $settings)
             ? (bool) $settings['forceTestnet']
@@ -2092,6 +2099,7 @@ class FutureTradeBotService
         $account = $this->accountSummary($config);
         $health = $this->operationalHealth->summary($config->workspace_id);
         $webhookTelemetry = $this->latestWebhookTelemetry($config);
+        $webhookAuthorityMode = in_array($this->normalizedSignalSource($settings), ['webhook', 'webhook_fallback'], true);
         $forceTestnet = (bool) ($settings['forceTestnet'] ?? true);
         $envReady = $this->environmentTradingReady($forceTestnet, $settings);
         $liveGuard = $this->liveGuard->canActivate($config->workspace_id, 'future_trade');
@@ -2140,11 +2148,17 @@ class FutureTradeBotService
                 $botWarnings[] = 'best_signal_wait';
                 $botChecks[] = ['label' => 'Scanner', 'state' => 'warning', 'message' => (string) ($bestSignal['reason'] ?? 'Scanner still returned WAIT.')];
             } elseif ($signalConfidence < $effectiveMinConfidence) {
-                $botBlockers[] = 'confidence_below_threshold';
+                if ($webhookAuthorityMode) {
+                    $botWarnings[] = 'scanner_confidence_below_threshold_diagnostic_only';
+                } else {
+                    $botBlockers[] = 'confidence_below_threshold';
+                }
                 $botChecks[] = [
                     'label' => 'Entry threshold',
-                    'state' => 'blocked',
-                    'message' => sprintf('Best signal %.1f%% is below active minimum %.1f%%.', $signalConfidence * 100, $effectiveMinConfidence * 100),
+                    'state' => $webhookAuthorityMode ? 'warning' : 'blocked',
+                    'message' => $webhookAuthorityMode
+                        ? sprintf('Scanner mirror %.1f%% is below active minimum %.1f%%. In webhook mode this is diagnostic; Pine webhook confidence is checked at execution time.', $signalConfidence * 100, $effectiveMinConfidence * 100)
+                        : sprintf('Best signal %.1f%% is below active minimum %.1f%%.', $signalConfidence * 100, $effectiveMinConfidence * 100),
                 ];
             } else {
                 $botChecks[] = [
@@ -2361,8 +2375,8 @@ class FutureTradeBotService
                 $checks[] = ['label' => 'Latest webhook', 'state' => 'warning', 'message' => 'No TradingView webhook has reached this workspace yet.'];
             } elseif ($latestWebhookEvent === 'PINE_WEBHOOK_REJECTED') {
                 $reason = (string) ($webhookTelemetry['reason'] ?? 'unknown_rejection');
-                $blockers[] = 'latest_webhook_rejected';
-                $checks[] = ['label' => 'Latest webhook', 'state' => 'blocked', 'message' => "Latest webhook was rejected: {$reason}."];
+                $warnings[] = 'latest_webhook_rejected';
+                $checks[] = ['label' => 'Latest webhook', 'state' => 'warning', 'message' => "Latest webhook was rejected: {$reason}. This does not block the next valid BUY/SELL webhook."];
             } elseif (in_array($latestWebhookEvent, ['PINE_WEBHOOK_WAIT', 'PINE_WEBHOOK_CLOSE'], true)) {
                 $warnings[] = strtolower($latestWebhookEvent);
                 $checks[] = ['label' => 'Latest webhook', 'state' => 'warning', 'message' => 'Latest webhook was accepted but it was WAIT/CLOSE, so no entry should open.'];
@@ -6291,7 +6305,7 @@ class FutureTradeBotService
             $settings['useAtrRiskTargets'] = filter_var($settings['useAtrRiskTargets'] ?? config('future_trade.atr_dynamic_risk_targets', false), FILTER_VALIDATE_BOOLEAN);
             $settings['confirmedCandleOnly'] = filter_var($settings['confirmedCandleOnly'] ?? config('future_trade.confirmed_candle_only', true), FILTER_VALIDATE_BOOLEAN);
             $settings['maxTradesPerDay'] = max(1, min(50, (int) ($settings['maxTradesPerDay'] ?? 50)));
-            $settings['maxLeverage'] = max(1, min(2, (int) ($settings['maxLeverage'] ?? 2)));
+            $settings['maxLeverage'] = max(1, min(125, (int) ($settings['maxLeverage'] ?? 2)));
             $settings['leverage'] = max(1, min((int) ($settings['leverage'] ?? 2), (int) $settings['maxLeverage']));
             $settings['tradeAmountUsdt'] = max(5, (float) ($settings['tradeAmountUsdt'] ?? 25));
             $settings['maxDailyLossPercent'] = max(0.01, min(10, (float) ($settings['maxDailyLossPercent'] ?? 0.5)));
@@ -7416,6 +7430,8 @@ class FutureTradeBotService
                 'trailingTakeProfitPercent' => (float) ($next['trailingTakeProfitPercent'] ?? $settings['trailingTakeProfitPercent'] ?? 0),
                 'cooldownSeconds' => (int) ($next['cooldownSeconds'] ?? 900),
                 'tradeAmountUsdt' => (float) ($next['tradeAmountUsdt'] ?? 25),
+                'leverage' => (float) ($next['leverage'] ?? $settings['leverage'] ?? 1),
+                'maxLeverage' => (float) ($next['maxLeverage'] ?? $settings['maxLeverage'] ?? 1),
             ],
             'analysis' => [
                 'lookbackMinutes' => 15,

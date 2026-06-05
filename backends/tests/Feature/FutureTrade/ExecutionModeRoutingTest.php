@@ -233,3 +233,21 @@ test('flipping paperTrading on/off via updateConfig changes executionMode cleanl
     ]);
     expect($flipBack->fresh()->executionMode())->toBe('paper');
 });
+
+test('updateConfig preserves operator leverage override and lifts maxLeverage when needed', function () {
+    $config = modeConfig([
+        'signalProfile' => FutureTradeBotService::PROFILE_PRIME_V617_CRYPTO,
+        'marketProfile' => 'Crypto',
+        'leverage' => 2,
+        'maxLeverage' => 2,
+    ]);
+
+    $updated = app(FutureTradeBotService::class)->updateConfig($config, [
+        'settings' => [
+            'leverage' => 7,
+        ],
+    ])->fresh();
+
+    expect((int) $updated->settings['leverage'])->toBe(7)
+        ->and((int) $updated->settings['maxLeverage'])->toBe(7);
+});
