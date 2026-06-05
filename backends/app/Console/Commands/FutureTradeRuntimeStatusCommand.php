@@ -4,9 +4,8 @@ namespace App\Console\Commands;
 
 use App\Models\FutureTradeBotConfig;
 use App\Models\FutureTradeBotLog;
-use App\Models\FutureTradeBotState;
 use App\Models\FutureTradeLogicalTrade;
-use App\Models\MarketFeedStatus;
+use Carbon\Carbon;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
@@ -104,6 +103,7 @@ class FutureTradeRuntimeStatusCommand extends Command
     {
         $query = FutureTradeBotConfig::query()
             ->where('enable_live_trading', true)
+            ->where('slot_index', 0)
             ->when($workspaceId !== '', fn ($q) => $q->where('workspace_id', $workspaceId));
 
         $result = [];
@@ -116,6 +116,7 @@ class FutureTradeRuntimeStatusCommand extends Command
             $result[] = [
                 'workspace_id'    => $config->workspace_id,
                 'config_id'       => $config->id,
+                'slot_index'      => $config->slot_index,
                 'status'          => is_array($state) ? ($state['status'] ?? 'UNKNOWN') : 'NOT_CONFIGURED',
                 'heartbeat_age_s' => $age,
                 'fresh'           => $age !== null && $age <= 30,
@@ -139,7 +140,7 @@ class FutureTradeRuntimeStatusCommand extends Command
                 $pending = DB::table('jobs')->where('queue', $queue)->count();
                 $failed  = DB::table('failed_jobs')->where('queue', $queue)->count();
                 $oldest  = DB::table('jobs')->where('queue', $queue)->min('created_at');
-                $ageS    = $oldest ? (time() - strtotime((string) $oldest)) : null;
+                $ageS    = $oldest ? $this->jobTimestampAgeSeconds($oldest) : null;
                 $result[$queue] = [
                     'pending'         => $pending,
                     'failed'          => $failed,
@@ -151,6 +152,23 @@ class FutureTradeRuntimeStatusCommand extends Command
         }
 
         return $result;
+    }
+
+    private function jobTimestampAgeSeconds(mixed $value): ?int
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+
+        if (is_numeric($value)) {
+            return max(0, time() - (int) $value);
+        }
+
+        try {
+            return max(0, now()->diffInSeconds(Carbon::parse((string) $value), true));
+        } catch (Throwable) {
+            return null;
+        }
     }
 
     private function positionStatus(string $workspaceId): array

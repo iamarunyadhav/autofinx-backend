@@ -836,6 +836,50 @@ test('activePositionCount aggregates across slots', function () {
     expect($svc->activePositionCount($workspace->id))->toBe(2);
 });
 
+test('starting future trade bot enables all slots and preserves live testnet mode', function () {
+    Carbon::setTestNow('2026-05-19 10:30:05');
+    $workspace = Workspace::factory()->create();
+    $primary = createPrimeWebhookLiveConfig($workspace->id, [
+        'maxOpenPositions' => 5,
+        'autoExecutePaperSignals' => false,
+    ]);
+    $svc = app(FutureTradeBotService::class);
+    $svc->syncSlots($primary);
+
+    \App\Models\FutureTradeBotConfig::query()
+        ->where('workspace_id', $workspace->id)
+        ->update([
+            'enabled' => false,
+            'paper_trading' => false,
+            'enable_live_trading' => true,
+        ]);
+    \App\Models\FutureTradeBotConfig::query()
+        ->where('workspace_id', $workspace->id)
+        ->get()
+        ->each(fn ($slot) => $slot->state()->update([
+            'status' => 'Stopped',
+            'state' => 'STOPPED',
+            'connection_status' => 'Disconnected',
+        ]));
+
+    $svc->start($primary->fresh('state'));
+
+    $slots = \App\Models\FutureTradeBotConfig::query()
+        ->with('state')
+        ->where('workspace_id', $workspace->id)
+        ->orderBy('slot_index')
+        ->get();
+
+    expect($slots)->toHaveCount(5);
+    foreach ($slots as $slot) {
+        expect((bool) $slot->enabled)->toBeTrue()
+            ->and((bool) $slot->paper_trading)->toBeFalse()
+            ->and((bool) $slot->enable_live_trading)->toBeTrue()
+            ->and($slot->state?->status)->toBe('Running')
+            ->and($slot->state?->state)->toBe('SCANNING');
+    }
+});
+
 test('webhook for new symbol when all 5 slots busy returns max_concurrent_positions_reached', function () {
     config(['future_trade.pine_webhook_token' => 'pine-secret']);
     Carbon::setTestNow('2026-05-19 10:30:05');

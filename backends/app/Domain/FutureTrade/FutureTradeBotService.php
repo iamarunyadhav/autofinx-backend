@@ -577,17 +577,28 @@ class FutureTradeBotService
 
     public function start(FutureTradeBotConfig $config): FutureTradeBotState
     {
-        $config->update(['enabled' => true, 'paper_trading' => true, 'enable_live_trading' => false]);
         $settings = $this->normalizeFutureTradeSettings($config->mergedSettings());
-        $this->autoEnsureLiveFeedStarted($config, $settings);
-        if ((bool) ($settings['liveTrading'] ?? false) && $this->environmentTradingReady((bool) ($settings['forceTestnet'] ?? true), $settings)) {
+        $liveRequested = (bool) ($settings['liveTrading'] ?? false);
+        $liveAllowed = false;
+
+        if ($liveRequested && $this->environmentTradingReady((bool) ($settings['forceTestnet'] ?? true), $settings)) {
             $guard = $this->liveGuard->canActivate($config->workspace_id, 'future_trade');
             if ($guard['allowed']) {
-                $config->update(['paper_trading' => false, 'enable_live_trading' => true]);
+                $liveAllowed = true;
             } else {
                 $this->log($config->fresh('state'), 'LIVE_GUARD_BLOCKED', null, null, 0, $guard['reason']);
             }
         }
+
+        $config->update([
+            'enabled' => true,
+            'paper_trading' => ! $liveAllowed,
+            'enable_live_trading' => $liveAllowed,
+        ]);
+        $config = $config->fresh('state');
+        $this->syncSlots($config);
+        $this->autoEnsureLiveFeedStarted($config, $settings);
+
         $state = $this->state($config);
         $wasDailyLocked = $state->daily_stop_until && $state->daily_stop_until->isFuture();
         if ($wasDailyLocked) {
@@ -616,6 +627,26 @@ class FutureTradeBotService
             'daily_stop_until' => null,
             'trading_day' => now()->toDateString(),
         ]);
+        FutureTradeBotConfig::query()
+            ->with('state')
+            ->where('workspace_id', $config->workspace_id)
+            ->where('slot_index', '>', 0)
+            ->where('enabled', true)
+            ->get()
+            ->each(function (FutureTradeBotConfig $slot): void {
+                $slotState = $this->state($slot);
+                if ((float) ($slotState->quantity ?? 0) > 0 || in_array((string) $slotState->state, ['IN_POSITION', 'LIVE_IN_POSITION'], true)) {
+                    return;
+                }
+                $this->persistState($slotState, [
+                    'status' => 'Running',
+                    'state' => 'SCANNING',
+                    'connection_status' => 'Connected',
+                    'current_signal' => 'WAITING_FOR_SIGNAL',
+                    'daily_stop_until' => null,
+                    'trading_day' => now()->toDateString(),
+                ]);
+            });
         $startedConfig = $config->fresh('state');
         $startedSettings = $startedConfig->mergedSettings();
         $this->log(
@@ -681,6 +712,10 @@ class FutureTradeBotService
     public function stop(FutureTradeBotConfig $config): FutureTradeBotState
     {
         $config->update(['enabled' => false]);
+        FutureTradeBotConfig::query()
+            ->where('workspace_id', $config->workspace_id)
+            ->where('slot_index', '>', 0)
+            ->update(['enabled' => false]);
         $state = $this->state($config);
         $this->persistState($state, [
             'status' => 'Stopped',
@@ -688,6 +723,23 @@ class FutureTradeBotService
             'connection_status' => 'Disconnected',
             'current_signal' => 'WAITING_FOR_SIGNAL',
         ]);
+        FutureTradeBotConfig::query()
+            ->with('state')
+            ->where('workspace_id', $config->workspace_id)
+            ->where('slot_index', '>', 0)
+            ->get()
+            ->each(function (FutureTradeBotConfig $slot): void {
+                $slotState = $this->state($slot);
+                if ((float) ($slotState->quantity ?? 0) > 0 || in_array((string) $slotState->state, ['IN_POSITION', 'LIVE_IN_POSITION'], true)) {
+                    return;
+                }
+                $this->persistState($slotState, [
+                    'status' => 'Stopped',
+                    'state' => 'STOPPED',
+                    'connection_status' => 'Disconnected',
+                    'current_signal' => 'WAITING_FOR_SIGNAL',
+                ]);
+            });
         $this->log($config->fresh('state'), 'BOT_STOPPED', $state->current_symbol, null, 0, 'Operator stopped futures bot.');
         return $state->exists ? $state->fresh() : $state;
     }
