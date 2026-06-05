@@ -101,6 +101,7 @@ run_artisan migrate --force
 run_artisan optimize:clear
 run_artisan config:cache
 run_artisan route:cache
+run_artisan queue:restart || true
 
 if [ "$NO_FRONTEND_BUILD" -eq 0 ] && [ -d "$FRONTEND_DIR" ]; then
   log "Building frontend at $FRONTEND_DIR"
@@ -136,6 +137,19 @@ if [ "$RESTART_RUNTIME" -eq 1 ]; then
 else
   log "Starting missing runtime workers and live feed"
   APP_DIR="$APP_DIR" PHP="$PHP" FT_SYMBOLS="$FT_SYMBOLS" FT_STREAMS="$FT_STREAMS" ./start-workers.sh
+fi
+
+log "Running heartbeat once to start queue workers, websocket feed, user-stream, scheduler, and scanner slices"
+APP_DIR="$APP_DIR" PHP="$PHP" FT_SYMBOLS="$FT_SYMBOLS" FT_STREAMS="$FT_STREAMS" ./future-trade-heartbeat.sh || true
+
+log "Running scheduler smoke"
+timeout 60 "$PHP" artisan schedule:run || true
+
+log "Running Future Trade user-stream smoke"
+if [ -n "$WORKSPACE_ID" ]; then
+  run_artisan future-trade:user-stream --duration=20 --workspace="$WORKSPACE_ID" || true
+else
+  run_artisan future-trade:user-stream --duration=20 || true
 fi
 
 log "Running Future Trade scanner smoke"
