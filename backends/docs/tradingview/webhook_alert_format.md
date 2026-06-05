@@ -85,12 +85,33 @@ side from the open position.
 | `token` | Must match `FUTURE_TRADE_PINE_WEBHOOK_TOKEN` env. |
 | `profile` | Must equal `autofinx_prime_v6_1_7_crypto`. |
 | `source` | Must equal `pine_webhook`. |
-| `symbol` | Must be in your config's allowed symbols list. `XYZUSDT.P` is auto-normalised to `XYZUSDT`. |
+| `symbol` | `XYZUSDT.P` is auto-normalised to `XYZUSDT`. By default, all Binance-style crypto futures symbols ending in `USDT` or `USDC` are accepted; set `restrictToWorkspaceSymbols=true` to force the curated workspace list only. |
 | `timeframe` | Must equal `15m` (or `15`). Other timeframes are rejected. |
 | `signal` | `BUY` / `SELL` / `LONG` / `SHORT` / `WAIT` / `CLOSE*`. |
 | `price` | Must be > 0. |
 | `bar_confirmed` | Must be `true` (we do **not** trade unconfirmed bars). |
 | `candle_open_time` | ISO-8601 or millisecond timestamp. Used for idempotency. |
+
+### All-symbol Pine mode
+
+For the v9.8 All Symbols Pine script, keep this gate:
+
+```pine
+symbolOk = isCrypto and (str.endswith(tickerNorm, "USDT") or str.endswith(tickerNorm, "USDC"))
+```
+
+The backend default that matches this mode is:
+
+```text
+FUTURE_TRADE_PERMISSIVE_SYMBOL_MODE=true
+restrictToWorkspaceSymbols=false
+permissiveSymbolMode=true
+```
+
+That means examples like `ETHUSDT.P`, `XRPUSDT.P`, `DOGEUSDT.P`,
+`1000PEPEUSDT.P`, and `BTCUSDC.P` are accepted after normalization, subject to
+the usual bot guards such as max open positions, cooldown, confidence, daily
+loss, and live-trading safety.
 
 ### Optional fields
 

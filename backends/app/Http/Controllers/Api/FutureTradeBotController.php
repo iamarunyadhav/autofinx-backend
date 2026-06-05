@@ -97,6 +97,24 @@ class FutureTradeBotController extends Controller
             ? $this->bot->findSlotForSymbol($workspace, $symbol)
             : null;
 
+        $rawSignal = strtoupper(trim((string) ($payload['signal'] ?? $payload['action'] ?? $payload['side'] ?? 'WAIT')));
+        $isCloseSignal = in_array($rawSignal, [
+            'CLOSE',
+            'EXIT',
+            'FLAT',
+            'CLOSE_LONG',
+            'CLOSE_SHORT',
+            'EXIT_LONG',
+            'EXIT_SHORT',
+            'FLAT_LONG',
+            'FLAT_SHORT',
+        ], true);
+
+        if ($symbol !== '' && $targetConfig === null && $isCloseSignal) {
+            $payload['_slot_routing'] = 'no_symbol_slot_close_log_only';
+            $targetConfig = $primary;
+        }
+
         if ($symbol !== '' && $targetConfig === null) {
             $activeCount = $this->bot->activePositionCount($workspace);
             return response()->json([

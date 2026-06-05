@@ -866,6 +866,39 @@ test('webhook for new symbol when all 5 slots busy returns max_concurrent_positi
         ->assertJsonPath('reason', 'max_concurrent_positions_reached');
 });
 
+test('close webhook for unowned symbol is accepted as log only when all slots are busy', function () {
+    config(['future_trade.pine_webhook_token' => 'pine-secret']);
+    Carbon::setTestNow('2026-05-19 10:30:05');
+    $workspace = Workspace::factory()->create();
+    $primary = createPrimeWebhookConfig($workspace->id, [
+        'maxOpenPositions' => 5,
+    ]);
+    $svc = app(FutureTradeBotService::class);
+    $svc->syncSlots($primary);
+
+    $symbols = ['ETHUSDT', 'BTCUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT'];
+    $slots = \App\Models\FutureTradeBotConfig::query()
+        ->where('workspace_id', $workspace->id)
+        ->orderBy('slot_index')->get();
+    foreach ($slots as $i => $slot) {
+        $slot->state()->update([
+            'state' => 'IN_POSITION',
+            'current_symbol' => $symbols[$i],
+            'position_side' => 'SHORT',
+            'quantity' => 1.0,
+        ]);
+    }
+
+    $response = $this->postJson("/api/v1/future-trade/pine-webhook/{$workspace->id}", pineWebhookPayload([
+        'symbol' => 'ADAUSDT',
+        'signal' => 'CLOSE_SHORT',
+    ]))->assertOk();
+
+    expect($response->json('accepted'))->toBeTrue()
+        ->and($response->json('executed'))->toBeFalse()
+        ->and($response->json('reason'))->toBe('close_signal_symbol_mismatch');
+});
+
 test('non-webhook signal still blocks on stale feed', function () {
     Carbon::setTestNow('2026-05-19 10:30:05');
     $workspace = Workspace::factory()->create();

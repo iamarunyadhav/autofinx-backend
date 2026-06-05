@@ -1495,6 +1495,10 @@ class FutureTradeBotService
             ],
         ];
 
+        $preWebhookPositionSymbol = strtoupper((string) ($state->current_symbol ?? ''));
+        $preWebhookPositionSide = strtoupper((string) ($state->position_side ?? ''));
+        $preWebhookQuantity = (float) ($state->quantity ?? 0);
+
         $this->persistState($state, [
             'current_symbol' => $symbol,
             'current_signal' => $decision,
@@ -1524,10 +1528,21 @@ class FutureTradeBotService
 
         if ($isCloseSignal) {
             $activeState = $this->state($config->fresh('state'));
-            $activeSide = strtoupper((string) ($activeState->position_side ?? ''));
-            $hasOpenPosition = (float) ($activeState->quantity ?? 0) > 0 && in_array($activeSide, ['LONG', 'SHORT'], true);
+            $activeSide = $preWebhookPositionSide !== ''
+                ? $preWebhookPositionSide
+                : strtoupper((string) ($activeState->position_side ?? ''));
+            $activeSymbol = $preWebhookPositionSymbol !== ''
+                ? $preWebhookPositionSymbol
+                : strtoupper((string) ($activeState->current_symbol ?? ''));
+            $activeQuantity = $preWebhookQuantity > 0
+                ? $preWebhookQuantity
+                : (float) ($activeState->quantity ?? 0);
+            $hasOpenPosition = $activeQuantity > 0 && in_array($activeSide, ['LONG', 'SHORT'], true);
 
-            $closeAllowed = $hasOpenPosition && ($closeTargetSide === null || $closeTargetSide === $activeSide);
+            $closeSymbolMatches = $activeSymbol === '' || $activeSymbol === $symbol;
+            $closeAllowed = $hasOpenPosition
+                && $closeSymbolMatches
+                && ($closeTargetSide === null || $closeTargetSide === $activeSide);
             $executed = false;
             $reason = 'Pine webhook produced close signal.';
             $hardBlockPct = (float) ($settings['hardDailyLossBlockPercent'] ?? 0.8);
@@ -1542,6 +1557,8 @@ class FutureTradeBotService
                 }
                 $executed = true;
                 $reason = 'Pine webhook close signal closed the active position.';
+            } elseif ($hasOpenPosition && ! $closeSymbolMatches) {
+                $reason = 'Pine webhook close symbol did not match the active position symbol.';
             } elseif ($hasOpenPosition) {
                 $reason = 'Pine webhook close side did not match the active position side.';
             } else {
@@ -1557,6 +1574,9 @@ class FutureTradeBotService
                 'webhookTiming' => $webhookTiming,
                 'closeTargetSide' => $closeTargetSide,
                 'activePositionSide' => $activeSide ?: null,
+                'activePositionSymbol' => $activeSymbol ?: null,
+                'closeSymbolMatches' => $closeSymbolMatches,
+                'slotRouting' => (string) ($payload['_slot_routing'] ?? '') ?: null,
                 'dailyLossTier' => $hardBlockPct > 0 && $dailyLossPct >= $hardBlockPct ? 'hard_block_exit_allowed' : null,
                 'dailyLossPercent' => $dailyLossPct,
             ]);
@@ -1568,8 +1588,16 @@ class FutureTradeBotService
                 'decision' => $decision,
                 'signal' => $decision,
                 'source' => 'pine_webhook',
-                'execution' => $executed ? 'executed' : ($hasOpenPosition ? 'blocked_close_signal_side_mismatch' : 'blocked_close_signal_no_open_position'),
-                'reason' => $executed ? 'close_signal_executed' : ($hasOpenPosition ? 'close_signal_side_mismatch' : 'close_signal_no_open_position'),
+                'execution' => $executed
+                    ? 'executed'
+                    : ($hasOpenPosition && ! $closeSymbolMatches
+                        ? 'blocked_close_signal_symbol_mismatch'
+                        : ($hasOpenPosition ? 'blocked_close_signal_side_mismatch' : 'blocked_close_signal_no_open_position')),
+                'reason' => $executed
+                    ? 'close_signal_executed'
+                    : ($hasOpenPosition && ! $closeSymbolMatches
+                        ? 'close_signal_symbol_mismatch'
+                        : ($hasOpenPosition ? 'close_signal_side_mismatch' : 'close_signal_no_open_position')),
             ]);
         }
 
@@ -6165,6 +6193,8 @@ class FutureTradeBotService
                 'useWebhookRiskOverrides' => false,
                 'useAtrRiskTargets' => false,
                 'confirmedCandleOnly' => true,
+                'restrictToWorkspaceSymbols' => false,
+                'permissiveSymbolMode' => config('future_trade.permissive_symbol_mode', true),
                 'reversalMode' => 'close_only',
             ], $settings);
             $settings['signalProfileName'] = 'AutoFinX Prime v6.1.7 Crypto Stable Default';

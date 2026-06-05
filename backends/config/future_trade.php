@@ -81,6 +81,10 @@ return [
         // `available_symbols` registry is accepted from a Pine webhook so
         // TradingView alerts on majors don't silently 422.
         'restrictToWorkspaceSymbols' => false,
+        // When true, TradingView Pine webhooks may execute any Binance-style
+        // crypto futures pair ending in USDT/USDC (e.g. 1000PEPEUSDT.P after
+        // normalization), even if the symbol is not in the curated UI list.
+        'permissiveSymbolMode' => env('FUTURE_TRADE_PERMISSIVE_SYMBOL_MODE', true),
         'timeframe' => '15m',
         'paperTrading' => true,
         'liveTrading' => false,

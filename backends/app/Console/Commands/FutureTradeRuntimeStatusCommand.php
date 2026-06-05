@@ -3,6 +3,7 @@
 namespace App\Console\Commands;
 
 use App\Models\FutureTradeBotConfig;
+use App\Models\FutureTradeBotLog;
 use App\Models\FutureTradeBotState;
 use App\Models\FutureTradeLogicalTrade;
 use App\Models\MarketFeedStatus;
@@ -35,6 +36,7 @@ class FutureTradeRuntimeStatusCommand extends Command
             'positions'     => $this->positionStatus($workspaceId),
             'configs'       => $this->configStatus($workspaceId),
             'last_webhook'  => $this->lastWebhookStatus($workspaceId),
+            'last_webhook_event' => $this->lastWebhookEventStatus($workspaceId),
         ];
 
         if ($asJson) {
@@ -220,6 +222,62 @@ class FutureTradeRuntimeStatusCommand extends Command
         }
     }
 
+    private function lastWebhookEventStatus(string $workspaceId): array
+    {
+        try {
+            $configIds = FutureTradeBotConfig::query()
+                ->when($workspaceId !== '', fn ($q) => $q->where('workspace_id', $workspaceId))
+                ->pluck('id');
+
+            if ($configIds->isEmpty()) {
+                return ['event' => null, 'reason' => null];
+            }
+
+            $row = FutureTradeBotLog::query()
+                ->whereIn('future_trade_bot_config_id', $configIds)
+                ->whereIn('event', [
+                    'WEBHOOK_RAW_RECEIVED',
+                    'PINE_WEBHOOK_SIGNAL',
+                    'PINE_WEBHOOK_WAIT',
+                    'PINE_WEBHOOK_CLOSE',
+                    'PINE_WEBHOOK_REJECTED',
+                    'DUPLICATE_WEBHOOK_IGNORED',
+                    'TRADE_BLOCKED',
+                    'SIGNAL_SKIPPED',
+                    'BUY_EXECUTED',
+                    'SELL_EXECUTED',
+                    'LIVE_BUY_EXECUTED',
+                    'LIVE_SELL_EXECUTED',
+                ])
+                ->latest('occurred_at')
+                ->first();
+
+            if (! $row) {
+                return ['event' => null, 'reason' => null];
+            }
+
+            $context = is_array($row->context) ? $row->context : [];
+            return [
+                'event'       => $row->event,
+                'reason'      => $row->reason,
+                'symbol'      => $row->symbol,
+                'signal'      => $row->signal,
+                'occurred_at' => $row->occurred_at?->toIso8601String(),
+                'source'      => $context['source'] ?? null,
+                'signal_source' => $context['signalSource'] ?? $context['signal_source'] ?? null,
+                'slot_routing' => $context['slotRouting'] ?? null,
+                'execution'   => $context['execution'] ?? null,
+                'payload_profile' => $context['payloadProfile'] ?? ($context['payload']['profile'] ?? null),
+                'payload_timeframe' => $context['timeframe'] ?? ($context['payload']['timeframe'] ?? null),
+                'active_position_symbol' => $context['activePositionSymbol'] ?? null,
+                'active_position_side' => $context['activePositionSide'] ?? null,
+                'webhook_timing' => $context['webhookTiming'] ?? null,
+            ];
+        } catch (Throwable $e) {
+            return ['event' => null, 'reason' => null, 'error' => $e->getMessage()];
+        }
+    }
+
     private function renderHuman(array $status): void
     {
         $ok  = '<fg=green>OK</>';
@@ -329,6 +387,15 @@ class FutureTradeRuntimeStatusCommand extends Command
         } else {
             $this->line('  Received : ' . $wh['received_at'] . ' (' . ($wh['age_seconds'] ?? '?') . ' s ago)');
             $this->line('  Symbol   : ' . ($wh['symbol'] ?? 'n/a') . '  signal=' . ($wh['signal'] ?? 'n/a'));
+        }
+        $event = $status['last_webhook_event'] ?? [];
+        if (($event['event'] ?? null) !== null) {
+            $this->line('  Last event: ' . ($event['event'] ?? 'n/a') . ' at ' . ($event['occurred_at'] ?? 'n/a'));
+            $this->line('  Reason    : ' . ($event['reason'] ?? 'n/a'));
+            $this->line('  Event sig : ' . ($event['symbol'] ?? 'n/a') . ' ' . ($event['signal'] ?? 'n/a'));
+            if (($event['payload_profile'] ?? null) !== null || ($event['signal_source'] ?? null) !== null) {
+                $this->line('  Debug     : profile=' . ($event['payload_profile'] ?? 'n/a') . ' source=' . ($event['signal_source'] ?? 'n/a'));
+            }
         }
         $this->newLine();
     }
