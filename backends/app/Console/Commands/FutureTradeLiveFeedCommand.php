@@ -4,6 +4,7 @@ namespace App\Console\Commands;
 
 use App\Models\FutureTradeBotConfig;
 use Illuminate\Console\Command;
+use Illuminate\Support\Facades\Cache;
 
 class FutureTradeLiveFeedCommand extends Command
 {
@@ -24,15 +25,31 @@ class FutureTradeLiveFeedCommand extends Command
             $symbols = ['BTCUSDT', 'ETHUSDT'];
         }
 
-        return $this->call('market:ws-consume', [
-            '--market-type' => 'futures',
-            '--symbols' => implode(',', $symbols),
-            '--streams' => (string) $this->option('streams'),
-            '--reconnect-sleep' => (string) $this->option('reconnect-sleep'),
-            '--max-runtime' => (string) $this->option('max-runtime'),
-            '--testnet' => (bool) $this->option('testnet'),
-            '--no-dispatch' => true,
-        ]);
+        $streams = (string) $this->option('streams');
+        $maxRuntime = max(0, (int) $this->option('max-runtime'));
+        $lock = Cache::lock(
+            'autofinx:runtime:future-trade-live-feed:'.md5(implode(',', $symbols)).':'.md5($streams),
+            $maxRuntime > 0 ? $maxRuntime + 60 : 86400
+        );
+        if (! $lock->get()) {
+            $this->warn('Another Future Trade live-feed daemon is already running for this symbol/stream scope.');
+
+            return self::SUCCESS;
+        }
+
+        try {
+            return $this->call('market:ws-consume', [
+                '--market-type' => 'futures',
+                '--symbols' => implode(',', $symbols),
+                '--streams' => $streams,
+                '--reconnect-sleep' => (string) $this->option('reconnect-sleep'),
+                '--max-runtime' => (string) $maxRuntime,
+                '--testnet' => (bool) $this->option('testnet'),
+                '--no-dispatch' => true,
+            ]);
+        } finally {
+            optional($lock)->release();
+        }
     }
 
     /**

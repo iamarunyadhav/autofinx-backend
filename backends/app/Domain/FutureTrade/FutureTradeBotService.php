@@ -1563,6 +1563,33 @@ class FutureTradeBotService
             ],
         ];
 
+        $idempotencyKey = $this->pineWebhookIdempotencyKey(
+            (string) ($settings['signalProfile'] ?? self::PROFILE_PRIME_V617_CRYPTO),
+            $symbol,
+            $timeframe,
+            $decision,
+            $candle['close']->toIso8601String()
+        );
+        if (! Cache::add($idempotencyKey, 1, now()->addMinutes(20))) {
+            $this->log($config->fresh('state'), 'DUPLICATE_WEBHOOK_IGNORED', $symbol, $decision, $confidence, 'Duplicate Pine webhook signal ignored by idempotency lock.', [
+                'source' => 'pine_webhook',
+                'idempotencyKey' => $idempotencyKey,
+                'candleClose' => $signal['candle_close'],
+            ]);
+
+            return $this->finalizeWebhookLatency($config, $signal, $t0, $latency, [
+                'ok' => true,
+                'accepted' => false,
+                'executed' => false,
+                'eligible' => false,
+                'decision' => $decision,
+                'signal' => $decision,
+                'source' => 'pine_webhook',
+                'execution' => 'duplicate_ignored',
+                'reason' => 'duplicate_signal',
+            ]);
+        }
+
         $preWebhookPositionSymbol = strtoupper((string) ($state->current_symbol ?? ''));
         $preWebhookPositionSide = strtoupper((string) ($state->position_side ?? ''));
         $preWebhookQuantity = (float) ($state->quantity ?? 0);
@@ -2509,6 +2536,16 @@ class FutureTradeBotService
     private function normalizePineSymbol(string $symbol): string
     {
         return $this->normalizeIncomingSymbol($symbol);
+    }
+
+    private function pineWebhookIdempotencyKey(string $profile, string $symbol, string $timeframe, string $signal, string $barTime): string
+    {
+        $parts = array_map(
+            static fn (string $value): string => preg_replace('/[^A-Z0-9_\-:]/', '', strtoupper(trim($value))) ?? '',
+            [$profile, $symbol, $timeframe, $signal, $barTime]
+        );
+
+        return 'autofinx:pine:idempotency:'.implode(':', $parts);
     }
 
     /**
@@ -8936,12 +8973,12 @@ class FutureTradeBotService
     private function primeMirrorLiveEnabled(array $settings = []): bool
     {
         return filter_var($settings['primeMirrorLiveEnabled'] ?? false, FILTER_VALIDATE_BOOLEAN)
-            || filter_var(config('future_trade.prime_mirror_live_enabled', false), FILTER_VALIDATE_BOOLEAN);
+            || filter_var(config('future_trade.live.prime_mirror_enabled', config('future_trade.prime_mirror_live_enabled', false)), FILTER_VALIDATE_BOOLEAN);
     }
 
     private function pineWebhookLiveEnabled(): bool
     {
-        return filter_var(config('future_trade.pine_webhook_live_enabled', true), FILTER_VALIDATE_BOOLEAN);
+        return filter_var(config('future_trade.live.pine_webhook_enabled', config('future_trade.pine_webhook_live_enabled', true)), FILTER_VALIDATE_BOOLEAN);
     }
 
     private function webhookFallbackEnabled(array $settings = []): bool

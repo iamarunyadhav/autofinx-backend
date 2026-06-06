@@ -153,7 +153,9 @@ class FutureTradeBotController extends Controller
                 $result['slotIndex'] = (int) $targetConfig->slot_index;
             }
 
-            return response()->json($result, ($result['accepted'] ?? false) ? 200 : 422);
+            $status = ($result['accepted'] ?? false) || ($result['reason'] ?? null) === 'duplicate_signal' ? 200 : 422;
+
+            return response()->json($result, $status);
         } catch (Throwable $exception) {
             Log::error('PINE_WEBHOOK_INTERNAL_ERROR', [
                 'workspace' => $workspace,

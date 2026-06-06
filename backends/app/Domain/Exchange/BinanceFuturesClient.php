@@ -10,7 +10,9 @@ use RuntimeException;
 class BinanceFuturesClient
 {
     private readonly string $apiKey;
+
     private readonly string $apiSecret;
+
     private readonly string $baseUrl;
 
     public function __construct(
@@ -120,7 +122,7 @@ class BinanceFuturesClient
     public function setLeverage(string $symbol, int|float $leverage): array
     {
         $response = $this->signedRequest('POST', '/fapi/v1/leverage', [
-            'symbol'   => BinanceSymbolNormalizer::normalize($symbol),
+            'symbol' => BinanceSymbolNormalizer::normalize($symbol),
             'leverage' => (int) round($leverage),
         ]);
 
@@ -130,7 +132,7 @@ class BinanceFuturesClient
     public function setMarginType(string $symbol, string $marginMode): array
     {
         $response = $this->signedRequest('POST', '/fapi/v1/marginType', [
-            'symbol'     => BinanceSymbolNormalizer::normalize($symbol),
+            'symbol' => BinanceSymbolNormalizer::normalize($symbol),
             'marginType' => strtoupper($marginMode),
         ], false);
 
@@ -169,12 +171,12 @@ class BinanceFuturesClient
         string $workingType = 'MARK_PRICE',
     ): array {
         $response = $this->signedRequest('POST', '/fapi/v1/order', [
-            'symbol'           => BinanceSymbolNormalizer::normalize($symbol),
-            'side'             => $side,
-            'type'             => $type,
-            'stopPrice'        => number_format(round($stopPrice, 8), 8, '.', ''),
-            'closePosition'    => 'true',
-            'workingType'      => $workingType,
+            'symbol' => BinanceSymbolNormalizer::normalize($symbol),
+            'side' => $side,
+            'type' => $type,
+            'stopPrice' => number_format(round($stopPrice, 8), 8, '.', ''),
+            'closePosition' => 'true',
+            'workingType' => $workingType,
             'newClientOrderId' => $clientOrderId,
         ]);
 
@@ -229,7 +231,7 @@ class BinanceFuturesClient
     {
         $params = [
             'symbol' => BinanceSymbolNormalizer::normalize($symbol),
-            'limit'  => max(1, min(1000, $limit)),
+            'limit' => max(1, min(1000, $limit)),
         ];
         if ($startTimeMs !== null) {
             $params['startTime'] = $startTimeMs;
@@ -294,12 +296,12 @@ class BinanceFuturesClient
             return;
         }
 
-        throw new RuntimeException($message . ' ' . $response->body());
+        throw new RuntimeException($message.' '.$response->body());
     }
 
     private function url(string $path): string
     {
-        return $this->baseUrl . $path;
+        return $this->baseUrl.$path;
     }
 
     // ── DNS pre-warm ─────────────────────────────────────────────────────────
@@ -312,7 +314,7 @@ class BinanceFuturesClient
             return;
         }
         try {
-            $cacheKey = 'binance_dns_warm:' . $host;
+            $cacheKey = 'binance_dns_warm:'.$host;
             if (! Cache::has($cacheKey)) {
                 $resolved = @gethostbyname($host);
                 if ($resolved && $resolved !== $host) {
@@ -332,7 +334,9 @@ class BinanceFuturesClient
     private function request(string $method, string $path, array $params = [], bool $authenticated = false): Response
     {
         $host = (string) (parse_url($this->baseUrl, PHP_URL_HOST) ?: '');
+        $restGuard = new BinanceRestCircuitBreaker;
         $this->prewarmDns($host);
+        $restGuard->assertAvailable();
         $this->assertCircuitClosed($host);
 
         $delaysMs = [0, 300, 900, 2000];
@@ -344,31 +348,34 @@ class BinanceFuturesClient
             }
 
             try {
+                $restGuard->throttle();
                 $pending = Http::withHeaders($authenticated ? $this->apiHeaders() : [])
                     ->timeout(12)
                     ->connectTimeout(5);
 
                 $response = match (strtoupper($method)) {
-                    'GET'    => $pending->get($this->url($path), $params),
-                    'PUT'    => $pending->asForm()->put($this->url($path), $params),
+                    'GET' => $pending->get($this->url($path), $params),
+                    'PUT' => $pending->asForm()->put($this->url($path), $params),
                     'DELETE' => $pending->delete($this->url($path), $params),
-                    default  => $pending->asForm()->post($this->url($path), $params),
+                    default => $pending->asForm()->post($this->url($path), $params),
                 };
 
                 // Retry on transient HTTP errors (rate-limit, gateway errors, etc.)
                 if ($this->isRetryableStatus($response) && $index !== array_key_last($delaysMs)) {
                     $lastException = new RuntimeException(
-                        'Binance futures REST returned retryable status ' . $response->status()
+                        'Binance futures REST returned retryable status '.$response->status()
                     );
+
                     continue;
                 }
 
                 // Success (or non-retryable response) — reset circuit breaker
                 if ($this->isRetryableStatus($response)) {
-                    $this->circuitRecordFailure($host, 'HTTP ' . $response->status() . ': ' . $response->body());
+                    $this->circuitRecordFailure($host, 'HTTP '.$response->status().': '.$response->body());
                 } else {
                     $this->circuitSuccess($host);
                 }
+                $restGuard->recordResponse($response);
 
                 return $response;
 
@@ -391,12 +398,12 @@ class BinanceFuturesClient
 
     private function assertCircuitClosed(string $host): void
     {
-        $state = (array) (Cache::get('binance_cb:' . $host, []));
+        $state = (array) (Cache::get('binance_cb:'.$host, []));
         if (($state['open'] ?? false) && time() < (int) ($state['until'] ?? 0)) {
             $remaining = (int) ($state['until'] ?? 0) - time();
             throw new RuntimeException(
-                'binance_rest_circuit_open: Binance API circuit breaker is open (' .
-                $remaining . 's remaining). Last error: ' .
+                'binance_rest_circuit_open: Binance API circuit breaker is open ('.
+                $remaining.'s remaining). Last error: '.
                 (string) ($state['last_error'] ?? 'unknown')
             );
         }
@@ -405,8 +412,8 @@ class BinanceFuturesClient
     private function circuitRecordFailure(string $host, ?string $error = null): void
     {
         try {
-            $key      = 'binance_cb:' . $host;
-            $state    = (array) (Cache::get($key, []));
+            $key = 'binance_cb:'.$host;
+            $state = (array) (Cache::get($key, []));
             $failures = (int) ($state['failures'] ?? 0) + 1;
             $lastError = $error !== null && $error !== ''
                 ? mb_substr($error, 0, 500)
@@ -414,9 +421,9 @@ class BinanceFuturesClient
 
             if ($failures >= 5) {
                 Cache::put($key, [
-                    'open'       => true,
-                    'until'      => time() + 45,
-                    'failures'   => $failures,
+                    'open' => true,
+                    'until' => time() + 45,
+                    'failures' => $failures,
                     'last_error' => $lastError,
                 ], 120);
             } else {
@@ -433,7 +440,7 @@ class BinanceFuturesClient
     private function circuitSuccess(string $host): void
     {
         try {
-            Cache::forget('binance_cb:' . $host);
+            Cache::forget('binance_cb:'.$host);
         } catch (\Throwable) {
         }
     }

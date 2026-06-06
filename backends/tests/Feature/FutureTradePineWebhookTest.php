@@ -126,6 +126,29 @@ test('pine webhook accepts TradingView futures symbol when dot suffix is flatten
         ->exists())->toBeTrue();
 });
 
+test('pine webhook ignores duplicate alert idempotently before execution', function () {
+    config(['future_trade.pine_webhook_token' => 'pine-secret']);
+    Carbon::setTestNow('2026-05-19 10:30:05');
+    $workspace = Workspace::factory()->create();
+    createPrimeWebhookConfig($workspace->id);
+    $payload = pineWebhookPayload([
+        'signal' => 'BUY',
+        'symbol' => 'ETHUSDT.P',
+        'strategy_order_id' => 'tv-order-duplicate-test',
+    ]);
+
+    $this->postJson("/api/v1/future-trade/pine-webhook/{$workspace->id}", $payload)
+        ->assertOk()
+        ->assertJsonPath('accepted', true);
+
+    $this->postJson("/api/v1/future-trade/pine-webhook/{$workspace->id}", $payload)
+        ->assertOk()
+        ->assertJsonPath('ok', true)
+        ->assertJsonPath('accepted', false)
+        ->assertJsonPath('executed', false)
+        ->assertJsonPath('reason', 'duplicate_signal');
+});
+
 test('pine webhook returns stable json instead of 500 when execution throws', function () {
     config(['future_trade.pine_webhook_token' => 'pine-secret']);
     Carbon::setTestNow('2026-05-19 10:30:05');

@@ -2,6 +2,7 @@
 
 namespace App\Console\Commands;
 
+use App\Domain\Exchange\BinanceRestCircuitBreaker;
 use App\Models\FutureTradeBotConfig;
 use App\Models\FutureTradeBotLog;
 use App\Models\FutureTradeLogicalTrade;
@@ -23,27 +24,33 @@ class FutureTradeRuntimeStatusCommand extends Command
     public function handle(): int
     {
         $workspaceId = trim((string) $this->option('workspace'));
-        $asJson      = (bool) $this->option('json');
+        $asJson = (bool) $this->option('json');
 
         $status = [
-            'generated_at'  => date('c'),
-            'redis'         => $this->redisStatus(),
-            'database'      => $this->dbStatus(),
-            'live_feed'     => $this->liveFeedStatus(),
-            'user_stream'   => $this->userStreamStatus($workspaceId),
-            'queues'        => $this->queueStatus(),
-            'positions'     => $this->positionStatus($workspaceId),
-            'configs'       => $this->configStatus($workspaceId),
-            'last_webhook'  => $this->lastWebhookStatus($workspaceId),
+            'generated_at' => date('c'),
+            'runtime' => $this->runtimeOwnershipStatus(),
+            'scheduler' => $this->schedulerStatus(),
+            'redis' => $this->redisStatus(),
+            'database' => $this->dbStatus(),
+            'binance_rest' => app(BinanceRestCircuitBreaker::class)->status(),
+            'live_feed' => $this->liveFeedStatus(),
+            'user_stream' => $this->userStreamStatus($workspaceId),
+            'unexpected_processes' => $this->unexpectedProcessStatus(),
+            'queues' => $this->queueStatus(),
+            'positions' => $this->positionStatus($workspaceId),
+            'configs' => $this->configStatus($workspaceId),
+            'last_webhook' => $this->lastWebhookStatus($workspaceId),
             'last_webhook_event' => $this->lastWebhookEventStatus($workspaceId),
         ];
 
         if ($asJson) {
             $this->line(json_encode($status, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+
             return self::SUCCESS;
         }
 
         $this->renderHuman($status);
+
         return self::SUCCESS;
     }
 
@@ -51,16 +58,40 @@ class FutureTradeRuntimeStatusCommand extends Command
     {
         try {
             $pong = Redis::ping();
+
             return ['ok' => true, 'response' => $pong];
         } catch (Throwable $e) {
             return ['ok' => false, 'error' => $e->getMessage()];
         }
     }
 
+    private function runtimeOwnershipStatus(): array
+    {
+        return [
+            'owner' => (string) config('autofinx.runtime.owner', 'supervisor'),
+            'supervisor' => (bool) config('autofinx.runtime.supervisor', false),
+        ];
+    }
+
+    private function schedulerStatus(): array
+    {
+        return [
+            'enabled' => (bool) config('autofinx.scheduler.enabled', true),
+            'market_consumers' => (bool) config('autofinx.scheduler.market_consumers', false),
+            'binance_rest' => (bool) config('autofinx.scheduler.binance_rest', false),
+            'metals' => (bool) config('autofinx.scheduler.metals', false),
+            'future_trade_runtime_commands' => (bool) config('future_trade.schedule.runtime_commands', false),
+            'future_trade_reconcile' => (bool) config('future_trade.schedule.reconcile', false),
+            'future_trade_diagnostics' => (bool) config('future_trade.schedule.diagnostics', false),
+            'future_trade_audit_missed_signals' => (bool) config('future_trade.schedule.audit_missed_signals', false),
+        ];
+    }
+
     private function dbStatus(): array
     {
         try {
             DB::select('SELECT 1');
+
             return ['ok' => true];
         } catch (Throwable $e) {
             return ['ok' => false, 'error' => $e->getMessage()];
@@ -73,29 +104,29 @@ class FutureTradeRuntimeStatusCommand extends Command
         if (! file_exists($path)) {
             return [
                 'heartbeat_file' => false,
-                'stale'          => true,
-                'age_seconds'    => null,
-                'detail'         => 'Heartbeat file not found. Is live-feed supervisor process running?',
+                'stale' => true,
+                'age_seconds' => null,
+                'detail' => 'Heartbeat file not found. Is live-feed supervisor process running?',
             ];
         }
 
         $raw = @file_get_contents($path);
         $data = $raw !== false ? @json_decode($raw, true) : null;
         $epoch = is_array($data) ? (int) ($data['last_message_epoch'] ?? 0) : 0;
-        $age   = $epoch > 0 ? (time() - $epoch) : null;
+        $age = $epoch > 0 ? (time() - $epoch) : null;
         $stale = $age === null || $age > 20;
 
         return [
-            'heartbeat_file'   => true,
-            'stale'            => $stale,
-            'age_seconds'      => $age,
-            'last_message_at'  => $data['last_message_at'] ?? null,
-            'symbol'           => $data['symbol'] ?? null,
-            'stream'           => $data['stream'] ?? null,
-            'reconnect_count'  => $data['reconnect_count'] ?? null,
-            'message_count'    => $data['message_count'] ?? null,
-            'connected_at'     => $data['connected_at'] ?? null,
-            'market_type'      => $data['market_type'] ?? null,
+            'heartbeat_file' => true,
+            'stale' => $stale,
+            'age_seconds' => $age,
+            'last_message_at' => $data['last_message_at'] ?? null,
+            'symbol' => $data['symbol'] ?? null,
+            'stream' => $data['stream'] ?? null,
+            'reconnect_count' => $data['reconnect_count'] ?? null,
+            'message_count' => $data['message_count'] ?? null,
+            'connected_at' => $data['connected_at'] ?? null,
+            'market_type' => $data['market_type'] ?? null,
         ];
     }
 
@@ -108,18 +139,18 @@ class FutureTradeRuntimeStatusCommand extends Command
 
         $result = [];
         foreach ($query->get() as $config) {
-            $cacheKey = 'autofinx_ft:user_stream:' . $config->id . ':state';
+            $cacheKey = 'autofinx_ft:user_stream:'.$config->id.':state';
             $state = Cache::get($cacheKey);
             $heartbeatAt = is_array($state) ? ($state['last_heartbeat_at'] ?? null) : null;
             $age = $heartbeatAt ? max(0, time() - strtotime((string) $heartbeatAt)) : null;
 
             $result[] = [
-                'workspace_id'    => $config->workspace_id,
-                'config_id'       => $config->id,
-                'slot_index'      => $config->slot_index,
-                'status'          => is_array($state) ? ($state['status'] ?? 'UNKNOWN') : 'NOT_CONFIGURED',
+                'workspace_id' => $config->workspace_id,
+                'config_id' => $config->id,
+                'slot_index' => $config->slot_index,
+                'status' => is_array($state) ? ($state['status'] ?? 'UNKNOWN') : 'NOT_CONFIGURED',
                 'heartbeat_age_s' => $age,
-                'fresh'           => $age !== null && $age <= 30,
+                'fresh' => $age !== null && $age <= 30,
             ];
         }
 
@@ -138,13 +169,13 @@ class FutureTradeRuntimeStatusCommand extends Command
         foreach ($queues as $queue) {
             try {
                 $pending = DB::table('jobs')->where('queue', $queue)->count();
-                $failed  = DB::table('failed_jobs')->where('queue', $queue)->count();
-                $oldest  = DB::table('jobs')->where('queue', $queue)->min('created_at');
-                $ageS    = $oldest ? $this->jobTimestampAgeSeconds($oldest) : null;
+                $failed = DB::table('failed_jobs')->where('queue', $queue)->count();
+                $oldest = DB::table('jobs')->where('queue', $queue)->min('created_at');
+                $ageS = $oldest ? $this->jobTimestampAgeSeconds($oldest) : null;
                 $result[$queue] = [
-                    'pending'         => $pending,
-                    'failed'          => $failed,
-                    'oldest_age_s'    => $ageS,
+                    'pending' => $pending,
+                    'failed' => $failed,
+                    'oldest_age_s' => $ageS,
                 ];
             } catch (Throwable) {
                 $result[$queue] = ['error' => 'unavailable'];
@@ -181,7 +212,7 @@ class FutureTradeRuntimeStatusCommand extends Command
                 });
 
             return [
-                'open_count'   => $query->count(),
+                'open_count' => $query->count(),
                 'open_symbols' => $query->pluck('symbol')->unique()->values()->all(),
             ];
         } catch (Throwable $e) {
@@ -199,17 +230,17 @@ class FutureTradeRuntimeStatusCommand extends Command
         foreach ($query->get() as $config) {
             $settings = $config->mergedSettings();
             $result[] = [
-                'workspace_id'       => $config->workspace_id,
-                'slot_index'         => $config->slot_index,
-                'enabled'            => $config->enabled,
-                'execution_mode'     => $config->executionMode(),
-                'live_trading'       => $config->enable_live_trading,
-                'state'              => $config->state?->state,
-                'status'             => $config->state?->status,
-                'current_symbol'     => $config->state?->current_symbol,
-                'last_scan_at'       => $config->state?->last_scan_at,
-                'signal_source'      => $settings['signalSource'] ?? 'mirror',
-                'symbols'            => $settings['symbols'] ?? [],
+                'workspace_id' => $config->workspace_id,
+                'slot_index' => $config->slot_index,
+                'enabled' => $config->enabled,
+                'execution_mode' => $config->executionMode(),
+                'live_trading' => $config->enable_live_trading,
+                'state' => $config->state?->state,
+                'status' => $config->state?->status,
+                'current_symbol' => $config->state?->current_symbol,
+                'last_scan_at' => $config->state?->last_scan_at,
+                'signal_source' => $settings['signalSource'] ?? 'mirror',
+                'symbols' => $settings['symbols'] ?? [],
             ];
         }
 
@@ -219,8 +250,8 @@ class FutureTradeRuntimeStatusCommand extends Command
     private function lastWebhookStatus(string $workspaceId): array
     {
         try {
-            $cacheKey = 'future_trade_last_pine_webhook_payload' . ($workspaceId !== '' ? ':' . $workspaceId : '');
-            $payload  = Cache::get($cacheKey);
+            $cacheKey = 'future_trade_last_pine_webhook_payload'.($workspaceId !== '' ? ':'.$workspaceId : '');
+            $payload = Cache::get($cacheKey);
             if (! is_array($payload)) {
                 return ['received_at' => null, 'age_seconds' => null];
             }
@@ -229,11 +260,11 @@ class FutureTradeRuntimeStatusCommand extends Command
             $age = $receivedAt ? max(0, time() - strtotime((string) $receivedAt)) : null;
 
             return [
-                'received_at'  => $receivedAt,
-                'age_seconds'  => $age,
-                'symbol'       => $payload['symbol'] ?? null,
-                'signal'       => $payload['signal'] ?? $payload['action'] ?? null,
-                'source'       => $payload['source'] ?? null,
+                'received_at' => $receivedAt,
+                'age_seconds' => $age,
+                'symbol' => $payload['symbol'] ?? null,
+                'signal' => $payload['signal'] ?? $payload['action'] ?? null,
+                'source' => $payload['source'] ?? null,
             ];
         } catch (Throwable) {
             return ['received_at' => null, 'age_seconds' => null];
@@ -275,16 +306,17 @@ class FutureTradeRuntimeStatusCommand extends Command
             }
 
             $context = is_array($row->context) ? $row->context : [];
+
             return [
-                'event'       => $row->event,
-                'reason'      => $row->reason,
-                'symbol'      => $row->symbol,
-                'signal'      => $row->signal,
+                'event' => $row->event,
+                'reason' => $row->reason,
+                'symbol' => $row->symbol,
+                'signal' => $row->signal,
                 'occurred_at' => $row->occurred_at?->toIso8601String(),
-                'source'      => $context['source'] ?? null,
+                'source' => $context['source'] ?? null,
                 'signal_source' => $context['signalSource'] ?? $context['signal_source'] ?? null,
                 'slot_routing' => $context['slotRouting'] ?? null,
-                'execution'   => $context['execution'] ?? null,
+                'execution' => $context['execution'] ?? null,
                 'payload_profile' => $context['payloadProfile'] ?? ($context['payload']['profile'] ?? null),
                 'payload_timeframe' => $context['timeframe'] ?? ($context['payload']['timeframe'] ?? null),
                 'active_position_symbol' => $context['activePositionSymbol'] ?? null,
@@ -296,39 +328,108 @@ class FutureTradeRuntimeStatusCommand extends Command
         }
     }
 
+    private function unexpectedProcessStatus(): array
+    {
+        if (PHP_OS_FAMILY === 'Windows' || ! function_exists('shell_exec')) {
+            return [
+                'checked' => false,
+                'unexpected_legacy_worker_detected' => false,
+                'matches' => [],
+                'detail' => 'Process scan is unavailable on this runtime.',
+            ];
+        }
+
+        $output = (string) shell_exec('ps -eo pid=,args= 2>/dev/null');
+        $badPatterns = [
+            'artisan queue:work --queue=critical,execution,reconcile,monitoring,market',
+            'artisan market:ws-consume',
+            'artisan metals:poll-prices',
+            'artisan schedule:run',
+            'artisan future-trade:reconcile',
+            'artisan future-trade:diagnostics',
+        ];
+
+        $matches = [];
+        foreach (preg_split('/\R/', $output) ?: [] as $line) {
+            foreach ($badPatterns as $pattern) {
+                if (str_contains($line, $pattern)) {
+                    $matches[] = trim($line);
+                    break;
+                }
+            }
+        }
+
+        return [
+            'checked' => true,
+            'unexpected_legacy_worker_detected' => $matches !== [],
+            'matches' => array_values(array_unique($matches)),
+        ];
+    }
+
     private function renderHuman(array $status): void
     {
-        $ok  = '<fg=green>OK</>';
+        $ok = '<fg=green>OK</>';
         $err = '<fg=red>FAIL</>';
         $warn = '<fg=yellow>WARN</>';
 
         $this->newLine();
         $this->line('<options=bold>══ AutoFinX Future Trade — Runtime Status ══</>');
-        $this->line('Generated: ' . $status['generated_at']);
+        $this->line('Generated: '.$status['generated_at']);
+        $this->newLine();
+
+        $this->line('<options=bold>[ Runtime Ownership ]</>');
+        $runtime = $status['runtime'];
+        $scheduler = $status['scheduler'];
+        $this->line('  Runtime owner      : '.($runtime['owner'] ?? 'unknown'));
+        $this->line('  Supervisor mode    : '.(($runtime['supervisor'] ?? false) ? $ok : $warn));
+        $this->line('  Scheduler enabled  : '.(($scheduler['enabled'] ?? false) ? $ok : $warn));
+        $this->line('  Market consumers   : '.(($scheduler['market_consumers'] ?? false) ? $warn : $ok.' disabled'));
+        $this->line('  Binance REST sched : '.(($scheduler['binance_rest'] ?? false) ? $warn : $ok.' disabled'));
+        $this->line('  FT reconcile sched : '.(($scheduler['future_trade_reconcile'] ?? false) ? $warn : $ok.' disabled'));
+        $this->line('  FT diagnostics     : '.(($scheduler['future_trade_diagnostics'] ?? false) ? $warn : $ok.' disabled'));
         $this->newLine();
 
         // Redis / DB
         $this->line('<options=bold>[ Infrastructure ]</>');
         $redis = $status['redis'];
-        $db    = $status['database'];
-        $this->line('  Redis   : ' . ($redis['ok'] ? $ok : $err . ' ' . ($redis['error'] ?? '')));
-        $this->line('  Database: ' . ($db['ok'] ? $ok : $err . ' ' . ($db['error'] ?? '')));
+        $db = $status['database'];
+        $this->line('  Redis   : '.($redis['ok'] ? $ok : $err.' '.($redis['error'] ?? '')));
+        $this->line('  Database: '.($db['ok'] ? $ok : $err.' '.($db['error'] ?? '')));
+        $rest = $status['binance_rest'];
+        $this->line('  Binance REST circuit: '.(($rest['open'] ?? false) ? $err.' open '.($rest['remaining_seconds'] ?? '?').'s' : $ok));
+        if (! empty($rest['last_error'])) {
+            $this->line('  Binance REST last error: '.$rest['last_error']);
+        }
         $this->newLine();
 
         // Live Feed
         $this->line('<options=bold>[ Live Feed (market:ws-consume) ]</>');
         $feed = $status['live_feed'];
         if (! $feed['heartbeat_file']) {
-            $this->line('  Status    : ' . $err . ' — no heartbeat file (is live-feed supervisor process running?)');
+            $this->line('  Status    : '.$err.' — no heartbeat file (is live-feed supervisor process running?)');
         } else {
             $age = $feed['age_seconds'];
             $label = $age === null ? $err : ($age <= 10 ? $ok : ($age <= 20 ? $warn : $err));
-            $this->line('  Status    : ' . $label);
-            $this->line('  Age       : ' . ($age !== null ? $age . ' s' : 'unknown'));
-            $this->line('  Last msg  : ' . ($feed['last_message_at'] ?? 'n/a'));
-            $this->line('  Symbol    : ' . ($feed['symbol'] ?? 'n/a') . '  stream=' . ($feed['stream'] ?? 'n/a'));
-            $this->line('  Reconnects: ' . ($feed['reconnect_count'] ?? 'n/a'));
-            $this->line('  Msg count : ' . ($feed['message_count'] ?? 'n/a'));
+            $this->line('  Status    : '.$label);
+            $this->line('  Age       : '.($age !== null ? $age.' s' : 'unknown'));
+            $this->line('  Last msg  : '.($feed['last_message_at'] ?? 'n/a'));
+            $this->line('  Symbol    : '.($feed['symbol'] ?? 'n/a').'  stream='.($feed['stream'] ?? 'n/a'));
+            $this->line('  Reconnects: '.($feed['reconnect_count'] ?? 'n/a'));
+            $this->line('  Msg count : '.($feed['message_count'] ?? 'n/a'));
+        }
+        $this->newLine();
+
+        $this->line('<options=bold>[ Unexpected Processes ]</>');
+        $processes = $status['unexpected_processes'];
+        if (! ($processes['checked'] ?? false)) {
+            $this->line('  '.$warn.' '.($processes['detail'] ?? 'not checked'));
+        } elseif ($processes['unexpected_legacy_worker_detected'] ?? false) {
+            $this->line('  '.$err.' unexpected legacy/runtime process detected');
+            foreach ((array) ($processes['matches'] ?? []) as $match) {
+                $this->line('  - '.$match);
+            }
+        } else {
+            $this->line('  '.$ok.' no unexpected legacy runtime processes detected');
         }
         $this->newLine();
 
@@ -355,11 +456,12 @@ class FutureTradeRuntimeStatusCommand extends Command
         $this->line('<options=bold>[ Queues ]</>');
         foreach ($status['queues'] as $q => $info) {
             if (isset($info['error'])) {
-                $this->line("  {$q}: " . $err . ' ' . $info['error']);
+                $this->line("  {$q}: ".$err.' '.$info['error']);
+
                 continue;
             }
             $pending = (int) ($info['pending'] ?? 0);
-            $failed  = (int) ($info['failed'] ?? 0);
+            $failed = (int) ($info['failed'] ?? 0);
             if ($pending > 0 || $failed > 0) {
                 $label = $failed > 0 ? $err : ($pending > 50 ? $warn : $ok);
                 $this->line(sprintf('  %s %-20s pending=%-4d failed=%-4d oldest=%ss',
@@ -373,10 +475,10 @@ class FutureTradeRuntimeStatusCommand extends Command
         $this->line('<options=bold>[ Open Positions ]</>');
         $pos = $status['positions'];
         if (isset($pos['error'])) {
-            $this->line('  ' . $err . ' ' . $pos['error']);
+            $this->line('  '.$err.' '.$pos['error']);
         } else {
-            $this->line('  Count  : ' . ($pos['open_count'] ?? 0));
-            $this->line('  Symbols: ' . implode(', ', $pos['open_symbols'] ?? []));
+            $this->line('  Count  : '.($pos['open_count'] ?? 0));
+            $this->line('  Symbols: '.implode(', ', $pos['open_symbols'] ?? []));
         }
         $this->newLine();
 
@@ -403,16 +505,16 @@ class FutureTradeRuntimeStatusCommand extends Command
         if ($wh['received_at'] === null) {
             $this->line('  No recent webhook recorded.');
         } else {
-            $this->line('  Received : ' . $wh['received_at'] . ' (' . ($wh['age_seconds'] ?? '?') . ' s ago)');
-            $this->line('  Symbol   : ' . ($wh['symbol'] ?? 'n/a') . '  signal=' . ($wh['signal'] ?? 'n/a'));
+            $this->line('  Received : '.$wh['received_at'].' ('.($wh['age_seconds'] ?? '?').' s ago)');
+            $this->line('  Symbol   : '.($wh['symbol'] ?? 'n/a').'  signal='.($wh['signal'] ?? 'n/a'));
         }
         $event = $status['last_webhook_event'] ?? [];
         if (($event['event'] ?? null) !== null) {
-            $this->line('  Last event: ' . ($event['event'] ?? 'n/a') . ' at ' . ($event['occurred_at'] ?? 'n/a'));
-            $this->line('  Reason    : ' . ($event['reason'] ?? 'n/a'));
-            $this->line('  Event sig : ' . ($event['symbol'] ?? 'n/a') . ' ' . ($event['signal'] ?? 'n/a'));
+            $this->line('  Last event: '.($event['event'] ?? 'n/a').' at '.($event['occurred_at'] ?? 'n/a'));
+            $this->line('  Reason    : '.($event['reason'] ?? 'n/a'));
+            $this->line('  Event sig : '.($event['symbol'] ?? 'n/a').' '.($event['signal'] ?? 'n/a'));
             if (($event['payload_profile'] ?? null) !== null || ($event['signal_source'] ?? null) !== null) {
-                $this->line('  Debug     : profile=' . ($event['payload_profile'] ?? 'n/a') . ' source=' . ($event['signal_source'] ?? 'n/a'));
+                $this->line('  Debug     : profile='.($event['payload_profile'] ?? 'n/a').' source='.($event['signal_source'] ?? 'n/a'));
             }
         }
         $this->newLine();
