@@ -1,8 +1,8 @@
 <?php
 
+use App\Domain\FutureTrade\FutureTradeBotService;
 use App\Models\FutureTradeBotConfig;
 use App\Models\Workspace;
-use App\Domain\FutureTrade\FutureTradeBotService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Carbon;
 
@@ -103,6 +103,48 @@ test('pine webhook accepts body token even when a wrong inherited bearer token i
         ->assertOk()
         ->assertJsonPath('accepted', true)
         ->assertJsonPath('decision', 'BUY');
+});
+
+test('pine webhook accepts TradingView futures symbol when dot suffix is flattened', function () {
+    config(['future_trade.pine_webhook_token' => 'pine-secret']);
+    Carbon::setTestNow('2026-05-19 10:30:05');
+    $workspace = Workspace::factory()->create();
+    $config = createPrimeWebhookConfig($workspace->id);
+
+    $this->postJson("/api/v1/future-trade/pine-webhook/{$workspace->id}", pineWebhookPayload([
+        'symbol' => 'BTCUSDTP',
+        'signal' => 'CLOSE_SHORT',
+        'price' => 69025.4,
+    ]))
+        ->assertOk()
+        ->assertJsonPath('accepted', true)
+        ->assertJsonPath('decision', 'CLOSE_SHORT');
+
+    expect($config->logs()
+        ->where('event', 'PINE_WEBHOOK_CLOSE')
+        ->where('symbol', 'BTCUSDT')
+        ->exists())->toBeTrue();
+});
+
+test('pine webhook returns stable json instead of 500 when execution throws', function () {
+    config(['future_trade.pine_webhook_token' => 'pine-secret']);
+    Carbon::setTestNow('2026-05-19 10:30:05');
+    $workspace = Workspace::factory()->create();
+    $config = createPrimeWebhookConfig($workspace->id);
+
+    $bot = Mockery::mock(FutureTradeBotService::class);
+    $bot->shouldReceive('getOrCreateConfig')->once()->with($workspace->id)->andReturn($config);
+    $bot->shouldReceive('recordRawPineWebhookRequest')->once();
+    $bot->shouldReceive('normalizeIncomingSymbol')->once()->andReturn('ETHUSDT');
+    $bot->shouldReceive('findSlotForSymbol')->once()->with($workspace->id, 'ETHUSDT')->andReturn($config);
+    $bot->shouldReceive('ingestPineWebhook')->once()->andThrow(new RuntimeException('simulated execution failure'));
+    app()->instance(FutureTradeBotService::class, $bot);
+
+    $this->postJson("/api/v1/future-trade/pine-webhook/{$workspace->id}", pineWebhookPayload())
+        ->assertOk()
+        ->assertJsonPath('accepted', false)
+        ->assertJsonPath('executed', false)
+        ->assertJsonPath('reason', 'webhook_internal_error');
 });
 
 test('pine webhook rejects non 15m or unconfirmed candles', function () {

@@ -3,8 +3,12 @@
 use App\Domain\FutureTrade\FutureTradeLockService;
 use App\Domain\FutureTrade\FutureTradeSignalStabilityService;
 use App\Domain\FutureTrade\FutureTradeUserStreamService;
+use App\Domain\Market\MarketPriceCacheService;
+use App\Domain\Market\RealtimeMarketFeedService;
 use App\Models\FutureTradeBotConfig;
 use App\Models\FutureTradeLogicalTrade;
+use App\Models\MarketFeedStatus;
+use App\Models\Symbol;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Str;
@@ -206,6 +210,42 @@ test('a fresh user-stream heartbeat survives across rapid snapshot calls without
 });
 
 // ─── Soft "no-double-charge" guarantees on close ──────────────────────────────
+
+test('future trade websocket disconnect marks feed degraded without refreshing the last real tick', function () {
+    $config = softConfig(['symbols' => ['ETHUSDT']], live: false);
+    $symbol = Symbol::create([
+        'id' => (string) Str::uuid(),
+        'symbol' => 'ETHUSDT',
+        'type' => 'crypto',
+        'exchange' => 'binance_futures',
+    ]);
+    $lastTickAt = now()->subSeconds(45);
+
+    MarketFeedStatus::create([
+        'id' => (string) Str::uuid(),
+        'workspace_id' => $config->workspace_id,
+        'symbol_id' => $symbol->id,
+        'symbol' => 'ETHUSDT',
+        'exchange' => 'binance_futures',
+        'market_type' => 'futures',
+        'last_tick_at' => $lastTickAt,
+        'last_price' => 2300,
+        'source' => 'trade',
+        'status' => 'healthy',
+    ]);
+
+    $feeds = new RealtimeMarketFeedService(app(MarketPriceCacheService::class));
+    $feeds->markDisconnected(['ETHUSDT'], 'futures', 'unit-test disconnect');
+
+    $status = MarketFeedStatus::query()
+        ->where('workspace_id', $config->workspace_id)
+        ->where('symbol', 'ETHUSDT')
+        ->first();
+
+    expect($status?->status)->toBe('degraded')
+        ->and((float) $status?->last_price)->toEqualWithDelta(2300, 0.0001)
+        ->and($status?->last_tick_at?->getTimestamp())->toBe($lastTickAt->getTimestamp());
+});
 
 test('a re-delivered FILLED exit event from Binance is idempotent (does not double the loss)', function () {
     $config = softConfig(live: true);

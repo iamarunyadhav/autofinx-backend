@@ -363,6 +363,33 @@ class RealtimeMarketFeedService
         foreach ($configs as $config) {
             $this->touchFeedStatus($config, null, null, 'websocket', 'degraded', ['reason' => $reason]);
         }
+
+        $futureConfigs = FutureTradeBotConfig::query()
+            ->with('state')
+            ->where('enabled', true)
+            ->get();
+
+        foreach ($futureConfigs as $config) {
+            $settingsSymbols = array_map(
+                static fn ($value) => strtoupper(trim((string) $value)),
+                (array) ($config->mergedSettings()['symbols'] ?? config('future_trade.defaults.symbols', []))
+            );
+            $currentSymbol = strtoupper(trim((string) ($config->state?->current_symbol ?? '')));
+            $ownedSymbols = array_values(array_unique(array_filter([...$settingsSymbols, $currentSymbol])));
+
+            foreach (array_intersect($symbolList, $ownedSymbols) as $symbol) {
+                $this->upsertFeedStatus(
+                    (string) $config->workspace_id,
+                    (string) $symbol,
+                    $marketType,
+                    null,
+                    null,
+                    'websocket',
+                    'degraded',
+                    ['reason' => $reason]
+                );
+            }
+        }
     }
 
     /**
@@ -476,7 +503,16 @@ class RealtimeMarketFeedService
         }
         $symbolId = self::$symbolIdCache[$symbolCacheKey];
 
-        $tickAt = $timestampMs ? Carbon::createFromTimestampMs($timestampMs) : now();
+        $existingFeed = MarketFeedStatus::query()
+            ->where('workspace_id', $workspaceId)
+            ->where('symbol_id', $symbolId)
+            ->where('exchange', $exchangeKey)
+            ->where('market_type', strtolower($marketType))
+            ->first();
+
+        $tickAt = $timestampMs
+            ? Carbon::createFromTimestampMs($timestampMs)
+            : ($status === 'healthy' ? now() : $existingFeed?->last_tick_at);
 
         MarketFeedStatus::updateOrCreate(
             [
@@ -486,15 +522,10 @@ class RealtimeMarketFeedService
                 'market_type' => strtolower($marketType),
             ],
             [
-                'id' => MarketFeedStatus::query()
-                    ->where('workspace_id', $workspaceId)
-                    ->where('symbol_id', $symbolId)
-                    ->where('exchange', $exchangeKey)
-                    ->where('market_type', strtolower($marketType))
-                    ->value('id') ?: (string) Str::uuid(),
+                'id' => $existingFeed?->id ?: (string) Str::uuid(),
                 'symbol' => $symbolUpper,
                 'last_tick_at' => $tickAt,
-                'last_price' => $price,
+                'last_price' => $price ?? $existingFeed?->last_price,
                 'source' => $source,
                 'status' => $status,
                 'meta_json' => $context,

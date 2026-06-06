@@ -26,6 +26,7 @@ class FutureTradeUserStreamCommand extends Command
         $duration = max(0, (int) $this->option('duration'));
         $reconnectSleep = max(1, (int) $this->option('reconnect-sleep'));
         $keepAliveEvery = max(60, (int) $this->option('max-keepalive'));
+        $perConfigSlice = 10;
 
         $lockKey = 'autofinx_ft:user_stream_lock' . ($workspaceId !== '' ? ':' . $workspaceId : '');
         $lock = Cache::lock($lockKey, max(30, $duration + 10));
@@ -48,11 +49,25 @@ class FutureTradeUserStreamCommand extends Command
             // Bounded loop: keep one config alive at a time inside this process.
             // (Shared-host friendly — for multi-config support, run with --workspace
             //  per cron entry.)
-            foreach ($configs as $config) {
-                if ($duration > 0 && (time() - $startedAt) >= $duration) {
-                    break;
+            if ($configs->count() === 1) {
+                $this->consumeOnce($userStream, $configs->first(), $startedAt, $duration, $reconnectSleep, $keepAliveEvery);
+
+                return self::SUCCESS;
+            }
+
+            while ($duration === 0 || (time() - $startedAt) < $duration) {
+                foreach ($configs as $config) {
+                    $remaining = $duration > 0 ? max(0, $duration - (time() - $startedAt)) : $perConfigSlice;
+                    if ($duration > 0 && $remaining <= 0) {
+                        break 2;
+                    }
+
+                    $sliceDuration = $duration > 0
+                        ? max(1, min($perConfigSlice, $remaining))
+                        : $perConfigSlice;
+
+                    $this->consumeOnce($userStream, $config, time(), $sliceDuration, $reconnectSleep, $keepAliveEvery);
                 }
-                $this->consumeOnce($userStream, $config, $startedAt, $duration, $reconnectSleep, $keepAliveEvery);
             }
         } finally {
             optional($lock)->release();

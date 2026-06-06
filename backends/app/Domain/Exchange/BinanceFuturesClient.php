@@ -364,13 +364,17 @@ class BinanceFuturesClient
                 }
 
                 // Success (or non-retryable response) — reset circuit breaker
-                $this->circuitSuccess($host);
+                if ($this->isRetryableStatus($response)) {
+                    $this->circuitRecordFailure($host, 'HTTP ' . $response->status() . ': ' . $response->body());
+                } else {
+                    $this->circuitSuccess($host);
+                }
 
                 return $response;
 
             } catch (\Throwable $exception) {
                 $lastException = $exception;
-                $this->circuitRecordFailure($host);
+                $this->circuitRecordFailure($host, $exception->getMessage());
 
                 if (! $this->isRetryableException($exception) || $index === array_key_last($delaysMs)) {
                     throw $exception;
@@ -398,22 +402,28 @@ class BinanceFuturesClient
         }
     }
 
-    private function circuitRecordFailure(string $host): void
+    private function circuitRecordFailure(string $host, ?string $error = null): void
     {
         try {
             $key      = 'binance_cb:' . $host;
             $state    = (array) (Cache::get($key, []));
             $failures = (int) ($state['failures'] ?? 0) + 1;
+            $lastError = $error !== null && $error !== ''
+                ? mb_substr($error, 0, 500)
+                : (string) ($state['last_error'] ?? 'repeated_failures');
 
             if ($failures >= 5) {
                 Cache::put($key, [
                     'open'       => true,
                     'until'      => time() + 45,
                     'failures'   => $failures,
-                    'last_error' => (string) ($state['last_error'] ?? 'repeated_failures'),
+                    'last_error' => $lastError,
                 ], 120);
             } else {
-                Cache::put($key, array_merge($state, ['failures' => $failures]), 120);
+                Cache::put($key, array_merge($state, [
+                    'failures' => $failures,
+                    'last_error' => $lastError,
+                ]), 120);
             }
         } catch (\Throwable) {
             // Best-effort

@@ -13,6 +13,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Log;
+use Throwable;
 
 class FutureTradeBotController extends Controller
 {
@@ -71,13 +72,21 @@ class FutureTradeBotController extends Controller
         }
         // Raw payload always recorded against slot 0 for a single source of
         // truth audit trail, regardless of which slot ultimately executes.
-        $this->bot->recordRawPineWebhookRequest($primary, is_array($decoded) ? $decoded : $request->all(), [
-            'rawBody' => $rawBody,
-            'remoteIp' => $request->ip(),
-            'headersSummary' => $headersSummary,
-            'parseStatus' => $rawBody === '' ? 'empty' : (json_last_error() === JSON_ERROR_NONE ? 'json' : 'invalid_json'),
-            'tokenStatus' => $tokenMatched ? 'valid' : 'invalid_or_missing',
-        ]);
+        try {
+            $this->bot->recordRawPineWebhookRequest($primary, is_array($decoded) ? $decoded : $request->all(), [
+                'rawBody' => $rawBody,
+                'remoteIp' => $request->ip(),
+                'headersSummary' => $headersSummary,
+                'parseStatus' => $rawBody === '' ? 'empty' : (json_last_error() === JSON_ERROR_NONE ? 'json' : 'invalid_json'),
+                'tokenStatus' => $tokenMatched ? 'valid' : 'invalid_or_missing',
+            ]);
+        } catch (Throwable $exception) {
+            Log::error('PINE_WEBHOOK_RAW_AUDIT_FAILED', [
+                'workspace' => $workspace,
+                'remoteIp' => $request->ip(),
+                'message' => $exception->getMessage(),
+            ]);
+        }
 
         if (! $tokenMatched) {
             return response()->json([
@@ -87,62 +96,81 @@ class FutureTradeBotController extends Controller
             ], 401);
         }
 
-        // Slot routing: find the slot that owns the incoming symbol, or
-        // assign the first FLAT slot. If every slot is busy with a
-        // different symbol, reject with a clear reason.
-        $payload = $request->all();
-        $rawSymbol = (string) ($payload['symbol'] ?? $payload['ticker'] ?? '');
-        $symbol = $this->bot->normalizeIncomingSymbol($rawSymbol);
-        $targetConfig = $symbol !== ''
-            ? $this->bot->findSlotForSymbol($workspace, $symbol)
-            : null;
+        try {
+            // Slot routing: find the slot that owns the incoming symbol, or
+            // assign the first FLAT slot. If every slot is busy with a
+            // different symbol, reject with a clear reason.
+            $payload = $request->all();
+            $rawSymbol = (string) ($payload['symbol'] ?? $payload['ticker'] ?? '');
+            $symbol = $this->bot->normalizeIncomingSymbol($rawSymbol);
+            $targetConfig = $symbol !== ''
+                ? $this->bot->findSlotForSymbol($workspace, $symbol)
+                : null;
 
-        $rawSignal = strtoupper(trim((string) ($payload['signal'] ?? $payload['action'] ?? $payload['side'] ?? 'WAIT')));
-        $isCloseSignal = in_array($rawSignal, [
-            'CLOSE',
-            'EXIT',
-            'FLAT',
-            'CLOSE_LONG',
-            'CLOSE_SHORT',
-            'EXIT_LONG',
-            'EXIT_SHORT',
-            'FLAT_LONG',
-            'FLAT_SHORT',
-        ], true);
+            $rawSignal = strtoupper(trim((string) ($payload['signal'] ?? $payload['action'] ?? $payload['side'] ?? 'WAIT')));
+            $isCloseSignal = in_array($rawSignal, [
+                'CLOSE',
+                'EXIT',
+                'FLAT',
+                'CLOSE_LONG',
+                'CLOSE_SHORT',
+                'EXIT_LONG',
+                'EXIT_SHORT',
+                'FLAT_LONG',
+                'FLAT_SHORT',
+            ], true);
 
-        if ($symbol !== '' && $targetConfig === null && $isCloseSignal) {
-            $payload['_slot_routing'] = 'no_symbol_slot_close_log_only';
-            $targetConfig = $primary;
-        }
+            if ($symbol !== '' && $targetConfig === null && $isCloseSignal) {
+                $payload['_slot_routing'] = 'no_symbol_slot_close_log_only';
+                $targetConfig = $primary;
+            }
 
-        if ($symbol !== '' && $targetConfig === null) {
-            $activeCount = $this->bot->activePositionCount($workspace);
+            if ($symbol !== '' && $targetConfig === null) {
+                $activeCount = $this->bot->activePositionCount($workspace);
+
+                return response()->json([
+                    'accepted' => false,
+                    'executed' => false,
+                    'eligible' => false,
+                    'source' => 'pine_webhook',
+                    'execution' => 'rejected',
+                    'reason' => 'max_concurrent_positions_reached',
+                    'symbol' => $symbol,
+                    'activePositions' => $activeCount,
+                ], 422);
+            }
+
+            // Fallback to primary (slot 0) when no symbol could be parsed —
+            // ingestPineWebhook will validate and reject with the right code.
+            $result = $this->bot->ingestPineWebhook(
+                $targetConfig ?? $primary,
+                $payload
+            );
+
+            // Surface which slot handled the signal so the operator can debug
+            // multi-position behaviour from the API response.
+            if ($targetConfig !== null) {
+                $result['slotIndex'] = (int) $targetConfig->slot_index;
+            }
+
+            return response()->json($result, ($result['accepted'] ?? false) ? 200 : 422);
+        } catch (Throwable $exception) {
+            Log::error('PINE_WEBHOOK_INTERNAL_ERROR', [
+                'workspace' => $workspace,
+                'symbol' => $request->input('symbol') ?? $request->input('ticker'),
+                'signal' => $request->input('signal') ?? $request->input('action') ?? $request->input('side'),
+                'message' => $exception->getMessage(),
+            ]);
+
             return response()->json([
                 'accepted' => false,
                 'executed' => false,
                 'eligible' => false,
                 'source' => 'pine_webhook',
-                'execution' => 'rejected',
-                'reason' => 'max_concurrent_positions_reached',
-                'symbol' => $symbol,
-                'activePositions' => $activeCount,
-            ], 422);
+                'execution' => 'failed',
+                'reason' => 'webhook_internal_error',
+            ]);
         }
-
-        // Fallback to primary (slot 0) when no symbol could be parsed —
-        // ingestPineWebhook will validate and reject with the right code.
-        $result = $this->bot->ingestPineWebhook(
-            $targetConfig ?? $primary,
-            $payload
-        );
-
-        // Surface which slot handled the signal so the operator can debug
-        // multi-position behaviour from the API response.
-        if ($targetConfig !== null) {
-            $result['slotIndex'] = (int) $targetConfig->slot_index;
-        }
-
-        return response()->json($result, ($result['accepted'] ?? false) ? 200 : 422);
     }
 
     public function lastWebhookPayload(string $workspace): JsonResponse
@@ -432,7 +460,7 @@ class FutureTradeBotController extends Controller
     private function envPayload($config): array
     {
         $settings = $config->mergedSettings();
-        $mask = fn (string $value) => $value === '' ? '' : substr($value, 0, 4) . str_repeat('*', max(4, strlen($value) - 8)) . substr($value, -4);
+        $mask = fn (string $value) => $value === '' ? '' : substr($value, 0, 4).str_repeat('*', max(4, strlen($value) - 8)).substr($value, -4);
 
         return [
             'mode' => (string) ($settings['envMode'] ?? 'paper'),
@@ -457,14 +485,14 @@ class FutureTradeBotController extends Controller
     public function runBacktest(Request $request, string $workspace): JsonResponse
     {
         $data = $request->validate([
-            'from'    => 'nullable|date|before:today',
-            'to'      => 'nullable|date|before_or_equal:today',
+            'from' => 'nullable|date|before:today',
+            'to' => 'nullable|date|before_or_equal:today',
             'capital' => 'nullable|numeric|min:10|max:1000000',
         ]);
 
-        $config  = $this->bot->getOrCreateConfig($workspace);
-        $from    = isset($data['from']) ? Carbon::parse($data['from'])->startOfDay() : now()->subDays(30)->startOfDay();
-        $to      = isset($data['to'])   ? Carbon::parse($data['to'])->endOfDay()     : now()->subDay()->endOfDay();
+        $config = $this->bot->getOrCreateConfig($workspace);
+        $from = isset($data['from']) ? Carbon::parse($data['from'])->startOfDay() : now()->subDays(30)->startOfDay();
+        $to = isset($data['to']) ? Carbon::parse($data['to'])->endOfDay() : now()->subDay()->endOfDay();
         $capital = (float) ($data['capital'] ?? 1000);
 
         $run = $this->backtestEngine->run($config, $from, $to, $capital);
@@ -486,6 +514,7 @@ class FutureTradeBotController extends Controller
     public function backtestStatus(string $workspace, string $runId): JsonResponse
     {
         $run = FutureTradeBacktestRun::where('workspace_id', $workspace)->findOrFail($runId);
+
         return response()->json($this->backtestRunPayload($run));
     }
 
@@ -493,35 +522,36 @@ class FutureTradeBotController extends Controller
     {
         $run = FutureTradeBacktestRun::where('workspace_id', $workspace)->findOrFail($runId);
         $trades = $run->trades()->orderBy('entry_time')->get();
+
         return response()->json(['trades' => $trades]);
     }
 
     private function backtestRunPayload(FutureTradeBacktestRun $run): array
     {
         return [
-            'id'                      => $run->id,
-            'status'                  => $run->status,
-            'from_date'               => $run->from_date?->toDateString(),
-            'to_date'                 => $run->to_date?->toDateString(),
-            'symbols'                 => $run->symbols,
-            'initial_capital_usdt'    => $run->initial_capital_usdt,
-            'total_trades'            => $run->total_trades,
-            'wins'                    => $run->wins,
-            'losses'                  => $run->losses,
-            'win_rate'                => $run->win_rate,
-            'total_pnl_usdt'          => $run->total_pnl_usdt,
-            'total_pnl_percent'       => $run->total_pnl_percent,
-            'max_drawdown_usdt'       => $run->max_drawdown_usdt,
-            'max_drawdown_percent'    => $run->max_drawdown_percent,
-            'profit_factor'           => $run->profit_factor,
-            'sharpe_ratio'            => $run->sharpe_ratio,
+            'id' => $run->id,
+            'status' => $run->status,
+            'from_date' => $run->from_date?->toDateString(),
+            'to_date' => $run->to_date?->toDateString(),
+            'symbols' => $run->symbols,
+            'initial_capital_usdt' => $run->initial_capital_usdt,
+            'total_trades' => $run->total_trades,
+            'wins' => $run->wins,
+            'losses' => $run->losses,
+            'win_rate' => $run->win_rate,
+            'total_pnl_usdt' => $run->total_pnl_usdt,
+            'total_pnl_percent' => $run->total_pnl_percent,
+            'max_drawdown_usdt' => $run->max_drawdown_usdt,
+            'max_drawdown_percent' => $run->max_drawdown_percent,
+            'profit_factor' => $run->profit_factor,
+            'sharpe_ratio' => $run->sharpe_ratio,
             'avg_trade_duration_minutes' => $run->avg_trade_duration_minutes,
-            'by_symbol'               => $run->by_symbol,
-            'by_exit_reason'          => $run->by_exit_reason,
-            'error_message'           => $run->error_message,
-            'started_at'              => $run->started_at?->toIso8601String(),
-            'completed_at'            => $run->completed_at?->toIso8601String(),
-            'created_at'              => $run->created_at?->toIso8601String(),
+            'by_symbol' => $run->by_symbol,
+            'by_exit_reason' => $run->by_exit_reason,
+            'error_message' => $run->error_message,
+            'started_at' => $run->started_at?->toIso8601String(),
+            'completed_at' => $run->completed_at?->toIso8601String(),
+            'created_at' => $run->created_at?->toIso8601String(),
         ];
     }
 }
