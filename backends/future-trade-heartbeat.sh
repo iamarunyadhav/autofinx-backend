@@ -157,19 +157,19 @@ start_runtime_slice_if_missing() {
 echo "[HEARTBEAT] start at $(date -Is)"
 
 start_worker_if_missing \
-  "queue:work --queue=critical,execution,reconcile,monitoring" \
+  "queue:work.*--queue=critical,execution,reconcile,monitoring" \
   "queue-critical" \
   "storage/logs/worker-critical.log" \
   "$PHP" artisan queue:work --queue=critical,execution,reconcile,monitoring --sleep=1 --tries=3 --timeout=120 --max-time=3600
 
 start_worker_if_missing \
-  "queue:work --queue=market,signals,strategies,ratio_bot,ops,intelligence,risk,billing,copytrading" \
+  "queue:work.*--queue=market,signals,strategies,ratio_bot,ops,intelligence,risk,billing,copytrading" \
   "queue-market" \
   "storage/logs/worker-market.log" \
   "$PHP" artisan queue:work --queue=market,signals,strategies,ratio_bot,ops,intelligence,risk,billing,copytrading --sleep=1 --tries=3 --timeout=120 --max-time=3600
 
 start_worker_if_missing \
-  "queue:work --queue=analytics,notifications,default,monitoring_safe" \
+  "queue:work.*--queue=analytics,notifications,default,monitoring_safe" \
   "queue-safe" \
   "storage/logs/worker-safe.log" \
   "$PHP" artisan queue:work --queue=analytics,notifications,default,monitoring_safe --sleep=1 --tries=3 --timeout=120 --max-time=3600
