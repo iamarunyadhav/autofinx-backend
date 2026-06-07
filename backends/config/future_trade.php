@@ -27,6 +27,7 @@ return [
         'circuit_breaker' => filter_var(env('BINANCE_REST_CIRCUIT_BREAKER', true), FILTER_VALIDATE_BOOL),
         'min_interval_ms' => max(0, (int) env('BINANCE_REST_MIN_INTERVAL_MS', 500)),
         'ban_cooldown_seconds' => max(60, (int) env('BINANCE_REST_BAN_COOLDOWN_SECONDS', 3600)),
+        'recv_window_ms' => max(5000, min(60000, (int) env('BINANCE_FUTURES_RECV_WINDOW', 15000))),
     ],
     'webhook_fallback_enabled' => env('FUTURE_TRADE_WEBHOOK_FALLBACK_ENABLED', false),
     'webhook_risk_overrides' => env('FUTURE_TRADE_WEBHOOK_RISK_OVERRIDES', false),

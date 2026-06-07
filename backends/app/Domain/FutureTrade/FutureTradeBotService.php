@@ -2391,17 +2391,23 @@ class FutureTradeBotService
         if ($webhookAuthority) {
             $diagnosticOnlyBlockers = [
                 'stale_market_data',
+                'stale_feed',
+                'STALE_FEED',
                 'stale_feed_active',
                 'market_data_unavailable',
                 'market_data_stale',
                 'ai_trading_disabled',
                 'external_context_disabled',
             ];
+            $runtimeBlockers = array_values(array_filter(
+                $runtimeBlockers,
+                static fn ($blocker): bool => ! in_array((string) $blocker, $diagnosticOnlyBlockers, true)
+            ));
             $serverBlockers = array_values(array_filter(
                 $serverBlockers,
                 static fn ($blocker): bool => ! in_array((string) $blocker, $diagnosticOnlyBlockers, true)
             ));
-            foreach (['ai_trading_disabled', 'external_context_disabled', 'market_data_unavailable', 'market_data_stale'] as $warning) {
+            foreach (['ai_trading_disabled', 'external_context_disabled', 'market_data_unavailable', 'market_data_stale', 'stale_feed'] as $warning) {
                 if (in_array($warning, (array) ($health['warnings'] ?? []), true) || in_array($warning, (array) ($health['blockers'] ?? []), true)) {
                     $serverWarnings[] = $warning;
                 }
@@ -6932,6 +6938,9 @@ class FutureTradeBotService
             $blockers[] = 'DAILY_LOSS_LOCKED';
         }
         foreach ((array) ($freshness['blockers'] ?? []) as $freshnessBlocker) {
+            if ($webhookAuthority && Str::lower((string) $freshnessBlocker) === 'stale_feed') {
+                continue;
+            }
             $blockers[] = Str::upper((string) $freshnessBlocker);
         }
 

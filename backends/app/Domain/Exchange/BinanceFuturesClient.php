@@ -281,7 +281,7 @@ class BinanceFuturesClient
     private function sign(array $payload): array
     {
         $payload['timestamp'] = (int) floor(microtime(true) * 1000);
-        $payload['recvWindow'] = 5000;
+        $payload['recvWindow'] = max(5000, min(60000, (int) config('future_trade.binance_rest.recv_window_ms', 15000)));
         ksort($payload);
 
         $query = http_build_query($payload, '', '&');
