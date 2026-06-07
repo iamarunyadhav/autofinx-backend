@@ -6,7 +6,7 @@ APP_DIR="${APP_DIR:-$SCRIPT_DIR}"
 APP_ROOT="${APP_ROOT:-$(dirname "$APP_DIR")}"
 FRONTEND_DIR="${FRONTEND_DIR:-}"
 PHP="${PHP:-}"
-COMPOSER="${COMPOSER:-$(command -v composer || true)}"
+COMPOSER_BIN="${COMPOSER_BIN:-$(command -v composer || true)}"
 NPM="${NPM:-npm}"
 
 INSTALL_CRON=0
@@ -45,7 +45,7 @@ Options:
   --no-pull             Do not run git pull.
 
 Environment overrides:
-  APP_DIR, APP_ROOT, FRONTEND_DIR, PHP, COMPOSER, NPM, FT_SYMBOLS, FT_STREAMS
+  APP_DIR, APP_ROOT, FRONTEND_DIR, PHP, COMPOSER_BIN, NPM, FT_SYMBOLS, FT_STREAMS
 HELP
       exit 0
       ;;
@@ -65,8 +65,8 @@ if [ -z "$PHP" ] || [ ! -x "$PHP" ]; then
   echo "PHP binary not found. Set PHP=/path/to/php and retry." >&2
   exit 1
 fi
-if [ -z "$COMPOSER" ] || [ ! -e "$COMPOSER" ]; then
-  echo "Composer not found. Set COMPOSER=/path/to/composer and retry." >&2
+if [ -z "$COMPOSER_BIN" ] || [ ! -e "$COMPOSER_BIN" ]; then
+  echo "Composer not found. Set COMPOSER_BIN=/path/to/composer and retry." >&2
   exit 1
 fi
 
@@ -79,7 +79,7 @@ run_artisan() {
 }
 
 run_composer() {
-  "$COMPOSER" "$@"
+  COMPOSER= "$COMPOSER_BIN" "$@"
 }
 
 cd "$APP_DIR"
