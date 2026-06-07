@@ -124,6 +124,17 @@ proc_count() {
   pgrep -f "$pattern" 2>/dev/null | wc -l | tr -d '[:space:]'
 }
 
+artisan_proc_count() {
+  local command_name="$1"
+  ps -eo pid=,ppid=,args= 2>/dev/null \
+    | awk -v cmd="$command_name" '
+        $0 ~ /artisan[[:space:]]+/ && $0 ~ cmd && $0 !~ /grep/ && $0 !~ /autofinx-verify/ {
+          count++
+        }
+        END { print count + 0 }
+      '
+}
+
 age_from_epoch() {
   local epoch="$1"
   local now
@@ -236,10 +247,10 @@ else
 fi
 
 section "5. Process Counts"
-queue_count="$(proc_count "artisan queue:work")"
-feed_count="$(proc_count "artisan future-trade:live-feed")"
-tick_count="$(proc_count "artisan future-trade:tick")"
-stream_count="$(proc_count "artisan future-trade:user-stream")"
+queue_count="$(artisan_proc_count "queue:work")"
+feed_count="$(artisan_proc_count "future-trade:live-feed")"
+tick_count="$(artisan_proc_count "future-trade:tick")"
+stream_count="$(artisan_proc_count "future-trade:user-stream")"
 printf 'queue:work             : %s\n' "${queue_count:-0}"
 printf 'future-trade:live-feed : %s\n' "${feed_count:-0}"
 printf 'future-trade:tick      : %s\n' "${tick_count:-0}"
@@ -254,7 +265,13 @@ section "6. Redis And Database"
 if command_exists redis-cli; then
   redis_cli_response="$(redis-cli ping 2>&1 || true)"
   echo "redis-cli ping: $redis_cli_response"
-  if [ "$redis_cli_response" = "PONG" ]; then pass "Redis CLI ping OK"; else fail "Redis CLI ping failed"; fi
+  if [ "$redis_cli_response" = "PONG" ]; then
+    pass "Redis CLI ping OK"
+  elif echo "$redis_cli_response" | grep -qi "NOAUTH"; then
+    warn "Redis CLI requires auth; Laravel Redis check below is authoritative"
+  else
+    warn "Redis CLI ping failed; Laravel Redis check below is authoritative"
+  fi
 fi
 
 if [ -x "${PHP:-}" ]; then
@@ -383,7 +400,7 @@ if [ -x "${PHP:-}" ]; then
         ->get();
       foreach ($rows as $row) {
         $ts = $row->last_tick_at ?: $row->updated_at;
-        $age = $ts ? now()->diffInSeconds(\Carbon\Carbon::parse($ts), true) : null;
+        $age = $ts ? (int) \Carbon\Carbon::parse((string) $ts, "UTC")->diffInSeconds(now("UTC"), true) : null;
         echo implode("|", [
           $row->symbol ?? $row->symbol_id ?? "-",
           $row->exchange ?? "-",
@@ -403,7 +420,7 @@ if [ -x "${PHP:-}" ]; then
   elif echo "$market_result" | grep -q "^ERROR|"; then
     fail "Market feed DB query failed"
   else
-    freshest_age="$(echo "$market_result" | awk -F'|' 'NF >= 6 && $6 ~ /^[0-9]+$/ { print $6; exit }')"
+    freshest_age="$(echo "$market_result" | awk -F'|' 'NF >= 6 && $6 ~ /^[0-9]+([.][0-9]+)?$/ { print int($6); exit }')"
     if [ -n "$freshest_age" ] && [ "$freshest_age" -le "$MARKET_FEED_MAX_AGE" ]; then
       pass "Market feed DB is fresh (${freshest_age}s old)"
     else
