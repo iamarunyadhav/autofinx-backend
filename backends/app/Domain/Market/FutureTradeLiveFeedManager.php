@@ -279,10 +279,52 @@ class FutureTradeLiveFeedManager
         $errLog = escapeshellarg($this->errLogPath());
         $cwd = escapeshellarg(base_path());
 
-        $command = "cd {$cwd} && nohup {$php} {$artisan} future-trade:live-feed --symbols={$symbolsArg} --streams=" . escapeshellarg(self::STREAMS) . " --reconnect-sleep=2 >> {$outLog} 2>> {$errLog} & echo $!";
-        $output = $this->runShellCommand("bash -lc " . escapeshellarg($command));
+        $shellCmd = "nohup {$php} {$artisan} future-trade:live-feed --symbols={$symbolsArg} --streams=" . escapeshellarg(self::STREAMS) . " --reconnect-sleep=2 >> {$outLog} 2>> {$errLog} & echo \$!";
 
-        return (int) trim((string) $output);
+        // Preferred: shell_exec with login shell (full PATH / env).
+        if (\function_exists('shell_exec')) {
+            $output = $this->runShellCommand("bash -lc " . escapeshellarg("cd {$cwd} && {$shellCmd}"));
+
+            return (int) trim((string) $output);
+        }
+
+        // Fallback 1: exec (available on some cPanel configs when shell_exec is disabled).
+        if (\function_exists('exec')) {
+            $result = [];
+            \exec("bash -c " . escapeshellarg($shellCmd), $result);
+
+            return (int) trim(implode('', $result));
+        }
+
+        // Fallback 2: proc_open — spawn /bin/bash with the background command.
+        // bash runs 'nohup ... &', prints the daemon PID, then exits immediately,
+        // so proc_close() returns at once and the daemon lives on as an orphan.
+        if (\function_exists('proc_open')) {
+            return $this->spawnUnixViaProc($shellCmd);
+        }
+
+        return 0;
+    }
+
+    private function spawnUnixViaProc(string $shellCmd): int
+    {
+        $descriptors = [
+            0 => ['file', '/dev/null', 'r'],
+            1 => ['pipe', 'w'],
+            2 => ['file', '/dev/null', 'w'],
+        ];
+        $pipes = [];
+        $process = \proc_open(['/bin/bash', '-c', $shellCmd], $descriptors, $pipes, base_path());
+
+        if (! \is_resource($process)) {
+            return 0;
+        }
+
+        $pidStr = \fgets($pipes[1]);
+        \fclose($pipes[1]);
+        \proc_close($process); // bash exits right after echo $!, so this doesn't block
+
+        return (int) trim((string) $pidStr);
     }
 
     private function terminate(int $pid): void
@@ -329,16 +371,25 @@ class FutureTradeLiveFeedManager
 
     private function canSpawnDaemon(): bool
     {
-        return \function_exists('shell_exec');
+        return \function_exists('shell_exec')
+            || \function_exists('exec')
+            || (PHP_OS_FAMILY !== 'Windows' && \function_exists('proc_open'));
     }
 
     private function runShellCommand(string $command): ?string
     {
-        if (! \function_exists('shell_exec')) {
-            return null;
+        if (\function_exists('shell_exec')) {
+            return \shell_exec($command);
         }
 
-        return \shell_exec($command);
+        if (\function_exists('exec')) {
+            $output = [];
+            \exec($command, $output);
+
+            return $output !== [] ? implode("\n", $output) : null;
+        }
+
+        return null;
     }
 
     private function ensureRuntimePaths(): void
