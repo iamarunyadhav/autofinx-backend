@@ -11,8 +11,9 @@
 #   - avoids `ps aux | wc -l` entirely (uses /proc count)
 #   - serializes work so no concurrent subshells
 
-PHP="/usr/local/bin/ea-php82"
-APP="/home/zcadmin/public_html/api.autofinx.arunyadhav.dev/autofinx-backend/backends"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PHP="${PHP:-$(command -v php || true)}"
+APP="${APP_DIR:-$SCRIPT_DIR}"
 WS_ID="26a36b56-4383-4edd-99d1-7622e7c191ef"
 FT_SYMBOLS="ETHUSDT,BTCUSDT,SOLUSDT,BNBUSDT"
 FT_STREAMS="trade,kline_1m,kline_5m,kline_15m,kline_1h,kline_4h"
@@ -21,10 +22,11 @@ cd "$APP" || { echo "ERROR: cd $APP failed"; exit 1; }
 mkdir -p storage/logs
 
 # Resolve PHP fallback once
-if [ ! -x "$PHP" ]; then
-  if [ -x "/opt/cpanel/ea-php82/root/usr/bin/php" ]; then
-    PHP="/opt/cpanel/ea-php82/root/usr/bin/php"
-  fi
+if { [ -z "$PHP" ] || [ ! -x "$PHP" ]; } && [ -x "/usr/local/bin/ea-php82" ]; then
+  PHP="/usr/local/bin/ea-php82"
+fi
+if { [ -z "$PHP" ] || [ ! -x "$PHP" ]; } && [ -x "/opt/cpanel/ea-php82/root/usr/bin/php" ]; then
+  PHP="/opt/cpanel/ea-php82/root/usr/bin/php"
 fi
 
 # Reliable process counter — pgrep -f lists PIDs, wc -l counts them.

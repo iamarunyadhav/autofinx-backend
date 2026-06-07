@@ -1,9 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_ROOT="/home/zcadmin/public_html/api.autofinx.arunyadhav.dev/autofinx-backend"
-APP_DIR="/home/zcadmin/public_html/api.autofinx.arunyadhav.dev/autofinx-backend/backends"
-PHP="/usr/local/bin/ea-php82"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+APP_DIR="${APP_DIR:-$SCRIPT_DIR}"
+APP_ROOT="${APP_ROOT:-$(dirname "$APP_DIR")}"
+PHP="${PHP:-$(command -v php || true)}"
+if { [ -z "$PHP" ] || [ ! -x "$PHP" ]; } && [ -x "/usr/local/bin/ea-php82" ]; then
+  PHP="/usr/local/bin/ea-php82"
+fi
+if { [ -z "$PHP" ] || [ ! -x "$PHP" ]; } && [ -x "/opt/cpanel/ea-php82/root/usr/bin/php" ]; then
+  PHP="/opt/cpanel/ea-php82/root/usr/bin/php"
+fi
+if [ -z "$PHP" ] || [ ! -x "$PHP" ]; then
+  echo "PHP binary not found. Set PHP=/path/to/php and retry." >&2
+  exit 1
+fi
 INSTALL_CRON=0
 SKIP_TESTS=0
 
@@ -37,9 +48,9 @@ chmod +x start-workers.sh stop-workers.sh restart-workers.sh future-trade-heartb
 "$PHP" artisan future-trade:diagnostics --persist
 "$PHP" artisan future-trade:queue-health
 
-CRON_LINES=$(cat <<'CRON'
-* * * * * bash /home/zcadmin/public_html/api.autofinx.arunyadhav.dev/autofinx-backend/backends/future-trade-heartbeat.sh >> /home/zcadmin/public_html/api.autofinx.arunyadhav.dev/autofinx-backend/backends/storage/logs/future-trade-heartbeat.log 2>&1
-*/10 * * * * flock -n /tmp/autofinx-maintenance.lock -c 'bash /home/zcadmin/public_html/api.autofinx.arunyadhav.dev/autofinx-backend/backends/future-trade-maintenance.sh >> /home/zcadmin/public_html/api.autofinx.arunyadhav.dev/autofinx-backend/backends/storage/logs/future-trade-cron.log 2>&1'
+CRON_LINES=$(cat <<CRON
+* * * * * APP_DIR="$APP_DIR" PHP="$PHP" bash "$APP_DIR/future-trade-heartbeat.sh" >> "$APP_DIR/storage/logs/future-trade-heartbeat.log" 2>&1
+*/10 * * * * flock -n /tmp/autofinx-maintenance.lock -c 'APP_DIR="$APP_DIR" PHP="$PHP" bash "$APP_DIR/future-trade-maintenance.sh" >> "$APP_DIR/storage/logs/future-trade-cron.log" 2>&1'
 CRON
 )
 
@@ -47,7 +58,7 @@ if [ "$INSTALL_CRON" -eq 1 ]; then
   (crontab -l 2>/dev/null | grep -v "future-trade:tick" | grep -v "future-trade:user-stream" | grep -v "future-trade:live-feed" | grep -v "future-trade-heartbeat.sh" | grep -v "future-trade-maintenance.sh" | grep -v "artisan schedule:run"; echo "$CRON_LINES") | crontab -
   echo "Crontab installed."
 else
-  echo "Add these cPanel cron lines:"
+  echo "Add these cron lines:"
   echo "$CRON_LINES"
 fi
 

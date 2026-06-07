@@ -10,10 +10,18 @@
 
 set -euo pipefail
 
-APP="/home/zcadmin/public_html/api.autofinx.arunyadhav.dev/autofinx-backend/backends"
-PHP="/usr/local/bin/ea-php82"
-if [ ! -x "$PHP" ] && [ -x "/opt/cpanel/ea-php82/root/usr/bin/php" ]; then
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+APP="${APP_DIR:-$SCRIPT_DIR}"
+PHP="${PHP:-$(command -v php || true)}"
+if { [ -z "$PHP" ] || [ ! -x "$PHP" ]; } && [ -x "/usr/local/bin/ea-php82" ]; then
+  PHP="/usr/local/bin/ea-php82"
+fi
+if { [ -z "$PHP" ] || [ ! -x "$PHP" ]; } && [ -x "/opt/cpanel/ea-php82/root/usr/bin/php" ]; then
   PHP="/opt/cpanel/ea-php82/root/usr/bin/php"
+fi
+if [ -z "$PHP" ] || [ ! -x "$PHP" ]; then
+  echo "PHP binary not found. Set PHP=/path/to/php and retry." >&2
+  exit 1
 fi
 
 DRY=0

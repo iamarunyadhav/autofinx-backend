@@ -105,6 +105,35 @@ test('pine webhook accepts body token even when a wrong inherited bearer token i
         ->assertJsonPath('decision', 'BUY');
 });
 
+test('pine webhook accepts raw json body when TradingView posts text plain', function () {
+    config(['future_trade.pine_webhook_token' => 'pine-secret']);
+    Carbon::setTestNow('2026-05-19 10:30:05');
+    $workspace = Workspace::factory()->create();
+    $config = createPrimeWebhookConfig($workspace->id);
+
+    $this->call(
+        'POST',
+        "/api/v1/future-trade/pine-webhook/{$workspace->id}",
+        [],
+        [],
+        [],
+        [
+            'CONTENT_TYPE' => 'text/plain',
+            'HTTP_ACCEPT' => 'application/json',
+        ],
+        json_encode(pineWebhookPayload(), JSON_THROW_ON_ERROR)
+    )
+        ->assertOk()
+        ->assertJsonPath('accepted', true)
+        ->assertJsonPath('decision', 'BUY');
+
+    $rawLog = $config->logs()->where('event', 'WEBHOOK_RAW_RECEIVED')->latest('occurred_at')->first();
+
+    expect($rawLog)->not->toBeNull()
+        ->and($rawLog->context['parseStatus'] ?? null)->toBe('json')
+        ->and($rawLog->context['tokenStatus'] ?? null)->toBe('valid');
+});
+
 test('pine webhook accepts TradingView futures symbol when dot suffix is flattened', function () {
     config(['future_trade.pine_webhook_token' => 'pine-secret']);
     Carbon::setTestNow('2026-05-19 10:30:05');

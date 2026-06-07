@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_DIR="${APP_DIR:-/home/zcadmin/public_html/api.autofinx.arunyadhav.dev/autofinx-backend/backends}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+APP_DIR="${APP_DIR:-$SCRIPT_DIR}"
 APP_ROOT="${APP_ROOT:-$(dirname "$APP_DIR")}"
 FRONTEND_DIR="${FRONTEND_DIR:-}"
-PHP="${PHP:-/usr/local/bin/ea-php82}"
+PHP="${PHP:-$(command -v php || true)}"
 COMPOSER="${COMPOSER:-composer}"
 NPM="${NPM:-npm}"
 
@@ -36,7 +37,7 @@ Usage:
 
 Options:
   --restart             Restart queue workers and Future Trade live feed.
-  --install-cron        Install cPanel cron entries for heartbeat and maintenance.
+  --install-cron        Install cron entries for heartbeat and maintenance.
   --workspace=UUID      Run the scanner tick for one workspace only.
   --tick-duration=N     Scanner smoke duration in seconds. Default: 20.
   --skip-tests          Skip FutureTrade test suite.
@@ -51,8 +52,15 @@ HELP
   esac
 done
 
-if [ ! -x "$PHP" ] && [ -x "/opt/cpanel/ea-php82/root/usr/bin/php" ]; then
+if { [ -z "$PHP" ] || [ ! -x "$PHP" ]; } && [ -x "/usr/local/bin/ea-php82" ]; then
+  PHP="/usr/local/bin/ea-php82"
+fi
+if { [ -z "$PHP" ] || [ ! -x "$PHP" ]; } && [ -x "/opt/cpanel/ea-php82/root/usr/bin/php" ]; then
   PHP="/opt/cpanel/ea-php82/root/usr/bin/php"
+fi
+if [ -z "$PHP" ] || [ ! -x "$PHP" ]; then
+  echo "PHP binary not found. Set PHP=/path/to/php and retry." >&2
+  exit 1
 fi
 
 log() {
@@ -183,7 +191,7 @@ if [ "$INSTALL_CRON" -eq 1 ]; then
     echo "$CRON_LINES") | crontab -
   log "Cron installed"
 else
-  log "Add these cPanel cron entries when ready"
+  log "Add these cron entries when ready"
   echo "$CRON_LINES"
 fi
 

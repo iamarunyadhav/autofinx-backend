@@ -25,7 +25,8 @@ set -euo pipefail
 ##############################################################################
 # Config
 ##############################################################################
-APP="${APP_DIR:-/home/zcadmin/public_html/api.autofinx.arunyadhav.dev/autofinx-backend/backends}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+APP="${APP_DIR:-$SCRIPT_DIR}"
 WS_ID="${WS_ID:-26a36b56-4383-4edd-99d1-7622e7c191ef}"
 APP_URL="${APP_URL:-https://api.autofinx.arunyadhav.dev}"
 
@@ -50,7 +51,13 @@ fail() { echo "[SETUP] FAIL: $*"; exit 1; }
 # Step 1: PHP binary detection
 ##############################################################################
 detect_php() {
+  if [ -n "${PHP:-}" ] && [ -x "$PHP" ]; then
+    "$PHP" -r 'if(PHP_MAJOR_VERSION>=8&&PHP_MINOR_VERSION>=2)exit(0);exit(1);' 2>/dev/null && {
+      echo "$PHP"; return 0;
+    }
+  fi
   for candidate in \
+    "$(command -v php || true)" \
     /usr/local/bin/ea-php82 \
     /opt/cpanel/ea-php82/root/usr/bin/php \
     /usr/bin/php82 \

@@ -49,12 +49,15 @@ class FutureTradeBotController extends Controller
         // logging, and as fallback when no symbol-specific slot is available.
         $primary = $this->bot->getOrCreateConfig($workspace);
         $configuredToken = trim((string) config('future_trade.pine_webhook_token', ''));
+        $rawBody = (string) $request->getContent();
+        $decoded = $rawBody !== '' ? json_decode($rawBody, true) : null;
+        $payload = is_array($decoded) ? $decoded : $request->all();
         $providedTokens = array_filter(array_map(
             static fn ($token): string => trim((string) $token),
             [
                 $request->bearerToken(),
                 $request->header('X-Webhook-Token'),
-                $request->input('token'),
+                $payload['token'] ?? null,
                 $request->query('token'),
             ]
         ));
@@ -62,8 +65,6 @@ class FutureTradeBotController extends Controller
         $tokenMatched = $configuredToken !== '' && collect($providedTokens)
             ->contains(static fn (string $token): bool => hash_equals($configuredToken, $token));
 
-        $rawBody = (string) $request->getContent();
-        $decoded = $rawBody !== '' ? json_decode($rawBody, true) : null;
         $headersSummary = [];
         foreach (['content-type', 'user-agent', 'x-forwarded-for', 'cf-connecting-ip'] as $header) {
             if ($request->headers->has($header)) {
@@ -73,7 +74,7 @@ class FutureTradeBotController extends Controller
         // Raw payload always recorded against slot 0 for a single source of
         // truth audit trail, regardless of which slot ultimately executes.
         try {
-            $this->bot->recordRawPineWebhookRequest($primary, is_array($decoded) ? $decoded : $request->all(), [
+            $this->bot->recordRawPineWebhookRequest($primary, $payload, [
                 'rawBody' => $rawBody,
                 'remoteIp' => $request->ip(),
                 'headersSummary' => $headersSummary,
@@ -100,7 +101,6 @@ class FutureTradeBotController extends Controller
             // Slot routing: find the slot that owns the incoming symbol, or
             // assign the first FLAT slot. If every slot is busy with a
             // different symbol, reject with a clear reason.
-            $payload = $request->all();
             $rawSymbol = (string) ($payload['symbol'] ?? $payload['ticker'] ?? '');
             $symbol = $this->bot->normalizeIncomingSymbol($rawSymbol);
             $targetConfig = $symbol !== ''
