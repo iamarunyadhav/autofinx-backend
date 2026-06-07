@@ -120,6 +120,7 @@ fi
 log "Installing optimized backend dependencies"
 run_composer install --no-dev --prefer-dist --no-interaction --no-scripts --optimize-autoloader
 run_composer dump-autoload --no-interaction --no-scripts --optimize
+rm -f bootstrap/cache/packages.php bootstrap/cache/services.php bootstrap/cache/config.php bootstrap/cache/routes-v7.php
 run_artisan package:discover --ansi || true
 
 log "Running migrations and clearing caches"
