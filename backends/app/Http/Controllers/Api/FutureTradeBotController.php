@@ -6,6 +6,7 @@ use App\Domain\FutureTrade\FutureTradeBacktestEngine;
 use App\Domain\FutureTrade\FutureTradeBotService;
 use App\Domain\Market\FutureTradeLiveFeedManager;
 use App\Http\Controllers\Controller;
+use App\Jobs\ProcessPineWebhookSignalJob;
 use App\Models\FutureTradeBacktestRun;
 use App\Models\WorkspaceMember;
 use Carbon\Carbon;
@@ -140,22 +141,27 @@ class FutureTradeBotController extends Controller
                 ], 422);
             }
 
-            // Fallback to primary (slot 0) when no symbol could be parsed —
-            // ingestPineWebhook will validate and reject with the right code.
-            $result = $this->bot->ingestPineWebhook(
-                $targetConfig ?? $primary,
-                $payload
+            // Dispatch execution to the queue so TradingView gets a response
+            // in < 100ms and never times out due to Binance API latency.
+            // All safety guards (daily loss, cooldown, idempotency) run inside
+            // the job — nothing is bypassed.
+            $resolvedConfig = $targetConfig ?? $primary;
+            ProcessPineWebhookSignalJob::dispatch(
+                (string) $resolvedConfig->id,
+                $payload,
+                $workspace,
+                $targetConfig !== null ? (int) $targetConfig->slot_index : null,
             );
 
-            // Surface which slot handled the signal so the operator can debug
-            // multi-position behaviour from the API response.
-            if ($targetConfig !== null) {
-                $result['slotIndex'] = (int) $targetConfig->slot_index;
-            }
-
-            $status = ($result['accepted'] ?? false) || ($result['reason'] ?? null) === 'duplicate_signal' ? 200 : 422;
-
-            return response()->json($result, $status);
+            return response()->json([
+                'accepted' => true,
+                'executed' => false,
+                'execution' => 'queued',
+                'source' => 'pine_webhook',
+                'symbol' => $symbol ?: null,
+                'slotIndex' => $targetConfig !== null ? (int) $targetConfig->slot_index : 0,
+                'queuedAt' => now()->toIso8601String(),
+            ], 200);
         } catch (Throwable $exception) {
             Log::error('PINE_WEBHOOK_INTERNAL_ERROR', [
                 'workspace' => $workspace,

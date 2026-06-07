@@ -437,8 +437,11 @@ class FutureTradeBotService
             }
         }
 
-        // Layer 2: first FLAT slot we can assign.
+        // Layer 2: first FLAT *enabled* slot we can assign.
         foreach ($slots as $slot) {
+            if (! $slot->enabled) {
+                continue;
+            }
             $state = $slot->state;
             $quantity = (float) ($state->quantity ?? 0);
             $slotState = (string) ($state->state ?? 'IDLE');
@@ -760,8 +763,6 @@ class FutureTradeBotService
     {
         $state = $this->state($config);
         $settings = $config->mergedSettings();
-        $dynamic = $this->dynamicDecision($config, $state, (array) ($state->scanner_snapshot ?? []), $signal, $settings);
-        $settings = $dynamic['settings'];
         $settings['emergencyStop'] = true;
         if ((float) ($this->state($config)->quantity ?? 0) > 0 && $config->enable_live_trading) {
             try {
@@ -1568,7 +1569,8 @@ class FutureTradeBotService
             $symbol,
             $timeframe,
             $decision,
-            $candle['close']->toIso8601String()
+            $candle['close']->toIso8601String(),
+            (string) $config->slot_index
         );
         if (! Cache::add($idempotencyKey, 1, now()->addMinutes(20))) {
             $this->log($config->fresh('state'), 'DUPLICATE_WEBHOOK_IGNORED', $symbol, $decision, $confidence, 'Duplicate Pine webhook signal ignored by idempotency lock.', [
@@ -2544,11 +2546,11 @@ class FutureTradeBotService
         return $this->normalizeIncomingSymbol($symbol);
     }
 
-    private function pineWebhookIdempotencyKey(string $profile, string $symbol, string $timeframe, string $signal, string $barTime): string
+    private function pineWebhookIdempotencyKey(string $profile, string $symbol, string $timeframe, string $signal, string $barTime, string $slotIndex = '0'): string
     {
         $parts = array_map(
             static fn (string $value): string => preg_replace('/[^A-Z0-9_\-:]/', '', strtoupper(trim($value))) ?? '',
-            [$profile, $symbol, $timeframe, $signal, $barTime]
+            [$profile, $symbol, $timeframe, $signal, $barTime, $slotIndex]
         );
 
         return 'autofinx:pine:idempotency:'.implode(':', $parts);
@@ -2600,8 +2602,8 @@ class FutureTradeBotService
                 $number = (int) $value;
 
                 return $number > 9999999999
-                    ? Carbon::createFromTimestampMs($number)
-                    : Carbon::createFromTimestamp($number);
+                    ? Carbon::createFromTimestampMs($number, 'UTC')
+                    : Carbon::createFromTimestamp($number, 'UTC');
             }
 
             return Carbon::parse((string) $value);
