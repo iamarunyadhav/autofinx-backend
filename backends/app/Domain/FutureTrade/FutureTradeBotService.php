@@ -1095,6 +1095,9 @@ class FutureTradeBotService
         $dynamic = $this->dynamicDecision($config, $state, $signals, $bestSignal, $settings);
         $effectiveMinConfidence = (float) ($dynamic['effectiveMinConfidence'] ?? ($settings['minConfidence'] ?? 0));
         $signalConfidence = (float) ($bestSignal['confidence'] ?? $state->confidence ?? 0);
+        $statusSymbol = (string) ($state->current_symbol ?: ($bestSignal['symbol'] ?? $this->resolveMarketChartSymbol($state, $bestSignal, $settings)));
+        $statusFeed = $this->feedFreshnessSnapshot($statusSymbol);
+        $livePrice = (float) ($statusFeed['lastTickPrice'] ?? 0);
         $wins = (int) $state->wins;
         $losses = (int) $state->losses;
         $total = max(1, $wins + $losses);
@@ -1110,8 +1113,8 @@ class FutureTradeBotService
             'currentSymbol' => $state->current_symbol,
             'currentSignal' => $state->current_signal,
             'entryReason' => $this->entryReasonSummary($state, $bestSignal, $effectiveMinConfidence),
-            'currentPrice' => (float) ($state->current_price ?? 0),
-            'confidence' => (float) $state->confidence,
+            'currentPrice' => $livePrice > 0 ? $livePrice : (float) ($state->current_price ?? 0),
+            'confidence' => $signalConfidence,
             'activeMinConfidence' => round($effectiveMinConfidence, 4),
             'signalConfidenceGap' => round($signalConfidence - $effectiveMinConfidence, 4),
             'positionSide' => $state->position_side,
@@ -1214,7 +1217,8 @@ class FutureTradeBotService
         $signals = array_slice((array) ($state->scanner_snapshot ?? []), 0, 20);
         $bestSignal = $signals[0] ?? null;
         $dynamic = $this->dynamicDecision($config, $state, $signals, $bestSignal, $settings);
-        $feed = $this->feedFreshnessSnapshot((string) ($state->current_symbol ?: ($bestSignal['symbol'] ?? '')));
+        $statusSymbol = (string) ($state->current_symbol ?: ($bestSignal['symbol'] ?? $this->resolveMarketChartSymbol($state, $bestSignal, $settings)));
+        $feed = $this->feedFreshnessSnapshot($statusSymbol);
         $lastChartPoint = Arr::last((array) ($state->chart_points ?? []));
         $chartAt = isset($lastChartPoint['time']) ? Carbon::parse((string) $lastChartPoint['time']) : null;
         $latestBlock = $config->logs()
@@ -1245,10 +1249,12 @@ class FutureTradeBotService
             'scanAgeSeconds' => (int) ($this->ageSecondsSince($state->last_scan_at) ?? 0),
             'chartUpdatedAt' => $this->isoTimestamp($chartAt),
             'chartAgeSeconds' => (int) ($this->ageSecondsSince($chartAt) ?? 0),
-            'currentSymbol' => $state->current_symbol,
+            'currentSymbol' => $statusSymbol ?: $state->current_symbol,
             'currentPrice' => (float) ($feed['lastTickPrice'] ?? $state->current_price ?? 0),
-            'currentSignal' => $state->current_signal,
-            'currentConfidence' => (float) ($state->confidence ?? 0),
+            'currentSignal' => (string) ($bestSignal['signal'] ?? $state->current_signal ?? 'WAIT'),
+            'currentConfidence' => (float) ($bestSignal['confidence'] ?? $state->confidence ?? 0),
+            'scannerSignal' => (string) ($bestSignal['signal'] ?? 'WAIT'),
+            'scannerConfidence' => (float) ($bestSignal['confidence'] ?? 0),
             'lastSkipReason' => $latestBlock?->reason,
             'positionSide' => $state->position_side ?: 'FLAT',
             'walletBalance' => $account['walletBalance'] ?? null,
@@ -1315,12 +1321,19 @@ class FutureTradeBotService
             'updatedAt' => $this->isoTimestamp($latestScanAt),
             'scanAgeSeconds' => (int) ($this->ageSecondsSince($latestScanAt) ?? 0),
             'symbols' => array_map(function (array $signal) use ($activeMinimum): array {
+                $symbol = strtoupper((string) ($signal['symbol'] ?? ''));
+                $feed = $this->feedFreshnessSnapshot($symbol);
+                $livePrice = (float) ($feed['lastTickPrice'] ?? 0);
+
                 return [
-                    'symbol' => (string) ($signal['symbol'] ?? ''),
-                    'price' => (float) ($signal['price'] ?? 0),
+                    'symbol' => $symbol,
+                    'price' => $livePrice > 0 ? $livePrice : (float) ($signal['price'] ?? 0),
                     'signal' => (string) ($signal['signal'] ?? 'WAIT'),
                     'confidence' => (float) ($signal['confidence'] ?? 0),
                     'activeMinimum' => (float) ($signal['effectiveMinConfidence'] ?? $activeMinimum),
+                    'feedFresh' => (bool) ($feed['feedFresh'] ?? false),
+                    'feedAgeSeconds' => (int) ($feed['feedAgeSeconds'] ?? 0),
+                    'lastTickAt' => $feed['lastTickAt'] ?? null,
                     'coreEntryPassed' => (bool) data_get($signal, 'debug.checks.coreEntryPassed', false),
                     'componentScores' => (array) data_get($signal, 'debug.componentScores', []),
                     'positiveFactors' => (array) data_get($signal, 'debug.positiveFactors', []),
