@@ -2,7 +2,13 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-APP_DIR="${APP_DIR:-$SCRIPT_DIR}"
+if [ -n "${APP_DIR:-}" ]; then
+  APP_DIR="$APP_DIR"
+elif [ -f "$PWD/artisan" ]; then
+  APP_DIR="$PWD"
+else
+  APP_DIR="$SCRIPT_DIR"
+fi
 PHP="${PHP:-}"
 SUPERVISOR_GROUP="${SUPERVISOR_GROUP:-autofinx-trading:*}"
 RUN_RESTART=1
