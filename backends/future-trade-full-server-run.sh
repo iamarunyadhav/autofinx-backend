@@ -5,8 +5,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR="${APP_DIR:-$SCRIPT_DIR}"
 APP_ROOT="${APP_ROOT:-$(dirname "$APP_DIR")}"
 FRONTEND_DIR="${FRONTEND_DIR:-}"
-PHP="${PHP:-$(command -v php || true)}"
-COMPOSER="${COMPOSER:-composer}"
+PHP="${PHP:-}"
+COMPOSER="${COMPOSER:-$(command -v composer || true)}"
 NPM="${NPM:-npm}"
 
 INSTALL_CRON=0
@@ -58,8 +58,15 @@ fi
 if { [ -z "$PHP" ] || [ ! -x "$PHP" ]; } && [ -x "/opt/cpanel/ea-php82/root/usr/bin/php" ]; then
   PHP="/opt/cpanel/ea-php82/root/usr/bin/php"
 fi
+if { [ -z "$PHP" ] || [ ! -x "$PHP" ]; }; then
+  PHP="$(command -v php || true)"
+fi
 if [ -z "$PHP" ] || [ ! -x "$PHP" ]; then
   echo "PHP binary not found. Set PHP=/path/to/php and retry." >&2
+  exit 1
+fi
+if [ -z "$COMPOSER" ] || [ ! -e "$COMPOSER" ]; then
+  echo "Composer not found. Set COMPOSER=/path/to/composer and retry." >&2
   exit 1
 fi
 
@@ -69,6 +76,10 @@ log() {
 
 run_artisan() {
   "$PHP" artisan "$@"
+}
+
+run_composer() {
+  "$COMPOSER" "$@"
 }
 
 cd "$APP_DIR"
@@ -100,9 +111,16 @@ find app/Domain/FutureTrade app/Domain/Market app/Http/Controllers/Api app/Conso
   -type f \( -name "*FutureTrade*.php" -o -name "future_trade.php" -o -name "api.php" -o -name "console.php" \) \
   -print0 | xargs -0 -n 1 "$PHP" -l >/dev/null
 
+if [ -x "./stop-workers.sh" ]; then
+  log "Stopping runtime workers before Composer"
+  APP_DIR="$APP_DIR" PHP="$PHP" ./stop-workers.sh || true
+  sleep 2
+fi
+
 log "Installing optimized backend dependencies"
-"$COMPOSER" install --no-dev --prefer-dist --no-interaction --optimize-autoloader
-"$COMPOSER" dump-autoload --no-interaction --optimize
+run_composer install --no-dev --prefer-dist --no-interaction --no-scripts --optimize-autoloader
+run_composer dump-autoload --no-interaction --no-scripts --optimize
+run_artisan package:discover --ansi || true
 
 log "Running migrations and clearing caches"
 run_artisan migrate --force

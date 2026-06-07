@@ -15,8 +15,8 @@ if [ -z "$PHP" ] || [ ! -x "$PHP" ]; then
   exit 1
 fi
 
-"$APP_DIR/stop-workers.sh"
+bash "$APP_DIR/stop-workers.sh"
 sleep 2
-APP_DIR="$APP_DIR" PHP="$PHP" "$APP_DIR/start-workers.sh"
+APP_DIR="$APP_DIR" PHP="$PHP" bash "$APP_DIR/start-workers.sh"
 
 echo "AutoFinX workers restarted."

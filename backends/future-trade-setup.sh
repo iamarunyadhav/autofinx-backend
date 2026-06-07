@@ -4,12 +4,15 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR="${APP_DIR:-$SCRIPT_DIR}"
 APP_ROOT="${APP_ROOT:-$(dirname "$APP_DIR")}"
-PHP="${PHP:-$(command -v php || true)}"
+PHP="${PHP:-}"
 if { [ -z "$PHP" ] || [ ! -x "$PHP" ]; } && [ -x "/usr/local/bin/ea-php82" ]; then
   PHP="/usr/local/bin/ea-php82"
 fi
 if { [ -z "$PHP" ] || [ ! -x "$PHP" ]; } && [ -x "/opt/cpanel/ea-php82/root/usr/bin/php" ]; then
   PHP="/opt/cpanel/ea-php82/root/usr/bin/php"
+fi
+if { [ -z "$PHP" ] || [ ! -x "$PHP" ]; }; then
+  PHP="$(command -v php || true)"
 fi
 if [ -z "$PHP" ] || [ ! -x "$PHP" ]; then
   echo "PHP binary not found. Set PHP=/path/to/php and retry." >&2
@@ -34,7 +37,8 @@ cd "$APP_DIR"
 "$PHP" -l app/Http/Controllers/Api/FutureTradeBotController.php
 "$PHP" -l app/Models/FutureTradeBotConfig.php
 
-composer dump-autoload --no-interaction --optimize
+composer dump-autoload --no-interaction --no-scripts --optimize
+"$PHP" artisan package:discover --ansi || true
 "$PHP" artisan migrate --force
 "$PHP" artisan optimize:clear
 
