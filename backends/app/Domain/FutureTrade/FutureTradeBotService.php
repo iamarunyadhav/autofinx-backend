@@ -1170,6 +1170,9 @@ class FutureTradeBotService
         $marketChartSymbol = $this->resolveMarketChartSymbol($state, $bestSignal, $settings);
         $marketTimeframe = (string) ($settings['timeframe'] ?? '5m');
         $marketCandles = $marketChartSymbol ? $this->fetchMarketCandles($marketChartSymbol, $marketTimeframe, 180) : [];
+        $marketFeed = $this->feedFreshnessSnapshot($marketChartSymbol);
+        $marketLivePrice = (float) ($marketFeed['lastTickPrice'] ?? 0);
+        $orderbookPrice = $marketLivePrice > 0 ? $marketLivePrice : (float) ($state->current_price ?? 0);
 
         $signalStability = $this->buildSignalStabilitySnapshot($config, $bestSignal, $settings);
         $runtimeHealth = $this->buildRuntimeHealthSnapshot($config, $state, $bestSignal);
@@ -1198,7 +1201,7 @@ class FutureTradeBotService
                 'bottom' => (float) ($state->bottom_price ?? 0) ?: null,
                 'effectiveMinConfidence' => $dynamic['effectiveMinConfidence'],
             ],
-            'orderbook' => $this->syntheticOrderbook((float) ($state->current_price ?? 0)),
+            'orderbook' => $this->syntheticOrderbook($orderbookPrice),
             'risk' => [
                 'lossPrevention' => 'Stop loss, rollback, trailing profit, cooldown, max daily loss and max trades are active in paper mode.',
                 'paperTrading' => ! $this->isLiveMode($config),
@@ -1329,8 +1332,22 @@ class FutureTradeBotService
                     'symbol' => $symbol,
                     'price' => $livePrice > 0 ? $livePrice : (float) ($signal['price'] ?? 0),
                     'signal' => (string) ($signal['signal'] ?? 'WAIT'),
+                    'changePercent' => (float) ($signal['changePercent'] ?? 0),
+                    'volume' => (float) ($signal['volume'] ?? 0),
+                    'rangePercent' => (float) ($signal['rangePercent'] ?? 0),
                     'confidence' => (float) ($signal['confidence'] ?? 0),
                     'activeMinimum' => (float) ($signal['effectiveMinConfidence'] ?? $activeMinimum),
+                    'effectiveMinConfidence' => (float) ($signal['effectiveMinConfidence'] ?? $activeMinimum),
+                    'dynamicMode' => (string) ($signal['dynamicMode'] ?? ''),
+                    'timeframe' => (string) ($signal['timeframe'] ?? ($settings['timeframe'] ?? '5m')),
+                    'reason' => (string) ($signal['reason'] ?? ''),
+                    'rsi14' => $signal['rsi14'] ?? data_get($signal, 'debug.componentScores.rsi'),
+                    'emaBullish' => $signal['emaBullish'] ?? null,
+                    'macdBullish' => $signal['macdBullish'] ?? null,
+                    'macdHistGrowing' => $signal['macdHistGrowing'] ?? null,
+                    'htfBullish' => $signal['htfBullish'] ?? null,
+                    'htf4hBullish' => $signal['htf4hBullish'] ?? null,
+                    'symbolPerfAdj' => $signal['symbolPerfAdj'] ?? null,
                     'feedFresh' => (bool) ($feed['feedFresh'] ?? false),
                     'feedAgeSeconds' => (int) ($feed['feedAgeSeconds'] ?? 0),
                     'lastTickAt' => $feed['lastTickAt'] ?? null,
