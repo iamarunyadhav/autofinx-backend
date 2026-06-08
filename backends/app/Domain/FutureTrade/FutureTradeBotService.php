@@ -3175,11 +3175,14 @@ class FutureTradeBotService
         if ($this->isLiveMode($config)) {
             $this->emitTradeDecisionDebug($config, $signal, $dynamic, 'OPEN', [], ['live_entry_allowed']);
             try {
-                $this->openLivePosition($config, array_merge($signal, [
+                $liveBlock = $this->openLivePosition($config, array_merge($signal, [
                     'signal_key' => $signalKey,
                     'candle_open' => $candleOpen,
                     'timeframe' => $timeframe,
                 ]));
+                if ($liveBlock !== null) {
+                    return $liveBlock;
+                }
             } catch (Throwable $e) {
                 $this->persistState($state, [
                     'connection_status' => 'Live entry failed',
@@ -3195,6 +3198,8 @@ class FutureTradeBotService
                     $this->runtimeContext($dynamic, ['status' => 'ERROR'], $signal),
                     30
                 );
+
+                return 'live_entry_failed';
             }
 
             return null;
@@ -3411,7 +3416,7 @@ class FutureTradeBotService
         }
     }
 
-    private function openLivePosition(FutureTradeBotConfig $config, array $signal): void
+    private function openLivePosition(FutureTradeBotConfig $config, array $signal): ?string
     {
         $settings = $this->normalizeFutureTradeSettings($config->mergedSettings());
         if ($this->primeMirrorExecutionBlocked($config, $settings, $signal)) {
@@ -3434,7 +3439,7 @@ class FutureTradeBotService
                 15
             );
 
-            return;
+            return $reason;
         }
 
         // Defense-in-depth: re-run the freshness gate here too. Any future
@@ -3466,7 +3471,7 @@ class FutureTradeBotService
                 15
             );
 
-            return;
+            return 'freshness_gate:'.implode(',', $freshnessBlockers);
         }
         $this->logFreshnessFallbackIfNeeded($config, $signal, $freshness);
 
@@ -3488,7 +3493,7 @@ class FutureTradeBotService
                     30
                 );
 
-                return false;
+                return 'open_position_exists';
             }
             if ($signalKey !== '' && $this->lockSvc()->hasSignalKey((string) $config->id, $signalKey)) {
                 $this->logThrottled(
@@ -3502,11 +3507,10 @@ class FutureTradeBotService
                     30
                 );
 
-                return false;
+                return 'duplicate_signal_key';
             }
-            $this->openLivePositionLocked($config, $signal);
 
-            return true;
+            return $this->openLivePositionLocked($config, $signal);
         });
 
         if ($result === null) {
@@ -3521,17 +3525,19 @@ class FutureTradeBotService
                 15
             );
 
-            return;
+            return 'duplicate_live_entry_processing';
         }
+
+        return $result === true ? null : (string) $result;
     }
 
-    private function openLivePositionLocked(FutureTradeBotConfig $config, array $signal): void
+    private function openLivePositionLocked(FutureTradeBotConfig $config, array $signal): bool|string
     {
         $guard = $this->liveGuard->canActivate($config->workspace_id, 'future_trade');
         if (! $guard['allowed']) {
             $this->log($config->fresh('state'), 'LIVE_GUARD_BLOCKED', (string) $signal['symbol'], (string) $signal['signal'], (float) $signal['confidence'], $guard['reason']);
 
-            return;
+            return 'live_guard_blocked';
         }
 
         $settings = $this->normalizeFutureTradeSettings($config->mergedSettings());
@@ -3561,7 +3567,7 @@ class FutureTradeBotService
                 15
             );
 
-            return;
+            return 'duplicate_live_position_local';
         }
 
         $exchangeBefore = $this->exchangePositionSnapshot($client, $symbol);
@@ -3581,7 +3587,7 @@ class FutureTradeBotService
                 15
             );
 
-            return;
+            return 'duplicate_live_position_exchange';
         }
 
         $filters = $this->orderSizing->extractFilters($this->cachedExchangeInfo($client, $symbol), $symbol);
@@ -3608,7 +3614,7 @@ class FutureTradeBotService
                 ], $signal, ['insufficient_wallet_balance'])
             );
 
-            return;
+            return 'insufficient_wallet_balance';
         }
 
         $sizing = $this->orderSizing->evaluate(
@@ -3685,7 +3691,7 @@ class FutureTradeBotService
                     ], $signal, ['rounded_quantity_zero'])
                 );
 
-                return;
+                return 'rounded_quantity_zero';
             }
         }
 
@@ -3715,7 +3721,7 @@ class FutureTradeBotService
                 ], $signal, ['min_notional_invalid'])
             );
 
-            return;
+            return 'min_notional_invalid';
         }
 
         // setLeverage/setMarginType: Binance returns -4046 if already set to the
@@ -3874,6 +3880,8 @@ class FutureTradeBotService
         if ($confirmedOpen) {
             $this->placeExchangeSLTPOrders($config, $client, $logical, $symbol, $positionSide, $entry, $settings, $signalKey);
         }
+
+        return true;
     }
 
     private function closeLivePosition(FutureTradeBotConfig $config, float $price, string $reason): void
