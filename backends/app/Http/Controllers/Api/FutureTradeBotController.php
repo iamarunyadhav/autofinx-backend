@@ -26,22 +26,22 @@ class FutureTradeBotController extends Controller
 
     public function status(string $workspace): JsonResponse
     {
-        return response()->json($this->bot->statusPayload($this->bot->getOrCreateConfig($workspace)));
+        return $this->liveJson($this->bot->statusPayload($this->bot->getOrCreateConfig($workspace)));
     }
 
     public function dashboard(string $workspace): JsonResponse
     {
-        return response()->json($this->bot->dashboardPayload($this->bot->getOrCreateConfig($workspace)));
+        return $this->liveJson($this->bot->dashboardPayload($this->bot->getOrCreateConfig($workspace)));
     }
 
     public function liveStatus(string $workspace): JsonResponse
     {
-        return response()->json($this->bot->liveStatusLightPayload($this->bot->getOrCreateConfig($workspace)));
+        return $this->liveJson($this->bot->liveStatusLightPayload($this->bot->getOrCreateConfig($workspace)));
     }
 
     public function scannerSnapshot(string $workspace): JsonResponse
     {
-        return response()->json($this->bot->scannerSnapshotPayload($this->bot->getOrCreateConfig($workspace)));
+        return $this->liveJson($this->bot->scannerSnapshotPayload($this->bot->getOrCreateConfig($workspace)));
     }
 
     public function pineWebhook(Request $request, string $workspace): JsonResponse
@@ -183,22 +183,22 @@ class FutureTradeBotController extends Controller
 
     public function lastWebhookPayload(string $workspace): JsonResponse
     {
-        return response()->json($this->bot->lastWebhookPayload($this->bot->getOrCreateConfig($workspace)));
+        return $this->liveJson($this->bot->lastWebhookPayload($this->bot->getOrCreateConfig($workspace)));
     }
 
     public function binanceHealth(string $workspace): JsonResponse
     {
-        return response()->json($this->bot->binanceHealthPayload($this->bot->getOrCreateConfig($workspace)));
+        return $this->liveJson($this->bot->binanceHealthPayload($this->bot->getOrCreateConfig($workspace)));
     }
 
     public function runtimeHealth(string $workspace): JsonResponse
     {
-        return response()->json($this->bot->runtimeHealthPayload($this->bot->getOrCreateConfig($workspace)));
+        return $this->liveJson($this->bot->runtimeHealthPayload($this->bot->getOrCreateConfig($workspace)));
     }
 
     public function chart(Request $request, string $workspace): JsonResponse
     {
-        return response()->json($this->bot->liveChartPayload(
+        return $this->liveJson($this->bot->liveChartPayload(
             $this->bot->getOrCreateConfig($workspace),
             $request->query('symbol') ? (string) $request->query('symbol') : null,
             $request->query('timeframe') ? (string) $request->query('timeframe') : null,
@@ -208,7 +208,7 @@ class FutureTradeBotController extends Controller
 
     public function liveFeedStatus(string $workspace): JsonResponse
     {
-        return response()->json($this->liveFeedManager->status($workspace));
+        return $this->liveJson($this->liveFeedManager->status($workspace));
     }
 
     public function startLiveFeed(string $workspace): JsonResponse
@@ -561,5 +561,14 @@ class FutureTradeBotController extends Controller
             'completed_at' => $run->completed_at?->toIso8601String(),
             'created_at' => $run->created_at?->toIso8601String(),
         ];
+    }
+
+    private function liveJson(array $payload): JsonResponse
+    {
+        return response()
+            ->json($payload)
+            ->header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+            ->header('Pragma', 'no-cache')
+            ->header('Expires', '0');
     }
 }
