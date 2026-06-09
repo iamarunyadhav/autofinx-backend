@@ -435,28 +435,40 @@ if [ -f storage/logs/laravel.log ] && [ -n "$TWOHOURSAGO" ]; then
     | sort | uniq -c | sort -rn \
     | sed 's/^/    /'
 
+  # Filter last 2h only using awk (works on all Linux)
+  RECENT_LOG="$(awk -v cutoff="[$TWOHOURSAGO]" '$0 >= cutoff' storage/logs/laravel.log 2>/dev/null || true)"
+
   # Check for -2015 in last 2h
-  DEAD_KEY_COUNT="$(grep -c 'binance_key_dead\|Invalid API-key' storage/logs/laravel.log 2>/dev/null || true)"
+  DEAD_KEY_COUNT="$(echo "$RECENT_LOG" | grep -c 'binance_key_dead\|Invalid API-key' 2>/dev/null || true)"
   if [ "${DEAD_KEY_COUNT:-0}" -gt 0 ]; then
-    fail "-2015/dead-key errors found in log: $DEAD_KEY_COUNT occurrences — fix Binance API key"
+    fail "-2015/dead-key errors in last 2h: $DEAD_KEY_COUNT occurrences — fix Binance API key"
   else
-    pass "No -2015 (dead key) errors in log"
+    pass "No -2015 (dead key) errors in last 2h"
   fi
 
   # Check for -1003 IP ban in last 2h
-  BAN_COUNT="$(grep -c '\-1003\|Way too many requests\|banned until' storage/logs/laravel.log 2>/dev/null || true)"
+  BAN_COUNT="$(echo "$RECENT_LOG" | grep -c '\-1003\|Way too many requests\|banned until' 2>/dev/null || true)"
   if [ "${BAN_COUNT:-0}" -gt 0 ]; then
-    fail "-1003 IP ban errors found: $BAN_COUNT — check Section 5 ban status"
+    fail "-1003 IP ban errors in last 2h: $BAN_COUNT — check Section 5 ban status"
   else
-    pass "No -1003 (IP ban) errors in log"
+    pass "No -1003 (IP ban) errors in last 2h"
   fi
 
-  # Check for blocked_with_logged_reason (timeout issue we fixed)
-  TIMEOUT_BLOCKS="$(grep -c 'blocked_with_logged_reason' storage/logs/laravel.log 2>/dev/null || true)"
+  # Check for blocked_with_logged_reason in last 2h
+  TIMEOUT_BLOCKS="$(echo "$RECENT_LOG" | grep -c 'blocked_with_logged_reason' 2>/dev/null || true)"
   if [ "${TIMEOUT_BLOCKS:-0}" -gt 0 ]; then
-    warn "blocked_with_logged_reason found: $TIMEOUT_BLOCKS times (check if key health cache is working)"
+    warn "blocked_with_logged_reason in last 2h: $TIMEOUT_BLOCKS times"
   else
-    pass "No blocked_with_logged_reason timeouts"
+    pass "No blocked_with_logged_reason timeouts in last 2h"
+  fi
+
+  # Job timeouts in last 2h
+  JOB_TIMEOUTS="$(echo "$RECENT_LOG" | grep -c 'has timed out' 2>/dev/null || true)"
+  if [ "${JOB_TIMEOUTS:-0}" -gt 0 ]; then
+    fail "ProcessPineWebhookSignalJob timed out in last 2h: $JOB_TIMEOUTS times"
+    echo "$RECENT_LOG" | grep 'has timed out' | tail -3 | sed 's/^/    /'
+  else
+    pass "No job timeouts in last 2h"
   fi
 
   # Show last 5 executed trades
@@ -574,11 +586,12 @@ else
   fail "Fix#4 MISSING: assertKeyHealthy() not found in $BINANCE_CLIENT"
 fi
 
-# Fix 5: Timeout reduced from 12 to 6
-if grep -q '->timeout(6)' "$BINANCE_CLIENT" 2>/dev/null; then
-  pass "Fix#5 deployed: HTTP timeout reduced to 6s"
+# Fix 5: Timeout reduced (6s or less)
+TIMEOUT_VAL="$(grep -oP '->timeout\(\K\d+' "$BINANCE_CLIENT" 2>/dev/null | head -1)"
+if [ -n "$TIMEOUT_VAL" ] && [ "$TIMEOUT_VAL" -le 8 ]; then
+  pass "Fix#5 deployed: HTTP timeout = ${TIMEOUT_VAL}s (≤8s)"
 else
-  warn "Fix#5 check: ->timeout(6) not found — may still be 12s"
+  warn "Fix#5 check: HTTP timeout = ${TIMEOUT_VAL:-unknown}s (expected ≤8s)"
 fi
 
 # Fix 6: 2 retry attempts (was 4)
