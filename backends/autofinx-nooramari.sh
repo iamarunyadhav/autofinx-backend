@@ -109,10 +109,10 @@ else
 fi
 
 if [ -n "$PHP" ]; then
-  REDIS_OK=$(tinker_run "try { Cache::put('_nooramari_ping','1',5); echo Cache::get('_nooramari_ping')==='1'?'ok':'fail'; } catch(\$e){echo 'fail';}")
+  REDIS_OK=$(tinker_run "try { Cache::put('_nooramari_ping','1',5); echo Cache::get('_nooramari_ping')==='1'?'ok':'fail'; } catch (\\Throwable \$e){echo 'fail';}")
   [ "$REDIS_OK" = "ok" ] && pass "Laravel Redis read/write OK" || fail "Laravel Redis read/write FAILED"
 
-  DB_OK=$(tinker_run "try { DB::select('SELECT 1'); echo 'ok'; } catch(\$e){echo 'fail|'.\$e->getMessage();}")
+  DB_OK=$(tinker_run "try { DB::select('SELECT 1'); echo 'ok'; } catch (\\Throwable \$e){echo 'fail|'.\$e->getMessage();}")
   [[ "$DB_OK" == ok ]] && pass "MySQL connection OK" || fail "MySQL connection FAILED: $DB_OK"
 fi
 
@@ -129,35 +129,55 @@ printf "  live-feed        : %s\n" "$FEED_N"
 printf "  tick (transient) : %s\n" "$TICK_N"
 printf "  user-stream      : %s\n" "$STREAM_N"
 
-NEED_START=0
+NEED_RESTART=0
+HAS_SUPERVISOR=0
+command -v supervisorctl &>/dev/null && HAS_SUPERVISOR=1
 
-# Kill duplicates
-if [ "${QUEUE_N:-0}" -gt 1 ]; then
-  warn "Duplicate queue:work ($QUEUE_N) — killing all for clean restart"
-  pkill -f "artisan queue:work" 2>/dev/null; sleep 2; NEED_START=1
-fi
-if [ "${FEED_N:-0}" -gt 1 ]; then
-  warn "Duplicate live-feed ($FEED_N) — killing all"
-  pkill -f "future-trade:live-feed" 2>/dev/null; sleep 2; NEED_START=1
-fi
-[ "${QUEUE_N:-0}" -eq 0 ] && NEED_START=1
-[ "${FEED_N:-0}" -eq 0 ]  && NEED_START=1
-
-if [ "$NEED_START" -eq 1 ] && [ -n "$PHP" ]; then
-  if ! pgrep -f "artisan queue:work" >/dev/null 2>&1; then
-    info "Auto-starting queue:work..."
-    nohup "$PHP" artisan queue:work \
-      --queue=critical,execution,reconcile,monitoring,market,signals,strategies,ratio_bot,ops,intelligence,risk,billing,copytrading,analytics,notifications,default,monitoring_safe \
-      --sleep=1 --tries=3 --timeout=120 --max-time=3600 \
-      >> storage/logs/worker-all.log 2>&1 &
-    sleep 3
+if [ "$HAS_SUPERVISOR" -eq 1 ]; then
+  # ── Supervisor mode: let supervisorctl own all process lifecycle ──────────
+  # Never pkill supervisor-managed processes — supervisor will just restart
+  # them immediately, creating duplicates. Restart via supervisorctl only.
+  if [ "${QUEUE_N:-0}" -gt 2 ]; then
+    warn "Too many queue:work processes ($QUEUE_N) — restarting via supervisor"
+    supervisorctl restart "autofinx-trading:queue-critical" \
+                          "autofinx-trading:queue-market" \
+                          "autofinx-trading:queue-safe" 2>/dev/null || true
+    sleep 3; NEED_RESTART=1
   fi
-  if ! pgrep -f "future-trade:live-feed" >/dev/null 2>&1; then
-    info "Auto-starting live-feed..."
-    nohup "$PHP" artisan future-trade:live-feed \
-      --symbols="$FT_SYMBOLS" --streams="$FT_STREAMS" --reconnect-sleep=2 \
-      >> storage/logs/future-trade-live-feed.log 2>> storage/logs/future-trade-live-feed.error.log &
-    sleep 4
+  if [ "${FEED_N:-0}" -eq 0 ]; then
+    warn "live-feed not running — restarting via supervisor"
+    supervisorctl restart "autofinx-trading:live-feed" 2>/dev/null || true
+    sleep 4; NEED_RESTART=1
+  fi
+else
+  # ── Non-supervisor (cron) mode: manage directly ───────────────────────────
+  if [ "${QUEUE_N:-0}" -gt 1 ]; then
+    warn "Duplicate queue:work ($QUEUE_N) — killing all for clean restart"
+    pkill -f "artisan queue:work" 2>/dev/null; sleep 2; NEED_RESTART=1
+  fi
+  if [ "${FEED_N:-0}" -gt 1 ]; then
+    warn "Duplicate live-feed ($FEED_N) — killing all"
+    pkill -f "future-trade:live-feed" 2>/dev/null; sleep 2; NEED_RESTART=1
+  fi
+  [ "${QUEUE_N:-0}" -eq 0 ] && NEED_RESTART=1
+  [ "${FEED_N:-0}" -eq 0 ]  && NEED_RESTART=1
+
+  if [ "$NEED_RESTART" -eq 1 ] && [ -n "$PHP" ]; then
+    if ! pgrep -f "artisan queue:work" >/dev/null 2>&1; then
+      info "Auto-starting queue:work (no-supervisor mode)..."
+      nohup "$PHP" artisan queue:work \
+        --queue=critical,execution,reconcile,monitoring,market,signals,strategies,ratio_bot,ops,intelligence,risk,billing,copytrading,analytics,notifications,default,monitoring_safe \
+        --sleep=1 --tries=3 --timeout=120 --max-time=3600 \
+        >> storage/logs/worker-all.log 2>&1 &
+      sleep 3
+    fi
+    if ! pgrep -f "future-trade:live-feed" >/dev/null 2>&1; then
+      info "Auto-starting live-feed (no-supervisor mode)..."
+      nohup "$PHP" artisan future-trade:live-feed \
+        --symbols="$FT_SYMBOLS" --streams="$FT_STREAMS" --reconnect-sleep=2 \
+        >> storage/logs/future-trade-live-feed.log 2>> storage/logs/future-trade-live-feed.error.log &
+      sleep 4
+    fi
   fi
 fi
 
@@ -322,7 +342,7 @@ if [ -n "$PHP" ]; then
           \$status,
           \$hasKey,
           \$hbAt,
-          \$age ? \"($age)\" : '',
+          \$age ? \"(\$age)\" : '',
           \$eventAt,
           \$lastErr ? ' | ERR: '.substr(\$lastErr, 0, 80) : '');
       }
@@ -465,6 +485,43 @@ else
 fi
 
 # =============================================================================
+section "11b. live-feed BACKOFF Diagnosis"
+# If supervisor shows BACKOFF, dig into why
+if command -v supervisorctl &>/dev/null; then
+  FEED_STATUS="$(supervisorctl status autofinx-trading:live-feed 2>/dev/null || true)"
+  if echo "$FEED_STATUS" | grep -qiE "BACKOFF|FATAL|STOPPED"; then
+    fail "live-feed is in BACKOFF/FATAL — checking crash reason..."
+    # Supervisor log
+    SUP_LOG="$(supervisorctl tail autofinx-trading:live-feed 2>/dev/null | tail -20 || true)"
+    if [ -n "$SUP_LOG" ]; then
+      info "Supervisor tail for live-feed:"
+      echo "$SUP_LOG" | sed 's/^/  /'
+    fi
+    # Stderr log
+    FEED_ERR="$(tail -30 storage/logs/future-trade-live-feed.error.log 2>/dev/null || true)"
+    [ -n "$FEED_ERR" ] && { info "live-feed stderr:"; echo "$FEED_ERR" | sed 's/^/  /'; }
+    # Quick PHP syntax check
+    if [ -n "$PHP" ]; then
+      info "PHP syntax check on live-feed command..."
+      "$PHP" -l app/Console/Commands/FutureTraceLiveFeedCommand.php 2>&1 || \
+      "$PHP" -l app/Console/Commands/FutureTradeLiveFeedCommand.php 2>&1 || \
+      find app/Console/Commands -name "*live*feed*" -o -name "*LiveFeed*" 2>/dev/null | while read -r f; do
+        "$PHP" -l "$f" 2>&1
+      done
+      info "PHP syntax check on all recently-changed files..."
+      for f in \
+        app/Domain/Exchange/BinanceFuturesClient.php \
+        app/Domain/FutureTrade/FutureTradeUserStreamService.php \
+        app/Console/Commands/FutureTradeUserStreamCommand.php \
+        app/Domain/FutureTrade/FutureTradeBotService.php; do
+        [ -f "$f" ] && "$PHP" -l "$f" 2>&1 | sed 's/^/  /'
+      done
+    fi
+  else
+    pass "live-feed not in BACKOFF state"
+  fi
+fi
+
 section "12. Live Feed Heartbeat"
 # =============================================================================
 HB_FILE="storage/framework/autofinx-live-feed-heartbeat.json"
