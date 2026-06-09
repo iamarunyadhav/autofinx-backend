@@ -81,7 +81,7 @@ class AiTradePolicyService
         $minConfidence = (float) ($config['min_confidence'] ?? 0);
         $lowConfidence = $minConfidence > 0 && $proposal->confidence < $minConfidence;
         if ($mode === 'restricted_auto' && $lowConfidence) {
-            return $this->reject('confidence_below_auto_threshold');
+            return $this->reject('confidence_below_auto_threshold', [], $minConfidence, $proposal->confidence);
         }
         if ($mode === 'manual_approval' && $lowConfidence) {
             $reasons[] = 'confidence_below_auto_threshold';
@@ -213,18 +213,22 @@ class AiTradePolicyService
             'can_execute_now' => $canExecuteNow,
             'requires_human_approval' => $requiresApproval,
             'reason_codes' => array_values(array_unique($reasons)),
+            'min_confidence' => $minConfidence,
+            'confidence_gap' => $minConfidence > 0 ? round($proposal->confidence - $minConfidence, 6) : null,
             'estimated_notional' => $estimatedNotional,
             'estimated_qty' => $estimatedQty,
         ];
     }
 
-    private function reject(string $reason, array $extraReasons = []): array
+    private function reject(string $reason, array $extraReasons = [], ?float $minConfidence = null, ?float $confidence = null): array
     {
         return [
             'allowed' => false,
             'can_execute_now' => false,
             'requires_human_approval' => false,
             'reason_codes' => array_values(array_unique(array_merge([$reason], $extraReasons))),
+            'min_confidence' => $minConfidence,
+            'confidence_gap' => $minConfidence !== null && $confidence !== null ? round($confidence - $minConfidence, 6) : null,
             'estimated_notional' => 0.0,
             'estimated_qty' => 0.0,
         ];

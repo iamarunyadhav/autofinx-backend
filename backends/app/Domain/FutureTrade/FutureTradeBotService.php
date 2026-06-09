@@ -2430,6 +2430,8 @@ class FutureTradeBotService
                 'market_data_stale',
                 'ai_trading_disabled',
                 'external_context_disabled',
+                'binance_user_stream_not_configured',
+                'failed_jobs_present',
             ];
             $runtimeBlockers = array_values(array_filter(
                 $runtimeBlockers,
@@ -2439,7 +2441,7 @@ class FutureTradeBotService
                 $serverBlockers,
                 static fn ($blocker): bool => ! in_array((string) $blocker, $diagnosticOnlyBlockers, true)
             ));
-            foreach (['ai_trading_disabled', 'external_context_disabled', 'market_data_unavailable', 'market_data_stale', 'stale_feed'] as $warning) {
+            foreach (['ai_trading_disabled', 'external_context_disabled', 'market_data_unavailable', 'market_data_stale', 'stale_feed', 'binance_user_stream_not_configured', 'failed_jobs_present'] as $warning) {
                 if (in_array($warning, (array) ($health['warnings'] ?? []), true) || in_array($warning, (array) ($health['blockers'] ?? []), true)) {
                     $serverWarnings[] = $warning;
                 }

@@ -188,7 +188,14 @@ class AiDecisionCycleService
                 'raw_proposal_json' => $orchestrated['raw_json'],
                 'validated_proposal_json' => $proposal->toArray(),
                 'validation_result_json' => $orchestrated['validation'],
-                'policy_result_json' => ['allowed' => true, 'reason_codes' => ['review_required_by_ai']],
+                'policy_result_json' => [
+                    'allowed' => true,
+                    'reason_codes' => ['review_required_by_ai'],
+                    'min_confidence' => (float) ($config->min_confidence ?? 0),
+                    'confidence_gap' => (float) ($config->min_confidence ?? 0) > 0
+                        ? round($proposal->confidence - (float) ($config->min_confidence ?? 0), 6)
+                        : null,
+                ],
                 'provider_name' => $orchestrated['provider'],
                 'provider_model' => $orchestrated['model'],
                 'requires_approval' => true,
