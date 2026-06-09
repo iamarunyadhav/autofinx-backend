@@ -20,9 +20,40 @@ STAMP="$(date +%Y%m%d-%H%M%S)"
 REPORT_DIR="$REPORT_ROOT/future-trade-root-diagnose-$STAMP"
 REPORT_MD="$REPORT_DIR/report.md"
 REPORT_JSON="$REPORT_DIR/report.json"
+PHP_BIN="${PHP_BIN:-}"
 
 mkdir -p "$REPORT_DIR"
 cd "$BACKEND_DIR" || exit 1
+
+detect_php_bin() {
+  if [ -n "$PHP_BIN" ] && [ -x "$PHP_BIN" ]; then
+    return
+  fi
+
+  for candidate in \
+    /opt/cpanel/ea-php83/root/usr/bin/php \
+    /opt/cpanel/ea-php82/root/usr/bin/php \
+    /usr/local/bin/ea-php83 \
+    /usr/local/bin/ea-php82 \
+    /usr/bin/php8.3 \
+    /usr/bin/php8.2 \
+    /usr/local/bin/php \
+    /usr/bin/php
+  do
+    if [ -x "$candidate" ]; then
+      local version_id
+      version_id="$("$candidate" -r 'echo PHP_VERSION_ID;' 2>/dev/null || true)"
+      if [ -n "$version_id" ] && [ "$version_id" -ge 80200 ]; then
+        PHP_BIN="$candidate"
+        return
+      fi
+    fi
+  done
+
+  PHP_BIN="$(command -v php 2>/dev/null || printf php)"
+}
+
+detect_php_bin
 
 PASS_COUNT=0
 WARN_COUNT=0
@@ -42,7 +73,7 @@ mask() {
 
 md() { printf "%s\n" "$*" >> "$REPORT_MD"; }
 json_escape() {
-  php -r 'echo json_encode($argv[1], JSON_UNESCAPED_SLASHES);' "$1" 2>/dev/null || printf '"%s"' "$1"
+  "$PHP_BIN" -r 'echo json_encode($argv[1], JSON_UNESCAPED_SLASHES);' "$1" 2>/dev/null || printf '"%s"' "$1"
 }
 
 add_result() {
@@ -91,10 +122,7 @@ detect_base_url() {
     return
   fi
   local app_url
-  app_url="$(php -r '
-    $env = @parse_ini_file(".env", false, INI_SCANNER_RAW);
-    echo trim((string)($env["APP_URL"] ?? ""));
-  ' 2>/dev/null)"
+  app_url="$(read_env_value APP_URL)"
   if [ -n "$app_url" ]; then
     BASE_URL="$app_url"
   else
@@ -104,10 +132,17 @@ detect_base_url() {
 
 read_env_value() {
   local key="$1"
-  php -r '
-    $env = @parse_ini_file(".env", false, INI_SCANNER_RAW);
-    echo trim((string)($env[$argv[1]] ?? ""));
-  ' "$key" 2>/dev/null
+  awk -v k="$key" '
+    BEGIN { FS = "=" }
+    /^[[:space:]]*#/ { next }
+    $1 == k {
+      sub(/^[^=]*=/, "")
+      gsub(/\r$/, "")
+      gsub(/^["'\'']|["'\'']$/, "")
+      print
+      exit
+    }
+  ' .env 2>/dev/null
 }
 
 php_probe_file="$REPORT_DIR/ft_probe.php"
@@ -363,7 +398,8 @@ for bin in php composer curl awk sed grep date ps; do
 done
 
 run_capture "php-version" php -v
-run_capture "laravel-version" php artisan --version
+run_capture "selected-php-version" "$PHP_BIN" -v
+run_capture "laravel-version" "$PHP_BIN" artisan --version
 
 section "Environment And Flow"
 PINE_TOKEN="$(read_env_value FUTURE_TRADE_PINE_WEBHOOK_TOKEN)"
@@ -391,20 +427,20 @@ md ""
 md "TradingView timeout usually means step 1-3 took too long. Trade not opening usually means step 3 job did not run, or step 4/5 blocked."
 
 section "Laravel Runtime Probes"
-WORKSPACE_ID="$WORKSPACE_ID" php "$php_probe_file" > "$REPORT_JSON" 2> "$REPORT_DIR/php-probe-error.txt"
+WORKSPACE_ID="$WORKSPACE_ID" "$PHP_BIN" "$php_probe_file" > "$REPORT_JSON" 2> "$REPORT_DIR/php-probe-error.txt"
 if [ "$?" -eq 0 ]; then
   add_result PASS "PHP runtime probe completed" "$REPORT_JSON"
 else
   add_result FAIL "PHP runtime probe failed" "see $REPORT_DIR/php-probe-error.txt"
 fi
 
-run_capture "future-trade-runtime-status-json" php artisan future-trade:runtime-status --json ${WORKSPACE_ID:+--workspace="$WORKSPACE_ID"}
+run_capture "future-trade-runtime-status-json" "$PHP_BIN" artisan future-trade:runtime-status --json ${WORKSPACE_ID:+--workspace="$WORKSPACE_ID"}
 if [ -n "$WORKSPACE_ID" ]; then
-  run_capture "future-trade-diagnostics-json" php artisan future-trade:diagnostics "$WORKSPACE_ID" --json
+  run_capture "future-trade-diagnostics-json" "$PHP_BIN" artisan future-trade:diagnostics "$WORKSPACE_ID" --json
 else
-  run_capture "future-trade-diagnostics-json" php artisan future-trade:diagnostics --json
+  run_capture "future-trade-diagnostics-json" "$PHP_BIN" artisan future-trade:diagnostics --json
 fi
-run_capture "future-trade-queue-health" php artisan future-trade:queue-health
+run_capture "future-trade-queue-health" "$PHP_BIN" artisan future-trade:queue-health
 
 section "Process Supervisor Scheduler"
 run_capture "processes-autofinx" bash -lc "ps aux | grep -E 'artisan|queue:work|horizon|future-trade|supervisord|nginx|apache|php-fpm' | grep -v grep || true"
@@ -439,8 +475,8 @@ if [ "$TEST_WEBHOOK" = "1" ]; then
 JSON
     run_capture "http-test-pine-webhook" bash -lc "curl -k -sS -X POST '$WEBHOOK_URL' -H 'Content-Type: application/json' --data-binary '@$PAYLOAD' -o /tmp/autofinx_test_webhook.$$ -w 'http_code=%{http_code} total=%{time_total} starttransfer=%{time_starttransfer}\n' ; cat /tmp/autofinx_test_webhook.$$ ; rm -f /tmp/autofinx_test_webhook.$$"
     add_result WARN "Webhook test was sent" "Check execution queue/job logs after this point. Signal=$TEST_SIGNAL symbol=$TEST_SYMBOL confidence=$TEST_CONFIDENCE"
-    run_capture "queue-after-test-webhook" php artisan future-trade:queue-health
-    run_capture "runtime-after-test-webhook" php artisan future-trade:runtime-status --json --workspace="$WORKSPACE_ID"
+    run_capture "queue-after-test-webhook" "$PHP_BIN" artisan future-trade:queue-health
+    run_capture "runtime-after-test-webhook" "$PHP_BIN" artisan future-trade:runtime-status --json --workspace="$WORKSPACE_ID"
   fi
 else
   add_result INFO "Webhook send skipped" "Set TEST_WEBHOOK=1 WORKSPACE_ID=... to send a TradingView-style webhook."
@@ -449,9 +485,9 @@ fi
 section "Scanner And Stream Probes"
 if [ "$RUN_TICK" = "1" ]; then
   if [ -n "$WORKSPACE_ID" ]; then
-    run_capture "future-trade-tick-no-execute" php artisan future-trade:tick --workspace="$WORKSPACE_ID" --duration=6 --sleep-ms=1000 --no-execute
+    run_capture "future-trade-tick-no-execute" "$PHP_BIN" artisan future-trade:tick --workspace="$WORKSPACE_ID" --duration=6 --sleep-ms=1000 --no-execute
   else
-    run_capture "future-trade-tick-no-execute" php artisan future-trade:tick --duration=6 --sleep-ms=1000 --no-execute
+    run_capture "future-trade-tick-no-execute" "$PHP_BIN" artisan future-trade:tick --duration=6 --sleep-ms=1000 --no-execute
   fi
 else
   add_result INFO "Tick probe skipped" "RUN_TICK=0"
@@ -459,9 +495,9 @@ fi
 
 if [ "$RUN_USER_STREAM_PROBE" = "1" ]; then
   if [ -n "$WORKSPACE_ID" ]; then
-    run_capture "future-trade-user-stream-probe" php artisan future-trade:user-stream --workspace="$WORKSPACE_ID" --duration=8
+    run_capture "future-trade-user-stream-probe" "$PHP_BIN" artisan future-trade:user-stream --workspace="$WORKSPACE_ID" --duration=8
   else
-    run_capture "future-trade-user-stream-probe" php artisan future-trade:user-stream --duration=8
+    run_capture "future-trade-user-stream-probe" "$PHP_BIN" artisan future-trade:user-stream --duration=8
   fi
 else
   add_result INFO "User-stream active probe skipped" "Set RUN_USER_STREAM_PROBE=1 only if Binance futures credentials are expected to work."
@@ -482,14 +518,16 @@ done
 
 section "Optional Laravel Tests"
 if [ "$RUN_PHP_TESTS" = "1" ]; then
-  run_capture "phpunit-future-trade-focused" php artisan test \
+  run_capture "phpunit-future-trade-focused" "$PHP_BIN" artisan test \
     --filter='FutureTrade|BinanceFutures|WebhookIdempotency|UserStreamGate|TradeNotBlockedSoftGuard|FreshnessGateFallback|ExecutionModeRouting'
 else
   add_result INFO "PHP tests skipped" "Set RUN_PHP_TESTS=1 to run focused FutureTrade/Binance suites. Avoid on production unless test DB is isolated."
 fi
 
 section "Automated Diagnosis Summary"
-php -r '
+summary_probe_file="$REPORT_DIR/ft_summary.php"
+cat > "$summary_probe_file" <<'PHP'
+<?php
 $json = json_decode(file_get_contents($argv[1]), true) ?: [];
 $configs = $json["configs"] ?? [];
 $queues = $json["queues"] ?? [];
@@ -521,7 +559,8 @@ if ($logs) {
 } else {
     echo "none".PHP_EOL;
 }
-' "$REPORT_JSON" | tee "$REPORT_DIR/diagnosis-summary.txt" | sed -n '1,120p' >> "$REPORT_MD"
+PHP
+"$PHP_BIN" "$summary_probe_file" "$REPORT_JSON" | tee "$REPORT_DIR/diagnosis-summary.txt" | sed -n '1,120p' >> "$REPORT_MD"
 
 section "Final Counts"
 add_result INFO "Report directory" "$REPORT_DIR"
