@@ -56,7 +56,7 @@ class FutureTradeUserStreamCommand extends Command
             }
 
             while ($duration === 0 || (time() - $startedAt) < $duration) {
-                foreach ($configs as $config) {
+                foreach ($configs as $slotIndex => $config) {
                     $remaining = $duration > 0 ? max(0, $duration - (time() - $startedAt)) : $perConfigSlice;
                     if ($duration > 0 && $remaining <= 0) {
                         break 2;
@@ -65,6 +65,13 @@ class FutureTradeUserStreamCommand extends Command
                     $sliceDuration = $duration > 0
                         ? max(1, min($perConfigSlice, $remaining))
                         : $perConfigSlice;
+
+                    // Stagger each config's ensureListenKey across the round-robin to avoid
+                    // simultaneous createListenKey calls from triggering Binance rate limits.
+                    if ($slotIndex > 0) {
+                        $staggerMs = rand(300, 800);
+                        usleep($staggerMs * 1000);
+                    }
 
                     $this->consumeOnce($userStream, $config, time(), $sliceDuration, $reconnectSleep, $keepAliveEvery);
                 }

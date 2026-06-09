@@ -515,6 +515,15 @@ class FutureTradeBotService
             'algorithm_notes' => $newNotes,
         ]);
 
+        // Clear any stale "key dead" health cache so the updated credentials get
+        // a clean slate — the next signed request will re-evaluate from scratch.
+        try {
+            $client = $this->userStreamSvc()->clientFor($config->fresh());
+            $client?->clearKeyHealth();
+        } catch (\Throwable) {
+            // Best-effort — never block a config save
+        }
+
         // Propagate live/paper mode and settings changes to all shadow slots
         if ($config->isPrimary()) {
             $this->syncSlots($config->fresh());

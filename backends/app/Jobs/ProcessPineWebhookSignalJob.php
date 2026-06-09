@@ -28,7 +28,7 @@ class ProcessPineWebhookSignalJob implements ShouldQueue
 
     public int $tries = 1;
 
-    public int $timeout = 30;
+    public int $timeout = 90;
 
     public function __construct(
         public readonly string $configId,

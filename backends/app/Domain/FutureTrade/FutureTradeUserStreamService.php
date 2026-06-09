@@ -3,6 +3,7 @@
 namespace App\Domain\FutureTrade;
 
 use App\Domain\Exchange\BinanceFuturesClient;
+use App\Domain\Exchange\BinanceRestCircuitBreaker;
 use App\Models\FutureTradeBotConfig;
 use App\Models\FutureTradeLogicalTrade;
 use App\Models\FutureTradeLogicalTradeEvent;
@@ -39,6 +40,10 @@ class FutureTradeUserStreamService
     public const STATUS_NOT_CONFIGURED = 'NOT_CONFIGURED';
 
     private const STATE_TTL_SECONDS = 3600;
+
+    // Global throttle: max 1 createListenKey attempt per 1.2 s across all configs/processes.
+    private const CLK_THROTTLE_KEY = 'autofinx_ft:create_listen_key_last_ms';
+    private const CLK_MIN_INTERVAL_MS = 1200;
 
     /**
      * Resolve the per-config Binance Futures client using the credentials
@@ -355,6 +360,28 @@ class FutureTradeUserStreamService
      */
     public function ensureListenKey(FutureTradeBotConfig $config): ?string
     {
+        // Bail immediately if Binance has globally banned this IP.
+        try {
+            (new BinanceRestCircuitBreaker())->assertAvailable();
+        } catch (Throwable $e) {
+            Log::warning('[FT USER STREAM] createListenKey skipped — global ban active', [
+                'config_id' => $config->id,
+                'error'     => $e->getMessage(),
+            ]);
+            $this->setStatus($config, self::STATUS_DEGRADED, ['last_error' => $e->getMessage()]);
+            return null;
+        }
+
+        // Global throttle: at most 1 createListenKey call per CLK_MIN_INTERVAL_MS across
+        // all processes.  Prevents simultaneous reconnects from triggering a new IP ban.
+        $nowMs   = (int) floor(microtime(true) * 1000);
+        $lastMs  = (int) Cache::get(self::CLK_THROTTLE_KEY, 0);
+        $waitMs  = max(0, self::CLK_MIN_INTERVAL_MS - ($nowMs - $lastMs));
+        if ($waitMs > 0) {
+            usleep($waitMs * 1000);
+        }
+        Cache::put(self::CLK_THROTTLE_KEY, (int) floor(microtime(true) * 1000), 60);
+
         $client = $this->clientFor($config);
         if (! $client) {
             $this->setStatus($config, self::STATUS_NOT_CONFIGURED);
@@ -369,7 +396,7 @@ class FutureTradeUserStreamService
         } catch (Throwable $e) {
             Log::warning('[FT USER STREAM] createListenKey failed', [
                 'config_id' => $config->id,
-                'error' => $e->getMessage(),
+                'error'     => $e->getMessage(),
             ]);
             $this->setStatus($config, self::STATUS_DEGRADED, ['last_error' => $e->getMessage()]);
             return null;

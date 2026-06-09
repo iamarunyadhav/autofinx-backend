@@ -252,6 +252,9 @@ class BinanceFuturesClient
 
     private function signedRequest(string $method, string $path, array $params = [], bool $throw = true): Response
     {
+        // Skip HTTP entirely if this API key is already known-dead (-2015 / -2014).
+        $this->assertKeyHealthy();
+
         $signedPayload = $this->sign($params);
         $response = $this->request($method, $path, $signedPayload, true);
 
@@ -264,6 +267,9 @@ class BinanceFuturesClient
 
     private function keyedRequest(string $method, string $path, array $params = [], bool $throw = true): Response
     {
+        // Skip HTTP entirely if this API key is already known-dead (-2015 / -2014).
+        $this->assertKeyHealthy();
+
         $response = $this->request($method, $path, $params, true);
 
         if ($throw) {
@@ -271,6 +277,47 @@ class BinanceFuturesClient
         }
 
         return $response;
+    }
+
+    // ── Per-API-key health cache ──────────────────────────────────────────────
+    // After a -2015 / -2014 response the key is cached as "dead" for 30 min.
+    // Every subsequent call throws in <1 ms (Redis lookup) without touching Binance.
+    // On a successful signed/keyed response the key is marked "ok" for 10 min.
+    // "ok" entries auto-expire; "dead" entries require a manual clear OR wait 30 min.
+
+    private const KEY_HEALTH_OK   = 'ok';
+    private const KEY_HEALTH_DEAD = 'dead_auth';
+    private const KEY_HEALTH_TTL_OK   = 600;   // 10 min
+    private const KEY_HEALTH_TTL_DEAD = 1800;  // 30 min
+
+    private function keyHealthKey(): string
+    {
+        return 'autofinx:binance:key_health:' . substr(hash('sha256', $this->apiKey), 0, 16);
+    }
+
+    private function assertKeyHealthy(): void
+    {
+        if (Cache::get($this->keyHealthKey()) === self::KEY_HEALTH_DEAD) {
+            throw new RuntimeException(
+                'binance_key_dead: API key is known-invalid (-2015/-2014). '.
+                'Fix the Binance key/IP whitelist then disable+re-enable the bot to clear this block.'
+            );
+        }
+    }
+
+    public function markKeyHealthy(): void
+    {
+        Cache::put($this->keyHealthKey(), self::KEY_HEALTH_OK, self::KEY_HEALTH_TTL_OK);
+    }
+
+    public function markKeyDead(): void
+    {
+        Cache::put($this->keyHealthKey(), self::KEY_HEALTH_DEAD, self::KEY_HEALTH_TTL_DEAD);
+    }
+
+    public function clearKeyHealth(): void
+    {
+        Cache::forget($this->keyHealthKey());
     }
 
     private function apiHeaders(): array
@@ -327,7 +374,9 @@ class BinanceFuturesClient
     }
 
     // ── Core HTTP request with retry + circuit breaker ────────────────────────
-    // Retry delays: 0 ms → 300 ms → 900 ms → 2000 ms (exponential backoff).
+    // Retry delays: 0 ms → 400 ms (2 attempts, 6 s timeout each → max ~12.5 s).
+    // -1003 / HTTP 418: fast-fail, open global ban circuit immediately.
+    // -2015 / -2014: fast-fail, no retry (fatal auth error, not transient).
     // Circuit breaker opens after 5 consecutive failures (exceptions OR 5xx/429).
     // Stays open 45 s, then resets so the next request probes liveness.
 
@@ -339,7 +388,9 @@ class BinanceFuturesClient
         $restGuard->assertAvailable();
         $this->assertCircuitClosed($host);
 
-        $delaysMs = [0, 300, 900, 2000];
+        // Two attempts only: 6s timeout each → worst-case 6s + 0.4s + 6s = ~12.5s.
+        // (Was 4 attempts × 12s = up to 25s when IP is soft-blocked.)
+        $delaysMs = [0, 400];
         $lastException = null;
 
         foreach ($delaysMs as $index => $delayMs) {
@@ -350,8 +401,8 @@ class BinanceFuturesClient
             try {
                 $restGuard->throttle();
                 $pending = Http::withHeaders($authenticated ? $this->apiHeaders() : [])
-                    ->timeout(12)
-                    ->connectTimeout(5);
+                    ->timeout(6)
+                    ->connectTimeout(4);
 
                 $response = match (strtoupper($method)) {
                     'GET' => $pending->get($this->url($path), $params),
@@ -359,6 +410,23 @@ class BinanceFuturesClient
                     'DELETE' => $pending->delete($this->url($path), $params),
                     default => $pending->asForm()->post($this->url($path), $params),
                 };
+
+                // Fast-fail on IP ban (-1003 / HTTP 418): open global circuit immediately, no retry.
+                $binanceCode = (int) ($response->json('code') ?? 0);
+                if ($binanceCode === -1003 || $response->status() === 418) {
+                    $restGuard->recordResponse($response); // writes BAN_UNTIL_KEY from "banned until" ms
+                    $this->circuitRecordFailure($host, $response->body());
+                    return $response; // assertSuccess() will throw upstream
+                }
+
+                // Fast-fail on fatal auth errors: invalid API-key / IP restriction.
+                // Mark the key dead in Redis so every subsequent call short-circuits
+                // in <1 ms without ever touching Binance again.
+                if (in_array($binanceCode, [-2015, -2014], true)) {
+                    $this->markKeyDead();
+                    $this->circuitRecordFailure($host, $response->body());
+                    return $response;
+                }
 
                 // Retry on transient HTTP errors (rate-limit, gateway errors, etc.)
                 if ($this->isRetryableStatus($response) && $index !== array_key_last($delaysMs)) {
@@ -441,6 +509,7 @@ class BinanceFuturesClient
     {
         try {
             Cache::forget('binance_cb:'.$host);
+            $this->markKeyHealthy();
         } catch (\Throwable) {
         }
     }
