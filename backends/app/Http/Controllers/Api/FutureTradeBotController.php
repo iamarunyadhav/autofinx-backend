@@ -108,7 +108,7 @@ class FutureTradeBotController extends Controller
                 ? $this->bot->findSlotForSymbol($workspace, $symbol)
                 : null;
 
-            $rawSignal = strtoupper(trim((string) ($payload['signal'] ?? $payload['action'] ?? $payload['side'] ?? 'WAIT')));
+            $rawSignal = strtoupper(str_replace(['-', ' '], '_', trim((string) ($payload['signal'] ?? $payload['action'] ?? $payload['side'] ?? 'WAIT'))));
             $isCloseSignal = in_array($rawSignal, [
                 'CLOSE',
                 'EXIT',

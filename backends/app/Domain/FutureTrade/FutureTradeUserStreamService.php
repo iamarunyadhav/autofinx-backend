@@ -169,6 +169,9 @@ class FutureTradeUserStreamService
     {
         $this->recordEvent($config, $payload);
         $eventType = (string) ($payload['e'] ?? '');
+        if ($eventType === 'ACCOUNT_UPDATE') {
+            return $this->ingestAccountUpdate($config, $payload);
+        }
         if ($eventType !== 'ORDER_TRADE_UPDATE') {
             return false;
         }
@@ -188,20 +191,37 @@ class FutureTradeUserStreamService
         $commission = (float) ($order['n'] ?? 0);
         $side = strtoupper((string) ($order['S'] ?? ''));
 
-        $trade = FutureTradeLogicalTrade::query()
-            ->where('future_trade_bot_config_id', $config->id)
-            ->where(function ($q) use ($clientOrderId, $orderId) {
-                if ($clientOrderId !== '') {
-                    $q->where('entry_client_order_id', $clientOrderId)
-                        ->orWhere('exit_client_order_id', $clientOrderId);
-                }
-                if ($orderId !== '') {
-                    $q->orWhere('entry_exchange_order_id', $orderId)
-                        ->orWhere('exit_exchange_order_id', $orderId);
-                }
-            })
-            ->orderByDesc('opened_at')
-            ->first();
+        $trade = null;
+        if ($clientOrderId !== '' || $orderId !== '') {
+            $trade = FutureTradeLogicalTrade::query()
+                ->where('future_trade_bot_config_id', $config->id)
+                ->where(function ($q) use ($clientOrderId, $orderId) {
+                    if ($clientOrderId !== '') {
+                        $q->where('entry_client_order_id', $clientOrderId)
+                            ->orWhere('exit_client_order_id', $clientOrderId);
+                    }
+                    if ($orderId !== '') {
+                        $q->orWhere('entry_exchange_order_id', $orderId)
+                            ->orWhere('exit_exchange_order_id', $orderId);
+                    }
+                })
+                ->orderByDesc('opened_at')
+                ->first();
+        }
+        $matchedByExternalCloseSide = false;
+        if (! $trade && $symbol !== '' && $side !== '') {
+            $tradeSide = $side === 'SELL' ? 'LONG' : ($side === 'BUY' ? 'SHORT' : null);
+            if ($tradeSide !== null) {
+                $trade = FutureTradeLogicalTrade::query()
+                    ->where('future_trade_bot_config_id', $config->id)
+                    ->where('symbol', $symbol)
+                    ->where('side', $tradeSide)
+                    ->whereIn('status', FutureTradeLogicalTrade::ACTIVE_STATUSES)
+                    ->orderByDesc('opened_at')
+                    ->first();
+                $matchedByExternalCloseSide = $trade !== null;
+            }
+        }
         if (! $trade) {
             return false;
         }
@@ -238,7 +258,7 @@ class FutureTradeUserStreamService
             return true;
         }
 
-        if ($isExitMatch || (! $isEntryMatch && $trade->isOpen() && $side !== '' && $side === ($trade->side === 'LONG' ? 'SELL' : 'BUY'))) {
+        if ($isExitMatch || $matchedByExternalCloseSide || (! $isEntryMatch && $trade->isOpen() && $side !== '' && $side === ($trade->side === 'LONG' ? 'SELL' : 'BUY'))) {
             // Idempotency: a re-delivered FILLED event must not double the
             // commission/realized PnL. If the trade is already CLOSED on our
             // side, skip re-processing.
@@ -264,6 +284,15 @@ class FutureTradeUserStreamService
                     'status' => $status === 'FILLED' ? FutureTradeLogicalTrade::STATUS_CLOSED : FutureTradeLogicalTrade::STATUS_CLOSING,
                     'closed_at' => $status === 'FILLED' ? now() : $trade->closed_at,
                 ]);
+                if ($status === 'FILLED') {
+                    $this->markRuntimePositionClosed(
+                        $config,
+                        $trade->fresh(),
+                        $avgPrice,
+                        $net,
+                        $matchedByExternalCloseSide ? 'BINANCE_EXTERNAL_CLOSE_FILLED' : 'BINANCE_EXIT_FILLED'
+                    );
+                }
 
                 FutureTradeLogicalTradeEvent::create([
                     'future_trade_logical_trade_id' => $trade->id,
@@ -277,7 +306,12 @@ class FutureTradeUserStreamService
                     'exchange_status' => $status,
                     'price' => $avgPrice,
                     'quantity' => $cumQty,
-                    'payload' => ['execType' => $execType, 'order' => $order, 'realizedPnl' => $realizedPnl],
+                    'payload' => [
+                        'execType' => $execType,
+                        'order' => $order,
+                        'realizedPnl' => $realizedPnl,
+                        'matchedByExternalCloseSide' => $matchedByExternalCloseSide,
+                    ],
                 ]);
                 return true;
             }
@@ -311,6 +345,7 @@ class FutureTradeUserStreamService
                     'status'                  => FutureTradeLogicalTrade::STATUS_CLOSED,
                     'closed_at'               => now(),
                 ]);
+                $this->markRuntimePositionClosed($config, $trade->fresh(), $avgPrice, $net, $reason);
 
                 FutureTradeLogicalTradeEvent::create([
                     'future_trade_logical_trade_id' => $trade->id,
@@ -442,5 +477,199 @@ class FutureTradeUserStreamService
     private function stateKey(string $configId): string
     {
         return sprintf(self::STATE_KEY, $configId);
+    }
+
+    private function ingestAccountUpdate(FutureTradeBotConfig $config, array $payload): bool
+    {
+        $positions = (array) data_get($payload, 'a.P', []);
+        $updated = false;
+
+        foreach ($positions as $position) {
+            if (! is_array($position)) {
+                continue;
+            }
+
+            $symbol = strtoupper((string) ($position['s'] ?? ''));
+            if ($symbol === '') {
+                continue;
+            }
+
+            $positionAmount = (float) ($position['pa'] ?? 0);
+            if (abs($positionAmount) > 0.0) {
+                $updated = $this->syncRuntimePositionFromAccountUpdate($config, $position) || $updated;
+                continue;
+            }
+
+            $activeTrade = FutureTradeLogicalTrade::query()
+                ->where('future_trade_bot_config_id', $config->id)
+                ->where('symbol', $symbol)
+                ->whereIn('status', FutureTradeLogicalTrade::ACTIVE_STATUSES)
+                ->orderByDesc('opened_at')
+                ->first();
+            $state = $config->state;
+            $localShowsSymbolOpen = $state
+                && strtoupper((string) ($state->current_symbol ?? '')) === $symbol
+                && ((float) ($state->quantity ?? 0) > 0 || in_array((string) ($state->state ?? ''), ['IN_POSITION', 'LIVE_IN_POSITION'], true));
+
+            if (! $activeTrade && ! $localShowsSymbolOpen) {
+                continue;
+            }
+
+            if ($activeTrade) {
+                $activeTrade->update([
+                    'status' => FutureTradeLogicalTrade::STATUS_RECONCILIATION_REQUIRED,
+                    'reconciled_at' => now(),
+                    'meta' => array_merge((array) ($activeTrade->meta ?? []), [
+                        'account_update_flat_detected_at' => now()->toIso8601String(),
+                        'account_update_position' => $position,
+                    ]),
+                ]);
+                FutureTradeLogicalTradeEvent::create([
+                    'future_trade_logical_trade_id' => $activeTrade->id,
+                    'future_trade_bot_config_id' => $config->id,
+                    'symbol' => $symbol,
+                    'event_type' => FutureTradeLogicalTradeEvent::EVENT_RECONCILED,
+                    'payload' => [
+                        'reason' => 'ACCOUNT_UPDATE_EXCHANGE_FLAT',
+                        'note' => 'Binance account update shows the position is flat; waiting for fill reconciliation.',
+                        'position' => $position,
+                    ],
+                ]);
+            }
+
+            $this->clearRuntimePositionState($config, $symbol, 'ACCOUNT_UPDATE_EXCHANGE_FLAT');
+            $updated = true;
+        }
+
+        return $updated;
+    }
+
+    private function syncRuntimePositionFromAccountUpdate(FutureTradeBotConfig $config, array $position): bool
+    {
+        $symbol = strtoupper((string) ($position['s'] ?? ''));
+        if ($symbol === '') {
+            return false;
+        }
+
+        $positionAmount = (float) ($position['pa'] ?? 0);
+        $quantity = abs($positionAmount);
+        if ($quantity <= 0.0) {
+            return false;
+        }
+
+        $state = $config->state;
+        if (! $state) {
+            return false;
+        }
+
+        $entryPrice = (float) ($position['ep'] ?? $state->entry_price ?? 0);
+        $markPrice = (float) ($position['mp'] ?? $state->current_price ?? 0);
+        $unrealized = (float) ($position['up'] ?? $state->unrealized_pnl ?? 0);
+        $side = $positionAmount > 0 ? 'LONG' : 'SHORT';
+        $unrealizedPercent = $entryPrice > 0 && $markPrice > 0
+            ? (($markPrice - $entryPrice) / $entryPrice) * ($side === 'LONG' ? 100 : -100)
+            : (float) ($state->unrealized_pnl_percent ?? 0);
+
+        $state->update([
+            'state' => 'LIVE_IN_POSITION',
+            'status' => 'Running',
+            'current_symbol' => $symbol,
+            'position_side' => $side,
+            'entry_price' => $entryPrice ?: $state->entry_price,
+            'quantity' => $quantity,
+            'current_price' => $markPrice ?: $state->current_price,
+            'unrealized_pnl' => $unrealized,
+            'unrealized_pnl_percent' => $unrealizedPercent,
+            'connection_status' => 'Connected',
+            'current_signal' => 'BINANCE_ACCOUNT_POSITION_SYNCED',
+        ]);
+
+        return true;
+    }
+
+    private function markRuntimePositionClosed(
+        FutureTradeBotConfig $config,
+        FutureTradeLogicalTrade $trade,
+        float $exitPrice,
+        float $netPnl,
+        string $reason
+    ): void {
+        $symbol = strtoupper((string) $trade->symbol);
+        $state = $config->state;
+        if (! $state) {
+            return;
+        }
+
+        $localSymbol = strtoupper((string) ($state->current_symbol ?? ''));
+        if ($localSymbol !== '' && $localSymbol !== $symbol) {
+            return;
+        }
+
+        $settings = $config->mergedSettings();
+        $cooldownSeconds = max(0, (int) ($settings['cooldownSeconds'] ?? 0));
+        $patch = [
+            'state' => $cooldownSeconds > 0 ? 'COOLDOWN' : ($config->enabled ? 'SCANNING' : 'STOPPED'),
+            'status' => $config->enabled ? 'Running' : 'Stopped',
+            'current_symbol' => null,
+            'position_side' => null,
+            'entry_price' => null,
+            'quantity' => 0,
+            'peak_price' => null,
+            'bottom_price' => null,
+            'current_price' => $exitPrice > 0 ? $exitPrice : (float) ($state->current_price ?? 0),
+            'unrealized_pnl' => 0,
+            'unrealized_pnl_percent' => 0,
+            'realized_pnl' => (float) ($state->realized_pnl ?? 0) + $netPnl,
+            'daily_profit' => $netPnl > 0 ? (float) ($state->daily_profit ?? 0) + $netPnl : (float) ($state->daily_profit ?? 0),
+            'daily_loss' => $netPnl < 0 ? (float) ($state->daily_loss ?? 0) + abs($netPnl) : (float) ($state->daily_loss ?? 0),
+            'wins' => $netPnl > 0 ? (int) ($state->wins ?? 0) + 1 : (int) ($state->wins ?? 0),
+            'losses' => $netPnl < 0 ? (int) ($state->losses ?? 0) + 1 : (int) ($state->losses ?? 0),
+            'cooldown_until' => $cooldownSeconds > 0 ? now()->addSeconds($cooldownSeconds) : null,
+            'current_signal' => $reason,
+            'connection_status' => 'Connected',
+        ];
+
+        $state->update($patch);
+        Log::info('[FT USER STREAM] runtime state closed from Binance event', [
+            'config_id' => (string) $config->id,
+            'symbol' => $symbol,
+            'reason' => $reason,
+            'exitPrice' => $exitPrice,
+            'netPnl' => $netPnl,
+        ]);
+    }
+
+    private function clearRuntimePositionState(FutureTradeBotConfig $config, string $symbol, string $reason): void
+    {
+        $state = $config->state;
+        if (! $state) {
+            return;
+        }
+
+        $localSymbol = strtoupper((string) ($state->current_symbol ?? ''));
+        if ($localSymbol !== '' && $localSymbol !== strtoupper($symbol)) {
+            return;
+        }
+
+        $state->update([
+            'state' => $config->enabled ? 'SCANNING' : 'STOPPED',
+            'status' => $config->enabled ? 'Running' : 'Stopped',
+            'current_symbol' => null,
+            'position_side' => null,
+            'entry_price' => null,
+            'quantity' => 0,
+            'peak_price' => null,
+            'bottom_price' => null,
+            'unrealized_pnl' => 0,
+            'unrealized_pnl_percent' => 0,
+            'connection_status' => 'Connected',
+            'current_signal' => $reason,
+        ]);
+
+        Log::warning('[FT USER STREAM] runtime state cleared because Binance is flat', [
+            'config_id' => (string) $config->id,
+            'symbol' => strtoupper($symbol),
+            'reason' => $reason,
+        ]);
     }
 }

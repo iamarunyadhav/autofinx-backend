@@ -26,9 +26,11 @@ return [
     'binance_rest' => [
         'circuit_breaker' => filter_var(env('BINANCE_REST_CIRCUIT_BREAKER', true), FILTER_VALIDATE_BOOL),
         'min_interval_ms' => max(0, (int) env('BINANCE_REST_MIN_INTERVAL_MS', 500)),
+        'execution_min_interval_ms' => max(0, (int) env('BINANCE_REST_EXECUTION_MIN_INTERVAL_MS', 150)),
         'ban_cooldown_seconds' => max(60, (int) env('BINANCE_REST_BAN_COOLDOWN_SECONDS', 3600)),
         'recv_window_ms' => max(5000, min(60000, (int) env('BINANCE_FUTURES_RECV_WINDOW', 15000))),
     ],
+    'live_max_open_positions' => max(1, min(5, (int) env('FUTURE_TRADE_LIVE_MAX_OPEN_POSITIONS', 1))),
     'webhook_fallback_enabled' => env('FUTURE_TRADE_WEBHOOK_FALLBACK_ENABLED', false),
     'webhook_risk_overrides' => env('FUTURE_TRADE_WEBHOOK_RISK_OVERRIDES', false),
     'atr_dynamic_risk_targets' => env('FUTURE_TRADE_ATR_DYNAMIC_RISK_TARGETS', false),
@@ -168,10 +170,10 @@ return [
         // Automated stop-loss / trailing exits run independently via the exit monitor.
         'softDailyLossWarnPercent' => 0.3,
         'hardDailyLossBlockPercent' => 0.8,
-        // Up to 5 concurrent open positions, one per symbol. Each Pine webhook
-        // for a different symbol gets routed to its own slot automatically.
-        // Same-symbol re-entry is still blocked while that symbol's slot is busy.
-        'maxOpenPositions' => 5,
+        // Start live safely with one active slot. Multi-slot live can be enabled
+        // intentionally via allowMultiLiveSlots + FUTURE_TRADE_LIVE_MAX_OPEN_POSITIONS.
+        'maxOpenPositions' => 1,
+        'allowMultiLiveSlots' => false,
         'reversalMode' => 'close_only',
         // Webhook-only mode can accept more Pine entries; loss/cooldown/open-position guards still apply.
         'maxTradesPerDay' => 50,

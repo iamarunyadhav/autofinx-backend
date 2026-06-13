@@ -1,10 +1,12 @@
 <?php
 
 use App\Domain\FutureTrade\FutureTradeBotService;
+use App\Jobs\ProcessPineWebhookSignalJob;
 use App\Models\FutureTradeBotConfig;
 use App\Models\Workspace;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Queue;
 
 uses(RefreshDatabase::class);
 
@@ -822,6 +824,7 @@ test('pine webhook rejects symbol not in global registry when permissive mode is
 
 test('pine webhook close_short signal is mapped and accepted', function () {
     config(['future_trade.pine_webhook_token' => 'pine-secret']);
+    Queue::fake();
     Carbon::setTestNow('2026-05-19 10:30:05');
     $workspace = Workspace::factory()->create();
     $config = createPrimeWebhookConfig($workspace->id, [
@@ -835,7 +838,8 @@ test('pine webhook close_short signal is mapped and accepted', function () {
 
     // No open position → CLOSE_SHORT is accepted (not 422) but logged-only.
     expect($response->json('accepted'))->toBeTrue()
-        ->and($response->json('decision'))->toBe('CLOSE_SHORT');
+        ->and($response->json('execution'))->toBe('queued');
+    Queue::assertPushed(ProcessPineWebhookSignalJob::class, fn (ProcessPineWebhookSignalJob $job): bool => ($job->payload['signal'] ?? null) === 'CLOSE_SHORT');
 });
 
 test('findSlotForSymbol returns first FLAT slot when no slot owns the symbol', function () {
@@ -930,7 +934,7 @@ test('activePositionCount aggregates across slots', function () {
     expect($svc->activePositionCount($workspace->id))->toBe(2);
 });
 
-test('starting future trade bot enables all slots and preserves live testnet mode', function () {
+test('starting future trade bot enables only primary slot in live mode by default', function () {
     Carbon::setTestNow('2026-05-19 10:30:05');
     $workspace = Workspace::factory()->create();
     $primary = createPrimeWebhookLiveConfig($workspace->id, [
@@ -964,7 +968,7 @@ test('starting future trade bot enables all slots and preserves live testnet mod
         ->orderBy('slot_index')
         ->get();
 
-    expect($slots)->toHaveCount(5);
+    expect($slots)->toHaveCount(1);
     foreach ($slots as $slot) {
         expect((bool) $slot->enabled)->toBeTrue()
             ->and((bool) $slot->paper_trading)->toBeFalse()

@@ -33,6 +33,7 @@ class FutureTradeReconciliationService
             'closed' => 0,
             'corrected' => 0,
             'flagged' => 0,
+            'state_cleared' => 0,
             'errors' => [],
         ];
 
@@ -68,10 +69,16 @@ class FutureTradeReconciliationService
                             $this->event($trade, FutureTradeLogicalTradeEvent::EVENT_RECONCILED, [
                                 'note' => 'Exchange flat but no matching fill — manual review required.',
                             ]);
+                            if ($this->clearRuntimePositionState($config, (string) $symbol, 'EXCHANGE_FLAT_RECONCILE_REQUIRED')) {
+                                $report['state_cleared']++;
+                            }
                             $report['flagged']++;
                             continue;
                         }
-                        $this->closeFromFill($trade, $matched, 'EXCHANGE_RECONCILED');
+                        $close = $this->closeFromFill($trade, $matched, 'EXCHANGE_RECONCILED');
+                        if ($this->clearRuntimePositionState($config, (string) $symbol, 'EXCHANGE_RECONCILED', $close)) {
+                            $report['state_cleared']++;
+                        }
                         $report['closed']++;
                         continue;
                     }
@@ -79,8 +86,13 @@ class FutureTradeReconciliationService
                     if ($trade->status === FutureTradeLogicalTrade::STATUS_RECONCILIATION_REQUIRED) {
                         $matched = $this->matchExitFill($trade, $fills);
                         if ($matched !== null) {
-                            $this->closeFromFill($trade, $matched, 'EXCHANGE_RECONCILED');
+                            $close = $this->closeFromFill($trade, $matched, 'EXCHANGE_RECONCILED');
+                            if ($this->clearRuntimePositionState($config, (string) $symbol, 'EXCHANGE_RECONCILED', $close)) {
+                                $report['state_cleared']++;
+                            }
                             $report['closed']++;
+                        } elseif ($exchangeQty <= 0 && $this->clearRuntimePositionState($config, (string) $symbol, 'EXCHANGE_FLAT_RECONCILE_REQUIRED')) {
+                            $report['state_cleared']++;
                         }
                     }
                 }
@@ -121,7 +133,7 @@ class FutureTradeReconciliationService
         return $candidates[0];
     }
 
-    private function closeFromFill(FutureTradeLogicalTrade $trade, array $fill, string $reason): void
+    private function closeFromFill(FutureTradeLogicalTrade $trade, array $fill, string $reason): array
     {
         $exitPrice = (float) ($fill['price'] ?? 0);
         $qty = (float) ($fill['qty'] ?? $trade->quantity);
@@ -149,6 +161,11 @@ class FutureTradeReconciliationService
             'fill' => $fill,
             'reason' => $reason,
         ]);
+
+        return [
+            'exit_price' => $exitPrice,
+            'net_pnl' => $net,
+        ];
     }
 
     private function event(FutureTradeLogicalTrade $trade, string $type, array $payload = []): void
@@ -160,6 +177,64 @@ class FutureTradeReconciliationService
             'event_type' => $type,
             'payload' => $payload,
         ]);
+    }
+
+    private function clearRuntimePositionState(FutureTradeBotConfig $config, string $symbol, string $reason, ?array $close = null): bool
+    {
+        $state = $config->fresh('state')->state;
+        if (! $state) {
+            return false;
+        }
+
+        $symbol = strtoupper($symbol);
+        $localSymbol = strtoupper((string) ($state->current_symbol ?? ''));
+        if ($localSymbol !== '' && $localSymbol !== $symbol) {
+            return false;
+        }
+
+        $localOpen = (float) ($state->quantity ?? 0) > 0
+            || in_array((string) ($state->state ?? ''), ['IN_POSITION', 'LIVE_IN_POSITION'], true);
+        if (! $localOpen) {
+            return false;
+        }
+
+        $netPnl = (float) ($close['net_pnl'] ?? 0);
+        $exitPrice = (float) ($close['exit_price'] ?? $state->current_price ?? 0);
+        $patch = [
+            'state' => $config->enabled ? 'SCANNING' : 'STOPPED',
+            'status' => $config->enabled ? 'Running' : 'Stopped',
+            'current_symbol' => null,
+            'position_side' => null,
+            'entry_price' => null,
+            'quantity' => 0,
+            'peak_price' => null,
+            'bottom_price' => null,
+            'current_price' => $exitPrice,
+            'unrealized_pnl' => 0,
+            'unrealized_pnl_percent' => 0,
+            'current_signal' => $reason,
+            'connection_status' => 'Connected',
+        ];
+
+        if ($close !== null) {
+            $patch += [
+                'realized_pnl' => (float) ($state->realized_pnl ?? 0) + $netPnl,
+                'daily_profit' => $netPnl > 0 ? (float) ($state->daily_profit ?? 0) + $netPnl : (float) ($state->daily_profit ?? 0),
+                'daily_loss' => $netPnl < 0 ? (float) ($state->daily_loss ?? 0) + abs($netPnl) : (float) ($state->daily_loss ?? 0),
+                'wins' => $netPnl > 0 ? (int) ($state->wins ?? 0) + 1 : (int) ($state->wins ?? 0),
+                'losses' => $netPnl < 0 ? (int) ($state->losses ?? 0) + 1 : (int) ($state->losses ?? 0),
+            ];
+        }
+
+        $state->update($patch);
+        Log::info('[FT RECONCILE STATE CLEARED]', [
+            'config_id' => (string) $config->id,
+            'symbol' => $symbol,
+            'reason' => $reason,
+            'netPnl' => $netPnl,
+        ]);
+
+        return true;
     }
 
     private function safeFetch(callable $fn)

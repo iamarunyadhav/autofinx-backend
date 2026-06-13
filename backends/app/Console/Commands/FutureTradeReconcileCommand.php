@@ -62,11 +62,12 @@ class FutureTradeReconcileCommand extends Command
                     $report = $reconciler->reconcileConfig($config, $client, $symbol);
                     Log::info('[FT RECONCILE REPORT]', $report);
                     $this->line(sprintf(
-                        '%s: closed=%d corrected=%d flagged=%d errors=%d',
+                        '%s: closed=%d corrected=%d flagged=%d state_cleared=%d errors=%d',
                         $config->workspace_id,
                         $report['closed'],
                         $report['corrected'],
                         $report['flagged'],
+                        $report['state_cleared'] ?? 0,
                         count($report['errors'])
                     ));
                 } catch (Throwable $e) {

@@ -337,7 +337,7 @@ class FutureTradeBotService
         }
 
         $settings = $primary->mergedSettings();
-        $maxSlots = max(1, (int) ($settings['maxOpenPositions'] ?? 1));
+        $maxSlots = $this->effectiveMaxOpenSlots($primary, $settings);
         $workspaceId = $primary->workspace_id;
 
         // Create missing shadow slots and initialise their state
@@ -348,7 +348,7 @@ class FutureTradeBotService
                     'bot_name' => ($primary->bot_name ?? 'Future Trade Bot').' (Slot '.($slot + 1).')',
                     'paper_trading' => $primary->paper_trading,
                     'enable_live_trading' => $primary->enable_live_trading,
-                    'enabled' => $primary->enabled,
+                    'enabled' => $this->shadowSlotShouldStartEnabled($primary, $settings),
                     'settings' => $primary->settings,
                     'algorithm_notes' => $primary->algorithm_notes,
                 ]
@@ -370,7 +370,7 @@ class FutureTradeBotService
                 ->update([
                     'paper_trading' => $primary->paper_trading,
                     'enable_live_trading' => $primary->enable_live_trading,
-                    'enabled' => $primary->enabled,
+                    'enabled' => $this->shadowSlotShouldStartEnabled($primary, $settings),
                     'settings' => json_encode($primary->settings),
                 ]);
         }
@@ -379,6 +379,12 @@ class FutureTradeBotService
         FutureTradeBotConfig::query()
             ->where('workspace_id', $workspaceId)
             ->where('slot_index', '>=', $maxSlots)
+            ->whereDoesntHave('state', function ($query): void {
+                $query->where(function ($stateQuery): void {
+                    $stateQuery->whereIn('state', ['IN_POSITION', 'LIVE_IN_POSITION'])
+                        ->orWhere('quantity', '>', 0);
+                });
+            })
             ->update(['enabled' => false]);
     }
 
@@ -416,17 +422,19 @@ class FutureTradeBotService
         $this->syncSlots($primary);
 
         $settings = $this->normalizeFutureTradeSettings($primary->mergedSettings());
-        $maxSlots = max(1, (int) ($settings['maxOpenPositions'] ?? 1));
+        $maxSlots = $this->effectiveMaxOpenSlots($primary, $settings);
 
-        $slots = FutureTradeBotConfig::query()
+        $allSlots = FutureTradeBotConfig::query()
             ->with('state')
             ->where('workspace_id', $workspaceId)
-            ->where('slot_index', '<', $maxSlots)
             ->orderBy('slot_index')
             ->get();
 
-        // Layer 1: slot that already owns this symbol (open or pending).
-        foreach ($slots as $slot) {
+        // Layer 1: any slot that already owns this symbol (open or pending).
+        // This intentionally scans beyond the current max slot cap so CLOSE /
+        // opposite-reversal webhooks still reach an older live position if the
+        // operator later tightens live mode back to one slot.
+        foreach ($allSlots as $slot) {
             if ($this->lockSvc()->hasActiveLogicalTrade((string) $slot->id, $symbol)) {
                 return $slot;
             }
@@ -436,6 +444,10 @@ class FutureTradeBotService
                 return $slot;
             }
         }
+
+        $slots = $allSlots
+            ->filter(fn (FutureTradeBotConfig $slot): bool => (int) $slot->slot_index < $maxSlots)
+            ->values();
 
         // Layer 2: first FLAT *enabled* slot we can assign.
         foreach ($slots as $slot) {
@@ -469,6 +481,32 @@ class FutureTradeBotService
                 });
             })
             ->count();
+    }
+
+    private function effectiveMaxOpenSlots(FutureTradeBotConfig $config, array $settings): int
+    {
+        $requested = max(1, min(5, (int) ($settings['maxOpenPositions'] ?? 1)));
+        if (! $this->isLiveMode($config)) {
+            return $requested;
+        }
+
+        $allowMultiLiveSlots = filter_var($settings['allowMultiLiveSlots'] ?? false, FILTER_VALIDATE_BOOLEAN);
+        if ($allowMultiLiveSlots) {
+            return min($requested, max(1, min(5, (int) config('future_trade.live_max_open_positions', 1))));
+        }
+
+        return 1;
+    }
+
+    private function shadowSlotShouldStartEnabled(FutureTradeBotConfig $primary, array $settings): bool
+    {
+        if (! $this->isLiveMode($primary)) {
+            return (bool) $primary->enabled;
+        }
+
+        return (bool) $primary->enabled
+            && filter_var($settings['allowMultiLiveSlots'] ?? false, FILTER_VALIDATE_BOOLEAN)
+            && max(1, min(5, (int) config('future_trade.live_max_open_positions', 1))) > 1;
     }
 
     public function updateConfig(FutureTradeBotConfig $config, array $payload): FutureTradeBotConfig
@@ -891,7 +929,7 @@ class FutureTradeBotService
             ];
         }
 
-        $client = $this->liveClient($settings);
+        $client = $this->liveClient($settings, 'execution');
         $result = match ($action) {
             'cancel_reduce_only' => $this->cancelReduceOnlyOrders($config, $client, $symbol),
             'sync_state' => $this->synchronizeLivePositionState($config, $client, $symbol, 'OPERATOR_SYNC'),
@@ -1502,7 +1540,7 @@ class FutureTradeBotService
             return $this->rejectPineWebhook($config, $payload, 'bar_not_confirmed');
         }
 
-        $rawDecision = strtoupper(trim((string) ($payload['signal'] ?? $payload['action'] ?? $payload['side'] ?? 'WAIT')));
+        $rawDecision = strtoupper(str_replace(['-', ' '], '_', trim((string) ($payload['signal'] ?? $payload['action'] ?? $payload['side'] ?? 'WAIT'))));
         $positionSide = strtoupper((string) ($state->position_side ?? ''));
         $isCloseSignal = false;
         $closeTargetSide = null;
@@ -1884,6 +1922,14 @@ class FutureTradeBotService
             || in_array((string) $afterState->state, ['IN_POSITION', 'LIVE_IN_POSITION'], true);
         // Milestone: execution path returned (order placed if executed=true).
         $latency['orderPlacedMs'] = (int) round((microtime(true) - $t0) * 1000);
+        $liveEntryTiming = $this->pullLiveEntryTiming($config, $signalKey);
+        if ($liveEntryTiming !== null) {
+            $latency['liveEntryTiming'] = $liveEntryTiming;
+            if (isset($liveEntryTiming['entryOrderPlacedMs'])) {
+                $latency['orderPlacedMs'] = (int) ($latency['stateSyncedMs'] ?? 0) + (int) $liveEntryTiming['entryOrderPlacedMs'];
+                $latency['executionReturnedMs'] = (int) round((microtime(true) - $t0) * 1000);
+            }
+        }
 
         $responseBase = [
             'accepted' => true,
@@ -3555,11 +3601,23 @@ class FutureTradeBotService
         $state = $this->state($config);
         $dynamic = $this->dynamicDecision($config, $state, (array) ($state->scanner_snapshot ?? []), null, $settings);
         $settings = $dynamic['settings'];
-        $client = $this->liveClient($settings);
+        $client = $this->liveClient($settings, 'execution');
         $symbol = strtoupper((string) $signal['symbol']);
         $side = $signal['signal'] === 'BUY' ? 'BUY' : 'SELL';
         $positionSide = $signal['signal'] === 'BUY' ? 'LONG' : 'SHORT';
         $price = (float) $signal['price'];
+        $signalKey = (string) ($signal['signal_key'] ?? '');
+        $timingStartedAt = microtime(true);
+        $executionTiming = [
+            'scope' => 'live_entry',
+            'symbol' => $symbol,
+            'side' => $side,
+            'throttleScope' => 'execution',
+            'startedAt' => now()->toIso8601String(),
+        ];
+        $markTiming = function (string $key) use (&$executionTiming, $timingStartedAt): void {
+            $executionTiming[$key] = (int) round((microtime(true) - $timingStartedAt) * 1000);
+        };
         $leverage = min((int) ($settings['leverage'] ?? 3), (int) ($settings['maxLeverage'] ?? 5));
         $freshState = $this->state($config->fresh('state'));
         if ((float) ($freshState->quantity ?? 0) > 0 || in_array((string) ($freshState->state ?? ''), ['IN_POSITION', 'LIVE_IN_POSITION'], true)) {
@@ -3582,6 +3640,7 @@ class FutureTradeBotService
         }
 
         $exchangeBefore = $this->exchangePositionSnapshot($client, $symbol);
+        $markTiming('exchangePrecheckMs');
         if ((float) ($exchangeBefore['quantity'] ?? 0) > 0) {
             $this->logThrottled(
                 $config->fresh('state'),
@@ -3609,6 +3668,7 @@ class FutureTradeBotService
             ? (float) $account['availableBalance']
             : (float) ($asset['availableBalance'] ?? 0);
         $requiredTradeAmountUsdt = (float) ($settings['tradeAmountUsdt'] ?? 25);
+        $markTiming('accountCheckedMs');
 
         if ($availableBalance > 0 && $availableBalance < $requiredTradeAmountUsdt) {
             $this->log(
@@ -3751,10 +3811,10 @@ class FutureTradeBotService
                 throw $e;
             }
         }
+        $markTiming('leverageMarginPreparedMs');
 
         // Deterministic clientOrderId — if a retry fires on the same signal_key
         // Binance will reject the duplicate instead of opening a second order.
-        $signalKey = (string) ($signal['signal_key'] ?? '');
         $clientOrderId = $signalKey !== ''
             ? $this->stabilitySvc()->deterministicClientOrderId($signalKey, 'entry')
             : substr('ft-entry-'.Str::uuid(), 0, 36);
@@ -3766,7 +3826,9 @@ class FutureTradeBotService
             'newClientOrderId' => $clientOrderId,
             'positionSide' => 'BOTH',
         ]);
+        $markTiming('entryOrderPlacedMs');
         $exchange = $this->exchangePositionSnapshot($client, $symbol);
+        $markTiming('entryConfirmedSnapshotMs');
         $confirmedOpen = (float) ($exchange['quantity'] ?? 0) > 0
             && (($exchange['position_side'] ?? null) === $positionSide);
         $entry = (float) ($exchange['entry_price'] ?? 0)
@@ -3890,7 +3952,18 @@ class FutureTradeBotService
 
         if ($confirmedOpen) {
             $this->placeExchangeSLTPOrders($config, $client, $logical, $symbol, $positionSide, $entry, $settings, $signalKey);
+            $markTiming('exchangeSltpFinishedMs');
         }
+        $markTiming('liveEntryFinishedMs');
+        $this->rememberLiveEntryTiming($config, $signalKey, $executionTiming);
+        Log::info('FT_LIVE_ENTRY_TIMING', [
+            'workspace' => (string) $config->workspace_id,
+            'configId' => (string) $config->id,
+            'slotIndex' => (int) $config->slot_index,
+            'symbol' => $symbol,
+            'signal' => (string) $signal['signal'],
+            'timing' => $executionTiming,
+        ]);
 
         return true;
     }
@@ -3904,7 +3977,7 @@ class FutureTradeBotService
 
         $settings = $this->normalizeFutureTradeSettings($config->mergedSettings());
         $dynamic = $this->dynamicDecision($config, $state, (array) ($state->scanner_snapshot ?? []), null, $settings);
-        $client = $this->liveClient($settings);
+        $client = $this->liveClient($settings, 'execution');
         $symbol = (string) $state->current_symbol;
         $filters = $this->symbolFilters($this->cachedExchangeInfo($client, $symbol), $symbol);
         $exchange = $this->exchangePositionSnapshot($client, $symbol);
@@ -6484,6 +6557,7 @@ class FutureTradeBotService
             // does NOT currently do (close-then-reverse pattern instead).
             $requestedMaxOpen = max(1, min(5, (int) ($settings['maxOpenPositions'] ?? 1)));
             $settings['maxOpenPositions'] = $requestedMaxOpen;
+            $settings['allowMultiLiveSlots'] = filter_var($settings['allowMultiLiveSlots'] ?? false, FILTER_VALIDATE_BOOLEAN);
         }
 
         $settings = $this->indicatorIntelligence->normalizeSettings(
@@ -9047,7 +9121,7 @@ class FutureTradeBotService
             || filter_var(config('future_trade.webhook_fallback_enabled', false), FILTER_VALIDATE_BOOLEAN);
     }
 
-    private function liveClient(array $settings): BinanceFuturesClient
+    private function liveClient(array $settings, string $throttleScope = 'default'): BinanceFuturesClient
     {
         $forceTestnet = (bool) ($settings['forceTestnet'] ?? true);
         if (! $this->environmentTradingReady($forceTestnet, $settings)) {
@@ -9070,6 +9144,7 @@ class FutureTradeBotService
             apiKey: (string) $apiKey,
             apiSecret: (string) $apiSecret,
             baseUrl: (string) $baseUrl,
+            throttleScope: $throttleScope,
         );
     }
 
@@ -9141,6 +9216,38 @@ class FutureTradeBotService
         }
 
         Cache::forget($key);
+    }
+
+    private function liveEntryTimingCacheKey(FutureTradeBotConfig $config, string $signalKey): ?string
+    {
+        $signalKey = trim($signalKey);
+        if ($signalKey === '') {
+            return null;
+        }
+
+        return 'future_trade_live_entry_timing:'.$config->id.':'.$signalKey;
+    }
+
+    private function rememberLiveEntryTiming(FutureTradeBotConfig $config, string $signalKey, array $timing): void
+    {
+        $key = $this->liveEntryTimingCacheKey($config, $signalKey);
+        if ($key === null) {
+            return;
+        }
+
+        $this->cachePut($key, $timing, 300);
+    }
+
+    private function pullLiveEntryTiming(FutureTradeBotConfig $config, string $signalKey): ?array
+    {
+        $key = $this->liveEntryTimingCacheKey($config, $signalKey);
+        if ($key === null) {
+            return null;
+        }
+
+        $timing = $this->cachePull($key);
+
+        return is_array($timing) ? $timing : null;
     }
 
     /**

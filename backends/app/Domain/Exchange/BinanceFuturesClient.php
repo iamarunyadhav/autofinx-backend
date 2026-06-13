@@ -19,6 +19,7 @@ class BinanceFuturesClient
         string $apiKey,
         string $apiSecret,
         string $baseUrl,
+        private readonly string $throttleScope = 'default',
     ) {
         $this->apiKey = trim($apiKey);
         $this->apiSecret = trim($apiSecret);
@@ -399,7 +400,7 @@ class BinanceFuturesClient
             }
 
             try {
-                $restGuard->throttle();
+                $restGuard->throttle($this->throttleScope);
                 $pending = Http::withHeaders($authenticated ? $this->apiHeaders() : [])
                     ->timeout(6)
                     ->connectTimeout(4);

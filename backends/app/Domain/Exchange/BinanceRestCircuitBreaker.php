@@ -28,22 +28,25 @@ class BinanceRestCircuitBreaker
         }
     }
 
-    public function throttle(): void
+    public function throttle(string $scope = 'default'): void
     {
-        $minIntervalMs = max(0, (int) config('future_trade.binance_rest.min_interval_ms', 500));
+        $minIntervalMs = $scope === 'execution'
+            ? max(0, (int) config('future_trade.binance_rest.execution_min_interval_ms', 150))
+            : max(0, (int) config('future_trade.binance_rest.min_interval_ms', 500));
         if ($minIntervalMs <= 0) {
             return;
         }
 
+        $lastCallKey = self::LAST_CALL_AT_KEY.':'.$scope;
         $nowMs = (int) floor(microtime(true) * 1000);
-        $lastCallAt = (int) Cache::get(self::LAST_CALL_AT_KEY, 0);
+        $lastCallAt = (int) Cache::get($lastCallKey, 0);
         $waitMs = $lastCallAt > 0 ? ($minIntervalMs - ($nowMs - $lastCallAt)) : 0;
         if ($waitMs > 0) {
             usleep($waitMs * 1000);
             $nowMs = (int) floor(microtime(true) * 1000);
         }
 
-        Cache::put(self::LAST_CALL_AT_KEY, $nowMs, 60);
+        Cache::put($lastCallKey, $nowMs, 60);
     }
 
     public function recordResponse(Response $response): void
@@ -76,6 +79,7 @@ class BinanceRestCircuitBreaker
             'last_error' => Cache::get(self::LAST_ERROR_KEY),
             'last_ok_at' => Cache::get(self::LAST_OK_AT_KEY),
             'min_interval_ms' => (int) config('future_trade.binance_rest.min_interval_ms', 500),
+            'execution_min_interval_ms' => (int) config('future_trade.binance_rest.execution_min_interval_ms', 150),
         ];
     }
 

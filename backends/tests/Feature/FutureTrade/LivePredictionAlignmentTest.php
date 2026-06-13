@@ -255,6 +255,92 @@ test('a SHORT closed via BUY at a HIGHER exit price records a NEGATIVE realized 
  * override the two methods the reconciler calls — the constructor is fine
  * with empty credentials.
  */
+test('a manual Binance app close with an unknown client id closes the matching open trade and clears runtime state', function () {
+    $config = laConfig();
+    $config->state()->create([
+        'status' => 'Running',
+        'state' => 'LIVE_IN_POSITION',
+        'connection_status' => 'Connected',
+        'current_symbol' => 'BTCUSDT',
+        'position_side' => 'LONG',
+        'entry_price' => 67000,
+        'quantity' => 0.01,
+        'trade_count_today' => 1,
+        'trading_day' => now()->toDateString(),
+    ]);
+    $svc = app(FutureTradeUserStreamService::class);
+
+    $trade = FutureTradeLogicalTrade::create([
+        'future_trade_bot_config_id' => $config->id,
+        'symbol' => 'BTCUSDT', 'side' => 'LONG',
+        'status' => FutureTradeLogicalTrade::STATUS_OPEN, 'mode' => 'LIVE_TESTNET',
+        'signal_key' => 'sk-manual-binance-close',
+        'entry_client_order_id' => 'ftx-entry-btc', 'entry_exchange_order_id' => 'entry-1',
+        'entry_price' => 67000, 'quantity' => 0.01, 'opened_at' => now()->subMinutes(5),
+    ]);
+
+    $updated = $svc->ingestEvent($config, [
+        'e' => 'ORDER_TRADE_UPDATE',
+        'o' => [
+            's' => 'BTCUSDT', 'c' => 'web-manual-close', 'i' => 'manual-9001',
+            'X' => 'FILLED', 'x' => 'TRADE', 'S' => 'SELL',
+            'ap' => 67100, 'z' => 0.01, 'rp' => 1.00, 'n' => 0.02,
+        ],
+    ]);
+
+    $trade->refresh();
+    $state = $config->fresh('state')->state;
+    expect($updated)->toBeTrue()
+        ->and($trade->status)->toBe(FutureTradeLogicalTrade::STATUS_CLOSED)
+        ->and((string) $trade->exit_client_order_id)->toBe('web-manual-close')
+        ->and((float) $state->quantity)->toEqualWithDelta(0.0, 0.000001)
+        ->and($state->position_side)->toBeNull()
+        ->and($state->current_signal)->toBe('BINANCE_EXTERNAL_CLOSE_FILLED');
+});
+
+test('an account update that says exchange is flat clears phantom app open state and flags reconciliation', function () {
+    $config = laConfig();
+    $config->state()->create([
+        'status' => 'Running',
+        'state' => 'LIVE_IN_POSITION',
+        'connection_status' => 'Connected',
+        'current_symbol' => 'BTCUSDT',
+        'position_side' => 'LONG',
+        'entry_price' => 67000,
+        'quantity' => 0.01,
+        'trade_count_today' => 1,
+        'trading_day' => now()->toDateString(),
+    ]);
+    $svc = app(FutureTradeUserStreamService::class);
+
+    $trade = FutureTradeLogicalTrade::create([
+        'future_trade_bot_config_id' => $config->id,
+        'symbol' => 'BTCUSDT', 'side' => 'LONG',
+        'status' => FutureTradeLogicalTrade::STATUS_OPEN, 'mode' => 'LIVE_TESTNET',
+        'signal_key' => 'sk-account-flat',
+        'entry_client_order_id' => 'ftx-entry-btc-flat',
+        'entry_price' => 67000, 'quantity' => 0.01, 'opened_at' => now()->subMinutes(5),
+    ]);
+
+    $updated = $svc->ingestEvent($config, [
+        'e' => 'ACCOUNT_UPDATE',
+        'a' => [
+            'm' => 'ORDER',
+            'P' => [
+                ['s' => 'BTCUSDT', 'pa' => '0', 'ep' => '0', 'up' => '0', 'ps' => 'BOTH'],
+            ],
+        ],
+    ]);
+
+    $trade->refresh();
+    $state = $config->fresh('state')->state;
+    expect($updated)->toBeTrue()
+        ->and($trade->status)->toBe(FutureTradeLogicalTrade::STATUS_RECONCILIATION_REQUIRED)
+        ->and((float) $state->quantity)->toEqualWithDelta(0.0, 0.000001)
+        ->and($state->state)->toBe('SCANNING')
+        ->and($state->current_signal)->toBe('ACCOUNT_UPDATE_EXCHANGE_FLAT');
+});
+
 function fakeFuturesClient(callable $positionFn, callable $userTradesFn): BinanceFuturesClient
 {
     return new class('https://testnet.local', 'x', 'y', $positionFn, $userTradesFn) extends BinanceFuturesClient {
@@ -275,6 +361,16 @@ function fakeFuturesClient(callable $positionFn, callable $userTradesFn): Binanc
 
 test('reconciliation closes an OPEN trade only when a matching exchange fill is found', function () {
     $config = laConfig();
+    $config->state()->create([
+        'status' => 'Running',
+        'state' => 'LIVE_IN_POSITION',
+        'connection_status' => 'Connected',
+        'current_symbol' => 'ETHUSDT',
+        'position_side' => 'LONG',
+        'entry_price' => 2300,
+        'quantity' => 0.04,
+        'trading_day' => now()->toDateString(),
+    ]);
 
     $trade = FutureTradeLogicalTrade::create([
         'future_trade_bot_config_id' => $config->id,
@@ -303,13 +399,28 @@ test('reconciliation closes an OPEN trade only when a matching exchange fill is 
     $report = app(FutureTradeReconciliationService::class)->reconcileConfig($config, $client, 'ETHUSDT');
 
     $trade->refresh();
+    $state = $config->fresh('state')->state;
     expect($trade->status)->toBe(FutureTradeLogicalTrade::STATUS_CLOSED)
         ->and((float) $trade->exit_price)->toEqualWithDelta(2315.0, 0.0001)
-        ->and($report['closed'])->toBe(1);
+        ->and($report['closed'])->toBe(1)
+        ->and($report['state_cleared'])->toBe(1)
+        ->and((float) $state->quantity)->toEqualWithDelta(0.0, 0.000001)
+        ->and($state->current_symbol)->toBeNull()
+        ->and($state->current_signal)->toBe('EXCHANGE_RECONCILED');
 });
 
 test('reconciliation flags as RECONCILIATION_REQUIRED when exchange is flat but no fill is found', function () {
     $config = laConfig();
+    $config->state()->create([
+        'status' => 'Running',
+        'state' => 'LIVE_IN_POSITION',
+        'connection_status' => 'Connected',
+        'current_symbol' => 'ETHUSDT',
+        'position_side' => 'LONG',
+        'entry_price' => 2300,
+        'quantity' => 0.04,
+        'trading_day' => now()->toDateString(),
+    ]);
     $trade = FutureTradeLogicalTrade::create([
         'future_trade_bot_config_id' => $config->id,
         'symbol' => 'ETHUSDT', 'side' => 'LONG',
@@ -328,8 +439,13 @@ test('reconciliation flags as RECONCILIATION_REQUIRED when exchange is flat but 
     $report = app(FutureTradeReconciliationService::class)->reconcileConfig($config, $client, 'ETHUSDT');
 
     $trade->refresh();
+    $state = $config->fresh('state')->state;
     expect($trade->status)->toBe(FutureTradeLogicalTrade::STATUS_RECONCILIATION_REQUIRED)
-        ->and($report['flagged'])->toBe(1);
+        ->and($report['flagged'])->toBe(1)
+        ->and($report['state_cleared'])->toBe(1)
+        ->and((float) $state->quantity)->toEqualWithDelta(0.0, 0.000001)
+        ->and($state->current_symbol)->toBeNull()
+        ->and($state->current_signal)->toBe('EXCHANGE_FLAT_RECONCILE_REQUIRED');
 });
 
 // ─── Stream snapshot reacts to real wall-clock time ──────────────────────────
