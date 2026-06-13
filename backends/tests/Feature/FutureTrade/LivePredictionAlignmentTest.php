@@ -381,6 +381,16 @@ test('reconciliation closes an OPEN trade only when a matching exchange fill is 
         'entry_price' => 2300, 'quantity' => 0.04,
         'opened_at' => now()->subHour(),
     ]);
+    $legacyTrade = $config->trades()->create([
+        'symbol' => 'ETHUSDT',
+        'side' => 'LONG',
+        'entry_price' => 2300,
+        'quantity' => 0.04,
+        'leverage' => 5,
+        'reason' => 'LIVE_BUY_SIGNAL',
+        'mode' => 'LIVE_TESTNET',
+        'status' => 'OPEN',
+    ]);
 
     $client = fakeFuturesClient(
         fn ($symbol) => [['symbol' => $symbol, 'positionAmt' => '0', 'entryPrice' => '0']],
@@ -399,9 +409,13 @@ test('reconciliation closes an OPEN trade only when a matching exchange fill is 
     $report = app(FutureTradeReconciliationService::class)->reconcileConfig($config, $client, 'ETHUSDT');
 
     $trade->refresh();
+    $legacyTrade->refresh();
     $state = $config->fresh('state')->state;
     expect($trade->status)->toBe(FutureTradeLogicalTrade::STATUS_CLOSED)
         ->and((float) $trade->exit_price)->toEqualWithDelta(2315.0, 0.0001)
+        ->and($legacyTrade->status)->toBe('CLOSED')
+        ->and((float) $legacyTrade->exit_price)->toEqualWithDelta(2315.0, 0.0001)
+        ->and($legacyTrade->net_pnl)->toBeNull()
         ->and($report['closed'])->toBe(1)
         ->and($report['state_cleared'])->toBe(1)
         ->and((float) $state->quantity)->toEqualWithDelta(0.0, 0.000001)
@@ -430,6 +444,16 @@ test('reconciliation flags as RECONCILIATION_REQUIRED when exchange is flat but 
         'entry_price' => 2300, 'quantity' => 0.04,
         'opened_at' => now()->subHour(),
     ]);
+    $legacyTrade = $config->trades()->create([
+        'symbol' => 'ETHUSDT',
+        'side' => 'LONG',
+        'entry_price' => 2300,
+        'quantity' => 0.04,
+        'leverage' => 5,
+        'reason' => 'LIVE_BUY_SIGNAL',
+        'mode' => 'LIVE_TESTNET',
+        'status' => 'OPEN',
+    ]);
 
     $client = fakeFuturesClient(
         fn ($symbol) => [['symbol' => $symbol, 'positionAmt' => '0']],
@@ -439,13 +463,62 @@ test('reconciliation flags as RECONCILIATION_REQUIRED when exchange is flat but 
     $report = app(FutureTradeReconciliationService::class)->reconcileConfig($config, $client, 'ETHUSDT');
 
     $trade->refresh();
+    $legacyTrade->refresh();
     $state = $config->fresh('state')->state;
     expect($trade->status)->toBe(FutureTradeLogicalTrade::STATUS_RECONCILIATION_REQUIRED)
+        ->and($legacyTrade->status)->toBe('RECONCILIATION_REQUIRED')
         ->and($report['flagged'])->toBe(1)
         ->and($report['state_cleared'])->toBe(1)
         ->and((float) $state->quantity)->toEqualWithDelta(0.0, 0.000001)
         ->and($state->current_symbol)->toBeNull()
         ->and($state->current_signal)->toBe('EXCHANGE_FLAT_RECONCILE_REQUIRED');
+});
+
+test('reconciliation clears legacy-only OPEN rows after logical trade was already closed', function () {
+    $config = laConfig();
+    FutureTradeLogicalTrade::create([
+        'future_trade_bot_config_id' => $config->id,
+        'symbol' => 'BTCUSDT', 'side' => 'SHORT',
+        'status' => FutureTradeLogicalTrade::STATUS_CLOSED, 'mode' => 'LIVE_TESTNET',
+        'signal_key' => 'sk-rec-legacy-1',
+        'entry_price' => 63943.6, 'exit_price' => 64085.5, 'quantity' => 0.002,
+        'opened_at' => now()->subHour(),
+        'closed_at' => now()->subMinutes(10),
+    ]);
+    $legacyTrade = $config->trades()->create([
+        'symbol' => 'BTCUSDT',
+        'side' => 'SHORT',
+        'entry_price' => 63943.6,
+        'quantity' => 0.002,
+        'leverage' => 5,
+        'reason' => 'LIVE_SELL_SIGNAL',
+        'mode' => 'LIVE_TESTNET',
+        'status' => 'OPEN',
+        'created_at' => now()->subHour(),
+        'updated_at' => now()->subHour(),
+    ]);
+
+    $client = fakeFuturesClient(
+        fn ($symbol) => [['symbol' => $symbol, 'positionAmt' => '0']],
+        fn ($symbol) => [[
+            'symbol' => $symbol,
+            'orderId' => '9002',
+            'clientOrderId' => 'web-manual-close-short',
+            'side' => 'BUY',
+            'price' => 64085.5,
+            'qty' => 0.002,
+            'commission' => 0.01,
+            'time' => now()->subMinutes(10)->getTimestampMs(),
+        ]],
+    );
+
+    $report = app(FutureTradeReconciliationService::class)->reconcileConfig($config, $client, 'BTCUSDT');
+
+    $legacyTrade->refresh();
+    expect($legacyTrade->status)->toBe('CLOSED')
+        ->and((float) $legacyTrade->exit_price)->toEqualWithDelta(64085.5, 0.0001)
+        ->and($report['legacy_closed'])->toBe(1)
+        ->and($report['closed'])->toBe(0);
 });
 
 // ─── Stream snapshot reacts to real wall-clock time ──────────────────────────

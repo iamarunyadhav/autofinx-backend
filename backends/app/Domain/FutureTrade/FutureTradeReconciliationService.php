@@ -4,6 +4,7 @@ namespace App\Domain\FutureTrade;
 
 use App\Domain\Exchange\BinanceFuturesClient;
 use App\Models\FutureTradeBotConfig;
+use App\Models\FutureTradeBotTrade;
 use App\Models\FutureTradeLogicalTrade;
 use App\Models\FutureTradeLogicalTradeEvent;
 use Illuminate\Support\Carbon;
@@ -33,6 +34,7 @@ class FutureTradeReconciliationService
             'closed' => 0,
             'corrected' => 0,
             'flagged' => 0,
+            'legacy_closed' => 0,
             'state_cleared' => 0,
             'errors' => [],
         ];
@@ -49,10 +51,25 @@ class FutureTradeReconciliationService
         }
 
         $tradesBySymbol = $query->get()->groupBy('symbol');
+        $legacyOpenBySymbol = FutureTradeBotTrade::query()
+            ->where('future_trade_bot_config_id', $config->id)
+            ->whereIn('status', ['OPEN', 'SUBMITTED'])
+            ->where('side', 'not like', '%CLOSE%')
+            ->when($singleSymbol, fn ($q) => $q->where('symbol', strtoupper($singleSymbol)))
+            ->get()
+            ->groupBy('symbol');
 
-        foreach ($tradesBySymbol as $symbol => $trades) {
+        $symbols = collect($tradesBySymbol->keys())
+            ->merge($legacyOpenBySymbol->keys())
+            ->map(fn ($symbol) => strtoupper((string) $symbol))
+            ->filter()
+            ->unique()
+            ->values();
+
+        foreach ($symbols as $symbol) {
             try {
                 $report['symbols'][] = $symbol;
+                $trades = $tradesBySymbol->get($symbol, collect());
                 $position = $this->safeFetch(fn () => $client->fetchPositionRisk($symbol)) ?? [];
                 $exchangeQty = $this->extractPositionQuantity($position, $symbol);
                 $exchangeSide = $this->extractPositionSide($position, $symbol);
@@ -72,6 +89,7 @@ class FutureTradeReconciliationService
                             if ($this->clearRuntimePositionState($config, (string) $symbol, 'EXCHANGE_FLAT_RECONCILE_REQUIRED')) {
                                 $report['state_cleared']++;
                             }
+                            $this->markLegacyEntryRowsClosed($config, $trade, null, null, 'RECONCILIATION_REQUIRED');
                             $report['flagged']++;
                             continue;
                         }
@@ -79,6 +97,7 @@ class FutureTradeReconciliationService
                         if ($this->clearRuntimePositionState($config, (string) $symbol, 'EXCHANGE_RECONCILED', $close)) {
                             $report['state_cleared']++;
                         }
+                        $this->markLegacyEntryRowsClosed($config, $trade, $close['exit_price'], $close['net_pnl']);
                         $report['closed']++;
                         continue;
                     }
@@ -90,10 +109,41 @@ class FutureTradeReconciliationService
                             if ($this->clearRuntimePositionState($config, (string) $symbol, 'EXCHANGE_RECONCILED', $close)) {
                                 $report['state_cleared']++;
                             }
+                            $this->markLegacyEntryRowsClosed($config, $trade, $close['exit_price'], $close['net_pnl']);
                             $report['closed']++;
                         } elseif ($exchangeQty <= 0 && $this->clearRuntimePositionState($config, (string) $symbol, 'EXCHANGE_FLAT_RECONCILE_REQUIRED')) {
                             $report['state_cleared']++;
+                            $this->markLegacyEntryRowsClosed($config, $trade, null, null, 'RECONCILIATION_REQUIRED');
                         }
+                    }
+                }
+
+                if ($exchangeQty <= 0) {
+                    $legacyOpenRows = FutureTradeBotTrade::query()
+                        ->where('future_trade_bot_config_id', $config->id)
+                        ->where('symbol', strtoupper((string) $symbol))
+                        ->whereIn('status', ['OPEN', 'SUBMITTED'])
+                        ->where('side', 'not like', '%CLOSE%')
+                        ->get();
+
+                    foreach ($legacyOpenRows as $legacyTrade) {
+                        $matched = $this->matchLegacyExitFill($legacyTrade, $fills);
+                        if ($matched === null) {
+                            $legacyTrade->update([
+                                'status' => 'RECONCILIATION_REQUIRED',
+                                'updated_at' => now(),
+                            ]);
+                            $report['flagged']++;
+                            continue;
+                        }
+
+                        $exitPrice = (float) ($matched['price'] ?? 0);
+                        $legacyTrade->update([
+                            'exit_price' => $exitPrice > 0 ? $exitPrice : $legacyTrade->exit_price,
+                            'status' => 'CLOSED',
+                            'updated_at' => now(),
+                        ]);
+                        $report['legacy_closed']++;
                     }
                 }
             } catch (Throwable $e) {
@@ -133,6 +183,27 @@ class FutureTradeReconciliationService
         return $candidates[0];
     }
 
+    private function matchLegacyExitFill(FutureTradeBotTrade $trade, array $fills): ?array
+    {
+        $side = strtoupper((string) $trade->side);
+        $closeSide = $side === 'LONG' ? 'SELL' : ($side === 'SHORT' ? 'BUY' : '');
+        if ($closeSide === '') {
+            return null;
+        }
+
+        $openedAtMs = $trade->created_at ? Carbon::parse($trade->created_at)->getTimestampMs() : 0;
+        $candidates = array_filter($fills, function ($fill) use ($closeSide, $openedAtMs) {
+            return strtoupper((string) ($fill['side'] ?? '')) === $closeSide
+                && (int) ($fill['time'] ?? 0) >= $openedAtMs;
+        });
+        if ($candidates === []) {
+            return null;
+        }
+
+        usort($candidates, fn ($a, $b) => (int) ($b['time'] ?? 0) <=> (int) ($a['time'] ?? 0));
+        return $candidates[0];
+    }
+
     private function closeFromFill(FutureTradeLogicalTrade $trade, array $fill, string $reason): array
     {
         $exitPrice = (float) ($fill['price'] ?? 0);
@@ -166,6 +237,41 @@ class FutureTradeReconciliationService
             'exit_price' => $exitPrice,
             'net_pnl' => $net,
         ];
+    }
+
+    private function markLegacyEntryRowsClosed(
+        FutureTradeBotConfig $config,
+        FutureTradeLogicalTrade $trade,
+        ?float $exitPrice,
+        ?float $netPnl,
+        string $status = 'CLOSED'
+    ): void {
+        $side = strtoupper((string) $trade->side);
+        $symbol = strtoupper((string) $trade->symbol);
+        $query = FutureTradeBotTrade::query()
+            ->where('future_trade_bot_config_id', $config->id)
+            ->where('symbol', $symbol)
+            ->whereIn('status', ['OPEN', 'SUBMITTED'])
+            ->where('side', 'not like', '%CLOSE%');
+
+        if (in_array($side, ['LONG', 'SHORT'], true)) {
+            $query->where('side', $side);
+        }
+
+        $updates = [
+            'status' => $status,
+            'updated_at' => now(),
+        ];
+
+        if ($exitPrice !== null && $exitPrice > 0) {
+            $updates['exit_price'] = $exitPrice;
+        }
+
+        if ($netPnl !== null && $status !== 'CLOSED') {
+            $updates['net_pnl'] = $netPnl;
+        }
+
+        $query->update($updates);
     }
 
     private function event(FutureTradeLogicalTrade $trade, string $type, array $payload = []): void
