@@ -2352,6 +2352,7 @@ class FutureTradeBotService
 
         $latestAlert = $config->logs()
             ->whereIn('event', ['SCAN_FAILED', 'MARKET_SNAPSHOT_FAILED', 'LIVE_ENTRY_FAILED', 'BALANCE_SYNC_FAILED', 'BALANCE_SYNC_WARNING', 'TRADE_BLOCKED', 'SIGNAL_SKIPPED', 'LIVE_GUARD_BLOCKED', 'DAILY_LOSS_LIMIT_HIT'])
+            ->where('occurred_at', '>=', now()->subHours(6))
             ->orderByDesc('occurred_at')
             ->first();
 
