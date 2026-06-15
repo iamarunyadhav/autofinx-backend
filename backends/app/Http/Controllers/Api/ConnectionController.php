@@ -260,10 +260,29 @@ class ConnectionController extends Controller
             }
 
             if ($provider === 'binance') {
-                $client = $clients->makeFromConnection($connection);
-                $price = $client->getLatestPrice('BTCUSDT');
-                $balances = $client->fetchBalances();
-                $probe = ['symbol' => 'BTCUSDT', 'price' => $price];
+                // Test against the SAME endpoint the bot uses — Binance USDⓈ-M
+                // futures (testnet.binancefuture.com for testnet). The old spot
+                // client (testnet.binance.vision) rejects futures-testnet keys
+                // with -2015, even though the key is valid for futures.
+                $environment = $connection->is_testnet ? 'testnet' : 'live';
+                $integration = Integration::where('workspace_id', $connection->workspace_id)
+                    ->where('provider_key', 'binance')
+                    ->where('environment', $environment)
+                    ->first();
+
+                if (! $integration || ! $integration->secrets_encrypted) {
+                    throw new \RuntimeException('No mirrored Binance integration found — re-save this connection, then test again.');
+                }
+
+                $futures = app(LiveTradeProviderRegistry::class)->for('binance');
+                $balance = $futures->availableBalance($integration, 'USDT'); // signed call validates the key
+                $balances = [$balance];
+                $probe = [
+                    'market' => 'futures',
+                    'environment' => $environment,
+                    'asset' => $balance['asset'] ?? 'USDT',
+                    'available' => $balance['available'] ?? 0,
+                ];
             } else {
                 $client = $venues->forProvider($provider, $connection);
                 $quote = $client->getLatestPrice('XAUUSD');
