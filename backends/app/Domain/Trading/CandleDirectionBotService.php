@@ -86,6 +86,19 @@ class CandleDirectionBotService
             }
         }
 
+        // Fast exit: the moment a candle closes against our position, get out.
+        // This is the "quick in / quick out per candle" behaviour — candles are
+        // the main factor, not a slow indicator give-back.
+        $candleDir = $this->candleDirection($latest);
+        if ($candleDir !== 'NEUTRAL' && $candleDir !== $side) {
+            return [
+                'action' => 'CLOSE',
+                'reason' => sprintf('Candle closed %s against %s — exiting.', $candleDir, $side),
+                'confidence' => 1.0,
+                'stop_price' => $stopPrice,
+            ];
+        }
+
         if (! $this->shouldContinueTrade(
             ['side' => $side, 'entry_price' => $entry, 'peak_profit' => $peakExcursion],
             $latest,
@@ -116,7 +129,26 @@ class CandleDirectionBotService
      */
     public function computeSignal(array $candles, string $timeframe, array $indicators): array
     {
-        return $this->signals->getDirectionSignal($candles, $timeframe, $indicators);
+        // Candle direction is the primary signal — fast, fires on (almost) every
+        // candle. Selected indicators only nudge confidence; they never block.
+        return $this->signals->getCandleDirectionSignal($candles, $timeframe, $indicators);
+    }
+
+    /** Direction of a single candle (close vs open). */
+    public function candleDirection(array $candle): string
+    {
+        $open = (float) ($candle['open'] ?? 0);
+        $close = (float) ($candle['close'] ?? 0);
+        $high = (float) ($candle['high'] ?? 0);
+        $low = (float) ($candle['low'] ?? 0);
+        $range = max($high - $low, 1e-9);
+
+        // Treat near-zero-body candles (doji) as neutral.
+        if (abs($close - $open) / $range < 0.05) {
+            return 'NEUTRAL';
+        }
+
+        return $close > $open ? 'BUY' : 'SELL';
     }
 
     /**
