@@ -35,6 +35,30 @@ class RiskGuardService
         $this->checkDrawdown($ledger);
     }
 
+    /**
+     * Reset the drawdown baseline for a workspace to the supplied balance (or the
+     * current ledger balance). Call this when a live account is connected so the
+     * drawdown guard measures against the real account equity instead of a stale
+     * seeded baseline — otherwise the very first live order false-trips the guard.
+     */
+    public function rebaseline(string $workspaceId, ?float $balance = null): void
+    {
+        $ledger = Ledger::firstOrCreate(
+            ['workspace_id' => $workspaceId],
+            ['id' => (string) Str::uuid(), 'balance' => 0, 'meta' => ['starting_balance' => 0]]
+        );
+
+        if ($balance !== null) {
+            $ledger->balance = $balance;
+        }
+
+        $meta = $ledger->meta ?? [];
+        $meta['starting_balance'] = (float) ($ledger->balance ?? 0);
+        $meta['baselined_at'] = now()->toIso8601String();
+        $ledger->meta = $meta;
+        $ledger->save();
+    }
+
     private function checkDailyLoss(Ledger $ledger): void
     {
         $limit = (float) config('risk.max_daily_loss', 0);

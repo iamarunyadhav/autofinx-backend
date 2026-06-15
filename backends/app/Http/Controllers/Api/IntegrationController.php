@@ -3,8 +3,10 @@
 namespace App\Http\Controllers\Api;
 
 use App\Domain\Integrations\IntegrationManager;
+use App\Domain\Trading\Providers\LiveTradeProviderRegistry;
 use App\Http\Controllers\Controller;
 use App\Models\Integration;
+use App\Support\RiskGuardService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
 
@@ -16,7 +18,7 @@ class IntegrationController extends Controller
         return Integration::when($workspaceId, fn ($q) => $q->where('workspace_id', $workspaceId))->get();
     }
 
-    public function store(Request $request, IntegrationManager $manager)
+    public function store(Request $request, IntegrationManager $manager, LiveTradeProviderRegistry $providers, RiskGuardService $riskGuard)
     {
         $data = $request->validate([
             'workspace_id' => 'required|uuid',
@@ -28,7 +30,29 @@ class IntegrationController extends Controller
         ]);
         $data['status'] = 'active';
         $integration = $manager->upsert($data, (string) Str::uuid());
+
+        // Connecting a live trading account re-baselines the drawdown guard to the
+        // real account equity so the first live order isn't blocked by a stale
+        // baseline. Best-effort: never fail the connection on a balance hiccup.
+        $this->rebaselineLiveAccount($integration, $providers, $riskGuard);
+
         return response()->json($integration, 201);
+    }
+
+    private function rebaselineLiveAccount(Integration $integration, LiveTradeProviderRegistry $providers, RiskGuardService $riskGuard): void
+    {
+        try {
+            $provider = $providers->for((string) $integration->provider_key);
+            if (($provider->capabilities()['live_supported'] ?? false) !== true) {
+                return;
+            }
+            $available = (float) ($provider->availableBalance($integration, 'USDT')['available'] ?? 0);
+            if ($available > 0) {
+                $riskGuard->rebaseline((string) $integration->workspace_id, $available);
+            }
+        } catch (\Throwable) {
+            // Connection still succeeds; baseline will fall back to ledger balance on first guard check.
+        }
     }
 
     public function update(Request $request, Integration $integration, IntegrationManager $manager)

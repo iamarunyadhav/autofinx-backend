@@ -168,6 +168,9 @@ Route::prefix('v1')->group(function () {
         Route::get('robot-sessions/{robotSession}/status', [RobotSessionController::class, 'status']);
         Route::get('robot-sessions/{robotSession}/history', [RobotSessionController::class, 'history']);
         Route::get('robot-sessions/{robotSession}/performance-summary', [RobotSessionController::class, 'performance']);
+        Route::get('robot-sessions/{robotSession}/live-stats', [RobotSessionController::class, 'liveStats']);
+        Route::post('robot-sessions/{robotSession}/force-close', [RobotSessionController::class, 'forceClose']);
+        Route::get('robot-sessions/{robotSession}/candle-feed', [RobotSessionController::class, 'candleFeed']);
 
         Route::get('workspaces/{workspace}/risk-profiles', [ConfigController::class, 'riskProfiles']);
         Route::post('workspaces/{workspace}/risk-profiles', [ConfigController::class, 'storeRiskProfile']);

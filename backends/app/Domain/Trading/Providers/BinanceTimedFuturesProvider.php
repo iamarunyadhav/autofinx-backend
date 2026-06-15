@@ -123,14 +123,21 @@ class BinanceTimedFuturesProvider implements LiveTradeProviderInterface
         ]);
 
         $payload = $response->json();
-        $price = (float) ($payload['avgPrice'] ?? $payload['price'] ?? $quote['price']);
+        $price = $this->fillPrice($payload);
         $executedQty = (float) ($payload['executedQty'] ?? $quantity);
 
+        // Market RESULT responses on Binance futures (notably testnet) often omit
+        // avgPrice and return price="0.00". Re-querying by orderId can transiently
+        // -2013 immediately after the fill, so treat the fetch as best-effort and
+        // fall back to the live quote rather than failing a confirmed fill.
         if ($price <= 0 || $executedQty <= 0) {
-            $fetched = $this->fetchOrder($integration, strtoupper($symbol), (string) ($payload['orderId'] ?? ''));
+            $fetched = $this->safeFetchOrder($integration, strtoupper($symbol), (string) ($payload['orderId'] ?? ''));
             $payload = array_merge($payload, $fetched);
-            $price = (float) ($payload['avgPrice'] ?? $payload['price'] ?? $quote['price']);
+            $price = $this->fillPrice($payload);
             $executedQty = (float) ($payload['executedQty'] ?? $quantity);
+        }
+        if ($price <= 0) {
+            $price = (float) ($quote['price'] ?? 0);
         }
 
         return [
@@ -168,14 +175,17 @@ class BinanceTimedFuturesProvider implements LiveTradeProviderInterface
         ]);
 
         $payload = $response->json();
-        $price = (float) ($payload['avgPrice'] ?? $payload['price'] ?? 0);
+        $price = $this->fillPrice($payload);
         $executedQty = (float) ($payload['executedQty'] ?? $normalizedQuantity);
 
         if ($price <= 0 || $executedQty <= 0) {
-            $fetched = $this->fetchOrder($integration, strtoupper($symbol), (string) ($payload['orderId'] ?? ''));
+            $fetched = $this->safeFetchOrder($integration, strtoupper($symbol), (string) ($payload['orderId'] ?? ''));
             $payload = array_merge($payload, $fetched);
-            $price = (float) ($payload['avgPrice'] ?? $payload['price'] ?? 0);
+            $price = $this->fillPrice($payload);
             $executedQty = (float) ($payload['executedQty'] ?? $normalizedQuantity);
+        }
+        if ($price <= 0) {
+            $price = (float) ($this->latestQuote($integration, $symbol)['price'] ?? 0);
         }
 
         return [
@@ -198,6 +208,36 @@ class BinanceTimedFuturesProvider implements LiveTradeProviderInterface
             'symbol' => strtoupper($symbol),
             'orderId' => $orderId,
         ])->json();
+    }
+
+    /**
+     * Best-effort order lookup that never throws — Binance (testnet especially)
+     * can return -2013 "Order does not exist" for a few hundred ms right after a
+     * market fill, which must not fail an already-confirmed order.
+     */
+    private function safeFetchOrder(Integration $integration, string $symbol, string $orderId): array
+    {
+        try {
+            return $this->fetchOrder($integration, $symbol, $orderId);
+        } catch (\Throwable) {
+            return [];
+        }
+    }
+
+    /**
+     * Resolve a usable fill price from an order payload, treating "0"/"0.00"
+     * (common for MARKET RESULT responses) as absent rather than a real price.
+     */
+    private function fillPrice(array $payload): float
+    {
+        foreach (['avgPrice', 'price'] as $key) {
+            $value = (float) ($payload[$key] ?? 0);
+            if ($value > 0) {
+                return $value;
+            }
+        }
+
+        return 0.0;
     }
 
     private function normalizeQuantity(Integration $integration, string $symbol, float $quantity): float

@@ -4,9 +4,11 @@ namespace App\Http\Controllers\Api;
 
 use App\Domain\Trading\QuickTradeService;
 use App\Domain\Trading\RobotSessionService;
+use App\Domain\Trading\TradingMarketService;
 use App\Models\RobotSession;
 use Illuminate\Http\Request;
 use App\Http\Controllers\Controller;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class RobotSessionController extends Controller
 {
@@ -38,6 +40,12 @@ class RobotSessionController extends Controller
             'confidence_threshold' => 'nullable|integer|min:1|max:100',
             'provider' => 'nullable|string|max:32',
             'integration_id' => 'nullable|uuid',
+            'bot_mode' => 'nullable|in:candle_direction,timed_expiry',
+            'stop_loss_pct' => 'nullable|numeric|min:0.1|max:100',
+            'take_profit_pct' => 'nullable|numeric|min:0.1|max:1000',
+            'multi_symbol' => 'nullable|boolean',
+            'symbol_list' => 'nullable|array',
+            'symbol_list.*' => 'string|max:32',
         ]);
 
         return response()->json(
@@ -65,6 +73,12 @@ class RobotSessionController extends Controller
             'confidence_threshold' => 'nullable|integer|min:1|max:100',
             'provider_key' => 'sometimes|string|max:32',
             'integration_id' => 'nullable|uuid',
+            'bot_mode' => 'sometimes|in:candle_direction,timed_expiry',
+            'stop_loss_pct' => 'sometimes|numeric|min:0.1|max:100',
+            'take_profit_pct' => 'nullable|numeric|min:0.1|max:1000',
+            'multi_symbol' => 'sometimes|boolean',
+            'symbol_list' => 'nullable|array',
+            'symbol_list.*' => 'string|max:32',
         ]);
 
         return response()->json($sessions->update($robotSession, $payload));
@@ -103,6 +117,68 @@ class RobotSessionController extends Controller
             $robotSession->id,
             100
         ));
+    }
+
+    public function liveStats(RobotSession $robotSession, RobotSessionService $sessions)
+    {
+        return response()->json($sessions->liveStats($robotSession));
+    }
+
+    public function forceClose(RobotSession $robotSession, RobotSessionService $sessions)
+    {
+        return response()->json($sessions->forceClose($robotSession));
+    }
+
+    /**
+     * Server-sent stream of live candles for the session symbol/timeframe. Used
+     * by the front-end for forex / non-crypto symbols where a direct Binance
+     * WebSocket is not available.
+     */
+    public function candleFeed(Request $request, RobotSession $robotSession, TradingMarketService $market): StreamedResponse
+    {
+        $iterations = (int) min(60, max(1, (int) $request->query('iterations', 30)));
+        $intervalSeconds = (int) min(10, max(1, (int) $request->query('interval', 2)));
+
+        $context = [
+            'workspace_id' => $robotSession->workspace_id,
+            'mode' => $robotSession->mode,
+            'provider' => $robotSession->provider_key,
+            'integration_id' => $robotSession->integration_id,
+        ];
+        $symbol = $robotSession->symbol;
+        $timeframe = $robotSession->timeframe;
+
+        $stream = function () use ($market, $symbol, $timeframe, $context, $iterations, $intervalSeconds) {
+            for ($i = 0; $i < $iterations; $i++) {
+                if (connection_aborted()) {
+                    break;
+                }
+
+                $candles = $market->candles($symbol, $timeframe, 120, $context);
+                $latest = $candles === [] ? null : $candles[array_key_last($candles)];
+
+                echo 'data: ' . json_encode([
+                    'symbol' => $symbol,
+                    'timeframe' => $timeframe,
+                    'candles' => $candles,
+                    'current' => $latest,
+                    'ts' => now()->toIso8601String(),
+                ]) . "\n\n";
+
+                if (function_exists('ob_flush')) {
+                    @ob_flush();
+                }
+                flush();
+                sleep($intervalSeconds);
+            }
+        };
+
+        return response()->stream($stream, 200, [
+            'Content-Type' => 'text/event-stream',
+            'Cache-Control' => 'no-cache',
+            'Connection' => 'keep-alive',
+            'X-Accel-Buffering' => 'no',
+        ]);
     }
 
     public function performance(RobotSession $robotSession, RobotSessionService $sessions)

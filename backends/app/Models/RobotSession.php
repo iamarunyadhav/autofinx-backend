@@ -22,6 +22,14 @@ class RobotSession extends BaseModel
         'last_signal_at' => 'datetime',
         'last_trade_at' => 'datetime',
         'runtime_json' => 'array',
+        'stop_loss_pct' => 'decimal:4',
+        'take_profit_pct' => 'decimal:4',
+        'multi_symbol' => 'boolean',
+        'symbol_list' => 'array',
+        'peak_profit' => 'decimal:8',
+        'active_entry_price' => 'decimal:8',
+        'active_since' => 'datetime',
+        'trade_stats_json' => 'array',
     ];
 
     public function quickTrades(): HasMany

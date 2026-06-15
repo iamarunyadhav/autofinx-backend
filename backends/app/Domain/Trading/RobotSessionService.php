@@ -15,6 +15,7 @@ class RobotSessionService
         private readonly TradingMarketService $market,
         private readonly SignalPreviewService $signals,
         private readonly TimeframeRegistry $timeframes,
+        private readonly CandleDirectionBotService $candleBot,
     ) {
     }
 
@@ -57,6 +58,15 @@ class RobotSessionService
             'max_consecutive_losses' => $payload['max_consecutive_losses'] ?? null,
             'max_active_trades' => (int) ($payload['max_active_trades'] ?? $config['max_active_trades'] ?? 2),
             'confidence_threshold' => (int) ($payload['confidence_threshold'] ?? $config['confidence_threshold'] ?? 60),
+            'bot_mode' => in_array(($payload['bot_mode'] ?? 'timed_expiry'), ['candle_direction', 'timed_expiry'], true)
+                ? (string) $payload['bot_mode']
+                : 'timed_expiry',
+            'stop_loss_pct' => round((float) ($payload['stop_loss_pct'] ?? 20.0), 4),
+            'take_profit_pct' => isset($payload['take_profit_pct']) ? round((float) $payload['take_profit_pct'], 4) : null,
+            'multi_symbol' => (bool) ($payload['multi_symbol'] ?? false),
+            'symbol_list' => isset($payload['symbol_list'])
+                ? collect((array) $payload['symbol_list'])->map(fn ($s) => strtoupper((string) $s))->filter()->unique()->values()->all()
+                : null,
             'mode' => (string) ($state['mode'] ?? 'paper'),
             'provider_key' => strtolower((string) ($payload['provider'] ?? ($state['preferred_provider'] ?? 'binance'))),
             'integration_id' => $payload['integration_id'] ?? ($state['preferred_integration_id'] ?? null),
@@ -85,10 +95,22 @@ class RobotSessionService
             'confidence_threshold',
             'provider_key',
             'integration_id',
+            'bot_mode',
+            'stop_loss_pct',
+            'take_profit_pct',
+            'multi_symbol',
         ] as $field) {
             if (array_key_exists($field, $payload)) {
                 $updates[$field] = $payload[$field];
             }
+        }
+        if (array_key_exists('symbol_list', $payload)) {
+            $updates['symbol_list'] = collect((array) $payload['symbol_list'])
+                ->map(fn ($s) => strtoupper((string) $s))
+                ->filter()
+                ->unique()
+                ->values()
+                ->all();
         }
         if (array_key_exists('timeframe', $payload)) {
             $updates['timeframe'] = $this->timeframes->normalize((string) $payload['timeframe']);
@@ -188,6 +210,10 @@ class RobotSessionService
             return ['session_id' => $session->id, 'status' => $session->status, 'action' => 'skipped'];
         }
 
+        if (($session->bot_mode ?? 'timed_expiry') === 'candle_direction') {
+            return $this->evaluateCandleDirectionSession($session);
+        }
+
         $cooldownSeconds = (int) ($this->settings->robotConfig($session->workspace_id)['cooldown_seconds'] ?? 15);
         if ($session->last_trade_at && now()->diffInSeconds($session->last_trade_at) < $cooldownSeconds) {
             return ['session_id' => $session->id, 'status' => 'cooldown', 'action' => 'skipped'];
@@ -244,6 +270,215 @@ class RobotSessionService
             'trade_id' => $trade->id,
             'signal' => $signal,
         ];
+    }
+
+    /**
+     * Candle Direction Bot evaluation path: open on a directional signal, then
+     * ride the move with a trailing stop until the bot says CLOSE.
+     *
+     * @return array<string, mixed>
+     */
+    public function evaluateCandleDirectionSession(RobotSession $session): array
+    {
+        $candles = $this->market->candles($session->symbol, $session->timeframe, 100, [
+            'workspace_id' => $session->workspace_id,
+            'mode' => $session->mode,
+            'provider' => $session->provider_key,
+            'integration_id' => $session->integration_id,
+        ]);
+
+        if ($candles === []) {
+            return ['session_id' => $session->id, 'status' => 'no_data', 'action' => 'skipped'];
+        }
+
+        $decision = $this->candleBot->evaluateCandle($session, $candles);
+        $latest = $candles[array_key_last($candles)];
+        $closePrice = (float) ($latest['close'] ?? 0);
+
+        $session->last_signal_at = now();
+        $session->runtime_json = array_merge((array) $session->runtime_json, [
+            'latest_decision' => $decision,
+            'last_close_price' => $closePrice,
+        ]);
+
+        $action = $decision['action'];
+
+        if ($action === 'BUY' || $action === 'SELL') {
+            $trade = $this->quickTrades->place([
+                'workspace_id' => $session->workspace_id,
+                'wallet_account_id' => $session->wallet_account_id,
+                'robot_session_id' => $session->id,
+                'symbol' => $session->symbol,
+                'side' => strtolower($action),
+                'stake_amount' => (float) $session->base_stake,
+                'timeframe' => $session->timeframe,
+                'expiry_seconds' => (int) $session->expiry_seconds,
+                'mode' => strtolower((string) $session->mode),
+                'source' => 'robot_candle_direction',
+                'indicator_set' => (array) $session->indicator_set,
+                'signal_payload' => $decision['signal'] ?? $decision,
+                'provider' => $session->provider_key,
+                'integration_id' => $session->integration_id,
+            ], $session->user_id);
+
+            $session->active_side = $action;
+            $session->active_entry_price = (float) ($trade->entry_price ?? $closePrice);
+            $session->active_since = now();
+            $session->peak_profit = 0;
+            $session->last_trade_at = now();
+            $session->save();
+
+            return [
+                'session_id' => $session->id,
+                'status' => 'opened',
+                'action' => 'trade_opened',
+                'side' => $action,
+                'trade_id' => $trade->id,
+                'decision' => $decision,
+            ];
+        }
+
+        if ($action === 'CLOSE') {
+            $closed = $this->closeActiveCandleTrade($session);
+            $session->active_side = null;
+            $session->active_entry_price = null;
+            $session->active_since = null;
+            $session->peak_profit = 0;
+            $session->last_trade_at = now();
+            $session->save();
+            $this->refreshPerformance($session);
+
+            return [
+                'session_id' => $session->id,
+                'status' => 'closed',
+                'action' => 'trade_closed',
+                'trade_id' => $closed?->id,
+                'decision' => $decision,
+            ];
+        }
+
+        // HOLD: keep peak excursion fresh while in a position.
+        if ($session->active_side) {
+            $entry = (float) $session->active_entry_price;
+            $excursion = $this->candleBot->favourableExcursion((string) $session->active_side, $entry, $closePrice);
+            $session->peak_profit = max((float) $session->peak_profit, $excursion);
+        }
+        $session->save();
+
+        return [
+            'session_id' => $session->id,
+            'status' => $session->active_side ? 'holding' : 'waiting',
+            'action' => 'hold',
+            'decision' => $decision,
+        ];
+    }
+
+    /**
+     * Real-time stats for the Candle Direction Bot: current price, live position,
+     * unrealised PnL, peak profit and the trailing-stop level.
+     *
+     * @return array<string, mixed>
+     */
+    public function liveStats(RobotSession $session): array
+    {
+        $session = $this->refreshPerformance($session);
+
+        $quote = $this->market->latestQuote($session->symbol, $session->timeframe, [
+            'workspace_id' => $session->workspace_id,
+            'mode' => $session->mode,
+            'provider' => $session->provider_key,
+            'integration_id' => $session->integration_id,
+        ]);
+        $currentPrice = (float) ($quote['price'] ?? 0);
+
+        $position = null;
+        if ($session->active_side && $session->active_entry_price !== null) {
+            $side = (string) $session->active_side;
+            $entry = (float) $session->active_entry_price;
+            $excursion = $this->candleBot->favourableExcursion($side, $entry, $currentPrice);
+            $peakExcursion = max((float) $session->peak_profit, $excursion);
+            $stopPrice = $this->candleBot->computeTrailingStop($entry, $peakExcursion, (float) $session->stop_loss_pct, $side);
+            $stake = (float) $session->base_stake;
+
+            $position = [
+                'side' => $side,
+                'entry_price' => $entry,
+                'current_price' => $currentPrice,
+                'stake' => $stake,
+                'unrealized_pnl' => $entry > 0 ? round($excursion / $entry * $stake, 8) : 0.0,
+                'unrealized_pct' => $entry > 0 ? round($excursion / $entry * 100, 4) : 0.0,
+                'peak_excursion' => round($peakExcursion, 8),
+                'peak_pct' => $entry > 0 ? round($peakExcursion / $entry * 100, 4) : 0.0,
+                'stop_price' => round($stopPrice, 8),
+                'active_since' => $session->active_since?->toIso8601String(),
+                'seconds_in_trade' => $session->active_since ? (int) abs(now()->diffInSeconds($session->active_since)) : 0,
+            ];
+        }
+
+        $closed = (int) $session->win_count + (int) $session->loss_count;
+
+        return [
+            'session_id' => $session->id,
+            'status' => $session->status,
+            'symbol' => $session->symbol,
+            'timeframe' => $session->timeframe,
+            'bot_mode' => $session->bot_mode,
+            'current_price' => $currentPrice,
+            'position' => $position,
+            'performance' => [
+                'total_pnl' => (float) $session->total_pnl,
+                'win_count' => (int) $session->win_count,
+                'loss_count' => (int) $session->loss_count,
+                'win_rate' => $closed > 0 ? round((int) $session->win_count / $closed * 100, 2) : 0.0,
+            ],
+            'last_decision' => ((array) $session->runtime_json)['latest_decision'] ?? null,
+            'as_of' => now()->toIso8601String(),
+        ];
+    }
+
+    /**
+     * Manually close the active candle-direction position.
+     *
+     * @return array<string, mixed>
+     */
+    public function forceClose(RobotSession $session): array
+    {
+        $closed = $this->closeActiveCandleTrade($session);
+
+        $session->active_side = null;
+        $session->active_entry_price = null;
+        $session->active_since = null;
+        $session->peak_profit = 0;
+        $session->last_trade_at = now();
+        $session->runtime_json = array_merge((array) $session->runtime_json, [
+            'latest_decision' => ['action' => 'CLOSE', 'reason' => 'Manual force-close.', 'confidence' => 1.0],
+        ]);
+        $session->save();
+        $this->refreshPerformance($session);
+
+        return [
+            'session_id' => $session->id,
+            'status' => 'closed',
+            'action' => $closed ? 'trade_closed' : 'no_active_trade',
+            'trade_id' => $closed?->id,
+        ];
+    }
+
+    /**
+     * Close the open quick trade backing the candle-direction position, if any.
+     */
+    private function closeActiveCandleTrade(RobotSession $session): ?QuickTrade
+    {
+        $trade = QuickTrade::where('robot_session_id', $session->id)
+            ->where('status', 'open')
+            ->orderByDesc('entry_at')
+            ->first();
+
+        if (! $trade) {
+            return null;
+        }
+
+        return $this->quickTrades->settleTrade($trade);
     }
 
     public function refreshPerformance(?RobotSession $session): RobotSession

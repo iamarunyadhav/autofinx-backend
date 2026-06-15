@@ -1672,15 +1672,42 @@ class FutureTradeBotService
         $preWebhookPositionSymbol = strtoupper((string) ($state->current_symbol ?? ''));
         $preWebhookPositionSide = strtoupper((string) ($state->position_side ?? ''));
         $preWebhookQuantity = (float) ($state->quantity ?? 0);
+        $preWebhookHasOpenPosition = $preWebhookQuantity > 0
+            && $preWebhookPositionSymbol !== ''
+            && in_array($preWebhookPositionSide, ['LONG', 'SHORT'], true);
+        $webhookMatchesActivePosition = ! $preWebhookHasOpenPosition
+            || $preWebhookPositionSymbol === $symbol;
 
-        $this->persistState($state, [
-            'current_symbol' => $symbol,
+        $statePatch = [
             'current_signal' => $decision,
             'current_price' => $price,
             'confidence' => $confidence,
             'last_scan_at' => $receivedAt,
-            'scanner_snapshot' => [$signal],
-        ]);
+        ];
+
+        if ($webhookMatchesActivePosition) {
+            $statePatch['current_symbol'] = $symbol;
+            $statePatch['scanner_snapshot'] = [$signal];
+        } else {
+            $statePatch['scanner_snapshot'] = (array) ($state->scanner_snapshot ?? []);
+            $this->logThrottled(
+                $config->fresh('state'),
+                'PINE_WEBHOOK_ACTIVE_SYMBOL_PRESERVED',
+                $symbol,
+                $decision,
+                $confidence,
+                'Incoming webhook symbol differs from active position; active runtime symbol was preserved.',
+                [
+                    'source' => 'pine_webhook',
+                    'incomingSymbol' => $symbol,
+                    'activePositionSymbol' => $preWebhookPositionSymbol,
+                    'activePositionSide' => $preWebhookPositionSide,
+                ],
+                30
+            );
+        }
+
+        $this->persistState($state, $statePatch);
 
         if ($riskOverrides !== [] && ! filter_var($settings['useWebhookRiskOverrides'] ?? false, FILTER_VALIDATE_BOOLEAN)) {
             $this->logThrottled(
@@ -3428,11 +3455,16 @@ class FutureTradeBotService
         $lastSignals = (array) ($state->scanner_snapshot ?? []);
         $dynamic = $this->dynamicDecision($config, $state, $lastSignals, $lastSignals[0] ?? null, $settings);
         $settings = $dynamic['settings'];
-        $entry = (float) $state->entry_price;
-        $qty = (float) $state->quantity;
-        $side = (string) $state->position_side;
+        $position = $this->canonicalOpenPosition($config, $state);
+        $entry = (float) $position['entry_price'];
+        $qty = (float) $position['quantity'];
+        $side = (string) $position['side'];
         if ($entry <= 0 || $qty <= 0 || ! in_array($side, ['LONG', 'SHORT'], true)) {
             return;
+        }
+
+        if ($position['logical_trade']) {
+            $this->healRuntimePositionState($config, $state, $position);
         }
 
         $direction = $side === 'LONG' ? 1 : -1;
@@ -3472,6 +3504,78 @@ class FutureTradeBotService
         } elseif ($this->isLiveMode($config) && $pct > 0) {
             $this->maybeUpdateExchangeTrailingSL($config, $state, $peak, $settings);
         }
+    }
+
+    /**
+     * Runtime state is mutable and can be touched by scanners/webhooks. The
+     * logical trade is the canonical open-position ledger; close/SL/TP logic
+     * must use it so another symbol can never poison entry price or quantity.
+     *
+     * @return array{logical_trade:?FutureTradeLogicalTrade,symbol:string,side:string,entry_price:float,quantity:float}
+     */
+    private function canonicalOpenPosition(FutureTradeBotConfig $config, FutureTradeBotState $state): array
+    {
+        $stateSymbol = strtoupper((string) ($state->current_symbol ?? ''));
+        $stateSide = strtoupper((string) ($state->position_side ?? ''));
+
+        $logicalTrade = null;
+        if ($stateSymbol !== '' && in_array($stateSide, ['LONG', 'SHORT'], true)) {
+            $logicalTrade = FutureTradeLogicalTrade::query()
+                ->where('future_trade_bot_config_id', $config->id)
+                ->where('symbol', $stateSymbol)
+                ->where('side', $stateSide)
+                ->whereIn('status', FutureTradeLogicalTrade::ACTIVE_STATUSES)
+                ->orderByDesc('opened_at')
+                ->orderByDesc('created_at')
+                ->first();
+        }
+
+        return [
+            'logical_trade' => $logicalTrade,
+            'symbol' => strtoupper((string) ($logicalTrade?->symbol ?: $stateSymbol)),
+            'side' => strtoupper((string) ($logicalTrade?->side ?: $stateSide)),
+            'entry_price' => (float) ($logicalTrade?->entry_price ?: $state->entry_price),
+            'quantity' => (float) ($logicalTrade?->quantity ?: $state->quantity),
+        ];
+    }
+
+    /**
+     * Self-heal harmless runtime drift before risk checks. This keeps the UI
+     * and stop/rollback calculations aligned with the logical trade.
+     *
+     * @param  array{logical_trade:?FutureTradeLogicalTrade,symbol:string,side:string,entry_price:float,quantity:float}  $position
+     */
+    private function healRuntimePositionState(FutureTradeBotConfig $config, FutureTradeBotState $state, array $position): void
+    {
+        $patch = [];
+        if (strtoupper((string) $state->current_symbol) !== $position['symbol']) {
+            $patch['current_symbol'] = $position['symbol'];
+        }
+        if (strtoupper((string) $state->position_side) !== $position['side']) {
+            $patch['position_side'] = $position['side'];
+        }
+        if (abs((float) $state->entry_price - (float) $position['entry_price']) > 0.00000001) {
+            $patch['entry_price'] = $position['entry_price'];
+        }
+        if (abs((float) $state->quantity - (float) $position['quantity']) > 0.00000001) {
+            $patch['quantity'] = $position['quantity'];
+        }
+
+        if ($patch === []) {
+            return;
+        }
+
+        $this->persistState($state, $patch);
+        $this->logThrottled(
+            $config->fresh('state'),
+            'RUNTIME_POSITION_STATE_HEALED',
+            $position['symbol'],
+            $position['side'],
+            1,
+            'Runtime position values were realigned from the active logical trade.',
+            ['patch' => $patch],
+            30
+        );
     }
 
     private function openLivePosition(FutureTradeBotConfig $config, array $signal): ?string
@@ -3979,7 +4083,31 @@ class FutureTradeBotService
         $settings = $this->normalizeFutureTradeSettings($config->mergedSettings());
         $dynamic = $this->dynamicDecision($config, $state, (array) ($state->scanner_snapshot ?? []), null, $settings);
         $client = $this->liveClient($settings, 'execution');
-        $symbol = (string) $state->current_symbol;
+        $position = $this->canonicalOpenPosition($config, $state);
+        $logicalForClose = $position['logical_trade'];
+        $symbol = $position['symbol'];
+        $positionSide = $position['side'];
+        $entry = (float) $position['entry_price'];
+        $positionQty = (float) $position['quantity'];
+        if ($symbol === '' || $entry <= 0 || $positionQty <= 0 || ! in_array($positionSide, ['LONG', 'SHORT'], true)) {
+            $this->logThrottled(
+                $config->fresh('state'),
+                'LIVE_CLOSE_BLOCKED_INVALID_CANONICAL_POSITION',
+                (string) ($state->current_symbol ?? ''),
+                'CLOSE',
+                1,
+                'Live close skipped because no valid canonical open position was found.',
+                ['state' => $state->only(['current_symbol', 'position_side', 'entry_price', 'quantity'])],
+                30
+            );
+
+            return;
+        }
+
+        if ($logicalForClose) {
+            $this->healRuntimePositionState($config, $state, $position);
+        }
+
         $filters = $this->symbolFilters($this->cachedExchangeInfo($client, $symbol), $symbol);
         $exchange = $this->exchangePositionSnapshot($client, $symbol);
 
@@ -3992,7 +4120,7 @@ class FutureTradeBotService
         $this->cancelReduceOnlyOrders($config, $client, $symbol, $exchange['reduce_only_orders']);
 
         $side = (($exchange['position_side'] ?? null) === 'LONG' ? 'SELL' : 'BUY');
-        $qtyFloat = min(max((float) $state->quantity, 0.0), (float) $exchange['quantity']);
+        $qtyFloat = min(max($positionQty, 0.0), (float) $exchange['quantity']);
         $qty = $this->formatStep($qtyFloat, $filters['stepSize']);
 
         if ((float) $qty <= 0) {
@@ -4004,13 +4132,6 @@ class FutureTradeBotService
         // Look up the active logical trade for this symbol/side so we can mint
         // a deterministic close clientOrderId — preventing a retried close
         // request from creating a second close order on Binance.
-        $logicalForClose = FutureTradeLogicalTrade::query()
-            ->where('future_trade_bot_config_id', $config->id)
-            ->where('symbol', $symbol)
-            ->where('side', (string) $state->position_side)
-            ->whereIn('status', FutureTradeLogicalTrade::ACTIVE_STATUSES)
-            ->orderByDesc('opened_at')
-            ->first();
         $closeKey = $logicalForClose?->signal_key ?: ('close-'.$symbol.'-'.substr((string) $config->id, 0, 8).'-'.(string) now()->timestamp);
         $closeClientOrderId = $this->stabilitySvc()->deterministicClientOrderId($closeKey, 'exit');
 
@@ -4046,20 +4167,22 @@ class FutureTradeBotService
         $postCloseExchange = $this->exchangePositionSnapshot($client, $symbol);
         $positionClosed = (float) ($postCloseExchange['quantity'] ?? 0) <= 0;
 
-        $direction = $state->position_side === 'LONG' ? 1 : -1;
-        $entry = (float) $state->entry_price;
-        $gross = ($price - $entry) * (float) $state->quantity * $direction;
-        $fees = ($entry + $price) * (float) $state->quantity * 0.0004;
+        $closeQty = (float) $qty;
+        $direction = $positionSide === 'LONG' ? 1 : -1;
+        $gross = ($price - $entry) * $closeQty * $direction;
+        $fees = ($entry + $price) * $closeQty * 0.0004;
         $net = $gross - $fees;
         $moveStats = $this->positionMoveStats($state);
+        $moveStats['side'] = $positionSide;
+        $moveStats['entry'] = round($entry, 8);
         $sourceSignal = (array) data_get($state->scanner_snapshot, '0', []);
 
         $config->trades()->create([
-            'symbol' => (string) $state->current_symbol,
-            'side' => 'LIVE_CLOSE_'.$state->position_side,
+            'symbol' => $symbol,
+            'side' => 'LIVE_CLOSE_'.$positionSide,
             'entry_price' => $entry,
             'exit_price' => $price,
-            'quantity' => (float) $state->quantity,
+            'quantity' => $closeQty,
             'leverage' => (float) ($settings['leverage'] ?? 3),
             'gross_pnl' => $gross,
             'fees' => $fees,
@@ -4109,13 +4232,13 @@ class FutureTradeBotService
                 'client_order_id' => $closeClientOrderId,
                 'exchange_order_id' => (string) ($response['orderId'] ?? ''),
                 'price' => $price,
-                'quantity' => (float) $state->quantity,
+                'quantity' => $closeQty,
                 'payload' => ['close_order' => $response, 'exchange_snapshot' => $postCloseExchange, 'reason' => $reason],
             ]);
         }
 
         if ($positionClosed) {
-            $closedSideBeforeWipe = (string) $state->position_side;
+            $closedSideBeforeWipe = $positionSide;
             $cooldownSeconds = (int) ($settings['cooldownSeconds'] ?? 10);
             $this->markOpenEntryTradesClosed($config, $symbol, $closedSideBeforeWipe, $price, $net);
             $this->persistState($state, [
@@ -4149,13 +4272,13 @@ class FutureTradeBotService
         $this->log(
             $config->fresh('state'),
             $positionClosed ? 'LIVE_'.$reason : 'LIVE_CLOSE_SUBMITTED',
-            $state->current_symbol,
+            $symbol,
             'CLOSE',
             1,
             $positionClosed
                 ? 'Live futures close confirmed from Binance position snapshot.'
                 : 'Live futures reduce-only close submitted and is waiting for Binance confirmation.',
-            $this->runtimeContext($dynamic, ['status' => $positionClosed ? $reason : 'SUBMITTED', 'side' => $state->position_side, 'entryPrice' => $entry, 'exitPrice' => $price, 'netPnl' => $net, 'mode' => $settings['forceTestnet'] ?? true ? 'LIVE_TESTNET' : 'LIVE'])
+            $this->runtimeContext($dynamic, ['status' => $positionClosed ? $reason : 'SUBMITTED', 'side' => $positionSide, 'entryPrice' => $entry, 'exitPrice' => $price, 'netPnl' => $net, 'mode' => $settings['forceTestnet'] ?? true ? 'LIVE_TESTNET' : 'LIVE'])
         );
         if ($positionClosed) {
             $freshConfig = $config->fresh('state');
@@ -4168,18 +4291,41 @@ class FutureTradeBotService
         $state = $this->state($config);
         $settings = $this->normalizeFutureTradeSettings($config->mergedSettings());
         $dynamic = $this->dynamicDecision($config, $state, (array) ($state->scanner_snapshot ?? []), null, $settings);
-        $side = (string) $state->position_side;
+        $position = $this->canonicalOpenPosition($config, $state);
+        $symbol = $position['symbol'];
+        $side = $position['side'];
+        $entry = (float) $position['entry_price'];
+        $qty = (float) $position['quantity'];
+        if ($symbol === '' || $entry <= 0 || $qty <= 0 || ! in_array($side, ['LONG', 'SHORT'], true)) {
+            $this->logThrottled(
+                $config->fresh('state'),
+                'PAPER_CLOSE_BLOCKED_INVALID_CANONICAL_POSITION',
+                (string) ($state->current_symbol ?? ''),
+                'CLOSE',
+                1,
+                'Paper close skipped because no valid canonical open position was found.',
+                ['state' => $state->only(['current_symbol', 'position_side', 'entry_price', 'quantity'])],
+                30
+            );
+
+            return;
+        }
+
+        if ($position['logical_trade']) {
+            $this->healRuntimePositionState($config, $state, $position);
+        }
+
         $direction = $side === 'LONG' ? 1 : -1;
-        $entry = (float) $state->entry_price;
-        $qty = (float) $state->quantity;
         $gross = ($price - $entry) * $qty * $direction;
         $fees = ($entry + $price) * $qty * 0.0004;
         $net = $gross - $fees;
         $moveStats = $this->positionMoveStats($state);
+        $moveStats['side'] = $side;
+        $moveStats['entry'] = round($entry, 8);
         $sourceSignal = (array) data_get($state->scanner_snapshot, '0', []);
 
         $config->trades()->create([
-            'symbol' => (string) $state->current_symbol,
+            'symbol' => $symbol,
             'side' => 'CLOSE_'.$side,
             'entry_price' => $entry,
             'exit_price' => $price,
@@ -4204,7 +4350,7 @@ class FutureTradeBotService
             ],
         ]);
 
-        $this->markOpenEntryTradesClosed($config, (string) $state->current_symbol, $side, $price, $net);
+        $this->markOpenEntryTradesClosed($config, $symbol, $side, $price, $net);
 
         $cooldownSeconds = (int) ($dynamic['settings']['cooldownSeconds'] ?? $settings['cooldownSeconds'] ?? 10);
         $this->persistState($state, [
@@ -4228,7 +4374,7 @@ class FutureTradeBotService
         $this->log(
             $config->fresh('state'),
             $reason,
-            $state->current_symbol,
+            $symbol,
             'CLOSE_'.$side,
             1,
             'Paper futures position closed.',

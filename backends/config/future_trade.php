@@ -158,18 +158,25 @@ return [
         'exitOnStrongOppositeScore' => true,
         'oppositeExitScore' => 78,
         // Prime default: webhook decides direction; these manual exits control risk.
-        'takeProfitPercent' => 0.5,
-        'stopLossPercent' => 0.25,
-        'trailingTakeProfitPercent' => 0.18,
-        'rollbackLossPercent' => 0.15,
-        'maxDailyLossPercent' => 0.5,
+        // Tuned so SL/TP clear round-trip taker fees (~0.08%) + normal 15m crypto
+        // noise. Tight 0.25%/0.5% values were getting stopped out by noise+fees
+        // before TP could fill. RR kept ~1:2 (0.75 SL : 1.5 TP).
+        'takeProfitPercent' => 1.5,
+        'stopLossPercent' => 0.75,
+        // Trailing give-back from peak; only arms on the second half (see
+        // useAtrTrailingSecondHalf) so it never closes before breakeven.
+        'trailingTakeProfitPercent' => 0.45,
+        // Soft early-bail kept INSIDE the hard SL but above noise+fees so it
+        // is a cushion, not a noise trigger. Must stay < stopLossPercent.
+        'rollbackLossPercent' => 0.6,
+        'maxDailyLossPercent' => 2.0,
         // 3-tier daily-loss guard:
         //   <= softDailyLossWarnPercent      → log warning only, all trades allowed
         //   >= maxDailyLossPercent           → block new entries, allow exits / close webhooks
         //   >= hardDailyLossBlockPercent     → block all webhook-driven trades (entries AND exits)
         // Automated stop-loss / trailing exits run independently via the exit monitor.
-        'softDailyLossWarnPercent' => 0.3,
-        'hardDailyLossBlockPercent' => 0.8,
+        'softDailyLossWarnPercent' => 1.2,
+        'hardDailyLossBlockPercent' => 3.0,
         // Start live safely with one active slot. Multi-slot live can be enabled
         // intentionally via allowMultiLiveSlots + FUTURE_TRADE_LIVE_MAX_OPEN_POSITIONS.
         'maxOpenPositions' => 1,
@@ -215,6 +222,22 @@ return [
         'missedTradeAuditMinNetProfitPercent' => 0.05,
         'preset' => null,
         'emergencyStop' => false,
+        // --- Trading-behaviour defaults that the bot previously read only via
+        // `$settings[...] ?? <fallback>` (not declared here). Pinned explicitly
+        // so the UI/DB always has a concrete starting value and behaviour does
+        // not silently depend on code-level fallbacks. Values match the prior
+        // code fallbacks, so this changes nothing functionally — it just makes
+        // every knob visible and editable.
+        // NOTE: API keys/secrets/URLs and the live/testnet env-mode flags are
+        // intentionally NOT pinned here — those come from .env / config/services
+        // so live↔testnet switching and credential rotation keep working. Do
+        // not hardcode them in this defaults map.
+        'coreOnlyMode' => false,
+        'useLiveDataFeed' => true,
+        'tradingHoursEnabled' => false,
+        'tradingHoursStartUtc' => '00:00',
+        'tradingHoursEndUtc' => '23:59',
+        'researchLab' => [],
         'indicatorInfluence' => [
             'vwapPositive' => 7,
             'emaPositive' => 7,

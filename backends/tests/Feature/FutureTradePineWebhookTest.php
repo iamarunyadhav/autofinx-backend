@@ -3,6 +3,7 @@
 use App\Domain\FutureTrade\FutureTradeBotService;
 use App\Jobs\ProcessPineWebhookSignalJob;
 use App\Models\FutureTradeBotConfig;
+use App\Models\FutureTradeLogicalTrade;
 use App\Models\Workspace;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Carbon;
@@ -1079,4 +1080,95 @@ test('prime mirror paper toggle lifts source guard for scanner execution', funct
     $method->setAccessible(true);
 
     expect($method->invoke(app(FutureTradeBotService::class), $config->fresh('state'), $settings, $signal))->toBeFalse();
+});
+
+test('incoming webhook for another symbol does not overwrite active position state', function () {
+    config(['future_trade.pine_webhook_token' => 'pine-secret']);
+    Carbon::setTestNow('2026-05-19 10:30:05');
+    $workspace = Workspace::factory()->create();
+    $config = createPrimeWebhookConfig($workspace->id);
+    $config->state()->update([
+        'state' => 'IN_POSITION',
+        'current_symbol' => 'BTCUSDT',
+        'position_side' => 'SHORT',
+        'entry_price' => 64210.05217391,
+        'quantity' => 0.0023,
+        'scanner_snapshot' => [[
+            'symbol' => 'BTCUSDT',
+            'signal' => 'SELL',
+            'price' => 64210.05217391,
+            'confidence' => 0.82,
+        ]],
+    ]);
+    FutureTradeLogicalTrade::create([
+        'future_trade_bot_config_id' => $config->id,
+        'workspace_id' => (string) $workspace->id,
+        'symbol' => 'BTCUSDT',
+        'side' => 'SHORT',
+        'status' => FutureTradeLogicalTrade::STATUS_OPEN,
+        'mode' => 'PAPER',
+        'entry_price' => 64210.05217391,
+        'quantity' => 0.0023,
+        'opened_at' => now(),
+    ]);
+
+    app(FutureTradeBotService::class)->ingestPineWebhook($config->fresh('state'), pineWebhookPayload([
+        'symbol' => 'ETHUSDT',
+        'signal' => 'SELL',
+        'price' => 1661.91,
+        'score' => 84,
+        'shortScore' => 84,
+        'longScore' => 22,
+    ]));
+
+    $state = $config->fresh('state')->state;
+    expect($state->current_symbol)->toBe('BTCUSDT')
+        ->and($state->position_side)->toBe('SHORT')
+        ->and((float) $state->entry_price)->toBe(64210.05217391)
+        ->and((float) $state->quantity)->toBe(0.0023)
+        ->and(data_get($state->scanner_snapshot, '0.symbol'))->toBe('BTCUSDT');
+});
+
+test('paper close uses logical trade values when runtime state was polluted by another symbol', function () {
+    Carbon::setTestNow('2026-05-19 10:30:05');
+    $workspace = Workspace::factory()->create();
+    $config = createPrimeWebhookConfig($workspace->id);
+    $config->state()->update([
+        'state' => 'IN_POSITION',
+        'current_symbol' => 'BTCUSDT',
+        'position_side' => 'SHORT',
+        'entry_price' => 1661.91,
+        'quantity' => 0.09,
+        'peak_price' => 63769.7,
+        'bottom_price' => 63769.7,
+        'scanner_snapshot' => [[
+            'symbol' => 'ETHUSDT',
+            'signal' => 'WAIT',
+            'price' => 1661.98,
+            'confidence' => 0.78,
+        ]],
+    ]);
+    FutureTradeLogicalTrade::create([
+        'future_trade_bot_config_id' => $config->id,
+        'workspace_id' => (string) $workspace->id,
+        'symbol' => 'BTCUSDT',
+        'side' => 'SHORT',
+        'status' => FutureTradeLogicalTrade::STATUS_OPEN,
+        'mode' => 'PAPER',
+        'entry_price' => 64210.05217391,
+        'quantity' => 0.0023,
+        'opened_at' => now(),
+    ]);
+
+    $method = new ReflectionMethod(FutureTradeBotService::class, 'closePaperPosition');
+    $method->setAccessible(true);
+    $method->invoke(app(FutureTradeBotService::class), $config->fresh('state'), 63769.7, 'LOSS_ROLLBACK_TRIGGERED');
+
+    $close = $config->trades()->where('side', 'CLOSE_SHORT')->firstOrFail();
+    expect($close->symbol)->toBe('BTCUSDT')
+        ->and((float) $close->entry_price)->toBe(64210.05217391)
+        ->and((float) $close->exit_price)->toBe(63769.7)
+        ->and((float) $close->quantity)->toBe(0.0023)
+        ->and((float) $close->net_pnl)->toBeGreaterThan(0)
+        ->and(abs((float) $close->net_pnl))->toBeLessThan(2);
 });
