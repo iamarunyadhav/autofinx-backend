@@ -207,6 +207,7 @@ Route::prefix('v1')->group(function () {
         Route::post('wallet/topup/initiate', [BillingController::class, 'topup'])->middleware('require.2fa');
         Route::post('billing/wallet/withdraw/request', [BillingController::class, 'withdraw'])->middleware(['require.2fa','throttle:10,1']);
         Route::get('workspaces/{workspace}/wallet/accounts', [LiveWalletController::class, 'balances']);
+        Route::get('workspaces/{workspace}/wallet/exchange-balance', [LiveWalletController::class, 'exchangeBalance']);
         Route::post('wallet/deposit/intent', [LiveWalletController::class, 'depositIntent'])->middleware('require.2fa');
         Route::post('wallet/deposit/initiate', [LiveWalletController::class, 'depositIntent'])->middleware('require.2fa');
         Route::post('wallet/withdrawals', [LiveWalletController::class, 'withdraw'])->middleware(['require.2fa','throttle:10,1']);

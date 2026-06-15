@@ -2,6 +2,9 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Domain\Trading\Providers\LiveTradeProviderRegistry;
+use App\Domain\Trading\TradingIntegrationResolver;
+use App\Domain\Trading\TradingModuleSettingsService;
 use App\Http\Controllers\Controller;
 use App\Models\Payment;
 use App\Models\Setting;
@@ -22,6 +25,54 @@ class LiveWalletController extends Controller
             ->get();
 
         return response()->json($accounts);
+    }
+
+    /**
+     * Real balance pulled live from the connected exchange for the workspace's
+     * active integration (testnet or live), so the UI can show the actual
+     * account equity instead of the internal/seeded wallet ledger.
+     */
+    public function exchangeBalance(
+        string $workspaceId,
+        TradingModuleSettingsService $settings,
+        TradingIntegrationResolver $integrations,
+        LiveTradeProviderRegistry $providers,
+    ) {
+        $state = $settings->tradingState($workspaceId);
+
+        if (($state['mode'] ?? 'paper') !== 'live') {
+            return response()->json([
+                'source' => 'internal',
+                'mode' => $state['mode'] ?? 'paper',
+                'environment' => null,
+                'available' => null,
+            ]);
+        }
+
+        try {
+            $provider = (string) ($state['preferred_provider'] ?? 'binance');
+            $integration = $integrations->resolve($workspaceId, $provider, $state['preferred_integration_id'] ?? null);
+            $balance = $providers->for($provider)->availableBalance($integration, 'USDT');
+
+            return response()->json([
+                'source' => 'exchange',
+                'mode' => 'live',
+                'environment' => $state['exchange_environment'] ?? ($integration->environment ?? 'live'),
+                'provider' => $provider,
+                'asset' => $balance['asset'] ?? 'USDT',
+                'balance' => (float) ($balance['balance'] ?? 0),
+                'available' => (float) ($balance['available'] ?? 0),
+                'as_of' => now()->toIso8601String(),
+            ]);
+        } catch (\Throwable $e) {
+            return response()->json([
+                'source' => 'exchange',
+                'mode' => 'live',
+                'environment' => $state['exchange_environment'] ?? null,
+                'available' => null,
+                'error' => $e->getMessage(),
+            ], 200);
+        }
     }
 
     public function depositIntent(Request $request, PaymentGatewayService $gateway)
