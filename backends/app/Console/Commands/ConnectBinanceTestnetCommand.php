@@ -58,12 +58,14 @@ class ConnectBinanceTestnetCommand extends Command
 
         $existing = Integration::where('workspace_id', $workspace->id)
             ->where('provider_key', 'binance')
+            ->where('environment', 'testnet')
             ->first();
 
         $integration = $integrations->upsert([
             'workspace_id' => $workspace->id,
             'type' => 'exchange',
             'provider_key' => 'binance',
+            'environment' => 'testnet',
             'display_name' => 'Binance Futures Testnet',
             'status' => 'active',
             'config_json' => ['environment' => 'testnet'],

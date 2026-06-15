@@ -29,6 +29,7 @@ class IntegrationController extends Controller
             'secrets' => 'array|nullable',
         ]);
         $data['status'] = 'active';
+        $data['environment'] = strtolower((string) ($data['config_json']['environment'] ?? 'live'));
         $integration = $manager->upsert($data, (string) Str::uuid());
 
         // Connecting a live trading account re-baselines the drawdown guard to the

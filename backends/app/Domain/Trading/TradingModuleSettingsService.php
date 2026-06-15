@@ -123,13 +123,16 @@ class TradingModuleSettingsService
             ? $trading['preferred_integration_id']
             : null;
 
-        $activeIntegration = collect($integrations)->first(function (array $integration) use ($preferredIntegrationId, $preferredProvider) {
-            if ($preferredIntegrationId && $integration['id'] === $preferredIntegrationId) {
-                return true;
-            }
-
-            return strtolower((string) ($integration['provider_key'] ?? '')) === $preferredProvider;
-        });
+        // Honour an explicit preferred integration id first (so a workspace with
+        // both testnet and live Binance integrations resolves the exact one the
+        // user selected); only then fall back to the first integration for the
+        // preferred provider.
+        $activeIntegration = ($preferredIntegrationId
+            ? collect($integrations)->firstWhere('id', $preferredIntegrationId)
+            : null)
+            ?: collect($integrations)->first(
+                fn (array $integration) => strtolower((string) ($integration['provider_key'] ?? '')) === $preferredProvider
+            );
 
         $providerProfile = $catalog[$preferredProvider] ?? [
             'key' => $preferredProvider,
@@ -151,7 +154,9 @@ class TradingModuleSettingsService
             'active_integrations' => $integrations,
             'provider_catalog' => $catalog,
             'provider_profile' => $providerProfile,
-            'venue_environment' => Arr::get($activeIntegration, 'config_json.environment', $resolved['settings']['venue_environment'] ?? null),
+            'venue_environment' => $activeIntegration['environment']
+                ?? Arr::get($activeIntegration, 'config_json.environment', $resolved['settings']['venue_environment'] ?? null),
+            'exchange_environment' => $activeIntegration['environment'] ?? null,
             'live_ready' => (bool) ($resolved['live_enabled']
                 && $resolved['mode'] === 'live'
                 && ($providerProfile['live_supported'] ?? false)

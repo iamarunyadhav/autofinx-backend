@@ -21,6 +21,8 @@ class TradingIntegrationResolver
                 'display_name' => $integration->display_name,
                 'status' => $integration->status,
                 'last_health_status' => $integration->last_health_status,
+                'environment' => strtolower((string) ($integration->environment
+                    ?? ($integration->config_json['environment'] ?? 'live'))),
                 'config_json' => (array) ($integration->config_json ?? []),
             ])
             ->all();

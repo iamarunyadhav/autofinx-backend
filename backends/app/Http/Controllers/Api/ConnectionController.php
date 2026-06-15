@@ -151,11 +151,14 @@ class ConnectionController extends Controller
     {
         $workspaceId = $connection->workspace_id;
         $providerKey = strtolower((string) $connection->provider);
+        $environment = $connection->is_testnet ? 'testnet' : 'live';
         $connection->delete();
 
-        // Disable the mirrored trading integration so live_ready turns off.
+        // Disable the mirrored trading integration (matching environment) so
+        // live_ready turns off for that environment.
         Integration::where('workspace_id', $workspaceId)
             ->where('provider_key', $providerKey)
+            ->where('environment', $environment)
             ->update(['status' => 'disabled']);
 
         $this->logAudit(request(), 'connection.delete', $workspaceId, ['connection_id' => $connection->id]);
@@ -179,21 +182,26 @@ class ConnectionController extends Controller
         ?string $apiSecret,
     ): void {
         $providerKey = strtolower($provider);
+        $environment = $isTestnet ? 'testnet' : 'live';
         $manager = app(IntegrationManager::class);
 
+        // Key by (workspace, provider, environment) so testnet and live keys for
+        // the same exchange are stored as separate integrations and can coexist.
         $existing = Integration::where('workspace_id', $workspaceId)
             ->where('provider_key', $providerKey)
+            ->where('environment', $environment)
             ->first();
 
         $attrs = [
             'workspace_id' => $workspaceId,
             'type' => 'exchange',
             'provider_key' => $providerKey,
+            'environment' => $environment,
             'display_name' => $name,
             'status' => 'active',
             'config_json' => array_merge(
                 (array) ($existing->config_json ?? []),
-                ['environment' => $isTestnet ? 'testnet' : 'live'],
+                ['environment' => $environment],
             ),
         ];
 
