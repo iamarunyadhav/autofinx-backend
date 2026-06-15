@@ -3,10 +3,14 @@
 namespace App\Http\Controllers\Api;
 
 use App\Domain\Exchange\ExchangeClientFactory;
+use App\Domain\Integrations\IntegrationManager;
+use App\Domain\Trading\Providers\LiveTradeProviderRegistry;
 use App\Domain\Venue\TradingVenueClientFactory;
 use App\Http\Controllers\Controller;
 use App\Models\AuditLog;
 use App\Models\ExchangeConnection;
+use App\Models\Integration;
+use App\Support\RiskGuardService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
 use App\Support\SecurityNotifier;
@@ -72,6 +76,18 @@ class ConnectionController extends Controller
             'is_active' => true,
         ]);
 
+        // Mirror into the trading-engine Integration table so the Robot Trade
+        // live/testnet path can actually use these keys (the engine reads
+        // Integration, not ExchangeConnection).
+        $this->syncTradingIntegration(
+            $workspaceId,
+            $connection->provider,
+            $connection->name,
+            (bool) $connection->is_testnet,
+            $data['api_key'] ?? null,
+            $data['api_secret'] ?? null,
+        );
+
         $this->logAudit($request, 'connection.create', $workspaceId, ['provider' => $connection->provider, 'connection_id' => $connection->id]);
         app(SecurityNotifier::class)->confirmAction($request->user(), $workspaceId, 'connection.create', ['provider' => $connection->provider, 'connection_id' => $connection->id]);
 
@@ -90,6 +106,9 @@ class ConnectionController extends Controller
             'api_secret' => 'nullable|string',
             'passphrase' => 'nullable|string',
         ]);
+
+        $rawApiKey = $data['api_key'] ?? null;
+        $rawApiSecret = $data['api_secret'] ?? null;
 
         if (array_key_exists('api_key', $data)) {
             $data['api_key_encrypted'] = $vault->encrypt($data['api_key']);
@@ -113,6 +132,15 @@ class ConnectionController extends Controller
 
         $connection->update($data);
 
+        $this->syncTradingIntegration(
+            $connection->workspace_id,
+            $connection->provider,
+            $connection->name,
+            (bool) $connection->is_testnet,
+            $rawApiKey,
+            $rawApiSecret,
+        );
+
         $this->logAudit($request, 'connection.update', $connection->workspace_id, ['connection_id' => $connection->id, 'fields' => array_keys($data)]);
         app(SecurityNotifier::class)->confirmAction($request->user(), $connection->workspace_id, 'connection.update', ['connection_id' => $connection->id, 'fields' => array_keys($data)]);
 
@@ -121,9 +149,78 @@ class ConnectionController extends Controller
 
     public function destroy(ExchangeConnection $connection)
     {
+        $workspaceId = $connection->workspace_id;
+        $providerKey = strtolower((string) $connection->provider);
         $connection->delete();
-        $this->logAudit(request(), 'connection.delete', $connection->workspace_id, ['connection_id' => $connection->id]);
+
+        // Disable the mirrored trading integration so live_ready turns off.
+        Integration::where('workspace_id', $workspaceId)
+            ->where('provider_key', $providerKey)
+            ->update(['status' => 'disabled']);
+
+        $this->logAudit(request(), 'connection.delete', $workspaceId, ['connection_id' => $connection->id]);
         return response()->json(['message' => 'Connection deleted']);
+    }
+
+    /**
+     * Mirror an exchange connection into the trading-engine Integration table.
+     * The Robot Trade / candle-bot live path resolves credentials from Integration
+     * (via TradingIntegrationResolver), not from ExchangeConnection, so a connection
+     * added in the UI must be reflected here to be usable for live/testnet trading.
+     * The Testnet toggle maps to config_json.environment, which routes the Binance
+     * provider to the testnet futures endpoint.
+     */
+    private function syncTradingIntegration(
+        string $workspaceId,
+        string $provider,
+        string $name,
+        bool $isTestnet,
+        ?string $apiKey,
+        ?string $apiSecret,
+    ): void {
+        $providerKey = strtolower($provider);
+        $manager = app(IntegrationManager::class);
+
+        $existing = Integration::where('workspace_id', $workspaceId)
+            ->where('provider_key', $providerKey)
+            ->first();
+
+        $attrs = [
+            'workspace_id' => $workspaceId,
+            'type' => 'exchange',
+            'provider_key' => $providerKey,
+            'display_name' => $name,
+            'status' => 'active',
+            'config_json' => array_merge(
+                (array) ($existing->config_json ?? []),
+                ['environment' => $isTestnet ? 'testnet' : 'live'],
+            ),
+        ];
+
+        if ($apiKey && $apiSecret) {
+            $attrs['secrets_encrypted'] = $manager->encryptSecrets(['api_key' => $apiKey, 'api_secret' => $apiSecret]);
+        } elseif ($existing) {
+            $attrs['secrets_encrypted'] = $existing->secrets_encrypted; // preserve on partial update
+        }
+
+        $integration = Integration::updateOrCreate(
+            ['id' => $existing->id ?? (string) Str::uuid()],
+            $attrs,
+        );
+
+        // Re-baseline the drawdown guard against the real account equity so the
+        // first live order isn't blocked by a stale seeded baseline. Best-effort.
+        try {
+            $providerImpl = app(LiveTradeProviderRegistry::class)->for($providerKey);
+            if (($providerImpl->capabilities()['live_supported'] ?? false) === true && $integration->secrets_encrypted) {
+                $available = (float) ($providerImpl->availableBalance($integration, 'USDT')['available'] ?? 0);
+                if ($available > 0) {
+                    app(RiskGuardService::class)->rebaseline($workspaceId, $available);
+                }
+            }
+        } catch (\Throwable) {
+            // Connection still succeeds even if the balance probe fails.
+        }
     }
 
     public function test(
