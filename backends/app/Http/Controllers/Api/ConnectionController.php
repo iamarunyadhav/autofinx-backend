@@ -15,6 +15,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Str;
 use App\Support\SecurityNotifier;
 use App\Support\ExchangeSecretVault;
+use Illuminate\Support\Facades\Log;
 
 class ConnectionController extends Controller
 {
@@ -181,53 +182,68 @@ class ConnectionController extends Controller
         ?string $apiKey,
         ?string $apiSecret,
     ): void {
-        $providerKey = strtolower($provider);
-        $environment = $isTestnet ? 'testnet' : 'live';
-        $manager = app(IntegrationManager::class);
-
-        // Key by (workspace, provider, environment) so testnet and live keys for
-        // the same exchange are stored as separate integrations and can coexist.
-        $existing = Integration::where('workspace_id', $workspaceId)
-            ->where('provider_key', $providerKey)
-            ->where('environment', $environment)
-            ->first();
-
-        $attrs = [
-            'workspace_id' => $workspaceId,
-            'type' => 'exchange',
-            'provider_key' => $providerKey,
-            'environment' => $environment,
-            'display_name' => $name,
-            'status' => 'active',
-            'config_json' => array_merge(
-                (array) ($existing->config_json ?? []),
-                ['environment' => $environment],
-            ),
-        ];
-
-        if ($apiKey && $apiSecret) {
-            $attrs['secrets_encrypted'] = $manager->encryptSecrets(['api_key' => $apiKey, 'api_secret' => $apiSecret]);
-        } elseif ($existing) {
-            $attrs['secrets_encrypted'] = $existing->secrets_encrypted; // preserve on partial update
-        }
-
-        $integration = Integration::updateOrCreate(
-            ['id' => $existing->id ?? (string) Str::uuid()],
-            $attrs,
-        );
-
-        // Re-baseline the drawdown guard against the real account equity so the
-        // first live order isn't blocked by a stale seeded baseline. Best-effort.
+        // The entire mirror is best-effort: a failure here must NEVER fail the
+        // connection save itself. Worst case the integration isn't mirrored and
+        // we log it for diagnosis; the ExchangeConnection is already persisted.
         try {
-            $providerImpl = app(LiveTradeProviderRegistry::class)->for($providerKey);
-            if (($providerImpl->capabilities()['live_supported'] ?? false) === true && $integration->secrets_encrypted) {
-                $available = (float) ($providerImpl->availableBalance($integration, 'USDT')['available'] ?? 0);
-                if ($available > 0) {
-                    app(RiskGuardService::class)->rebaseline($workspaceId, $available);
-                }
+            $providerKey = strtolower($provider);
+            $environment = $isTestnet ? 'testnet' : 'live';
+            $manager = app(IntegrationManager::class);
+
+            // Key by (workspace, provider, environment) so testnet and live keys
+            // for the same exchange are stored as separate integrations. Fall back
+            // to any same-provider integration if the environment-aware unique
+            // index hasn't been applied yet (avoids a duplicate-key insert).
+            $existing = Integration::where('workspace_id', $workspaceId)
+                ->where('provider_key', $providerKey)
+                ->where('environment', $environment)
+                ->first()
+                ?? Integration::where('workspace_id', $workspaceId)
+                    ->where('provider_key', $providerKey)
+                    ->first();
+
+            $attrs = [
+                'workspace_id' => $workspaceId,
+                'type' => 'exchange',
+                'provider_key' => $providerKey,
+                'environment' => $environment,
+                'display_name' => $name,
+                'status' => 'active',
+                'config_json' => array_merge(
+                    (array) ($existing->config_json ?? []),
+                    ['environment' => $environment],
+                ),
+            ];
+
+            if ($apiKey && $apiSecret) {
+                $attrs['secrets_encrypted'] = $manager->encryptSecrets(['api_key' => $apiKey, 'api_secret' => $apiSecret]);
+            } elseif ($existing) {
+                $attrs['secrets_encrypted'] = $existing->secrets_encrypted; // preserve on partial update
             }
-        } catch (\Throwable) {
-            // Connection still succeeds even if the balance probe fails.
+
+            $integration = Integration::updateOrCreate(
+                ['id' => $existing->id ?? (string) Str::uuid()],
+                $attrs,
+            );
+
+            // Re-baseline the drawdown guard against the real account equity so the
+            // first live order isn't blocked by a stale seeded baseline.
+            try {
+                $providerImpl = app(LiveTradeProviderRegistry::class)->for($providerKey);
+                if (($providerImpl->capabilities()['live_supported'] ?? false) === true && $integration->secrets_encrypted) {
+                    $available = (float) ($providerImpl->availableBalance($integration, 'USDT')['available'] ?? 0);
+                    if ($available > 0) {
+                        app(RiskGuardService::class)->rebaseline($workspaceId, $available);
+                    }
+                }
+            } catch (\Throwable) {
+                // Balance probe is optional.
+            }
+        } catch (\Throwable $e) {
+            Log::warning('Connection->Integration mirror failed (connection still saved): ' . $e->getMessage(), [
+                'workspace_id' => $workspaceId,
+                'provider' => $provider,
+            ]);
         }
     }
 
