@@ -119,6 +119,11 @@ class RobotSessionController extends Controller
         ));
     }
 
+    public function destroy(RobotSession $robotSession, RobotSessionService $sessions)
+    {
+        return response()->json($sessions->delete($robotSession));
+    }
+
     public function liveStats(RobotSession $robotSession, RobotSessionService $sessions)
     {
         return response()->json($sessions->liveStats($robotSession));

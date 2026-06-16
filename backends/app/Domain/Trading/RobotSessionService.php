@@ -158,6 +158,32 @@ class RobotSessionService
         return $session->fresh();
     }
 
+    /**
+     * Delete a robot session. Any open candle-direction position is force-closed
+     * first so we never orphan a live exchange position. Settled quick trades are
+     * preserved (their robot_session_id is nulled by the FK).
+     *
+     * @return array<string, mixed>
+     */
+    public function delete(RobotSession $session): array
+    {
+        $id = $session->id;
+
+        if ($session->active_side) {
+            try {
+                $this->forceClose($session);
+                $session = $session->fresh() ?? $session;
+            } catch (\Throwable $e) {
+                // Surface the failure rather than deleting with an open position.
+                throw new RuntimeException('Could not close the open position before delete: ' . $e->getMessage());
+            }
+        }
+
+        $session->delete();
+
+        return ['session_id' => $id, 'status' => 'deleted'];
+    }
+
     public function pause(RobotSession $session): RobotSession
     {
         $session->status = 'PAUSED';
