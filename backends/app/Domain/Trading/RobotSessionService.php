@@ -306,6 +306,12 @@ class RobotSessionService
      */
     public function evaluateCandleDirectionSession(RobotSession $session): array
     {
+        // Sync first: if the position was closed externally on the exchange,
+        // clear our state before deciding anything.
+        if ($this->reconcileExternalClose($session)) {
+            $session = $session->fresh() ?? $session;
+        }
+
         $candles = $this->market->candles($session->symbol, $session->timeframe, 100, [
             'workspace_id' => $session->workspace_id,
             'mode' => $session->mode,
@@ -409,6 +415,21 @@ class RobotSessionService
     {
         $session = $this->refreshPerformance($session);
 
+        // Near-real-time external-close sync for the UI, throttled to avoid
+        // hammering the exchange (positionRisk) on every 1s poll.
+        if (strtolower((string) $session->mode) === 'live' && $session->active_side) {
+            $lastRecon = ((array) $session->runtime_json)['last_recon_at'] ?? null;
+            $due = ! $lastRecon || now()->diffInSeconds(\Illuminate\Support\Carbon::parse($lastRecon)) >= 15;
+            if ($due) {
+                $changed = $this->reconcileExternalClose($session);
+                $session->runtime_json = array_merge((array) $session->runtime_json, ['last_recon_at' => now()->toIso8601String()]);
+                $session->save();
+                if ($changed) {
+                    $session = $session->fresh() ?? $session;
+                }
+            }
+        }
+
         $quote = $this->market->latestQuote($session->symbol, $session->timeframe, [
             'workspace_id' => $session->workspace_id,
             'mode' => $session->mode,
@@ -488,6 +509,83 @@ class RobotSessionService
             'action' => $closed ? 'trade_closed' : 'no_active_trade',
             'trade_id' => $closed?->id,
         ];
+    }
+
+    /**
+     * Sync our state when a live position was closed externally (manually on
+     * Binance, by exchange TP/SL, or liquidation). If the exchange shows the
+     * symbol flat but we still think we hold a position, settle our open trade
+     * (without sending another order) and clear the active state.
+     *
+     * @return bool true if a reconciliation (external close) was applied
+     */
+    public function reconcileExternalClose(RobotSession $session): bool
+    {
+        if (strtolower((string) $session->mode) !== 'live' || ! $session->active_side) {
+            return false;
+        }
+
+        try {
+            $integration = app(TradingIntegrationResolver::class)->resolve(
+                $session->workspace_id,
+                $session->provider_key ?: 'binance',
+                $session->integration_id,
+            );
+            $position = app(\App\Domain\Trading\Providers\LiveTradeProviderRegistry::class)
+                ->for($session->provider_key ?: 'binance')
+                ->positionFor($integration, $session->symbol);
+        } catch (\Throwable) {
+            return false; // Can't verify right now — leave state untouched.
+        }
+
+        $amount = (float) ($position['positionAmt'] ?? 0);
+        $price = (float) ($position['markPrice'] ?? 0);
+        if ($price <= 0) {
+            $price = (float) ($this->market->latestQuote($session->symbol, $session->timeframe, [
+                'workspace_id' => $session->workspace_id,
+                'mode' => $session->mode,
+                'provider' => $session->provider_key,
+                'integration_id' => $session->integration_id,
+            ])['price'] ?? 0);
+        }
+
+        // Treat exactly-zero (manual "Close") and sub-$10 un-closable lot dust as
+        // flat; a real bot position is always well above the min notional.
+        $notional = abs($amount) * max($price, 0);
+        if (abs($amount) > 1e-9 && $notional >= 10.0) {
+            return false; // Still a real position on the exchange.
+        }
+
+        // Flat on the exchange -> settle our open trade as already closed.
+        $trade = QuickTrade::where('robot_session_id', $session->id)
+            ->where('status', 'open')
+            ->orderByDesc('entry_at')
+            ->first();
+
+        if ($trade) {
+            $entry = (float) $trade->entry_price;
+            $exit = $price > 0 ? $price : $entry;
+            $qty = (float) ($trade->quantity ?: 0);
+            $pnl = strtolower((string) $trade->side) === 'buy' ? ($exit - $entry) * $qty : ($entry - $exit) * $qty;
+            $trade->update([
+                'exit_price' => $exit,
+                'status' => $pnl >= 0 ? 'won' : 'lost',
+                'profit_loss' => round($pnl, 8),
+                'settled_at' => now(),
+            ]);
+        }
+
+        $session->active_side = null;
+        $session->active_entry_price = null;
+        $session->active_since = null;
+        $session->peak_profit = 0;
+        $session->runtime_json = array_merge((array) $session->runtime_json, [
+            'latest_decision' => ['action' => 'CLOSE', 'reason' => 'Position closed externally on the exchange — synced.', 'confidence' => 1.0],
+        ]);
+        $session->save();
+        $this->refreshPerformance($session);
+
+        return true;
     }
 
     /**

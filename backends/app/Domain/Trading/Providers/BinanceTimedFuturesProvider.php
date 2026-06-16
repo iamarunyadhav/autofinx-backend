@@ -150,6 +150,27 @@ class BinanceTimedFuturesProvider implements LiveTradeProviderInterface
         ];
     }
 
+    /**
+     * Current exchange position for a symbol. positionAmt == 0 means flat (e.g.
+     * the user closed it manually on Binance). Used to reconcile our state.
+     *
+     * @return array{positionAmt: float, entryPrice: float, markPrice: float, unRealizedProfit: float}
+     */
+    public function positionFor(Integration $integration, string $symbol): array
+    {
+        $response = $this->signedRequest($integration, 'GET', '/fapi/v2/positionRisk', [
+            'symbol' => strtoupper($symbol),
+        ]);
+        $row = collect((array) $response->json())->first() ?? [];
+
+        return [
+            'positionAmt' => (float) ($row['positionAmt'] ?? 0),
+            'entryPrice' => (float) ($row['entryPrice'] ?? 0),
+            'markPrice' => (float) ($row['markPrice'] ?? 0),
+            'unRealizedProfit' => (float) ($row['unRealizedProfit'] ?? 0),
+        ];
+    }
+
     public function closeTimedTrade(
         Integration $integration,
         string $symbol,
