@@ -1242,3 +1242,75 @@ test('manual app close closes only the requested open symbol when multiple posit
         ->and($btcConfig->trades()->where('side', 'CLOSE_SHORT')->exists())->toBeFalse()
         ->and($ethConfig->trades()->where('side', 'CLOSE_SHORT')->exists())->toBeTrue();
 });
+
+test('fresh reset clears logical trades and workspace runtime summary', function () {
+    Carbon::setTestNow('2026-05-19 10:30:05');
+    $workspace = Workspace::factory()->create();
+    $config = createPrimeWebhookConfig($workspace->id);
+    $config->state()->update([
+        'state' => 'IN_POSITION',
+        'status' => 'Running',
+        'current_symbol' => 'BTCUSDT',
+        'position_side' => 'LONG',
+        'entry_price' => 64000,
+        'quantity' => 0.002,
+        'realized_pnl' => -15,
+        'daily_loss' => 15,
+        'trade_count_today' => 3,
+        'wins' => 1,
+        'losses' => 2,
+        'daily_stop_until' => now()->addHour(),
+        'cooldown_until' => now()->addMinutes(5),
+    ]);
+
+    $logical = FutureTradeLogicalTrade::create([
+        'future_trade_bot_config_id' => $config->id,
+        'workspace_id' => (string) $workspace->id,
+        'symbol' => 'BTCUSDT',
+        'side' => 'LONG',
+        'status' => FutureTradeLogicalTrade::STATUS_OPEN,
+        'mode' => 'PAPER',
+        'entry_price' => 64000,
+        'quantity' => 0.002,
+        'opened_at' => now(),
+    ]);
+    \App\Models\FutureTradeLogicalTradeEvent::create([
+        'future_trade_bot_config_id' => $config->id,
+        'future_trade_logical_trade_id' => $logical->id,
+        'event_type' => \App\Models\FutureTradeLogicalTradeEvent::EVENT_ENTRY_FILLED,
+        'symbol' => 'BTCUSDT',
+        'price' => 64000,
+        'quantity' => 0.002,
+        'payload' => [],
+    ]);
+    $config->trades()->create([
+        'symbol' => 'BTCUSDT',
+        'side' => 'LIVE_BUY_SIGNAL',
+        'entry_price' => 64000,
+        'quantity' => 0.002,
+        'status' => 'OPEN',
+        'mode' => 'PAPER',
+    ]);
+    $config->logs()->create([
+        'event' => 'TRADE_BLOCKED',
+        'symbol' => 'BTCUSDT',
+        'signal' => 'BUY',
+        'confidence' => 0.7,
+        'reason' => 'open_position_exists',
+        'occurred_at' => now(),
+    ]);
+
+    $result = app(FutureTradeBotService::class)->clearHistory($config->fresh('state'));
+
+    $state = $config->fresh('state')->state;
+    expect($result['cleared'])->toBeTrue()
+        ->and($result['cleared_logical_trades'])->toBe(1)
+        ->and($result['cleared_logical_events'])->toBe(1)
+        ->and(FutureTradeLogicalTrade::query()->where('workspace_id', $workspace->id)->count())->toBe(0)
+        ->and((float) $state->quantity)->toBe(0.0)
+        ->and($state->current_symbol)->toBeNull()
+        ->and((float) $state->realized_pnl)->toBe(0.0)
+        ->and((float) $state->daily_loss)->toBe(0.0)
+        ->and($state->daily_stop_until)->toBeNull()
+        ->and($state->cooldown_until)->toBeNull();
+});

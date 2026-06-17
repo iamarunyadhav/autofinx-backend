@@ -1,6 +1,7 @@
 <?php
 
 use App\Models\FutureTradeBotConfig;
+use App\Models\FutureTradeLogicalTrade;
 use App\Models\User;
 use App\Models\Workspace;
 use App\Models\WorkspaceMember;
@@ -157,6 +158,55 @@ test('future trade sync state adopts actual Binance open position', function () 
     expect((float) $state->quantity)->toBe(0.011)
         ->and($state->position_side)->toBe('SHORT')
         ->and((float) $state->entry_price)->toBe(2283.5);
+});
+
+test('fresh reset refuses to clear history while Binance has an open position', function () {
+    $this->withoutMiddleware('require.2fa');
+    $workspace = Workspace::factory()->create();
+    $user = User::factory()->create();
+    attachFutureTradeWorkspaceMember($workspace, $user);
+    $config = createFutureTradeLiveConfig($workspace->id, [
+        'current_symbol' => 'BTCUSDT',
+        'position_side' => 'LONG',
+        'entry_price' => 64000,
+        'quantity' => 0.002,
+    ]);
+    FutureTradeLogicalTrade::create([
+        'future_trade_bot_config_id' => $config->id,
+        'workspace_id' => (string) $workspace->id,
+        'symbol' => 'BTCUSDT',
+        'side' => 'LONG',
+        'status' => FutureTradeLogicalTrade::STATUS_OPEN,
+        'mode' => 'LIVE_TESTNET',
+        'entry_price' => 64000,
+        'quantity' => 0.002,
+        'opened_at' => now(),
+    ]);
+
+    Http::fake(function ($request) {
+        $url = $request->url();
+
+        if (str_contains($url, '/fapi/v2/positionRisk')) {
+            return Http::response([[
+                'symbol' => 'BTCUSDT',
+                'positionAmt' => '0.002',
+                'entryPrice' => '64000',
+                'markPrice' => '64100',
+                'unRealizedProfit' => '0.20',
+            ]], 200);
+        }
+
+        return Http::response([], 200);
+    });
+
+    $this->actingAs($user)
+        ->postJson("/api/v1/workspaces/{$workspace->id}/future-trade/clear-history")
+        ->assertOk()
+        ->assertJsonPath('blocked', true)
+        ->assertJsonPath('reason', 'exchange_position_open');
+
+    expect(FutureTradeLogicalTrade::query()->where('workspace_id', $workspace->id)->count())->toBe(1)
+        ->and((float) $config->fresh('state')->state->quantity)->toBe(0.002);
 });
 
 test('future trade scan command refreshes scanner snapshot and graph from fake Binance data', function () {

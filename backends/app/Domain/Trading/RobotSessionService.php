@@ -192,6 +192,37 @@ class RobotSessionService
         return $session->fresh();
     }
 
+    /**
+     * Reset a session that was halted by a loss limit, profit target, consecutive
+     * losses, or an error. Clears the error, baselines the stats (PnL / win-loss /
+     * streak start fresh from now — past deals stay in history but no longer count
+     * toward the limits), and leaves it STOPPED and ready to Start again.
+     *
+     * @return array<string, mixed>
+     */
+    public function reset(RobotSession $session): array
+    {
+        $session->last_error = null;
+        $session->status = $session->status === 'RUNNING' ? 'RUNNING' : 'STOPPED';
+        $session->runtime_json = array_merge((array) $session->runtime_json, [
+            'stats_reset_at' => now()->toIso8601String(),
+            'last_reset_at' => now()->toIso8601String(),
+        ]);
+        $session->save();
+
+        // Recompute against the fresh baseline (post-reset history is empty -> 0).
+        $session = $this->refreshPerformance($session);
+
+        return [
+            'session_id' => $session->id,
+            'status' => 'reset',
+            'total_pnl' => (float) $session->total_pnl,
+            'win_count' => (int) $session->win_count,
+            'loss_count' => (int) $session->loss_count,
+            'message' => 'Stats baselined; loss limit / error cleared. You can start again.',
+        ];
+    }
+
     public function stop(RobotSession $session, ?string $reason = null): RobotSession
     {
         $session->status = 'STOPPED';
@@ -611,8 +642,13 @@ class RobotSessionService
             throw new RuntimeException('Robot session not found.');
         }
 
+        // A reset baselines stats: only trades settled after stats_reset_at count
+        // toward PnL / win-loss / streak and the profit-target / loss-limit gates.
+        $resetAt = ((array) $session->runtime_json)['stats_reset_at'] ?? null;
+
         $history = QuickTrade::where('robot_session_id', $session->id)
             ->whereIn('status', ['won', 'lost', 'draw'])
+            ->when($resetAt, fn ($q) => $q->where('settled_at', '>', $resetAt))
             ->orderBy('settled_at')
             ->get();
 

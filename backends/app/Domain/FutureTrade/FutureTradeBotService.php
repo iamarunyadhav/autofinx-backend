@@ -11,7 +11,9 @@ use App\Domain\Signals\IndicatorIntelligenceService;
 use App\Domain\Signals\StrategyResearchLabService;
 use App\Domain\Trading\FuturesOrderSizingService;
 use App\Models\FutureTradeBotConfig;
+use App\Models\FutureTradeBotLog;
 use App\Models\FutureTradeBotState;
+use App\Models\FutureTradeBotTrade;
 use App\Models\FutureTradeConfigVersion;
 use App\Models\FutureTradeLogicalTrade;
 use App\Models\FutureTradeLogicalTradeEvent;
@@ -927,26 +929,135 @@ class FutureTradeBotService
 
     public function clearHistory(FutureTradeBotConfig $config): array
     {
-        $trades = $config->trades()->count();
-        $logs = $config->logs()->count();
-        $config->trades()->delete();
-        $config->logs()->delete();
-        $state = $this->state($config);
-        $this->persistState($state, [
-            'realized_pnl' => 0,
-            'daily_profit' => 0,
-            'daily_loss' => 0,
-            'trade_count_today' => 0,
-            'wins' => 0,
-            'losses' => 0,
-            'chart_points' => [],
-            'scanner_snapshot' => [],
-            'daily_stop_until' => null,
-            'trading_day' => now()->toDateString(),
-        ]);
-        $this->log($config->fresh('state'), 'HISTORY_CLEARED', null, null, 0, "Operator cleared {$trades} trades and {$logs} logs for fresh analysis.");
+        $configs = FutureTradeBotConfig::query()
+            ->with('state')
+            ->where('workspace_id', $config->workspace_id)
+            ->orderBy('slot_index')
+            ->get();
 
-        return ['cleared_trades' => $trades, 'cleared_logs' => $logs];
+        $exchangeOpenPositions = [];
+        $syncReports = [];
+        if ($this->isLiveMode($config)) {
+            $settings = $config->mergedSettings();
+            $client = $this->liveClient($settings, 'execution');
+            $symbols = $configs
+                ->flatMap(function (FutureTradeBotConfig $slot) {
+                    $settings = $slot->mergedSettings();
+
+                    return array_merge(
+                        (array) ($settings['symbols'] ?? []),
+                        [(string) ($slot->state?->current_symbol ?? '')]
+                    );
+                })
+                ->merge(FutureTradeLogicalTrade::query()
+                    ->where('workspace_id', $config->workspace_id)
+                    ->whereIn('status', FutureTradeLogicalTrade::ACTIVE_STATUSES)
+                    ->pluck('symbol'))
+                ->map(fn ($symbol) => $this->normalizeIncomingSymbol((string) $symbol))
+                ->filter()
+                ->unique()
+                ->values();
+
+            foreach ($symbols as $symbol) {
+                $exchange = $this->exchangePositionSnapshot($client, (string) $symbol);
+                $exchangeQty = (float) ($exchange['quantity'] ?? 0);
+                if ($exchangeQty > 0) {
+                    $exchangeOpenPositions[] = [
+                        'symbol' => (string) $symbol,
+                        'quantity' => $exchangeQty,
+                        'side' => $exchange['position_side'] ?? null,
+                    ];
+
+                    $target = $this->findOpenPositionConfigForSymbol((string) $config->workspace_id, (string) $symbol) ?? $config;
+                    $syncReports[] = $this->synchronizeLivePositionState($target, $client, (string) $symbol, 'CLEAR_HISTORY_FOUND_EXCHANGE_OPEN', $exchange);
+                }
+            }
+
+            if ($exchangeOpenPositions !== []) {
+                return [
+                    'cleared' => false,
+                    'blocked' => true,
+                    'reason' => 'exchange_position_open',
+                    'message' => 'Fresh reset blocked: Binance still has an open futures position. Close it first, then run Fresh Reset again.',
+                    'open_positions' => $exchangeOpenPositions,
+                    'sync_reports' => $syncReports,
+                ];
+            }
+        }
+
+        $configIds = $configs->pluck('id')->all();
+        $trades = FutureTradeBotTrade::query()
+            ->whereIn('future_trade_bot_config_id', $configIds)
+            ->count();
+        $logs = FutureTradeBotLog::query()
+            ->whereIn('future_trade_bot_config_id', $configIds)
+            ->count();
+        $logicalTrades = FutureTradeLogicalTrade::query()
+            ->whereIn('future_trade_bot_config_id', $configIds)
+            ->count();
+        $logicalEvents = FutureTradeLogicalTradeEvent::query()
+            ->whereIn('future_trade_bot_config_id', $configIds)
+            ->count();
+
+        FutureTradeBotTrade::query()
+            ->whereIn('future_trade_bot_config_id', $configIds)
+            ->delete();
+        FutureTradeBotLog::query()
+            ->whereIn('future_trade_bot_config_id', $configIds)
+            ->delete();
+        FutureTradeLogicalTradeEvent::query()
+            ->whereIn('future_trade_bot_config_id', $configIds)
+            ->delete();
+        FutureTradeLogicalTrade::query()
+            ->whereIn('future_trade_bot_config_id', $configIds)
+            ->delete();
+
+        foreach ($configs as $slot) {
+            $state = $this->state($slot);
+            $this->persistState($state, [
+                'state' => $slot->enabled ? 'SCANNING' : 'STOPPED',
+                'status' => $slot->enabled ? 'Running' : 'Stopped',
+                'current_symbol' => null,
+                'current_signal' => 'WAITING_FOR_SIGNAL',
+                'entry_price' => null,
+                'quantity' => 0,
+                'position_side' => null,
+                'peak_price' => null,
+                'bottom_price' => null,
+                'unrealized_pnl' => 0,
+                'unrealized_pnl_percent' => 0,
+                'realized_pnl' => 0,
+                'daily_profit' => 0,
+                'daily_loss' => 0,
+                'trade_count_today' => 0,
+                'wins' => 0,
+                'losses' => 0,
+                'chart_points' => [],
+                'scanner_snapshot' => [],
+                'daily_stop_until' => null,
+                'cooldown_until' => null,
+                'trading_day' => now()->toDateString(),
+            ]);
+        }
+
+        $this->log(
+            $config->fresh('state'),
+            'HISTORY_CLEARED',
+            null,
+            null,
+            0,
+            "Operator fresh-reset Future Trade history: {$trades} legacy trades, {$logs} logs, {$logicalTrades} logical trades, {$logicalEvents} logical events.",
+            ['workspaceReset' => true]
+        );
+
+        return [
+            'cleared' => true,
+            'cleared_trades' => $trades,
+            'cleared_logs' => $logs,
+            'cleared_logical_trades' => $logicalTrades,
+            'cleared_logical_events' => $logicalEvents,
+            'message' => 'Fresh reset complete. Profit/loss summary, warnings, stale open-position state, and diagnostics history were cleared.',
+        ];
     }
 
     public function resetDailyLoss(FutureTradeBotConfig $config): FutureTradeBotState
@@ -2767,11 +2878,16 @@ class FutureTradeBotService
                 ? 'Waiting for an accepted BUY/SELL TradingView webhook.'
                 : 'Waiting for backend scanner signal to pass.',
         };
+        $firstBlocker = $blockers[0] ?? null;
 
         return [
             'decision' => $decision,
             'summary' => $summary,
             'canOpenNow' => $canOpenNow,
+            'firstBlocker' => $firstBlocker,
+            'firstBlockerLabel' => $firstBlocker ? $this->tradeBlockerLabel((string) $firstBlocker) : null,
+            'nextAction' => $this->tradeEligibilityNextAction($decision, $firstBlocker, $warnings[0] ?? null, $webhookAuthority),
+            'recoveryActions' => $this->tradeEligibilityRecoveryActions($blockers, $warnings, $webhookAuthority),
             'signalSource' => $signalSource,
             'webhookAuthority' => $webhookAuthority,
             'latestWebhookEvent' => $latestWebhookEvent ?: null,
@@ -2785,6 +2901,75 @@ class FutureTradeBotService
             'warnings' => $warnings,
             'checks' => $checks,
         ];
+    }
+
+    private function tradeBlockerLabel(string $code): string
+    {
+        return match (strtolower($code)) {
+            'open_position_exists' => 'An app-side open position still exists.',
+            'reconciliation_required' => 'A previous trade needs Binance reconciliation.',
+            'daily_loss_locked', 'daily_loss_lock_active' => 'Daily loss lock is active.',
+            'cooldown_active' => 'Cooldown is still active.',
+            'wallet_blocked', 'wallet_balance_unavailable' => 'Wallet balance cannot be trusted right now.',
+            'available_balance_too_low' => 'Available USDT is lower than trade size.',
+            'live_environment_not_ready' => 'Live/testnet gate or API credentials are not ready.',
+            'live_guard_blocked' => 'Another live automation guard is blocking Future Trade.',
+            'max_trades_per_day_reached' => 'Max trades per day has been reached.',
+            default => Str::headline(str_replace(['-', '_'], ' ', $code)),
+        };
+    }
+
+    private function tradeEligibilityNextAction(string $decision, ?string $firstBlocker, ?string $firstWarning, bool $webhookAuthority): string
+    {
+        if ($decision === 'eligible') {
+            return 'Ready: the latest executable signal can trade.';
+        }
+
+        if ($firstBlocker) {
+            return match (strtolower($firstBlocker)) {
+                'open_position_exists' => 'Use Sync Binance State. If Binance is flat, run Fresh Reset. If Binance still has a position, use Close Now first.',
+                'reconciliation_required' => 'Run Sync Binance State or wait for the 10-minute reconcile job to close the stale app trade.',
+                'daily_loss_locked', 'daily_loss_lock_active' => 'Use Reset Day Loss only after you intentionally accept today’s risk again.',
+                'cooldown_active' => 'Wait for cooldown expiry, or reduce cooldown in Algorithm Config if this is too strict.',
+                'wallet_blocked', 'wallet_balance_unavailable' => 'Check Binance API permissions and futures wallet access, then run Sync Binance State.',
+                'available_balance_too_low' => 'Lower trade size or add more USDT before enabling entries.',
+                'live_environment_not_ready' => 'Fix Live/Testnet credentials in My Config and test the connection.',
+                'live_guard_blocked' => 'Stop the other live bot or clear the live guard before running Future Trade.',
+                'max_trades_per_day_reached' => 'Use Reset Day Loss/limits only if you want a fresh session today.',
+                default => 'Fix the first red blocker, then refresh diagnostics.',
+            };
+        }
+
+        if ($webhookAuthority) {
+            return 'No hard blocker: waiting for the next accepted BUY/SELL TradingView webhook.';
+        }
+
+        return $firstWarning
+            ? 'No hard blocker, but the scanner is warning: '.Str::headline(str_replace(['-', '_'], ' ', $firstWarning)).'.'
+            : 'Waiting for a valid scanner signal.';
+    }
+
+    private function tradeEligibilityRecoveryActions(array $blockers, array $warnings, bool $webhookAuthority): array
+    {
+        $codes = array_map(static fn ($code) => strtolower((string) $code), array_merge($blockers, $warnings));
+        $actions = [];
+
+        if (in_array('open_position_exists', $codes, true) || in_array('reconciliation_required', $codes, true)) {
+            $actions[] = ['label' => 'Sync Binance State', 'action' => 'sync_state'];
+            $actions[] = ['label' => 'Close Open Position', 'action' => 'close_position'];
+            $actions[] = ['label' => 'Fresh Reset after flat', 'action' => 'clear_history'];
+        }
+        if (in_array('daily_loss_locked', $codes, true) || in_array('daily_loss_lock_active', $codes, true) || in_array('max_trades_per_day_reached', $codes, true)) {
+            $actions[] = ['label' => 'Reset Day Loss', 'action' => 'reset_daily_loss'];
+        }
+        if (in_array('wallet_blocked', $codes, true) || in_array('wallet_balance_unavailable', $codes, true) || in_array('live_environment_not_ready', $codes, true)) {
+            $actions[] = ['label' => 'Test Connection', 'action' => 'test_connection'];
+        }
+        if ($actions === [] && $webhookAuthority) {
+            $actions[] = ['label' => 'Wait for TradingView BUY/SELL', 'action' => 'wait_webhook'];
+        }
+
+        return array_values(array_unique($actions, SORT_REGULAR));
     }
 
     // -------------------------------------------------------------------------

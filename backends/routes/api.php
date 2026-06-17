@@ -162,6 +162,7 @@ Route::prefix('v1')->group(function () {
         Route::post('workspaces/{workspace}/robot-sessions', [RobotSessionController::class, 'store']);
         Route::patch('robot-sessions/{robotSession}', [RobotSessionController::class, 'update']);
         Route::delete('robot-sessions/{robotSession}', [RobotSessionController::class, 'destroy']);
+        Route::post('robot-sessions/{robotSession}/reset', [RobotSessionController::class, 'reset']);
         Route::post('robot-sessions/{robotSession}/start', [RobotSessionController::class, 'start']);
         Route::post('robot-sessions/{robotSession}/pause', [RobotSessionController::class, 'pause']);
         Route::post('robot-sessions/{robotSession}/stop', [RobotSessionController::class, 'stop']);
