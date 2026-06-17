@@ -483,6 +483,67 @@ class FutureTradeBotService
             ->count();
     }
 
+    private function findOpenPositionConfigForSymbol(string $workspaceId, string $symbol): ?FutureTradeBotConfig
+    {
+        $symbol = strtoupper(trim($symbol));
+        if ($workspaceId === '' || $symbol === '') {
+            return null;
+        }
+
+        $logical = FutureTradeLogicalTrade::query()
+            ->where('workspace_id', $workspaceId)
+            ->where('symbol', $symbol)
+            ->whereIn('status', FutureTradeLogicalTrade::ACTIVE_STATUSES)
+            ->orderByDesc('opened_at')
+            ->orderByDesc('created_at')
+            ->first();
+        if ($logical) {
+            return FutureTradeBotConfig::query()
+                ->with('state')
+                ->whereKey($logical->future_trade_bot_config_id)
+                ->first();
+        }
+
+        return FutureTradeBotConfig::query()
+            ->with('state')
+            ->where('workspace_id', $workspaceId)
+            ->whereHas('state', function ($query) use ($symbol): void {
+                $query->where('current_symbol', $symbol)
+                    ->where(function ($state): void {
+                        $state->where('quantity', '>', 0)
+                            ->orWhereIn('state', ['IN_POSITION', 'LIVE_IN_POSITION']);
+                    });
+            })
+            ->orderBy('slot_index')
+            ->first();
+    }
+
+    private function hydrateRuntimeStateFromLogicalTrade(FutureTradeBotConfig $config, string $symbol): void
+    {
+        $logical = FutureTradeLogicalTrade::query()
+            ->where('future_trade_bot_config_id', $config->id)
+            ->where('symbol', strtoupper($symbol))
+            ->whereIn('status', FutureTradeLogicalTrade::ACTIVE_STATUSES)
+            ->orderByDesc('opened_at')
+            ->orderByDesc('created_at')
+            ->first();
+        if (! $logical) {
+            return;
+        }
+
+        $state = $this->state($config);
+        $this->persistState($state, [
+            'state' => $this->isLiveMode($config) ? 'LIVE_IN_POSITION' : 'IN_POSITION',
+            'status' => 'Running',
+            'current_symbol' => strtoupper((string) $logical->symbol),
+            'position_side' => strtoupper((string) $logical->side),
+            'entry_price' => (float) $logical->entry_price,
+            'quantity' => (float) $logical->quantity,
+            'current_price' => (float) ($state->current_price ?: $logical->entry_price),
+            'connection_status' => 'Connected',
+        ]);
+    }
+
     private function effectiveMaxOpenSlots(FutureTradeBotConfig $config, array $settings): int
     {
         $requested = max(1, min(5, (int) ($settings['maxOpenPositions'] ?? 1)));
@@ -939,6 +1000,101 @@ class FutureTradeBotService
         return $result + [
             'action' => $action,
             'state' => $this->state($config->fresh('state')),
+        ];
+    }
+
+    public function closeOpenPosition(FutureTradeBotConfig $config, ?string $symbol = null, string $reason = 'OPERATOR_MANUAL_CLOSE'): array
+    {
+        $requestedSymbol = $symbol ? $this->normalizeIncomingSymbol($symbol) : '';
+        $target = $requestedSymbol !== ''
+            ? $this->findOpenPositionConfigForSymbol((string) $config->workspace_id, $requestedSymbol)
+            : $config;
+
+        if (! $target) {
+            return [
+                'closed' => false,
+                'submitted' => false,
+                'message' => $requestedSymbol !== ''
+                    ? "No open Future Trade position found for {$requestedSymbol}."
+                    : 'No open Future Trade position found.',
+            ];
+        }
+
+        $state = $this->state($target);
+        $symbol = $requestedSymbol !== '' ? $requestedSymbol : strtoupper((string) ($state->current_symbol ?? ''));
+        if ($symbol === '') {
+            return [
+                'closed' => false,
+                'submitted' => false,
+                'message' => 'No active Future Trade symbol is available to close.',
+                'state' => $state->fresh(),
+            ];
+        }
+
+        $this->hydrateRuntimeStateFromLogicalTrade($target, $symbol);
+        $state = $this->state($target->fresh('state'));
+        $settings = $target->mergedSettings();
+
+        if (! $this->isLiveMode($target)) {
+            $price = (float) ($state->current_price ?? 0);
+            if ($price <= 0) {
+                $price = (float) ($state->entry_price ?? 0);
+            }
+            if ($price <= 0) {
+                return [
+                    'closed' => false,
+                    'submitted' => false,
+                    'message' => 'Paper close skipped because no current or entry price is available.',
+                    'state' => $state->fresh(),
+                ];
+            }
+
+            $this->closePaperPosition($target->fresh('state'), $price, $reason);
+
+            return [
+                'closed' => true,
+                'submitted' => true,
+                'symbol' => $symbol,
+                'mode' => 'PAPER',
+                'message' => "{$symbol} paper position closed from the app.",
+                'state' => $this->state($target->fresh('state')),
+                'trade' => $target->trades()->where('symbol', $symbol)->where('side', 'like', '%CLOSE%')->latest('created_at')->first(),
+            ];
+        }
+
+        $client = $this->liveClient($settings, 'execution');
+        $exchange = $this->exchangePositionSnapshot($client, $symbol);
+        $exchangeQty = (float) ($exchange['quantity'] ?? 0);
+        if ($exchangeQty <= 0) {
+            $synced = $this->synchronizeLivePositionState($target, $client, $symbol, 'OPERATOR_CLOSE_FOUND_EXCHANGE_FLAT', $exchange);
+
+            return $synced + [
+                'closed' => (bool) ($synced['local_state_cleared'] ?? false),
+                'submitted' => false,
+                'symbol' => $symbol,
+                'message' => (string) ($synced['message'] ?? 'Binance is already flat; app state was synced.'),
+                'state' => $this->state($target->fresh('state')),
+            ];
+        }
+
+        $this->synchronizeLivePositionState($target, $client, $symbol, 'OPERATOR_PRE_CLOSE_SYNC', $exchange);
+        $state = $this->state($target->fresh('state'));
+        $price = (float) ($exchange['mark_price'] ?? $state->current_price ?? $state->entry_price ?? 0);
+        if ($price <= 0) {
+            $price = (float) ($state->entry_price ?? 0);
+        }
+
+        $this->closeLivePosition($target->fresh('state'), $price, $reason);
+        $freshState = $this->state($target->fresh('state'));
+
+        return [
+            'closed' => (float) ($freshState->quantity ?? 0) <= 0,
+            'submitted' => true,
+            'symbol' => $symbol,
+            'mode' => ($settings['forceTestnet'] ?? true) ? 'LIVE_TESTNET' : 'LIVE',
+            'message' => "{$symbol} close order submitted from the app.",
+            'state' => $freshState,
+            'trade' => $target->trades()->where('symbol', $symbol)->where('side', 'like', '%CLOSE%')->latest('created_at')->first(),
         ];
     }
 

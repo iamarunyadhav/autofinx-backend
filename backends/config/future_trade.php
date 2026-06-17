@@ -10,7 +10,7 @@ return [
     'schedule_runtime_commands' => env('FUTURE_TRADE_SCHEDULE_RUNTIME_COMMANDS', false),
     'schedule' => [
         'runtime_commands' => filter_var(env('FUTURE_TRADE_SCHEDULE_RUNTIME_COMMANDS', false), FILTER_VALIDATE_BOOL),
-        'reconcile' => filter_var(env('FUTURE_TRADE_SCHEDULE_RECONCILE', false), FILTER_VALIDATE_BOOL),
+        'reconcile' => filter_var(env('FUTURE_TRADE_SCHEDULE_RECONCILE', true), FILTER_VALIDATE_BOOL),
         'diagnostics' => filter_var(env('FUTURE_TRADE_SCHEDULE_DIAGNOSTICS', false), FILTER_VALIDATE_BOOL),
         'audit_missed_signals' => filter_var(env('FUTURE_TRADE_SCHEDULE_AUDIT_MISSED_SIGNALS', false), FILTER_VALIDATE_BOOL),
     ],

@@ -475,6 +475,7 @@ Route::prefix('v1')->group(function () {
         Route::post('workspaces/{workspace}/future-trade/reset-paper', [FutureTradeBotController::class, 'resetPaper'])->middleware('require.2fa');
         Route::post('workspaces/{workspace}/future-trade/reset-daily-loss', [FutureTradeBotController::class, 'resetDailyLoss'])->middleware('require.2fa');
         Route::post('workspaces/{workspace}/future-trade/recover', [FutureTradeBotController::class, 'recover'])->middleware('require.2fa');
+        Route::post('workspaces/{workspace}/future-trade/close-position', [FutureTradeBotController::class, 'closePosition'])->middleware(['require.2fa','throttle:20,1']);
         Route::get('workspaces/{workspace}/future-trade/config', [FutureTradeBotController::class, 'config']);
         Route::put('workspaces/{workspace}/future-trade/config', [FutureTradeBotController::class, 'updateConfig'])->middleware('require.2fa');
         Route::post('workspaces/{workspace}/future-trade/generate-tuning-plan', [FutureTradeBotController::class, 'generateTuningPlan']);

@@ -11,7 +11,7 @@ BACKEND_DIR="${BACKEND_DIR:-$(pwd)}"
 WORKSPACE_ID="${WORKSPACE_ID:-}"
 RUN_USER_STREAM_PROBE="${RUN_USER_STREAM_PROBE:-0}"
 STAMP="$(date +%Y%m%d-%H%M%S)"
-REPORT_DIR="$BACKEND_DIR/autofinx-test-reports/live-diagnose-safe-$STAMP"
+REPORT_DIR="$BACKEND_DIR/autofinx-test-reports/live-diagnose-safe-f$STAMP"
 REPORT="$REPORT_DIR/report.txt"
 mkdir -p "$REPORT_DIR"
 cd "$BACKEND_DIR" || exit 1

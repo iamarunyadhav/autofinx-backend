@@ -322,6 +322,32 @@ class FutureTradeBotController extends Controller
         }
     }
 
+    public function closePosition(Request $request, string $workspace): JsonResponse
+    {
+        if (! $this->authorizeRecovery($request, $workspace)) {
+            return response()->json(['message' => 'Forbidden'], 403);
+        }
+
+        $data = $request->validate([
+            'symbol' => 'nullable|string|max:32',
+        ]);
+
+        try {
+            return response()->json(
+                $this->bot->closeOpenPosition(
+                    $this->bot->getOrCreateConfig($workspace),
+                    isset($data['symbol']) ? (string) $data['symbol'] : null,
+                )
+            );
+        } catch (\Throwable $e) {
+            return response()->json([
+                'closed' => false,
+                'submitted' => false,
+                'message' => $e->getMessage(),
+            ], 422);
+        }
+    }
+
     private function authorizeRecovery(Request $request, string $workspace): bool
     {
         $user = $request->user();

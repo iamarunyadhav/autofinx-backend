@@ -1172,3 +1172,73 @@ test('paper close uses logical trade values when runtime state was polluted by a
         ->and((float) $close->net_pnl)->toBeGreaterThan(0)
         ->and(abs((float) $close->net_pnl))->toBeLessThan(2);
 });
+
+test('manual app close closes only the requested open symbol when multiple positions exist', function () {
+    Carbon::setTestNow('2026-05-19 10:30:05');
+    $workspace = Workspace::factory()->create();
+    $btcConfig = createPrimeWebhookConfig($workspace->id);
+    $ethConfig = FutureTradeBotConfig::create([
+        'workspace_id' => $workspace->id,
+        'slot_index' => 1,
+        'bot_name' => 'Future Trade Bot (Slot 2)',
+        'paper_trading' => true,
+        'enable_live_trading' => false,
+        'enabled' => true,
+        'settings' => $btcConfig->settings,
+    ]);
+    $ethConfig->state()->create([
+        'status' => 'Running',
+        'state' => 'IN_POSITION',
+        'connection_status' => 'Connected',
+        'trading_day' => now()->toDateString(),
+    ]);
+
+    $btcConfig->state()->update([
+        'state' => 'IN_POSITION',
+        'current_symbol' => 'BTCUSDT',
+        'position_side' => 'SHORT',
+        'entry_price' => 64210.05217391,
+        'current_price' => 64000,
+        'quantity' => 0.0023,
+    ]);
+    $ethConfig->state()->update([
+        'state' => 'IN_POSITION',
+        'current_symbol' => 'ETHUSDT',
+        'position_side' => 'SHORT',
+        'entry_price' => 1661.91,
+        'current_price' => 1650,
+        'quantity' => 0.09,
+    ]);
+
+    FutureTradeLogicalTrade::create([
+        'future_trade_bot_config_id' => $btcConfig->id,
+        'workspace_id' => (string) $workspace->id,
+        'symbol' => 'BTCUSDT',
+        'side' => 'SHORT',
+        'status' => FutureTradeLogicalTrade::STATUS_OPEN,
+        'mode' => 'PAPER',
+        'entry_price' => 64210.05217391,
+        'quantity' => 0.0023,
+        'opened_at' => now(),
+    ]);
+    FutureTradeLogicalTrade::create([
+        'future_trade_bot_config_id' => $ethConfig->id,
+        'workspace_id' => (string) $workspace->id,
+        'symbol' => 'ETHUSDT',
+        'side' => 'SHORT',
+        'status' => FutureTradeLogicalTrade::STATUS_OPEN,
+        'mode' => 'PAPER',
+        'entry_price' => 1661.91,
+        'quantity' => 0.09,
+        'opened_at' => now(),
+    ]);
+
+    $result = app(FutureTradeBotService::class)->closeOpenPosition($btcConfig->fresh('state'), 'ETHUSDT');
+
+    expect($result['closed'])->toBeTrue()
+        ->and((float) $ethConfig->fresh('state')->state->quantity)->toBe(0.0)
+        ->and($btcConfig->fresh('state')->state->current_symbol)->toBe('BTCUSDT')
+        ->and((float) $btcConfig->fresh('state')->state->quantity)->toBe(0.0023)
+        ->and($btcConfig->trades()->where('side', 'CLOSE_SHORT')->exists())->toBeFalse()
+        ->and($ethConfig->trades()->where('side', 'CLOSE_SHORT')->exists())->toBeTrue();
+});

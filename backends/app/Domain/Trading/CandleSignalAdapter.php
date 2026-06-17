@@ -74,8 +74,11 @@ class CandleSignalAdapter
         }
 
         $side = $close > $open ? 'BUY' : 'SELL';
-        // 0.5 floor + up to 0.5 from body strength -> a clear candle reads 0.7-0.99.
-        $confidence = 0.5 + $bodyRatio * 0.5;
+        // Candle direction is the primary signal, so any decisive (non-doji)
+        // candle should be actionable at typical thresholds: 0.6 floor + up to
+        // 0.4 from body strength -> a directional candle reads ~0.62-0.99. This
+        // makes the bot trade on (almost) every candle as intended.
+        $confidence = 0.6 + $bodyRatio * 0.4;
         $reasons = [sprintf('%s candle, body %.0f%% of range.', $side === 'BUY' ? 'Bullish' : 'Bearish', $bodyRatio * 100)];
 
         // Optional indicator confirmation (does not block the candle direction).

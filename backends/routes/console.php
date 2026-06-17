@@ -184,9 +184,9 @@ if ($schedulerEnabled && $scheduleFutureTradeAuditMissedSignals) {
         ->after(fn () => $markRunEnd('future-trade:audit-missed-signals'));
 }
 
-if ($schedulerEnabled && $allowBinanceRest && $scheduleFutureTradeReconcile) {
+if ($schedulerEnabled && $scheduleFutureTradeReconcile) {
     Schedule::command('future-trade:reconcile')
-        ->everyFiveMinutes()
+        ->everyTenMinutes()
         ->withoutOverlapping(10)
         ->onOneServer()
         ->before(fn () => $markRunStart('future-trade:reconcile'))
