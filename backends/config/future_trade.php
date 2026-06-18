@@ -84,7 +84,13 @@ return [
         'signalProfile' => env('FUTURE_TRADE_SIGNAL_PROFILE', env('FUTURE_TRADE_DEFAULT_SIGNAL_PROFILE', 'autofinx_prime_v6_1_7_crypto')),
         'signalProfileName' => 'AutoFinX Prime v6.1.7 Crypto Stable Default',
         'marketProfile' => 'Crypto',
+        // Sources:
+        // webhook          => TradingView Pine is the only executor.
+        // webhook_fallback => TradingView first; Binance scanner executes only when webhook is stale.
+        // mirror           => Existing Binance-backed Prime mirror scanner.
+        // binance          => Native backend Binance brain: Binance market data is the source of truth.
         'signalSource' => env('FUTURE_TRADE_SIGNAL_SOURCE', 'webhook'),
+        'binanceBrainVersion' => 'v11_native_beta',
         'pineWebhookFallbackTimeoutSeconds' => (int) env('FUTURE_TRADE_PINE_WEBHOOK_FALLBACK_TIMEOUT_SECONDS', 1200),
         'webhookFallbackEnabled' => env('FUTURE_TRADE_WEBHOOK_FALLBACK_ENABLED', false),
         'primeMirrorLiveEnabled' => false,

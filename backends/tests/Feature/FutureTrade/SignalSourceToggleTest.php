@@ -8,9 +8,10 @@ use Illuminate\Support\Str;
 uses(RefreshDatabase::class);
 
 /**
- * Signal-source toggle: Mirror vs Webhook. The two paths are mutually exclusive.
+ * Signal-source toggle: Binance/Mirror vs Webhook. The paths are mutually exclusive.
  *
  * Mirror mode (default) — backend scanner executes; webhook is rejected.
+ * Binance mode         — native backend Binance brain executes; webhook is rejected.
  * Webhook mode          — backend scanner is read-only; webhook is the only entry path.
  */
 
@@ -60,6 +61,27 @@ test('mirror mode rejects an incoming Pine webhook with a clear reason', functio
         ->and((string) ($result['reason'] ?? ''))->toBe('webhook_disabled_in_mirror_mode');
 });
 
+test('binance mode rejects Pine webhook because backend brain is authoritative', function () {
+    config(['future_trade.pine_webhook_token' => 'unit-test-token']);
+    $config = sigSrcConfig('binance');
+    $bot = app(FutureTradeBotService::class);
+
+    $result = $bot->ingestPineWebhook($config, [
+        'token' => 'unit-test-token',
+        'symbol' => 'ETHUSDT',
+        'timeframe' => '15m',
+        'signal' => 'BUY',
+        'price' => 2300.50,
+        'candle_open' => now()->subMinutes(15)->floorMinutes(15)->toIso8601String(),
+        'candle_close' => now()->floorMinutes(15)->toIso8601String(),
+        'bar_confirmed' => true,
+    ]);
+
+    expect($result['accepted'] ?? false)->toBeFalse()
+        ->and((string) ($result['reason'] ?? ''))->toBe('webhook_disabled_in_mirror_mode')
+        ->and((string) ($result['signalSource'] ?? ''))->toBe('binance');
+});
+
 // ─── Webhook mode rejects nothing it should accept ───────────────────────────
 
 test('webhook mode no longer rejects webhooks with webhook_disabled_in_mirror_mode', function () {
@@ -100,6 +122,11 @@ test('signalSource is preserved through updateConfig and mergedSettings', functi
         'settings' => ['signalSource' => 'mirror'],
     ]);
     expect((string) ($updated2->mergedSettings()['signalSource'] ?? 'webhook'))->toBe('mirror');
+
+    $updated3 = $bot->updateConfig($updated2->fresh('state'), [
+        'settings' => ['signalSource' => 'binance'],
+    ]);
+    expect((string) ($updated3->mergedSettings()['signalSource'] ?? 'webhook'))->toBe('binance');
 });
 
 // ─── Hint payload is preserved for diagnostics ───────────────────────────────
@@ -156,4 +183,137 @@ test('webhook fallback ignores recent WAIT webhooks but respects recent executab
     ]);
 
     expect($method->invoke($bot, $config->fresh(), $settings))->toBeTrue();
+});
+
+test('binance mode lets backend scanner execute without mirror fallback toggles', function () {
+    $config = sigSrcConfig('binance');
+    $settings = array_merge($config->mergedSettings(), [
+        'primeMirrorExecutionEnabled' => false,
+        'primeMirrorLiveEnabled' => false,
+    ]);
+    $bot = app(FutureTradeBotService::class);
+    $method = new ReflectionMethod(FutureTradeBotService::class, 'primeMirrorExecutionBlocked');
+    $method->setAccessible(true);
+
+    $blocked = $method->invoke($bot, $config->fresh(), $settings, [
+        'source' => 'backend_mirror',
+        'symbol' => 'ETHUSDT',
+        'signal' => 'BUY',
+        'confidence' => 0.82,
+    ]);
+
+    expect($blocked)->toBeFalse();
+});
+
+test('binance mode uses Pine v11 native scoring gates for BUY signals', function () {
+    $bot = app(FutureTradeBotService::class);
+    $method = new ReflectionMethod(FutureTradeBotService::class, 'scoreTickerPrimeCrypto');
+    $method->setAccessible(true);
+
+    $result = $method->invoke($bot, [
+        'symbol' => 'BTCUSDT',
+        'lastPrice' => '100',
+        'openPrice' => '98',
+        'highPrice' => '101',
+        'lowPrice' => '97',
+        'quoteVolume' => '1000000',
+        'sequence' => [
+            'ema9' => 106,
+            'ema21' => 103,
+            'ema50' => 95,
+            'ema200' => 80,
+            'sessionVwap' => 96,
+            'rsi14' => 60,
+            'adx14' => 28,
+            'diPlus14' => 35,
+            'diMinus14' => 12,
+            'relativeVolume' => 1.5,
+            'choppiness14' => 42,
+            'donchianBullCount' => 9,
+            'donchianBearCount' => 0,
+            'bollingerUpper' => 99,
+            'bollingerBasis' => 95,
+            'bollingerSqueeze' => false,
+            'stochK' => 45,
+            'stochD' => 35,
+            'supertrendDirection' => 1,
+            'nearDemand' => true,
+            'bullBurst' => true,
+            'atr14' => 1.2,
+            'atrPercent' => 1.2,
+        ],
+        'htf' => [
+            'trend1h' => 1,
+            'trend4h' => 1,
+        ],
+    ], array_merge(config('future_trade.defaults'), [
+        'signalSource' => 'binance',
+        'tradeScoreThreshold' => 65,
+        'watchScoreThreshold' => 50,
+        'tradeDirection' => 'Both',
+        'useDayFilter' => false,
+        'useHourFilter' => false,
+        'useVolume' => true,
+        'useChopFilter' => true,
+        'useVWAP' => true,
+        'cryptoRelVolMin' => 0.75,
+        'cryptoChopMax' => 61,
+        'adxMin' => 20,
+    ]));
+
+    expect($result['signal'])->toBe('BUY')
+        ->and($result['debug']['profile'])->toBe('autofinx_prime_v11_native_binance')
+        ->and($result['debug']['sourceOfTruth'])->toBe('binance')
+        ->and($result['debug']['hardLongFilter'])->toBeTrue();
+});
+
+test('binance v11 native hard gates block Bollinger squeeze even with high score', function () {
+    $bot = app(FutureTradeBotService::class);
+    $method = new ReflectionMethod(FutureTradeBotService::class, 'scoreTickerPrimeCrypto');
+    $method->setAccessible(true);
+
+    $result = $method->invoke($bot, [
+        'symbol' => 'BTCUSDT',
+        'lastPrice' => '100',
+        'openPrice' => '98',
+        'highPrice' => '101',
+        'lowPrice' => '97',
+        'quoteVolume' => '1000000',
+        'sequence' => [
+            'ema9' => 106,
+            'ema21' => 103,
+            'ema50' => 95,
+            'ema200' => 80,
+            'sessionVwap' => 96,
+            'rsi14' => 60,
+            'adx14' => 28,
+            'diPlus14' => 35,
+            'diMinus14' => 12,
+            'relativeVolume' => 1.5,
+            'choppiness14' => 42,
+            'donchianBullCount' => 9,
+            'bollingerUpper' => 99,
+            'bollingerBasis' => 95,
+            'bollingerSqueeze' => true,
+            'supertrendDirection' => 1,
+            'nearDemand' => true,
+            'bullBurst' => true,
+        ],
+        'htf' => [
+            'trend1h' => 1,
+            'trend4h' => 1,
+        ],
+    ], array_merge(config('future_trade.defaults'), [
+        'signalSource' => 'binance',
+        'tradeScoreThreshold' => 65,
+        'useDayFilter' => false,
+        'useHourFilter' => false,
+        'cryptoRelVolMin' => 0.75,
+        'cryptoChopMax' => 61,
+        'adxMin' => 20,
+    ]));
+
+    expect($result['signal'])->toBe('WAIT')
+        ->and($result['debug']['hardLongFilter'])->toBeFalse()
+        ->and($result['debug']['checks']['bbSqueezeClear'])->toBeFalse();
 });
