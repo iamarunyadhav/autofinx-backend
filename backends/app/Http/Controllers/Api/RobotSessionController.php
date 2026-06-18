@@ -46,6 +46,8 @@ class RobotSessionController extends Controller
             'multi_symbol' => 'nullable|boolean',
             'symbol_list' => 'nullable|array',
             'symbol_list.*' => 'string|max:32',
+            'cooldown_seconds' => 'nullable|integer|min:0|max:86400',
+            'daily_loss_limit' => 'nullable|numeric|min:0',
         ]);
 
         return response()->json(
@@ -79,6 +81,8 @@ class RobotSessionController extends Controller
             'multi_symbol' => 'sometimes|boolean',
             'symbol_list' => 'nullable|array',
             'symbol_list.*' => 'string|max:32',
+            'cooldown_seconds' => 'sometimes|integer|min:0|max:86400',
+            'daily_loss_limit' => 'nullable|numeric|min:0',
         ]);
 
         return response()->json($sessions->update($robotSession, $payload));
@@ -127,6 +131,11 @@ class RobotSessionController extends Controller
     public function reset(RobotSession $robotSession, RobotSessionService $sessions)
     {
         return response()->json($sessions->reset($robotSession));
+    }
+
+    public function resetDailyLoss(RobotSession $robotSession, RobotSessionService $sessions)
+    {
+        return response()->json($sessions->resetDailyLoss($robotSession));
     }
 
     public function liveStats(RobotSession $robotSession, RobotSessionService $sessions)

@@ -63,6 +63,8 @@ class RobotSessionService
                 : 'timed_expiry',
             'stop_loss_pct' => round((float) ($payload['stop_loss_pct'] ?? 20.0), 4),
             'take_profit_pct' => isset($payload['take_profit_pct']) ? round((float) $payload['take_profit_pct'], 4) : null,
+            'cooldown_seconds' => (int) ($payload['cooldown_seconds'] ?? 300),
+            'daily_loss_limit' => isset($payload['daily_loss_limit']) ? round((float) $payload['daily_loss_limit'], 8) : null,
             'multi_symbol' => (bool) ($payload['multi_symbol'] ?? false),
             'symbol_list' => isset($payload['symbol_list'])
                 ? collect((array) $payload['symbol_list'])->map(fn ($s) => strtoupper((string) $s))->filter()->unique()->values()->all()
@@ -98,6 +100,8 @@ class RobotSessionService
             'bot_mode',
             'stop_loss_pct',
             'take_profit_pct',
+            'cooldown_seconds',
+            'daily_loss_limit',
             'multi_symbol',
         ] as $field) {
             if (array_key_exists($field, $payload)) {
@@ -207,6 +211,11 @@ class RobotSessionService
         $session->runtime_json = array_merge((array) $session->runtime_json, [
             'stats_reset_at' => now()->toIso8601String(),
             'last_reset_at' => now()->toIso8601String(),
+            // Clear daily loss + cooldown so bot can trade again immediately.
+            'daily_loss_date' => now()->utc()->toDateString(),
+            'daily_loss_total' => 0.0,
+            'daily_loss_hit' => false,
+            'cooldown_until' => null,
         ]);
         $session->save();
 
@@ -220,6 +229,36 @@ class RobotSessionService
             'win_count' => (int) $session->win_count,
             'loss_count' => (int) $session->loss_count,
             'message' => 'Stats baselined; loss limit / error cleared. You can start again.',
+        ];
+    }
+
+    /**
+     * Reset ONLY the daily loss counter + cooldown — does NOT touch PnL history or
+     * win/loss stats. Lets the user resume trading on the same day without waiting
+     * for UTC midnight.
+     *
+     * @return array<string, mixed>
+     */
+    public function resetDailyLoss(RobotSession $session): array
+    {
+        $session->runtime_json = array_merge((array) $session->runtime_json, [
+            'daily_loss_date' => now()->utc()->toDateString(),
+            'daily_loss_total' => 0.0,
+            'daily_loss_hit' => false,
+            'cooldown_until' => null,
+        ]);
+        if ($session->last_error && (
+            str_contains((string) $session->last_error, 'Daily loss') ||
+            str_contains((string) $session->last_error, 'cooldown')
+        )) {
+            $session->last_error = null;
+        }
+        $session->save();
+
+        return [
+            'session_id' => $session->id,
+            'status' => 'daily_loss_reset',
+            'message' => 'Daily loss counter cleared. Trading resumes immediately.',
         ];
     }
 
@@ -337,6 +376,54 @@ class RobotSessionService
      */
     public function evaluateCandleDirectionSession(RobotSession $session): array
     {
+        // ── Daily loss limit guard ──────────────────────────────────────────
+        $todayUtc = now()->utc()->toDateString();
+        $rt = (array) $session->runtime_json;
+        $dailyDate = (string) ($rt['daily_loss_date'] ?? '');
+        $dailyTotal = (float) ($rt['daily_loss_total'] ?? 0);
+        $dailyHit = (bool) ($rt['daily_loss_hit'] ?? false);
+
+        // Midnight reset: new calendar day clears the daily counters.
+        if ($dailyDate !== $todayUtc) {
+            $dailyTotal = 0.0;
+            $dailyHit = false;
+            $rt = array_merge($rt, [
+                'daily_loss_date' => $todayUtc,
+                'daily_loss_total' => 0.0,
+                'daily_loss_hit' => false,
+            ]);
+            $session->runtime_json = $rt;
+            $session->save();
+        }
+
+        if ($dailyHit && $session->daily_loss_limit !== null) {
+            $session->last_error = sprintf(
+                'Daily loss limit $%.2f hit (%s). Resumes tomorrow (UTC midnight).',
+                (float) $session->daily_loss_limit,
+                $todayUtc
+            );
+            $session->save();
+            return ['session_id' => $session->id, 'status' => 'daily_limit_hit', 'action' => 'skipped'];
+        }
+
+        // ── Post-loss cooldown guard ────────────────────────────────────────
+        $cooldownUntil = $rt['cooldown_until'] ?? null;
+        if ($cooldownUntil && now()->lt(\Illuminate\Support\Carbon::parse($cooldownUntil))) {
+            $secsLeft = (int) now()->diffInSeconds(\Illuminate\Support\Carbon::parse($cooldownUntil));
+            return [
+                'session_id' => $session->id,
+                'status' => 'cooldown',
+                'action' => 'skipped',
+                'cooldown_seconds_left' => $secsLeft,
+            ];
+        }
+
+        // ── Clear stale error once we are past cooldown / daily reset ───────
+        if ($session->last_error && str_contains((string) $session->last_error, 'cooldown')) {
+            $session->last_error = null;
+            $session->save();
+        }
+
         // Sync first: if the position was closed externally on the exchange,
         // clear our state before deciding anything.
         if ($this->reconcileExternalClose($session)) {
@@ -359,8 +446,28 @@ class RobotSessionService
         $closePrice = (float) ($latest['close'] ?? 0);
 
         $session->last_signal_at = now();
+
+        // Persist signal analysis (pattern, momentum, continuation) for UI display.
+        $signalAnalysis = $decision['signal'] ?? null;
+        $analysisSnapshot = $signalAnalysis ? [
+            'pattern' => $signalAnalysis['pattern'] ?? null,
+            'pattern_type' => $signalAnalysis['pattern_type'] ?? null,
+            'trend_bias' => $signalAnalysis['trend_bias'] ?? null,
+            'trend_streak' => $signalAnalysis['trend_streak'] ?? null,
+            'momentum_score' => $signalAnalysis['momentum_score'] ?? null,
+            'continuation_pct' => $signalAnalysis['continuation_pct'] ?? null,
+            'confidence' => $signalAnalysis['confidence'] ?? null,
+            'side' => $signalAnalysis['side'] ?? null,
+        ] : null;
+
         $session->runtime_json = array_merge((array) $session->runtime_json, [
-            'latest_decision' => $decision,
+            'latest_decision' => array_merge($decision, [
+                'pattern' => $signalAnalysis['pattern'] ?? ($decision['pattern'] ?? null),
+                'trend_bias' => $signalAnalysis['trend_bias'] ?? null,
+                'momentum_score' => $signalAnalysis['momentum_score'] ?? null,
+                'continuation_pct' => $signalAnalysis['continuation_pct'] ?? null,
+            ]),
+            'latest_signal_analysis' => $analysisSnapshot,
             'last_close_price' => $closePrice,
         ]);
 
@@ -402,6 +509,12 @@ class RobotSessionService
         }
 
         if ($action === 'CLOSE') {
+            // Capture PnL snapshot BEFORE close so we can measure the trade result.
+            $pnlBefore = (float) $session->total_pnl;
+            $entrySide = (string) $session->active_side;
+            $entryPrice = (float) $session->active_entry_price;
+            $stake = (float) $session->base_stake;
+
             $closed = $this->closeActiveCandleTrade($session);
             $session->active_side = null;
             $session->active_entry_price = null;
@@ -411,10 +524,60 @@ class RobotSessionService
             $session->save();
             $this->refreshPerformance($session);
 
+            // Measure the realised PnL of this specific trade.
+            $session = $session->fresh() ?? $session;
+            $pnlAfter = (float) $session->total_pnl;
+            $tradePnl = $pnlAfter - $pnlBefore;
+
+            // ── Cooldown + daily loss tracking ──────────────────────────────
+            $rt2 = (array) $session->runtime_json;
+            $extraRuntime = [];
+
+            if ($tradePnl < 0) {
+                $absLoss = abs($tradePnl);
+
+                // Apply cooldown: bot will skip evaluations until cooldown_until.
+                $cooldownSecs = max(0, (int) ($session->cooldown_seconds ?? 300));
+                if ($cooldownSecs > 0) {
+                    $extraRuntime['cooldown_until'] = now()->addSeconds($cooldownSecs)->toIso8601String();
+                    $session->last_error = sprintf('Loss cooldown: resuming in %ds.', $cooldownSecs);
+                }
+
+                // Accumulate daily loss total.
+                $todayCheck = now()->utc()->toDateString();
+                $storedDate = (string) ($rt2['daily_loss_date'] ?? '');
+                $runningTotal = ($storedDate === $todayCheck) ? (float) ($rt2['daily_loss_total'] ?? 0) : 0.0;
+                $runningTotal += $absLoss;
+                $extraRuntime['daily_loss_date'] = $todayCheck;
+                $extraRuntime['daily_loss_total'] = round($runningTotal, 8);
+
+                // Check if daily limit is now exceeded.
+                $dailyLimitCfg = $session->daily_loss_limit !== null ? (float) $session->daily_loss_limit : null;
+                if ($dailyLimitCfg !== null && $runningTotal >= $dailyLimitCfg) {
+                    $extraRuntime['daily_loss_hit'] = true;
+                    $extraRuntime['cooldown_until'] = null; // daily limit overrides cooldown
+                    $session->last_error = sprintf(
+                        'Daily loss limit $%.2f reached ($%.2f lost today). Trading resumes tomorrow (UTC midnight).',
+                        $dailyLimitCfg,
+                        $runningTotal
+                    );
+                }
+            } else {
+                // Win or break-even: clear cooldown.
+                $extraRuntime['cooldown_until'] = null;
+            }
+
+            if ($extraRuntime !== []) {
+                $session->runtime_json = array_merge($rt2, $extraRuntime);
+                $session->save();
+            }
+            // ────────────────────────────────────────────────────────────────
+
             return [
                 'session_id' => $session->id,
                 'status' => 'closed',
                 'action' => 'trade_closed',
+                'trade_pnl' => round($tradePnl, 8),
                 'trade_id' => $closed?->id,
                 'decision' => $decision,
             ];
@@ -510,7 +673,48 @@ class RobotSessionService
                 'win_rate' => $closed > 0 ? round((int) $session->win_count / $closed * 100, 2) : 0.0,
             ],
             'last_decision' => ((array) $session->runtime_json)['latest_decision'] ?? null,
+            'last_signal_analysis' => ((array) $session->runtime_json)['latest_signal_analysis'] ?? null,
+            'cooldown' => $this->cooldownStatus($session),
+            'daily_loss' => $this->dailyLossStatus($session),
             'as_of' => now()->toIso8601String(),
+        ];
+    }
+
+    // ─── Cooldown & daily-loss helpers ───────────────────────────────────────
+
+    /**
+     * @return array{active: bool, seconds_left: int, until: string|null}
+     */
+    private function cooldownStatus(RobotSession $session): array
+    {
+        $rt = (array) $session->runtime_json;
+        $until = $rt['cooldown_until'] ?? null;
+        if ($until && now()->lt(\Illuminate\Support\Carbon::parse($until))) {
+            return [
+                'active' => true,
+                'seconds_left' => (int) now()->diffInSeconds(\Illuminate\Support\Carbon::parse($until)),
+                'until' => $until,
+            ];
+        }
+        return ['active' => false, 'seconds_left' => 0, 'until' => null];
+    }
+
+    /**
+     * @return array{today: float, limit: float|null, hit: bool, pct: float|null}
+     */
+    private function dailyLossStatus(RobotSession $session): array
+    {
+        $rt = (array) $session->runtime_json;
+        $todayUtc = now()->utc()->toDateString();
+        $storedDate = (string) ($rt['daily_loss_date'] ?? '');
+        $total = ($storedDate === $todayUtc) ? (float) ($rt['daily_loss_total'] ?? 0) : 0.0;
+        $limit = $session->daily_loss_limit !== null ? (float) $session->daily_loss_limit : null;
+        $hit = ($storedDate === $todayUtc) && (bool) ($rt['daily_loss_hit'] ?? false);
+        return [
+            'today' => round($total, 2),
+            'limit' => $limit !== null ? round($limit, 2) : null,
+            'hit' => $hit,
+            'pct' => ($limit !== null && $limit > 0) ? round($total / $limit * 100, 1) : null,
         ];
     }
 

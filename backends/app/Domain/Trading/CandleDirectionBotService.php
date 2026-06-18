@@ -26,7 +26,7 @@ class CandleDirectionBotService
      * Decide what to do at a candle boundary for a given session.
      *
      * @param  array<int, array<string, mixed>>  $candles  ordered oldest -> newest
-     * @return array{action: 'BUY'|'SELL'|'HOLD'|'CLOSE', reason: string, confidence: float, signal?: array<string, mixed>, stop_price?: float}
+     * @return array{action: 'BUY'|'SELL'|'HOLD'|'CLOSE', reason: string, confidence: float, pattern?: string, signal?: array<string, mixed>, stop_price?: float}
      */
     public function evaluateCandle(RobotSession $session, array $candles): array
     {
@@ -45,20 +45,23 @@ class CandleDirectionBotService
                 return [
                     'action' => 'HOLD',
                     'reason' => sprintf(
-                        'Signal %s (%.0f%%) below threshold %d%%.',
+                        'Signal %s (%.0f%%) below threshold %d%%. Pattern: %s',
                         $signal['side'],
                         $signal['confidence'] * 100,
-                        (int) $session->confidence_threshold
+                        (int) $session->confidence_threshold,
+                        $signal['pattern'] ?? 'n/a'
                     ),
                     'confidence' => $signal['confidence'],
+                    'pattern' => $signal['pattern'] ?? null,
                     'signal' => $signal,
                 ];
             }
 
             return [
                 'action' => $signal['side'], // BUY or SELL
-                'reason' => 'Entry signal: ' . implode(' ', array_slice($signal['reasons'], 0, 2)),
+                'reason' => sprintf('Entry [%s]: %s', $signal['pattern'] ?? 'body', implode(' ', array_slice($signal['reasons'], 0, 2))),
                 'confidence' => $signal['confidence'],
+                'pattern' => $signal['pattern'] ?? null,
                 'signal' => $signal,
             ];
         }
