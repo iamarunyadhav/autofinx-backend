@@ -4506,7 +4506,7 @@ class FutureTradeBotService
         }
 
         $postCloseExchange = $this->exchangePositionSnapshot($client, $symbol);
-        $positionClosed = (float) ($postCloseExchange['quantity'] ?? 0) <= 0;
+        $positionClosed = $this->liveCloseConfirmed($response, $postCloseExchange);
 
         $closeQty = (float) $qty;
         $direction = $positionSide === 'LONG' ? 1 : -1;
@@ -10867,6 +10867,22 @@ class FutureTradeBotService
             'open_orders' => $openOrders->all(),
             'snapshot_partial' => $riskPayload === [] || $openOrdersPayload === [],
         ];
+    }
+
+    private function liveCloseConfirmed(array $orderResponse, array $postCloseExchange): bool
+    {
+        $orderStatus = strtoupper((string) ($orderResponse['status'] ?? ''));
+        $executedQty = (float) ($orderResponse['executedQty'] ?? $orderResponse['executed_qty'] ?? 0);
+
+        if ($orderStatus === 'FILLED' && $executedQty > 0) {
+            return true;
+        }
+
+        if ((bool) ($postCloseExchange['snapshot_partial'] ?? false)) {
+            return false;
+        }
+
+        return (float) ($postCloseExchange['quantity'] ?? 0) <= 0;
     }
 
     private function isReduceOnlyRejected(Throwable $e): bool

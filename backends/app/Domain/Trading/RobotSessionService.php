@@ -575,8 +575,8 @@ class RobotSessionService
         $action = $decision['action'];
 
         if ($action === 'BUY' || $action === 'SELL') {
-            // ── Signal stability gate ──────────────────────────────────────
             $openDirection = strtolower($action);
+            // Track direction streak for telemetry only (no longer gates entry)
             if ($session->last_signal_direction === $openDirection) {
                 $session->signal_streak = (int) $session->signal_streak + 1;
             } else {
@@ -585,18 +585,7 @@ class RobotSessionService
                 $session->last_signal_direction_at = now();
             }
 
-            if ($session->signal_streak < 2) {
-                // First sighting — store it, wait for next eval to confirm.
-                $session->runtime_json = array_merge((array) $session->runtime_json, [
-                    'latest_decision' => array_merge($decision, ['action' => 'BUILDING', 'reason' => 'Signal building — waiting for confirmation.']),
-                    'volatility' => $volatility,
-                    'last_evaluation_at' => now()->toIso8601String(),
-                ]);
-                $session->save();
-                return ['session_id' => $session->id, 'status' => 'signal_building', 'action' => 'skipped', 'streak' => 1, 'direction' => $openDirection];
-            }
-
-            // Confirmed — reset streak after entry.
+            // Reset streak after entry
             $session->signal_streak = 0;
             $session->last_signal_direction = null;
 
