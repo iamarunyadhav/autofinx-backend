@@ -208,10 +208,11 @@ class OperationalHealthService
             ->get();
 
         if ($connections->isEmpty()) {
+            // No connections = paper / heuristic mode — user stream not needed, no warning
             return [
-                'state' => 'caution',
+                'state' => 'healthy',
                 'blockers' => [],
-                'warnings' => ['binance_user_stream_not_configured'],
+                'warnings' => [],
                 'active_connections' => 0,
                 'healthy_connections' => 0,
                 'connections' => [],
@@ -427,12 +428,26 @@ class OperationalHealthService
     private function aiHealth(string $workspaceId, \Illuminate\Support\Carbon $now): array
     {
         $config = AiTradingConfig::query()->where('workspace_id', $workspaceId)->first();
-        if (! $config || ! (bool) $config->enabled) {
+
+        // No config = heuristic mode — AI not required, no warning needed
+        if (! $config) {
+            return [
+                'state' => 'healthy',
+                'blockers' => [],
+                'warnings' => [],
+                'provider' => config('intelligence.ai_trading.provider', 'heuristic'),
+                'pending_ai_decisions' => 0,
+                'recent_failed_cycles' => 0,
+            ];
+        }
+
+        // Config exists but explicitly turned off
+        if (! (bool) $config->enabled) {
             return [
                 'state' => 'healthy',
                 'blockers' => [],
                 'warnings' => ['ai_trading_disabled'],
-                'provider' => $config?->provider ?? config('intelligence.ai_trading.provider', 'heuristic'),
+                'provider' => $config->provider ?? config('intelligence.ai_trading.provider', 'heuristic'),
                 'pending_ai_decisions' => 0,
                 'recent_failed_cycles' => 0,
             ];

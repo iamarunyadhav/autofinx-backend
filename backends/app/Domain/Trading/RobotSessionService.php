@@ -275,6 +275,34 @@ class RobotSessionService
 
     public function evaluateActiveSessions(?string $sessionId = null, int $limit = 50): array
     {
+        // Auto-resume sessions that were paused yesterday due to consecutive losses.
+        // A new UTC day means fresh daily limits — let them trade again.
+        if (! $sessionId) {
+            $todayUtc = now()->utc()->toDateString();
+            RobotSession::where('status', 'PAUSED')
+                ->where(fn ($q) => $q
+                    ->where('last_error', 'LIKE', '%consecutive losses%')
+                    ->orWhere('last_error', 'LIKE', '%Auto-paused%')
+                )
+                ->whereDate('updated_at', '<', $todayUtc)
+                ->each(function (RobotSession $s) use ($todayUtc) {
+                    $s->status = 'RUNNING';
+                    $s->last_error = null;
+                    $s->consecutive_losses = 0;
+                    $s->signal_streak = 0;
+                    $s->last_signal_direction = null;
+                    $s->runtime_json = array_merge((array) $s->runtime_json, [
+                        'daily_loss_date' => $todayUtc,
+                        'daily_loss_total' => 0.0,
+                        'daily_loss_hit' => false,
+                        'cooldown_until' => null,
+                        'auto_paused_at' => null,
+                        'auto_pause_reason' => null,
+                    ]);
+                    $s->save();
+                });
+        }
+
         $results = [];
         $query = RobotSession::query()
             ->where('status', 'RUNNING')
@@ -328,16 +356,68 @@ class RobotSessionService
             'provider' => $session->provider_key,
             'integration_id' => $session->integration_id,
         ]);
+
+        // ── Volatility gate ────────────────────────────────────────────────
+        $volatility = $this->computeVolatilityGate($candles, $session->timeframe);
+        if (! $volatility['tradeable']) {
+            $session->runtime_json = array_merge((array) $session->runtime_json, [
+                'volatility' => $volatility,
+                'last_evaluation_at' => now()->toIso8601String(),
+            ]);
+            $session->save();
+            return ['session_id' => $session->id, 'status' => 'volatility_block', 'action' => 'skipped', 'reason' => $volatility['reason']];
+        }
+
         $signal = $this->signals->preview($candles, $session->timeframe, (array) $session->indicator_set);
         $session->last_signal_at = now();
+
+        // ── Signal stability gate ──────────────────────────────────────────
+        // Require the same direction on 2 consecutive evaluations before entering.
+        $direction = (string) ($signal['direction'] ?? 'neutral');
+        if ($direction !== 'neutral' && (int) ($signal['confidence'] ?? 0) >= (int) $session->confidence_threshold) {
+            if ($session->last_signal_direction === $direction) {
+                $session->signal_streak = (int) $session->signal_streak + 1;
+            } else {
+                $session->signal_streak = 1;
+                $session->last_signal_direction = $direction;
+                $session->last_signal_direction_at = now();
+            }
+            $session->runtime_json = array_merge((array) $session->runtime_json, [
+                'latest_signal' => $signal,
+                'volatility' => $volatility,
+            ]);
+            $session->save();
+
+            if ($session->signal_streak < 2) {
+                return ['session_id' => $session->id, 'status' => 'signal_building', 'action' => 'skipped', 'streak' => 1, 'direction' => $direction];
+            }
+            // Confirmed — reset streak so it doesn't fire repeatedly on same candle.
+            $session->signal_streak = 0;
+            $session->last_signal_direction = null;
+            $session->save();
+        } else {
+            // No signal or below threshold: clear streak.
+            if ($session->signal_streak > 0 || $session->last_signal_direction !== null) {
+                $session->signal_streak = 0;
+                $session->last_signal_direction = null;
+            }
+        }
+
         $session->runtime_json = array_merge((array) $session->runtime_json, [
             'latest_signal' => $signal,
+            'volatility' => $volatility,
         ]);
         $session->save();
 
-        if (($signal['direction'] ?? 'neutral') === 'neutral' || (int) ($signal['confidence'] ?? 0) < (int) $session->confidence_threshold) {
+        if ($direction === 'neutral' || (int) ($signal['confidence'] ?? 0) < (int) $session->confidence_threshold) {
             return ['session_id' => $session->id, 'status' => 'neutral', 'action' => 'skipped', 'signal' => $signal];
         }
+
+        // ── ATR-based position sizing ──────────────────────────────────────
+        $atrAvg = $this->computeAtrAvgPct($candles);
+        $atrNow = $volatility['atr_pct'];
+        $atrRatio = ($atrAvg > 0 && $atrNow > 0) ? min(1.5, max(0.5, $atrAvg / $atrNow)) : 1.0;
+        $adjustedStake = round((float) $session->base_stake * $atrRatio, 2);
 
         $trade = $this->quickTrades->place([
             'workspace_id' => $session->workspace_id,
@@ -345,7 +425,7 @@ class RobotSessionService
             'robot_session_id' => $session->id,
             'symbol' => $session->symbol,
             'side' => $signal['direction'],
-            'stake_amount' => (float) $session->base_stake,
+            'stake_amount' => $adjustedStake,
             'timeframe' => $session->timeframe,
             'expiry_seconds' => (int) $session->expiry_seconds,
             'mode' => strtolower((string) $session->mode),
@@ -441,6 +521,25 @@ class RobotSessionService
             return ['session_id' => $session->id, 'status' => 'no_data', 'action' => 'skipped'];
         }
 
+        // ── Volatility gate (new entries only — skip if position is active) ─
+        $volatility = ['tradeable' => true, 'reason' => 'position_active', 'atr_pct' => 0.0, 'bb_width_pct' => 0.0];
+        if (! $session->active_side) {
+            $volatility = $this->computeVolatilityGate($candles, $session->timeframe);
+            if (! $volatility['tradeable']) {
+                // Clear any stale signal streak when market is flat.
+                if ($session->signal_streak > 0 || $session->last_signal_direction !== null) {
+                    $session->signal_streak = 0;
+                    $session->last_signal_direction = null;
+                }
+                $session->runtime_json = array_merge((array) $session->runtime_json, [
+                    'volatility' => $volatility,
+                    'last_evaluation_at' => now()->toIso8601String(),
+                ]);
+                $session->save();
+                return ['session_id' => $session->id, 'status' => 'volatility_block', 'action' => 'skipped', 'reason' => $volatility['reason']];
+            }
+        }
+
         $decision = $this->candleBot->evaluateCandle($session, $candles);
         $latest = $candles[array_key_last($candles)];
         $closePrice = (float) ($latest['close'] ?? 0);
@@ -469,18 +568,51 @@ class RobotSessionService
             ]),
             'latest_signal_analysis' => $analysisSnapshot,
             'last_close_price' => $closePrice,
+            'volatility' => $volatility,
+            'last_evaluation_at' => now()->toIso8601String(),
         ]);
 
         $action = $decision['action'];
 
         if ($action === 'BUY' || $action === 'SELL') {
+            // ── Signal stability gate ──────────────────────────────────────
+            $openDirection = strtolower($action);
+            if ($session->last_signal_direction === $openDirection) {
+                $session->signal_streak = (int) $session->signal_streak + 1;
+            } else {
+                $session->signal_streak = 1;
+                $session->last_signal_direction = $openDirection;
+                $session->last_signal_direction_at = now();
+            }
+
+            if ($session->signal_streak < 2) {
+                // First sighting — store it, wait for next eval to confirm.
+                $session->runtime_json = array_merge((array) $session->runtime_json, [
+                    'latest_decision' => array_merge($decision, ['action' => 'BUILDING', 'reason' => 'Signal building — waiting for confirmation.']),
+                    'volatility' => $volatility,
+                    'last_evaluation_at' => now()->toIso8601String(),
+                ]);
+                $session->save();
+                return ['session_id' => $session->id, 'status' => 'signal_building', 'action' => 'skipped', 'streak' => 1, 'direction' => $openDirection];
+            }
+
+            // Confirmed — reset streak after entry.
+            $session->signal_streak = 0;
+            $session->last_signal_direction = null;
+
+            // ── ATR-based position sizing ──────────────────────────────────
+            $atrAvg = $this->computeAtrAvgPct($candles);
+            $atrNow = $volatility['atr_pct'];
+            $atrRatio = ($atrAvg > 0 && $atrNow > 0) ? min(1.5, max(0.5, $atrAvg / $atrNow)) : 1.0;
+            $adjustedStake = round((float) $session->base_stake * $atrRatio, 2);
+
             $trade = $this->quickTrades->place([
                 'workspace_id' => $session->workspace_id,
                 'wallet_account_id' => $session->wallet_account_id,
                 'robot_session_id' => $session->id,
                 'symbol' => $session->symbol,
-                'side' => strtolower($action),
-                'stake_amount' => (float) $session->base_stake,
+                'side' => $openDirection,
+                'stake_amount' => $adjustedStake,
                 'timeframe' => $session->timeframe,
                 'expiry_seconds' => (int) $session->expiry_seconds,
                 'mode' => strtolower((string) $session->mode),
@@ -535,12 +667,31 @@ class RobotSessionService
 
             if ($tradePnl < 0) {
                 $absLoss = abs($tradePnl);
+                $consecutiveLosses = (int) $session->consecutive_losses; // fresh after refreshPerformance
 
-                // Apply cooldown: bot will skip evaluations until cooldown_until.
-                $cooldownSecs = max(0, (int) ($session->cooldown_seconds ?? 300));
-                if ($cooldownSecs > 0) {
-                    $extraRuntime['cooldown_until'] = now()->addSeconds($cooldownSecs)->toIso8601String();
-                    $session->last_error = sprintf('Loss cooldown: resuming in %ds.', $cooldownSecs);
+                // ── Auto-pause after 3+ consecutive losses ─────────────────
+                if ($consecutiveLosses >= 3) {
+                    $session->status = 'PAUSED';
+                    $session->last_error = sprintf(
+                        'Auto-paused after %d consecutive losses. Resumes at UTC midnight or manual reset.',
+                        $consecutiveLosses
+                    );
+                    $extraRuntime['auto_paused_at'] = now()->toIso8601String();
+                    $extraRuntime['auto_pause_reason'] = 'consecutive_losses';
+                    $extraRuntime['cooldown_until'] = null;
+                } else {
+                    // ── Adaptive cooldown: doubles with each consecutive loss ─
+                    $baseCooldown = max(0, (int) ($session->cooldown_seconds ?? 300));
+                    $adaptiveFactor = 2 ** min($consecutiveLosses, 4); // max 16x
+                    $adaptiveCooldown = $baseCooldown * $adaptiveFactor;
+                    if ($adaptiveCooldown > 0) {
+                        $extraRuntime['cooldown_until'] = now()->addSeconds($adaptiveCooldown)->toIso8601String();
+                        $session->last_error = sprintf(
+                            'Loss cooldown (%dx): resuming in %ds.',
+                            $adaptiveFactor,
+                            $adaptiveCooldown
+                        );
+                    }
                 }
 
                 // Accumulate daily loss total.
@@ -563,8 +714,10 @@ class RobotSessionService
                     );
                 }
             } else {
-                // Win or break-even: clear cooldown.
+                // Win or break-even: clear cooldown and reset signal streak.
                 $extraRuntime['cooldown_until'] = null;
+                $session->signal_streak = 0;
+                $session->last_signal_direction = null;
             }
 
             if ($extraRuntime !== []) {
@@ -676,8 +829,103 @@ class RobotSessionService
             'last_signal_analysis' => ((array) $session->runtime_json)['latest_signal_analysis'] ?? null,
             'cooldown' => $this->cooldownStatus($session),
             'daily_loss' => $this->dailyLossStatus($session),
+            'volatility' => ((array) $session->runtime_json)['volatility'] ?? null,
+            'signal_streak' => (int) $session->signal_streak,
             'as_of' => now()->toIso8601String(),
         ];
+    }
+
+    // ─── Volatility helpers ───────────────────────────────────────────────────
+
+    /**
+     * ATR + Bollinger Band width check. Returns whether the market has enough
+     * directional energy to trade. Thresholds scale with timeframe.
+     *
+     * @param  array<array{open:mixed,high:mixed,low:mixed,close:mixed}>  $candles
+     * @return array{tradeable: bool, reason: string, atr_pct: float, bb_width_pct: float}
+     */
+    private function computeVolatilityGate(array $candles, string $timeframe): array
+    {
+        if (count($candles) < 20) {
+            return ['tradeable' => true, 'reason' => 'insufficient_data', 'atr_pct' => 0.0, 'bb_width_pct' => 0.0];
+        }
+
+        $highs  = array_column($candles, 'high');
+        $lows   = array_column($candles, 'low');
+        $closes = array_column($candles, 'close');
+        $last   = (float) end($closes);
+
+        // ATR (14 periods, True Range)
+        $trValues = [];
+        for ($i = 1; $i < count($candles) && $i <= 14; $i++) {
+            $trValues[] = max(
+                (float) $highs[$i] - (float) $lows[$i],
+                abs((float) $highs[$i] - (float) $closes[$i - 1]),
+                abs((float) $lows[$i]  - (float) $closes[$i - 1])
+            );
+        }
+        $atr    = count($trValues) > 0 ? array_sum($trValues) / count($trValues) : 0.0;
+        $atrPct = $last > 0 ? ($atr / $last) * 100 : 0.0;
+
+        // Bollinger Band width (20 periods, 2σ)
+        $slice  = array_slice($closes, -20);
+        $mean   = array_sum($slice) / count($slice);
+        $stddev = sqrt(array_sum(array_map(fn ($c) => ((float) $c - $mean) ** 2, $slice)) / count($slice));
+        $bbWidthPct = $mean > 0 ? (4 * $stddev / $mean) * 100 : 0.0; // (upper - lower) / mean
+
+        // Minimum ATR threshold scales with timeframe
+        $tfStr      = strtolower((string) $timeframe);
+        $tfMinutes  = preg_match('/^(\d+)m$/i', $tfStr, $m) ? (int) $m[1] : (preg_match('/^(\d+)h$/i', $tfStr, $m) ? (int) $m[1] * 60 : 1);
+        $minAtrPct  = match(true) {
+            $tfMinutes <= 1  => 0.07,
+            $tfMinutes <= 5  => 0.10,
+            $tfMinutes <= 15 => 0.13,
+            $tfMinutes <= 60 => 0.20,
+            default          => 0.25,
+        };
+        $minBbWidthPct = $minAtrPct * 2.5;
+
+        if ($atrPct < $minAtrPct) {
+            return [
+                'tradeable'    => false,
+                'reason'       => sprintf('ATR too low: %.4f%% < %.4f%% min', $atrPct, $minAtrPct),
+                'atr_pct'      => round($atrPct, 4),
+                'bb_width_pct' => round($bbWidthPct, 4),
+            ];
+        }
+        if ($bbWidthPct < $minBbWidthPct) {
+            return [
+                'tradeable'    => false,
+                'reason'       => sprintf('BB squeeze: %.4f%% < %.4f%% min', $bbWidthPct, $minBbWidthPct),
+                'atr_pct'      => round($atrPct, 4),
+                'bb_width_pct' => round($bbWidthPct, 4),
+            ];
+        }
+
+        return ['tradeable' => true, 'reason' => 'ok', 'atr_pct' => round($atrPct, 4), 'bb_width_pct' => round($bbWidthPct, 4)];
+    }
+
+    /**
+     * Average ATR as % of price over the last 20 periods. Used for position sizing.
+     *
+     * @param  array<array{high:mixed,low:mixed,close:mixed}>  $candles
+     */
+    private function computeAtrAvgPct(array $candles): float
+    {
+        $highs  = array_column($candles, 'high');
+        $lows   = array_column($candles, 'low');
+        $closes = array_column($candles, 'close');
+        $trs    = [];
+        $count  = min(count($candles), 21);
+        for ($i = 1; $i < $count; $i++) {
+            $trs[] = max(
+                (float) $highs[$i] - (float) $lows[$i],
+                abs((float) $highs[$i] - (float) $closes[$i - 1]),
+                abs((float) $lows[$i]  - (float) $closes[$i - 1])
+            );
+        }
+        $last = (float) end($closes);
+        return (count($trs) > 0 && $last > 0) ? (array_sum($trs) / count($trs) / $last) * 100 : 0.0;
     }
 
     // ─── Cooldown & daily-loss helpers ───────────────────────────────────────

@@ -32,6 +32,8 @@ class RobotSession extends BaseModel
         'trade_stats_json' => 'array',
         'cooldown_seconds' => 'integer',
         'daily_loss_limit' => 'decimal:8',
+        'signal_streak' => 'integer',
+        'last_signal_direction_at' => 'datetime',
     ];
 
     public function quickTrades(): HasMany
