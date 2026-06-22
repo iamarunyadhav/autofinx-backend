@@ -158,6 +158,16 @@ class BinanceFuturesClient
         return (array) $response->json();
     }
 
+    public function placeOrderViaWebSocket(array $payload): array
+    {
+        return (new BinanceFuturesWebSocketApiClient(
+            apiKey: $this->apiKey,
+            apiSecret: $this->apiSecret,
+            wsApiUrl: $this->wsApiUrl(),
+            timeoutSeconds: (int) config('future_trade.order_router.websocket_timeout_seconds', 8),
+        ))->placeOrder($payload);
+    }
+
     /**
      * Place a reduce-only STOP_MARKET or TAKE_PROFIT_MARKET order on Binance Futures.
      * Uses closePosition=true so the full position is closed regardless of quantity.
@@ -264,6 +274,17 @@ class BinanceFuturesClient
         }
 
         return $response;
+    }
+
+    private function wsApiUrl(): string
+    {
+        $configured = trim((string) config('services.binance.futures_ws_api_url', ''));
+        $configuredTestnet = trim((string) config('services.binance.futures_testnet_ws_api_url', ''));
+        if (str_contains($this->baseUrl, 'testnet')) {
+            return $configuredTestnet !== '' ? $configuredTestnet : 'wss://testnet.binancefuture.com/ws-fapi/v1';
+        }
+
+        return $configured !== '' ? $configured : 'wss://ws-fapi.binance.com/ws-fapi/v1';
     }
 
     private function keyedRequest(string $method, string $path, array $params = [], bool $throw = true): Response

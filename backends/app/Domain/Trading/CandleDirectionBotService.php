@@ -39,6 +39,22 @@ class CandleDirectionBotService
 
         // No open position -> look for an entry.
         if (! $session->active_side) {
+            if ($this->isNoisyCandle($latest)) {
+                return [
+                    'action' => 'HOLD',
+                    'reason' => 'noisy_candle_filtered',
+                    'confidence' => 0.0,
+                    'pattern' => 'noisy_candle',
+                    'signal' => [
+                        'side' => 'NEUTRAL',
+                        'confidence' => 0.0,
+                        'pattern' => 'noisy_candle',
+                        'noisy_candle' => true,
+                        'reasons' => ['Small body with large two-sided wicks.'],
+                    ],
+                ];
+            }
+
             $signal = $this->computeSignal($candles, (string) $session->timeframe, (array) $session->indicator_set);
 
             if (! $this->signals->isActionable($signal, (int) $session->confidence_threshold)) {
@@ -152,6 +168,24 @@ class CandleDirectionBotService
         }
 
         return $close > $open ? 'BUY' : 'SELL';
+    }
+
+    public function isNoisyCandle(array $candle): bool
+    {
+        $open = (float) ($candle['open'] ?? 0);
+        $close = (float) ($candle['close'] ?? 0);
+        $high = (float) ($candle['high'] ?? 0);
+        $low = (float) ($candle['low'] ?? 0);
+        $volume = (float) ($candle['volume'] ?? 1);
+        $range = max($high - $low, 1e-9);
+        $bodyRatio = abs($close - $open) / $range;
+        $upperWickRatio = max(0, $high - max($open, $close)) / $range;
+        $lowerWickRatio = max(0, min($open, $close) - $low) / $range;
+
+        return $bodyRatio < 0.18
+            && $upperWickRatio > 0.30
+            && $lowerWickRatio > 0.30
+            && $volume > 0;
     }
 
     /**

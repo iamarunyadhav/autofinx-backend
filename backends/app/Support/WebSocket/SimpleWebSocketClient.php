@@ -105,6 +105,11 @@ class SimpleWebSocketClient
         $this->sendFrame($payload, 0x9);
     }
 
+    public function sendText(string $payload): void
+    {
+        $this->sendFrame($payload, 0x1);
+    }
+
     public function readFrame(int $timeoutSeconds = 1): ?array
     {
         if (! is_resource($this->socket)) {

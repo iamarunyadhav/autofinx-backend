@@ -2263,6 +2263,7 @@ class FutureTradeBotService
         }
 
         $safePayload = $this->sanitizeWebhookPayload($payload);
+        app(FutureTradeAuditService::class)->recordWebhookRequest($config, $payload, $context);
         $this->log($config->fresh('state'), 'WEBHOOK_RAW_RECEIVED', $symbol ?: null, $signal ?: null, $confidence, 'TradingView webhook request received at backend.', [
             'source' => 'pine_webhook',
             'workspace' => $config->workspace_id,
@@ -3102,6 +3103,7 @@ class FutureTradeBotService
     {
         $symbol = $this->normalizePineSymbol((string) ($payload['symbol'] ?? $payload['ticker'] ?? ''));
         $signal = strtoupper(trim((string) ($payload['signal'] ?? $payload['action'] ?? $payload['side'] ?? 'WAIT')));
+        app(FutureTradeAuditService::class)->markWebhookRejected($config, $payload, $reason, $context);
         $this->log($config->fresh('state'), 'PINE_WEBHOOK_REJECTED', $symbol ?: null, $signal ?: null, 0.0, $reason, array_merge([
             'source' => 'pine_webhook',
             'profile' => self::PROFILE_PRIME_V617_CRYPTO,
@@ -4264,14 +4266,43 @@ class FutureTradeBotService
         $clientOrderId = $signalKey !== ''
             ? $this->stabilitySvc()->deterministicClientOrderId($signalKey, 'entry')
             : substr('ft-entry-'.Str::uuid(), 0, 36);
-        $response = $client->placeOrder([
+        $orderPayload = [
             'symbol' => $symbol,
             'side' => $side,
             'type' => 'MARKET',
             'quantity' => $qty,
             'newClientOrderId' => $clientOrderId,
             'positionSide' => 'BOTH',
+        ];
+        $orderAudit = app(FutureTradeAuditService::class)->recordOrderRequest($config, $orderPayload, [
+            'source' => 'tradingview',
+            'positionSide' => $positionSide,
+            'leverage' => $leverage,
+            'marginType' => (string) ($settings['marginMode'] ?? 'isolated'),
+            'price' => $price,
+            'stopLoss' => $this->stopLossPrice($price, $positionSide, $settings),
+            'takeProfit' => $this->takeProfitPrice($price, $positionSide, $settings),
+            'trailingStop' => (float) ($settings['trailingTakeProfitPercent'] ?? 0),
+            'signalKey' => $signalKey,
+            'transport' => (string) ($settings['orderTransport'] ?? config('future_trade.order_router.transport', 'rest')),
         ]);
+        try {
+            $routed = app(FutureTradeOrderRouter::class)->place($config, $client, $orderPayload, [
+                'intent' => 'entry',
+                'position_side' => $positionSide,
+                'signal_key' => $signalKey,
+            ]);
+            $response = (array) $routed['response'];
+            $response['_autofinx_order_router'] = [
+                'transport' => $routed['transport'] ?? null,
+                'latency_ms' => $routed['latency_ms'] ?? null,
+                'trace_id' => $routed['trace_id'] ?? null,
+            ];
+            app(FutureTradeAuditService::class)->markOrderSuccess($orderAudit, $response);
+        } catch (Throwable $e) {
+            app(FutureTradeAuditService::class)->markOrderFailed($orderAudit, $e);
+            throw $e;
+        }
         $markTiming('entryOrderPlacedMs');
         $exchange = $this->exchangePositionSnapshot($client, $symbol);
         $markTiming('entryConfirmedSnapshotMs');
@@ -4476,17 +4507,40 @@ class FutureTradeBotService
         $closeKey = $logicalForClose?->signal_key ?: ('close-'.$symbol.'-'.substr((string) $config->id, 0, 8).'-'.(string) now()->timestamp);
         $closeClientOrderId = $this->stabilitySvc()->deterministicClientOrderId($closeKey, 'exit');
 
+        $orderPayload = [
+            'symbol' => $symbol,
+            'side' => $side,
+            'type' => 'MARKET',
+            'quantity' => $qty,
+            'reduceOnly' => 'true',
+            'newClientOrderId' => $closeClientOrderId,
+            'positionSide' => 'BOTH',
+        ];
+        $orderAudit = app(FutureTradeAuditService::class)->recordOrderRequest($config, $orderPayload, [
+            'source' => 'tradingview',
+            'positionSide' => $positionSide,
+            'leverage' => (float) ($settings['leverage'] ?? 3),
+            'marginType' => (string) ($settings['marginMode'] ?? 'isolated'),
+            'price' => $price,
+            'reason' => $reason,
+            'transport' => (string) ($settings['orderTransport'] ?? config('future_trade.order_router.transport', 'rest')),
+        ]);
+
         try {
-            $response = $client->placeOrder([
-                'symbol' => $symbol,
-                'side' => $side,
-                'type' => 'MARKET',
-                'quantity' => $qty,
-                'reduceOnly' => 'true',
-                'newClientOrderId' => $closeClientOrderId,
-                'positionSide' => 'BOTH',
+            $routed = app(FutureTradeOrderRouter::class)->place($config, $client, $orderPayload, [
+                'intent' => 'close',
+                'position_side' => $positionSide,
+                'reason' => $reason,
             ]);
+            $response = (array) $routed['response'];
+            $response['_autofinx_order_router'] = [
+                'transport' => $routed['transport'] ?? null,
+                'latency_ms' => $routed['latency_ms'] ?? null,
+                'trace_id' => $routed['trace_id'] ?? null,
+            ];
+            app(FutureTradeAuditService::class)->markOrderSuccess($orderAudit, $response);
         } catch (Throwable $e) {
+            app(FutureTradeAuditService::class)->markOrderFailed($orderAudit, $e);
             if ($this->isReduceOnlyRejected($e)) {
                 $resolution = $this->resolveRuntimeState($config, $client, $symbol, 'REDUCE_ONLY_REJECTED');
                 $this->log(
@@ -10260,6 +10314,7 @@ class FutureTradeBotService
         // even when no slow-path log was emitted.
         $this->cachePut('future_trade_last_webhook_latency:'.$config->workspace_id, $latency, 600);
         $response['latency'] = $latency;
+        app(FutureTradeAuditService::class)->markWebhookDecision($config, $signal, $response);
 
         return $response;
     }
@@ -10629,7 +10684,11 @@ class FutureTradeBotService
         $metaUpdate = [];
 
         try {
-            $slResponse = $client->placeReduceOnlyStopOrder($symbol, $closeSide, 'STOP_MARKET', $slPrice, $slClientId);
+            $routed = app(FutureTradeOrderRouter::class)->placeReduceOnlyStop($config, $client, $symbol, $closeSide, 'STOP_MARKET', $slPrice, $slClientId, 'MARK_PRICE', [
+                'intent' => 'stop_loss',
+                'position_side' => $positionSide,
+            ]);
+            $slResponse = (array) $routed['response'];
             $metaUpdate['sl_client_order_id'] = $slClientId;
             $metaUpdate['sl_exchange_order_id'] = (string) ($slResponse['orderId'] ?? '');
             $this->log($config->fresh('state'), 'EXCHANGE_SL_PLACED', $symbol, null, 0,
@@ -10641,7 +10700,11 @@ class FutureTradeBotService
         }
 
         try {
-            $tpResponse = $client->placeReduceOnlyStopOrder($symbol, $closeSide, 'TAKE_PROFIT_MARKET', $tpPrice, $tpClientId);
+            $routed = app(FutureTradeOrderRouter::class)->placeReduceOnlyStop($config, $client, $symbol, $closeSide, 'TAKE_PROFIT_MARKET', $tpPrice, $tpClientId, 'MARK_PRICE', [
+                'intent' => 'take_profit',
+                'position_side' => $positionSide,
+            ]);
+            $tpResponse = (array) $routed['response'];
             $metaUpdate['tp_client_order_id'] = $tpClientId;
             $metaUpdate['tp_exchange_order_id'] = (string) ($tpResponse['orderId'] ?? '');
             $this->log($config->fresh('state'), 'EXCHANGE_TP_PLACED', $symbol, null, 0,
@@ -10748,7 +10811,11 @@ class FutureTradeBotService
 
         // Place new trailed SL
         try {
-            $slResponse = $client->placeReduceOnlyStopOrder($symbol, $closeSide, 'STOP_MARKET', $newSlFmt, $newSlClientId);
+            $routed = app(FutureTradeOrderRouter::class)->placeReduceOnlyStop($config, $client, $symbol, $closeSide, 'STOP_MARKET', $newSlFmt, $newSlClientId, 'MARK_PRICE', [
+                'intent' => 'trailing_stop_update',
+                'position_side' => $positionSide,
+            ]);
+            $slResponse = (array) $routed['response'];
 
             $logical->update(['meta' => array_merge($meta, [
                 'sl_client_order_id' => $newSlClientId,

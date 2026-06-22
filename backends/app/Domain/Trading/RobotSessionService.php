@@ -4,6 +4,7 @@ namespace App\Domain\Trading;
 
 use App\Models\QuickTrade;
 use App\Models\RobotSession;
+use App\Domain\FutureTrade\FutureTradeAuditService;
 use Illuminate\Support\Str;
 use RuntimeException;
 
@@ -59,7 +60,7 @@ class RobotSessionService
             'max_active_trades' => (int) ($payload['max_active_trades'] ?? $config['max_active_trades'] ?? 2),
             'confidence_threshold' => (int) ($payload['confidence_threshold'] ?? $config['confidence_threshold'] ?? 60),
             'bot_mode' => in_array(($payload['bot_mode'] ?? 'timed_expiry'), ['candle_direction', 'timed_expiry'], true)
-                ? (string) $payload['bot_mode']
+                ? (string) ($payload['bot_mode'] ?? 'timed_expiry')
                 : 'timed_expiry',
             'stop_loss_pct' => round((float) ($payload['stop_loss_pct'] ?? 20.0), 4),
             'take_profit_pct' => isset($payload['take_profit_pct']) ? round((float) $payload['take_profit_pct'], 4) : null,
@@ -543,6 +544,45 @@ class RobotSessionService
         $decision = $this->candleBot->evaluateCandle($session, $candles);
         $latest = $candles[array_key_last($candles)];
         $closePrice = (float) ($latest['close'] ?? 0);
+        app(FutureTradeAuditService::class)->recordRobotDecision($session, $candles, $decision);
+
+        $totalLossLimit = $session->loss_limit !== null
+            ? abs((float) $session->loss_limit)
+            : (float) config('future_trade.robot.total_loss_limit_usdt', 0);
+        if ($totalLossLimit > 0) {
+            $unrealized = 0.0;
+            if ($session->active_side && (float) $session->active_entry_price > 0 && $closePrice > 0) {
+                $direction = strtoupper((string) $session->active_side) === 'SELL' ? -1 : 1;
+                $unrealized = ($closePrice - (float) $session->active_entry_price) * $direction * (float) $session->base_stake;
+            }
+            $totalLoss = max(0.0, -1 * ((float) $session->total_pnl + $unrealized));
+            if ($totalLoss >= $totalLossLimit && (bool) config('future_trade.robot.stop_after_total_loss', true)) {
+                if ($session->active_side) {
+                    try {
+                        $this->forceClose($session);
+                    } catch (\Throwable $e) {
+                        $session->last_error = 'ROBOT_STOPPED_TOTAL_LOSS close failed: '.$e->getMessage();
+                    }
+                }
+                $session->status = 'STOPPED';
+                $session->last_error = 'ROBOT_STOPPED_TOTAL_LOSS';
+                $session->runtime_json = array_merge((array) $session->runtime_json, [
+                    'total_loss_limit_hit' => true,
+                    'total_loss_limit_usdt' => $totalLossLimit,
+                    'total_loss_observed_usdt' => round($totalLoss, 8),
+                    'stopped_at' => now()->toIso8601String(),
+                ]);
+                $session->save();
+
+                return [
+                    'session_id' => $session->id,
+                    'status' => 'ROBOT_STOPPED_TOTAL_LOSS',
+                    'action' => 'stopped',
+                    'total_loss' => round($totalLoss, 8),
+                    'limit' => $totalLossLimit,
+                ];
+            }
+        }
 
         $session->last_signal_at = now();
 

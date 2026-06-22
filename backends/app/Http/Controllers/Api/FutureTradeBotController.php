@@ -4,15 +4,23 @@ namespace App\Http\Controllers\Api;
 
 use App\Domain\FutureTrade\FutureTradeBacktestEngine;
 use App\Domain\FutureTrade\FutureTradeBotService;
+use App\Domain\FutureTrade\FutureTradeRuntimeConnectivityService;
 use App\Domain\Market\FutureTradeLiveFeedManager;
 use App\Http\Controllers\Controller;
 use App\Jobs\ProcessPineWebhookSignalJob;
 use App\Models\FutureTradeBacktestRun;
+use App\Models\FutureTradeBotConfig;
+use App\Models\FutureTradeOrderAudit;
+use App\Models\FutureTradeWebhookAudit;
+use App\Models\RobotSession;
+use App\Models\RobotTradeAudit;
+use App\Models\SchedulerRun;
 use App\Models\WorkspaceMember;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Artisan;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Throwable;
 
@@ -44,6 +52,284 @@ class FutureTradeBotController extends Controller
         return $this->liveJson($this->bot->scannerSnapshotPayload($this->bot->getOrCreateConfig($workspace)));
     }
 
+    public function auditOverview(string $workspace): JsonResponse
+    {
+        $config = $this->bot->getOrCreateConfig($workspace);
+        $latestWebhook = FutureTradeWebhookAudit::query()->where('workspace_id', $workspace)->latest('received_at')->first();
+        $latestOrder = FutureTradeOrderAudit::query()->where('workspace_id', $workspace)->latest('order_request_at')->first();
+        $latestRobot = RobotTradeAudit::query()->where('workspace_id', $workspace)->latest()->first();
+        $robotSession = RobotSession::query()->where('workspace_id', $workspace)->latest('updated_at')->first();
+        $diagnostics = $this->bot->diagnosticsPayload($config->fresh('state'), false);
+        $runtime = app(FutureTradeRuntimeConnectivityService::class)->snapshot($config, $this->liveFeedManager);
+
+        $queueRows = collect(['execution', 'critical', 'reconcile', 'market', 'default'])->mapWithKeys(function (string $queue) {
+            try {
+                return [$queue => [
+                    'pending' => DB::getSchemaBuilder()->hasTable('jobs') ? DB::table('jobs')->where('queue', $queue)->count() : 0,
+                    'failed' => DB::getSchemaBuilder()->hasTable('failed_jobs') ? DB::table('failed_jobs')->where('queue', $queue)->count() : 0,
+                ]];
+            } catch (Throwable) {
+                return [$queue => ['pending' => null, 'failed' => null]];
+            }
+        })->all();
+
+        $timeline = collect()
+            ->merge(FutureTradeWebhookAudit::query()->where('workspace_id', $workspace)->latest('received_at')->limit(12)->get()->map(fn ($row) => [
+                'at' => optional($row->received_at)->toIso8601String(),
+                'type' => 'webhook',
+                'title' => trim(($row->normalized_signal ?: $row->signal ?: 'WEBHOOK').' '.($row->symbol ?: '')),
+                'state' => $row->validation_status === 'rejected' ? 'red' : ($row->decision === 'EXECUTE' ? 'green' : ($row->decision === 'WAIT' ? 'yellow' : 'gray')),
+                'reason' => $row->reject_reason ?: $row->decision_reason,
+                'latency_ms' => $row->total_latency_ms ?: $row->latency_from_bar_close_ms,
+            ]))
+            ->merge(FutureTradeOrderAudit::query()->where('workspace_id', $workspace)->latest('order_request_at')->limit(12)->get()->map(fn ($row) => [
+                'at' => optional($row->order_request_at)->toIso8601String(),
+                'type' => 'order',
+                'title' => trim(($row->side ?: 'ORDER').' '.($row->binance_symbol ?: '')),
+                'state' => $row->execution_status === 'FAILED' ? 'red' : ($row->execution_status === 'SUCCESS' ? 'green' : 'yellow'),
+                'reason' => $row->error_message ?: $row->execution_status,
+                'latency_ms' => null,
+            ]))
+            ->merge(RobotTradeAudit::query()->where('workspace_id', $workspace)->latest()->limit(12)->get()->map(fn ($row) => [
+                'at' => optional($row->created_at)->toIso8601String(),
+                'type' => 'robot',
+                'title' => trim(($row->robot_signal ?: 'WAIT').' '.($row->symbol ?: '')),
+                'state' => $row->noisy_candle ? 'yellow' : (in_array($row->robot_signal, ['BUY', 'SELL', 'CLOSE'], true) ? 'green' : 'gray'),
+                'reason' => $row->decision_reason,
+                'latency_ms' => null,
+            ]))
+            ->sortByDesc('at')
+            ->values()
+            ->take(30)
+            ->all();
+
+        $flows = [
+            'webhook' => $this->webhookFlow($latestWebhook),
+            'binance_brain' => $this->brainFlow($config, $diagnostics),
+            'robot' => $this->robotFlow($robotSession, $latestRobot),
+            'order_transport' => $this->orderTransportFlow($latestOrder, $runtime),
+            'server' => $this->serverFlow($diagnostics, $queueRows, $runtime),
+        ];
+        $report = $this->auditReport($flows, $diagnostics, $queueRows, $latestWebhook, $latestOrder, $latestRobot, $robotSession, $runtime);
+
+        return response()->json([
+            'generated_at' => now()->toIso8601String(),
+            'workspace_id' => $workspace,
+            'flows' => $flows,
+            'runtime' => $runtime,
+            'report' => $report,
+            'metrics' => [
+                'webhooks_24h' => FutureTradeWebhookAudit::query()->where('workspace_id', $workspace)->where('received_at', '>=', now()->subDay())->count(),
+                'webhook_rejects_24h' => FutureTradeWebhookAudit::query()->where('workspace_id', $workspace)->where('received_at', '>=', now()->subDay())->where('validation_status', 'rejected')->count(),
+                'orders_24h' => FutureTradeOrderAudit::query()->where('workspace_id', $workspace)->where('order_request_at', '>=', now()->subDay())->count(),
+                'order_failures_24h' => FutureTradeOrderAudit::query()->where('workspace_id', $workspace)->where('order_request_at', '>=', now()->subDay())->where('execution_status', 'FAILED')->count(),
+                'robot_decisions_24h' => RobotTradeAudit::query()->where('workspace_id', $workspace)->where('created_at', '>=', now()->subDay())->count(),
+            ],
+            'latest' => [
+                'webhook' => $latestWebhook,
+                'order' => $latestOrder,
+                'robot' => $latestRobot,
+                'robot_session' => $robotSession,
+            ],
+            'queues' => $queueRows,
+            'scheduler' => [
+                'latest_runs' => SchedulerRun::query()->latest('started_at')->limit(8)->get(),
+            ],
+            'timeline' => $timeline,
+            'actions' => [
+                'recover_future_trade' => "/api/v1/workspaces/{$workspace}/future-trade/runtime/recover",
+                'restart_live_feed' => "/api/v1/workspaces/{$workspace}/future-trade/live-feed/restart",
+                'restart_workers' => '/api/v1/jobs/restart-workers',
+                'retry_failed_jobs' => '/api/v1/jobs/failed/retry',
+                'reconcile_binance' => 'php artisan future-trade:reconcile-binance --workspace='.$workspace,
+            ],
+        ]);
+    }
+
+    public function tradingViewWebhook(Request $request): JsonResponse
+    {
+        $rawBody = (string) $request->getContent();
+        $decoded = $rawBody !== '' ? json_decode($rawBody, true) : null;
+        $payload = is_array($decoded) ? $decoded : $request->all();
+        $workspace = (string) (
+            $payload['workspace_id']
+            ?? $payload['workspace']
+            ?? $request->header('X-Workspace-Id')
+            ?? FutureTradeBotConfig::query()->value('workspace_id')
+            ?? ''
+        );
+
+        if ($workspace === '') {
+            return response()->json([
+                'accepted' => false,
+                'executed' => false,
+                'reason' => 'workspace_required',
+            ], 422);
+        }
+
+        $payload['source'] = 'pine_webhook';
+        $request->merge($payload);
+        $request->attributes->set('force_future_trade_source', 'pine_webhook');
+
+        return $this->pineWebhook($request, $workspace);
+    }
+
+    private function webhookFlow(?FutureTradeWebhookAudit $latest): array
+    {
+        return [
+            'title' => 'TradingView Webhook',
+            'enabled' => true,
+            'nodes' => [
+                $this->flowNode('tradingview_alert', 'TradingView alert', $latest ? 'green' : 'gray', $latest?->signal, optional($latest?->received_at)->toIso8601String(), null, 'soft', $latest ? 'Alert reached backend.' : 'Create a TradingView alert and send one test payload.'),
+                $this->flowNode('backend_received', 'Backend received', $latest ? 'green' : 'gray', $latest?->request_ip, optional($latest?->received_at)->toIso8601String(), $latest?->latency_from_bar_close_ms, 'soft', 'Check token, URL, internet, and Laravel logs if this stays empty.'),
+                $this->flowNode('validation', 'Validation', ! $latest ? 'gray' : ($latest->validation_status === 'rejected' ? 'red' : 'green'), $latest?->reject_reason ?: 'valid', null, null, $latest?->validation_status === 'rejected' ? 'hard' : 'none', $latest?->reject_reason ? 'Fix payload/token/symbol/timeframe/bar_confirmed and resend alert.' : 'Payload is accepted.'),
+                $this->flowNode('decision', 'Decision', ! $latest ? 'gray' : ($latest->decision === 'EXECUTE' ? 'green' : ($latest->decision === 'BLOCKED' ? 'red' : 'yellow')), $latest?->decision_reason, null, $latest?->total_latency_ms, $latest?->decision === 'BLOCKED' ? 'hard' : 'soft', 'Review duplicate, cooldown, risk, existing position, and live-mode gates.'),
+            ],
+        ];
+    }
+
+    private function brainFlow(FutureTradeBotConfig $config, array $diagnostics): array
+    {
+        $settings = $config->mergedSettings();
+        $mirrorLive = (bool) ($settings['primeMirrorLiveEnabled'] ?? config('future_trade.live.prime_mirror_enabled', false));
+        $source = (string) ($settings['signalSource'] ?? 'webhook');
+        $blockers = (array) ($diagnostics['botBlockers'] ?? []);
+
+        return [
+            'title' => 'Binance Brain / Mirror',
+            'enabled' => in_array($source, ['mirror', 'binance', 'webhook_fallback'], true),
+            'nodes' => [
+                $this->flowNode('market_data', 'Market data', data_get($diagnostics, 'tradeEligibility.decision') === 'blocked' ? 'red' : 'green', data_get($diagnostics, 'tradeEligibility.summary'), null, null, data_get($diagnostics, 'tradeEligibility.decision') === 'blocked' ? 'hard' : 'none', 'Restart live feed or run diagnostics if market data is stale.'),
+                $this->flowNode('scanner', 'Scanner decision', $blockers === [] ? 'green' : 'yellow', implode(', ', $blockers) ?: 'scanner ready', null, null, $blockers === [] ? 'none' : 'soft', 'Scanner blockers are diagnostic in webhook authority mode unless mirror live is enabled.'),
+                $this->flowNode('mirror_live_gate', 'Mirror live gate', $mirrorLive ? 'green' : 'yellow', $mirrorLive ? 'enabled' : 'prime_mirror_live_disabled_pending_tv_csv_validation', null, null, $mirrorLive ? 'none' : 'soft', 'Keep mirror live disabled until TradingView CSV validation passes.'),
+                $this->flowNode('execution_gate', 'Execution gate', $source === 'webhook' ? 'yellow' : 'green', 'signalSource='.$source, null, null, $source === 'webhook' ? 'soft' : 'none', 'Webhook mode executes TradingView alerts; scanner stays visible for comparison.'),
+            ],
+        ];
+    }
+
+    private function robotFlow(?RobotSession $session, ?RobotTradeAudit $latest): array
+    {
+        $status = strtoupper((string) ($session?->status ?? 'OFF'));
+
+        return [
+            'title' => 'Robot Candle Trade',
+            'enabled' => $session !== null,
+            'nodes' => [
+                $this->flowNode('robot_status', 'Robot status', $status === 'RUNNING' ? 'green' : ($status === 'STOPPED' ? 'red' : 'yellow'), $status, optional($session?->updated_at)->toIso8601String(), null, $status === 'STOPPED' ? 'hard' : 'soft', 'Restart robot only after checking stop reason and PnL limit.'),
+                $this->flowNode('candle_direction', 'Candle direction', $latest ? ($latest->noisy_candle ? 'yellow' : 'green') : 'gray', $latest?->candle_direction ?: 'no candle audit yet', optional($latest?->created_at)->toIso8601String(), null, $latest?->noisy_candle ? 'soft' : 'none', 'Noisy candles should WAIT; clear candles can open/close based on confidence.'),
+                $this->flowNode('robot_signal', 'Robot signal', ! $latest ? 'gray' : (in_array($latest->robot_signal, ['BUY', 'SELL', 'CLOSE'], true) ? 'green' : 'yellow'), $latest?->decision_reason ?: $latest?->robot_signal, null, null, in_array((string) $latest?->robot_signal, ['WAIT', 'HOLD'], true) ? 'soft' : 'none', 'WAIT is safe when confidence, cooldown, spread, or candle quality fails.'),
+                $this->flowNode('loss_guard', 'Loss guard', str_contains((string) ($session?->last_error ?? ''), 'LOSS') ? 'red' : 'green', $session?->last_error ?: 'within limits', null, null, str_contains((string) ($session?->last_error ?? ''), 'LOSS') ? 'hard' : 'none', 'If total loss hit, robot closes positions and blocks new entries.'),
+            ],
+        ];
+    }
+
+    private function orderTransportFlow(?FutureTradeOrderAudit $latestOrder, array $runtime): array
+    {
+        $requested = (string) data_get($runtime, 'order_router.requested_transport', 'rest');
+        $effective = (string) data_get($runtime, 'order_router.effective_transport', 'rest');
+        $wsEnabled = (bool) data_get($runtime, 'order_router.websocket_enabled', false);
+        $latestLatency = data_get($runtime, 'latency.latest.latency_ms');
+        $latestStatus = (string) data_get($runtime, 'latency.latest.status', '');
+        $userFresh = (bool) data_get($runtime, 'user_stream.fresh', false);
+
+        return [
+            'title' => 'Order Transport',
+            'enabled' => true,
+            'nodes' => [
+                $this->flowNode('transport_switch', 'Transport Switch', $effective === 'websocket' ? 'green' : 'yellow', "requested={$requested}, effective={$effective}", null, null, $effective === 'websocket' ? 'none' : 'soft', 'Use the UI switch to move Future Trade orders between REST and Binance WS API.'),
+                $this->flowNode('ws_session', 'WS API Session', $effective === 'websocket' && $wsEnabled ? 'green' : 'gray', $wsEnabled ? 'WS order endpoint enabled.' : 'WS order endpoint disabled; REST fallback active.', null, null, $wsEnabled ? 'none' : 'soft', 'Validate testnet endpoint, ping/pong, timeout, and reconnect behavior.'),
+                $this->flowNode('signed_order', 'Signed Order', $latestOrder ? 'green' : 'gray', $latestOrder?->request_payload ? 'latest order payload audited' : 'no order sent yet', optional($latestOrder?->order_request_at)->toIso8601String(), is_numeric($latestLatency) ? (int) $latestLatency : null, 'none', 'Every order includes timestamp, recvWindow, apiKey, and signature before sending.'),
+                $this->flowNode('binance_ack', 'Binance ACK', ! $latestOrder ? 'gray' : ($latestOrder->execution_status === 'FAILED' ? 'red' : 'green'), $latestOrder?->error_message ?: ($latestOrder?->execution_status ?: 'waiting for first ACK'), null, is_numeric($latestLatency) ? (int) $latestLatency : null, $latestOrder?->execution_status === 'FAILED' ? 'hard' : 'none', 'If ACK fails, inspect Binance error code and transport response payload.'),
+                $this->flowNode('user_stream_confirm', 'User Stream Confirm', $userFresh ? 'green' : 'yellow', 'fresh=' . ($userFresh ? 'yes' : 'no') . ', status=' . data_get($runtime, 'user_stream.status', 'unknown'), data_get($runtime, 'user_stream.lastHeartbeatAt'), null, $userFresh ? 'none' : 'soft', 'Order ACK is not final truth; user data stream should confirm fills/position updates.'),
+            ],
+        ];
+    }
+
+    private function serverFlow(array $diagnostics, array $queues, array $runtime): array
+    {
+        $queueFailed = collect($queues)->sum(fn ($row) => (int) ($row['failed'] ?? 0));
+        $queuePending = collect($queues)->sum(fn ($row) => (int) ($row['pending'] ?? 0));
+        $marketState = (string) data_get($runtime, 'market_stream.state', 'waiting');
+        $userState = (string) data_get($runtime, 'user_stream.state', 'waiting');
+        $routerTransport = (string) data_get($runtime, 'order_router.effective_transport', 'rest');
+        $latencyState = (string) data_get($runtime, 'latency.state', 'waiting');
+
+        return [
+            'title' => 'Server Runtime',
+            'enabled' => true,
+            'nodes' => [
+                $this->flowNode('market_stream', 'Market WS', $marketState === 'healthy' ? 'green' : ($marketState === 'warning' ? 'yellow' : 'red'), data_get($runtime, 'market_stream.message', 'market stream status unavailable'), data_get($runtime, 'market_stream.last_tick_at'), null, $marketState === 'blocked' ? 'hard' : ($marketState === 'warning' ? 'soft' : 'none'), 'Restart live feed or verify Binance websocket connectivity.'),
+                $this->flowNode('user_stream', 'User Stream', $userState === 'healthy' ? 'green' : ($userState === 'warning' ? 'yellow' : 'gray'), 'status='.data_get($runtime, 'user_stream.status', 'unknown').', fresh='.(data_get($runtime, 'user_stream.fresh') ? 'yes' : 'no'), data_get($runtime, 'user_stream.lastHeartbeatAt'), null, $userState === 'warning' ? 'soft' : 'none', 'Keep listenKey alive and reconnect user-data stream if it becomes stale.'),
+                $this->flowNode('order_router', 'Order Router', $routerTransport === 'websocket' ? 'green' : 'yellow', data_get($runtime, 'order_router.message', 'order router ready'), null, data_get($runtime, 'latency.latest.latency_ms'), $routerTransport === 'websocket' ? 'none' : 'soft', 'REST is safe; enable WS order transport only after testnet validation.'),
+                $this->flowNode('latency_engine', 'Latency Engine', $latencyState === 'healthy' ? 'green' : ($latencyState === 'warning' ? 'yellow' : ($latencyState === 'blocked' ? 'red' : 'gray')), data_get($runtime, 'latency.summary', 'No latency samples yet.'), data_get($runtime, 'latency.latest.finished_at'), data_get($runtime, 'latency.latest.latency_ms'), $latencyState === 'blocked' ? 'hard' : ($latencyState === 'warning' ? 'soft' : 'none'), 'Check order-router, queue, network, and Binance ACK times.'),
+                $this->flowNode('queue', 'Queue workers', $queueFailed > 0 ? 'red' : ($queuePending > 50 ? 'yellow' : 'green'), "pending {$queuePending}, failed {$queueFailed}", null, null, $queueFailed > 0 ? 'hard' : ($queuePending > 50 ? 'soft' : 'none'), 'Retry failed jobs, restart workers, or scale queue workers.'),
+                $this->flowNode('scheduler', 'Scheduler / cron', 'green', 'scheduler audit available', null, null, 'none', 'If commands stop updating, verify cron schedule:run and supervisor.'),
+            ],
+        ];
+    }
+
+    private function flowNode(string $key, string $label, string $state, ?string $detail = null, ?string $at = null, ?int $latencyMs = null, string $blockerType = 'none', ?string $nextAction = null): array
+    {
+        $retryable = in_array($key, ['backend_received', 'market_data', 'queue', 'scheduler', 'server', 'wallet'], true);
+
+        return compact('key', 'label', 'state', 'detail', 'at', 'latencyMs', 'blockerType', 'nextAction', 'retryable');
+    }
+
+    private function auditReport(array $flows, array $diagnostics, array $queues, ?FutureTradeWebhookAudit $latestWebhook, ?FutureTradeOrderAudit $latestOrder, ?RobotTradeAudit $latestRobot, ?RobotSession $robotSession, array $runtime): array
+    {
+        $nodes = collect($flows)->flatMap(fn (array $flow, string $flowKey) => collect($flow['nodes'] ?? [])->map(fn (array $node) => [
+            ...$node,
+            'flow' => $flowKey,
+        ]));
+        $hard = $nodes->where('state', 'red')->values();
+        $warnings = $nodes->where('state', 'yellow')->values();
+        $queueFailed = collect($queues)->sum(fn ($row) => (int) ($row['failed'] ?? 0));
+        $queuePending = collect($queues)->sum(fn ($row) => (int) ($row['pending'] ?? 0));
+
+        $summary = $hard->isNotEmpty()
+            ? 'Hard blocker found. Trade flow may stop at the red node until it is fixed.'
+            : ($warnings->isNotEmpty()
+                ? 'Flow is running with soft warnings. Trades may still work depending on the active method.'
+                : 'All visible audit lights are healthy.');
+
+        return [
+            'summary' => $summary,
+            'health' => [
+                'state' => $hard->isNotEmpty() ? 'blocked' : ($warnings->isNotEmpty() ? 'warning' : 'healthy'),
+                'hard_blocker_count' => $hard->count(),
+                'soft_warning_count' => $warnings->count(),
+                'queue_pending' => $queuePending,
+                'queue_failed' => $queueFailed,
+            ],
+            'hard_blockers' => $hard->all(),
+            'soft_warnings' => $warnings->all(),
+            'failover' => [
+                ['label' => 'TradingView primary', 'state' => $latestWebhook ? 'ready' : 'waiting', 'detail' => $latestWebhook ? 'Webhook audit row exists.' : 'No webhook received yet.'],
+                ['label' => 'Webhook fallback', 'state' => 'available', 'detail' => 'Backend scanner stays diagnostic while webhook authority is active.'],
+                ['label' => 'Market websocket', 'state' => (string) data_get($runtime, 'market_stream.state', 'waiting'), 'detail' => (string) data_get($runtime, 'market_stream.message', 'Market stream status unavailable.')],
+                ['label' => 'User data stream', 'state' => (string) data_get($runtime, 'user_stream.state', 'waiting'), 'detail' => 'Fresh='.(data_get($runtime, 'user_stream.fresh') ? 'yes' : 'no').', status='.(string) data_get($runtime, 'user_stream.status', 'unknown')],
+                ['label' => 'Order transport', 'state' => (string) data_get($runtime, 'order_router.effective_transport', 'rest'), 'detail' => (string) data_get($runtime, 'order_router.message', 'Order router status unavailable.')],
+                ['label' => 'Queue recovery', 'state' => $queueFailed > 0 ? 'needs_retry' : 'ready', 'detail' => $queueFailed > 0 ? 'Retry failed jobs and restart workers.' : 'No failed jobs in tracked queues.'],
+                ['label' => 'Binance reconcile', 'state' => 'available', 'detail' => 'Run reconcile when Binance position/order status looks different from local DB.'],
+                ['label' => 'Robot loss guard', 'state' => str_contains((string) ($robotSession?->last_error ?? ''), 'LOSS') ? 'stopped' : 'armed', 'detail' => $robotSession?->last_error ?: 'Total and daily loss guards are active.'],
+            ],
+            'operator_actions' => [
+                'red_node' => 'Fix the red node first; it is a hard stop for that flow.',
+                'yellow_node' => 'Yellow is a warning or diagnostic gate; verify before enabling live execution.',
+                'failed_order' => $latestOrder?->execution_status === 'FAILED' ? ($latestOrder->error_message ?: 'Check Binance error payload.') : 'No latest failed order.',
+                'latest_robot' => $latestRobot?->decision_reason ?: 'No robot decision audit yet.',
+                'diagnostics' => data_get($diagnostics, 'summary'),
+                'latency' => data_get($runtime, 'latency.summary'),
+            ],
+            'raw_refs' => [
+                'latest_webhook_id' => $latestWebhook?->id,
+                'latest_order_id' => $latestOrder?->id,
+                'latest_robot_audit_id' => $latestRobot?->id,
+                'robot_session_id' => $robotSession?->id,
+            ],
+        ];
+    }
+
     public function pineWebhook(Request $request, string $workspace): JsonResponse
     {
         // Primary slot 0 always exists — used for token validation, raw audit
@@ -53,6 +339,9 @@ class FutureTradeBotController extends Controller
         $rawBody = (string) $request->getContent();
         $decoded = $rawBody !== '' ? json_decode($rawBody, true) : null;
         $payload = is_array($decoded) ? $decoded : $request->all();
+        if ($request->attributes->get('force_future_trade_source')) {
+            $payload['source'] = (string) $request->attributes->get('force_future_trade_source');
+        }
         $providedTokens = array_filter(array_map(
             static fn ($token): string => trim((string) $token),
             [

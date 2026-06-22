@@ -30,11 +30,28 @@ return [
         'ban_cooldown_seconds' => max(60, (int) env('BINANCE_REST_BAN_COOLDOWN_SECONDS', 3600)),
         'recv_window_ms' => max(5000, min(60000, (int) env('BINANCE_FUTURES_RECV_WINDOW', 15000))),
     ],
+    'order_router' => [
+        'transport' => env('FUTURE_TRADE_ORDER_TRANSPORT', 'rest'),
+        'websocket_enabled' => filter_var(env('FUTURE_TRADE_ORDER_WEBSOCKET_ENABLED', false), FILTER_VALIDATE_BOOL),
+        'websocket_timeout_seconds' => max(3, min(30, (int) env('FUTURE_TRADE_ORDER_WEBSOCKET_TIMEOUT_SECONDS', 8))),
+    ],
     'live_max_open_positions' => max(1, min(5, (int) env('FUTURE_TRADE_LIVE_MAX_OPEN_POSITIONS', 1))),
     'webhook_fallback_enabled' => env('FUTURE_TRADE_WEBHOOK_FALLBACK_ENABLED', false),
     'webhook_risk_overrides' => env('FUTURE_TRADE_WEBHOOK_RISK_OVERRIDES', false),
     'atr_dynamic_risk_targets' => env('FUTURE_TRADE_ATR_DYNAMIC_RISK_TARGETS', false),
     'confirmed_candle_only' => env('FUTURE_TRADE_CONFIRMED_CANDLE_ONLY', true),
+    'robot' => [
+        'allow_reverse' => filter_var(env('ROBOT_ALLOW_REVERSE', true), FILTER_VALIDATE_BOOL),
+        'reverse_min_confidence' => (float) env('ROBOT_REVERSE_MIN_CONFIDENCE', 0.70),
+        'total_loss_limit_usdt' => (float) env('ROBOT_TOTAL_LOSS_LIMIT_USDT', 10),
+        'daily_loss_limit_usdt' => (float) env('ROBOT_DAILY_LOSS_LIMIT_USDT', 10),
+        'per_trade_max_loss_usdt' => (float) env('ROBOT_PER_TRADE_MAX_LOSS_USDT', 2),
+        'stop_after_total_loss' => filter_var(env('ROBOT_STOP_AFTER_TOTAL_LOSS', true), FILTER_VALIDATE_BOOL),
+        'take_profit_percent' => (float) env('ROBOT_TAKE_PROFIT_PERCENT', 0.5),
+        'stop_loss_percent' => (float) env('ROBOT_STOP_LOSS_PERCENT', 0.25),
+        'trailing_profit_percent' => (float) env('ROBOT_TRAILING_PROFIT_PERCENT', 0.18),
+        'min_profit_to_close_usdt' => (float) env('ROBOT_MIN_PROFIT_TO_CLOSE_USDT', 0.20),
+    ],
 
     // Permissive symbol mode (default true): when on, any incoming Pine webhook
     // symbol that matches the Binance-futures pattern `<TICKER>USDT|USDC` is
