@@ -104,7 +104,7 @@ class FutureTradeBotController extends Controller
             ->all();
 
         $flows = [
-            'webhook' => $this->webhookFlow($latestWebhook),
+            'webhook' => $this->webhookFlow($latestWebhook, $diagnostics),
             'binance_brain' => $this->brainFlow($config, $diagnostics),
             'robot' => $this->robotFlow($robotSession, $latestRobot),
             'order_transport' => $this->orderTransportFlow($latestOrder, $runtime),
@@ -174,8 +174,33 @@ class FutureTradeBotController extends Controller
         return $this->pineWebhook($request, $workspace);
     }
 
-    private function webhookFlow(?FutureTradeWebhookAudit $latest): array
+    private function webhookFlow(?FutureTradeWebhookAudit $latest, array $diagnostics): array
     {
+        $activeBlockers = array_map('strval', (array) data_get($diagnostics, 'tradeEligibility.blockers', []));
+        $decisionReason = (string) ($latest?->decision_reason ?? '');
+        $isHistoricalDuplicate = $latest?->decision === 'BLOCKED'
+            && str_contains($decisionReason, 'duplicate_live_position_exchange')
+            && ! in_array('duplicate_live_position_exchange', $activeBlockers, true);
+
+        $decisionState = 'gray';
+        $decisionBlocker = 'soft';
+        $decisionNextAction = 'Review duplicate, cooldown, risk, existing position, and live-mode gates.';
+
+        if ($latest) {
+            $decisionState = match ($latest->decision) {
+                'EXECUTE' => 'green',
+                'BLOCKED' => $isHistoricalDuplicate ? 'yellow' : 'red',
+                default => 'yellow',
+            };
+            $decisionBlocker = $latest->decision === 'BLOCKED' && ! $isHistoricalDuplicate ? 'hard' : 'soft';
+            $decisionNextAction = $isHistoricalDuplicate
+                ? 'Historical duplicate decision only. Send a fresh BUY/SELL alert or run reconcile if it appears again.'
+                : $decisionNextAction;
+            $decisionReason = $isHistoricalDuplicate
+                ? $decisionReason.' (historical only; current state is clear)'
+                : $decisionReason;
+        }
+
         return [
             'title' => 'TradingView Webhook',
             'enabled' => true,
@@ -183,7 +208,7 @@ class FutureTradeBotController extends Controller
                 $this->flowNode('tradingview_alert', 'TradingView alert', $latest ? 'green' : 'gray', $latest?->signal, optional($latest?->received_at)->toIso8601String(), null, 'soft', $latest ? 'Alert reached backend.' : 'Create a TradingView alert and send one test payload.'),
                 $this->flowNode('backend_received', 'Backend received', $latest ? 'green' : 'gray', $latest?->request_ip, optional($latest?->received_at)->toIso8601String(), $latest?->latency_from_bar_close_ms, 'soft', 'Check token, URL, internet, and Laravel logs if this stays empty.'),
                 $this->flowNode('validation', 'Validation', ! $latest ? 'gray' : ($latest->validation_status === 'rejected' ? 'red' : 'green'), $latest?->reject_reason ?: 'valid', null, null, $latest?->validation_status === 'rejected' ? 'hard' : 'none', $latest?->reject_reason ? 'Fix payload/token/symbol/timeframe/bar_confirmed and resend alert.' : 'Payload is accepted.'),
-                $this->flowNode('decision', 'Decision', ! $latest ? 'gray' : ($latest->decision === 'EXECUTE' ? 'green' : ($latest->decision === 'BLOCKED' ? 'red' : 'yellow')), $latest?->decision_reason, null, $latest?->total_latency_ms, $latest?->decision === 'BLOCKED' ? 'hard' : 'soft', 'Review duplicate, cooldown, risk, existing position, and live-mode gates.'),
+                $this->flowNode('decision', 'Decision', $decisionState, $decisionReason ?: null, null, $latest?->total_latency_ms, $decisionBlocker, $decisionNextAction),
             ],
         ];
     }
