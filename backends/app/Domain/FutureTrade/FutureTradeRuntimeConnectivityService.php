@@ -19,6 +19,7 @@ class FutureTradeRuntimeConnectivityService
     {
         $market = $liveFeedManager->status((string) $config->workspace_id);
         $heartbeat = $this->marketHeartbeat();
+        $heartbeatFresh = (string) ($heartbeat['state'] ?? '') === 'healthy';
         $userStream = $this->userStream->snapshot($config);
         $latency = $this->latency->summary((string) $config->workspace_id);
         $settings = $config->mergedSettings();
@@ -32,13 +33,17 @@ class FutureTradeRuntimeConnectivityService
 
         return [
             'market_stream' => [
-                'state' => ($market['feedFresh'] ?? false) ? 'healthy' : (($market['running'] ?? false) ? 'warning' : 'blocked'),
-                'fresh' => (bool) ($market['feedFresh'] ?? false),
-                'running' => (bool) ($market['running'] ?? false),
-                'mode' => $market['mode'] ?? null,
-                'last_tick_at' => $market['lastTickAt'] ?? null,
-                'age_seconds' => $market['feedAgeSeconds'] ?? null,
-                'message' => $market['message'] ?? null,
+                'state' => ($market['feedFresh'] ?? false) || $heartbeatFresh
+                    ? 'healthy'
+                    : (($market['running'] ?? false) || ($heartbeat['state'] ?? null) === 'warning' ? 'warning' : 'blocked'),
+                'fresh' => (bool) (($market['feedFresh'] ?? false) || $heartbeatFresh),
+                'running' => (bool) (($market['running'] ?? false) || $heartbeatFresh),
+                'mode' => $heartbeatFresh ? 'TRUE_WEBSOCKET_HEARTBEAT_LIVE' : ($market['mode'] ?? null),
+                'last_tick_at' => $heartbeat['last_message_at'] ?? $market['lastTickAt'] ?? null,
+                'age_seconds' => $heartbeat['age_seconds'] ?? $market['feedAgeSeconds'] ?? null,
+                'message' => $heartbeatFresh
+                    ? 'Shared futures websocket feed is live by supervisor heartbeat.'
+                    : ($market['message'] ?? $heartbeat['message'] ?? null),
                 'heartbeat' => $heartbeat,
             ],
             'user_stream' => [
