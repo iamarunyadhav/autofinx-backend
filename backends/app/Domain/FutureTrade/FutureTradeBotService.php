@@ -4681,7 +4681,7 @@ class FutureTradeBotService
                 'state' => 'LIVE_IN_POSITION',
                 'status' => 'Running',
                 'current_signal' => 'LIVE_CLOSE_SUBMITTED',
-                'connection_status' => 'Waiting for Binance close confirmation',
+                'connection_status' => 'Close confirmation pending',
             ]);
         }
         $this->log(
@@ -9978,6 +9978,10 @@ class FutureTradeBotService
 
     private function persistState(FutureTradeBotState $state, array $attributes): void
     {
+        if (isset($attributes['connection_status']) && is_string($attributes['connection_status'])) {
+            $attributes['connection_status'] = mb_substr($attributes['connection_status'], 0, 32);
+        }
+
         if ($state->exists) {
             $state->update($attributes);
 
