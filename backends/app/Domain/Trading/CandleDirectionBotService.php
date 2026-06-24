@@ -39,7 +39,7 @@ class CandleDirectionBotService
 
         // No open position -> look for an entry.
         if (! $session->active_side) {
-            if ($this->isNoisyCandle($latest)) {
+            if ($this->isNoisyCandle($latest) && ! $this->isNoisyTrendContinuation($candles)) {
                 return [
                     'action' => 'HOLD',
                     'reason' => 'noisy_candle_filtered',
@@ -186,6 +186,45 @@ class CandleDirectionBotService
             && $upperWickRatio > 0.30
             && $lowerWickRatio > 0.30
             && $volume > 0;
+    }
+
+    private function isNoisyTrendContinuation(array $candles): bool
+    {
+        if (count($candles) < 4) {
+            return false;
+        }
+
+        $recent = array_slice($candles, -4);
+        $latestDirection = $this->candleDirection($recent[array_key_last($recent)]);
+        if (! in_array($latestDirection, ['BUY', 'SELL'], true)) {
+            return false;
+        }
+
+        $sameDirection = 0;
+        $oppositeDirection = 0;
+        foreach ($recent as $candle) {
+            $direction = $this->candleDirection($candle);
+            if ($direction === $latestDirection) {
+                $sameDirection++;
+            } elseif (in_array($direction, ['BUY', 'SELL'], true)) {
+                $oppositeDirection++;
+            }
+        }
+
+        $first = $recent[0];
+        $last = $recent[array_key_last($recent)];
+        $start = (float) ($first['open'] ?? ($first['close'] ?? 0));
+        $end = (float) ($last['close'] ?? 0);
+        if ($start <= 0 || $end <= 0) {
+            return false;
+        }
+
+        $movePct = (($end - $start) / $start) * 100;
+        $alignedMove = $latestDirection === 'BUY'
+            ? $movePct >= 0.08
+            : $movePct <= -0.08;
+
+        return $sameDirection >= 3 && $oppositeDirection === 0 && $alignedMove;
     }
 
     /**
