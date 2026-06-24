@@ -85,9 +85,12 @@ class CandleDirectionBotService
         // Position open -> manage trailing stop / take profit.
         $side = (string) $session->active_side;
         $entry = (float) $session->active_entry_price;
+        $highPrice = (float) ($latest['high'] ?? $closePrice);
+        $lowPrice = (float) ($latest['low'] ?? $closePrice);
+        $bestPrice = strtoupper($side) === 'SELL' ? $lowPrice : $highPrice;
 
-        // Peak favourable excursion = best of stored peak and the current move.
-        $currentExcursion = $this->favourableExcursion($side, $entry, $closePrice);
+        // Peak favourable excursion uses the candle's best intrabar price.
+        $currentExcursion = $this->favourableExcursion($side, $entry, $bestPrice);
         $peakExcursion = max((float) $session->peak_profit, $currentExcursion);
 
         $stopPrice = $this->computeTrailingStop($entry, $peakExcursion, (float) $session->stop_loss_pct, $side);
@@ -95,14 +98,24 @@ class CandleDirectionBotService
         // Optional fixed take-profit.
         if ($session->take_profit_pct !== null) {
             $tpPrice = $this->takeProfitPrice($side, $entry, (float) $session->take_profit_pct);
-            if ($this->priceReached($side, $closePrice, $tpPrice, true)) {
+            $tpCheckPrice = strtoupper($side) === 'SELL' ? $lowPrice : $highPrice;
+            if ($this->priceReached($side, $tpCheckPrice, $tpPrice, true)) {
                 return [
                     'action' => 'CLOSE',
-                    'reason' => sprintf('Take profit hit at %s (target %s).', $closePrice, $tpPrice),
+                    'reason' => sprintf('Take profit hit at %s (target %s).', $tpCheckPrice, $tpPrice),
                     'confidence' => 1.0,
                     'stop_price' => $stopPrice,
                 ];
             }
+        }
+
+        if ($this->trailingStopBreachedIntrabar($side, $latest, $stopPrice)) {
+            return [
+                'action' => 'CLOSE',
+                'reason' => sprintf('Trailing stop breached intrabar (stop %s, peak excursion %s).', $stopPrice, $peakExcursion),
+                'confidence' => 1.0,
+                'stop_price' => $stopPrice,
+            ];
         }
 
         // Fast exit: the moment a candle closes against our position, get out.
@@ -254,6 +267,21 @@ class CandleDirectionBotService
         }
 
         return $close < $stopPrice;
+    }
+
+    private function trailingStopBreachedIntrabar(string $side, array $candle, float $stopPrice): bool
+    {
+        $side = strtoupper($side);
+        $high = (float) ($candle['high'] ?? ($candle['close'] ?? 0));
+        $low = (float) ($candle['low'] ?? ($candle['close'] ?? 0));
+
+        if ($stopPrice <= 0 || $high <= 0 || $low <= 0) {
+            return false;
+        }
+
+        return $side === 'SELL'
+            ? $high >= $stopPrice
+            : $low <= $stopPrice;
     }
 
     /**

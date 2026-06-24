@@ -782,7 +782,11 @@ class RobotSessionService
         // HOLD: keep peak excursion fresh while in a position.
         if ($session->active_side) {
             $entry = (float) $session->active_entry_price;
-            $excursion = $this->candleBot->favourableExcursion((string) $session->active_side, $entry, $closePrice);
+            $side = strtoupper((string) $session->active_side);
+            $bestPrice = $side === 'SELL'
+                ? (float) ($latest['low'] ?? $closePrice)
+                : (float) ($latest['high'] ?? $closePrice);
+            $excursion = $this->candleBot->favourableExcursion($side, $entry, $bestPrice);
             $session->peak_profit = max((float) $session->peak_profit, $excursion);
         }
         $session->save();
