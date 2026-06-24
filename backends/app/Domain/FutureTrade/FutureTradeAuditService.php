@@ -81,6 +81,7 @@ class FutureTradeAuditService
 
         $audit->update([
             'validation_status' => 'validated',
+            'reject_reason' => null,
             'decision' => $decision,
             'decision_reason' => (string) ($response['reason'] ?? $response['blockReason'] ?? $execution ?: 'webhook_processed'),
             'total_latency_ms' => (int) data_get($response, 'latency.totalMs', 0) ?: null,
