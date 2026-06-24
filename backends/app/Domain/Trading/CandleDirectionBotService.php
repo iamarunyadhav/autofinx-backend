@@ -85,9 +85,7 @@ class CandleDirectionBotService
         // Position open -> manage trailing stop / take profit.
         $side = (string) $session->active_side;
         $entry = (float) $session->active_entry_price;
-        $highPrice = (float) ($latest['high'] ?? $closePrice);
-        $lowPrice = (float) ($latest['low'] ?? $closePrice);
-        $bestPrice = strtoupper($side) === 'SELL' ? $lowPrice : $highPrice;
+        $bestPrice = $this->bestIntrabarPrice($side, $entry, $latest);
 
         // Peak favourable excursion uses the candle's best intrabar price.
         $currentExcursion = $this->favourableExcursion($side, $entry, $bestPrice);
@@ -98,7 +96,7 @@ class CandleDirectionBotService
         // Optional fixed take-profit.
         if ($session->take_profit_pct !== null) {
             $tpPrice = $this->takeProfitPrice($side, $entry, (float) $session->take_profit_pct);
-            $tpCheckPrice = strtoupper($side) === 'SELL' ? $lowPrice : $highPrice;
+            $tpCheckPrice = $bestPrice;
             if ($this->priceReached($side, $tpCheckPrice, $tpPrice, true)) {
                 return [
                     'action' => 'CLOSE',
@@ -109,7 +107,7 @@ class CandleDirectionBotService
             }
         }
 
-        if ($this->trailingStopBreachedIntrabar($side, $latest, $stopPrice)) {
+        if ($this->trailingStopBreachedIntrabar($side, $latest, $stopPrice, $entry)) {
             return [
                 'action' => 'CLOSE',
                 'reason' => sprintf('Trailing stop breached intrabar (stop %s, peak excursion %s).', $stopPrice, $peakExcursion),
@@ -269,14 +267,45 @@ class CandleDirectionBotService
         return $close < $stopPrice;
     }
 
-    private function trailingStopBreachedIntrabar(string $side, array $candle, float $stopPrice): bool
+    public function bestIntrabarPrice(string $side, float $entryPrice, array $candle): float
+    {
+        $side = strtoupper($side);
+        $close = (float) ($candle['close'] ?? 0);
+        $high = (float) ($candle['high'] ?? $close);
+        $low = (float) ($candle['low'] ?? $close);
+        $candidate = $side === 'SELL' ? $low : $high;
+
+        if ($candidate <= 0 || $close <= 0 || $entryPrice <= 0) {
+            return $close;
+        }
+
+        $maxIntrabarMovePercent = 2.0;
+        $moveFromClose = abs($candidate - $close) / $close * 100;
+        $moveFromEntry = abs($candidate - $entryPrice) / $entryPrice * 100;
+        if ($moveFromClose > $maxIntrabarMovePercent || $moveFromEntry > $maxIntrabarMovePercent) {
+            return $close;
+        }
+
+        return $candidate;
+    }
+
+    private function trailingStopBreachedIntrabar(string $side, array $candle, float $stopPrice, float $entryPrice): bool
     {
         $side = strtoupper($side);
         $high = (float) ($candle['high'] ?? ($candle['close'] ?? 0));
         $low = (float) ($candle['low'] ?? ($candle['close'] ?? 0));
+        $close = (float) ($candle['close'] ?? 0);
 
-        if ($stopPrice <= 0 || $high <= 0 || $low <= 0) {
+        if ($stopPrice <= 0 || $high <= 0 || $low <= 0 || $close <= 0 || $entryPrice <= 0) {
             return false;
+        }
+
+        $maxIntrabarMovePercent = 2.0;
+        if (abs($high - $close) / $close * 100 > $maxIntrabarMovePercent || abs($high - $entryPrice) / $entryPrice * 100 > $maxIntrabarMovePercent) {
+            $high = $close;
+        }
+        if (abs($low - $close) / $close * 100 > $maxIntrabarMovePercent || abs($low - $entryPrice) / $entryPrice * 100 > $maxIntrabarMovePercent) {
+            $low = $close;
         }
 
         return $side === 'SELL'

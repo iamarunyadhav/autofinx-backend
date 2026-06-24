@@ -783,9 +783,7 @@ class RobotSessionService
         if ($session->active_side) {
             $entry = (float) $session->active_entry_price;
             $side = strtoupper((string) $session->active_side);
-            $bestPrice = $side === 'SELL'
-                ? (float) ($latest['low'] ?? $closePrice)
-                : (float) ($latest['high'] ?? $closePrice);
+            $bestPrice = $this->candleBot->bestIntrabarPrice($side, $entry, $latest);
             $excursion = $this->candleBot->favourableExcursion($side, $entry, $bestPrice);
             $session->peak_profit = max((float) $session->peak_profit, $excursion);
         }
