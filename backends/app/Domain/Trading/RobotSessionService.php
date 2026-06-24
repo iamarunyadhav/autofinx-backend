@@ -537,6 +537,20 @@ class RobotSessionService
                     'last_evaluation_at' => now()->toIso8601String(),
                 ]);
                 $session->save();
+                app(FutureTradeAuditService::class)->recordRobotDecision($session, $candles, [
+                    'action' => 'HOLD',
+                    'reason' => $volatility['reason'],
+                    'confidence' => 0.0,
+                    'pattern' => 'volatility_block',
+                    'signal' => [
+                        'side' => 'NEUTRAL',
+                        'confidence' => 0.0,
+                        'pattern' => 'volatility_block',
+                        'noisy_candle' => false,
+                        'reasons' => [$volatility['reason']],
+                    ],
+                ]);
+
                 return ['session_id' => $session->id, 'status' => 'volatility_block', 'action' => 'skipped', 'reason' => $volatility['reason']];
             }
         }
@@ -886,7 +900,8 @@ class RobotSessionService
 
         // ATR (14 periods, True Range)
         $trValues = [];
-        for ($i = 1; $i < count($candles) && $i <= 14; $i++) {
+        $start = max(1, count($candles) - 14);
+        for ($i = $start; $i < count($candles); $i++) {
             $trValues[] = max(
                 (float) $highs[$i] - (float) $lows[$i],
                 abs((float) $highs[$i] - (float) $closes[$i - 1]),
