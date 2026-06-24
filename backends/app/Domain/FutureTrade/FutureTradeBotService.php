@@ -3345,6 +3345,26 @@ class FutureTradeBotService
 
             return 'confidence_below_threshold';
         }
+        if ($lateEntryBlock = $this->lateEntryChaseGuard($config, $signal, $settings)) {
+            $reason = (string) ($lateEntryBlock['code'] ?? 'late_entry_chase_guard');
+            $this->recordMissedTradeAudit($config, $signal, $dynamic, [$reason]);
+            $this->emitTradeDecisionDebug($config, $signal, $dynamic, 'BLOCKED', [$reason]);
+            $this->logThrottled(
+                $config,
+                'SIGNAL_SKIPPED',
+                $signal['symbol'],
+                $signal['signal'],
+                (float) ($signal['confidence'] ?? 0),
+                (string) ($lateEntryBlock['message'] ?? 'Late entry chase guard blocked execution.'),
+                $this->runtimeContext($dynamic, [
+                    'status' => 'SKIPPED',
+                    'antiChase' => $lateEntryBlock['context'] ?? null,
+                ], $signal, [$reason]),
+                45
+            );
+
+            return $reason;
+        }
         if (
             $strictEntryGuards
             && (
@@ -6467,6 +6487,97 @@ class FutureTradeBotService
         return round(100 - (100 / (1 + $avgGain / $avgLoss)), 2);
     }
 
+    private function lateEntryChaseGuard(FutureTradeBotConfig $config, array $signal, array $settings): ?array
+    {
+        if (! filter_var($settings['antiChaseGuardEnabled'] ?? true, FILTER_VALIDATE_BOOLEAN)) {
+            return null;
+        }
+
+        $side = strtoupper((string) ($signal['signal'] ?? ''));
+        $symbol = strtoupper((string) ($signal['symbol'] ?? ''));
+        if (! in_array($side, ['BUY', 'SELL'], true) || $symbol === '') {
+            return null;
+        }
+
+        $timeframe = strtolower((string) ($signal['timeframe'] ?? ($settings['timeframe'] ?? '15m')));
+        $lookback = max(2, min(8, (int) ($settings['antiChaseLookbackCandles'] ?? 3)));
+        $candles = $this->cachedOhlcCandles($symbol, $timeframe, max(30, $lookback + 20));
+        if (count($candles) < max(18, $lookback + 2)) {
+            return null;
+        }
+
+        $closes = array_values(array_filter(
+            array_map(static fn (array $row): float => (float) ($row['close'] ?? 0), $candles),
+            static fn (float $close): bool => $close > 0
+        ));
+        if (count($closes) < 15) {
+            return null;
+        }
+
+        $rsi = $this->calcRsi($closes, (int) ($settings['antiChaseRsiLength'] ?? 14));
+        $recentCandles = array_slice($candles, -$lookback);
+        $first = $recentCandles[0] ?? [];
+        $last = $recentCandles[count($recentCandles) - 1] ?? [];
+        $startPrice = (float) ($first['open'] ?? ($first['close'] ?? 0));
+        $endPrice = (float) ($signal['price'] ?? ($last['close'] ?? 0));
+        if ($startPrice <= 0 || $endPrice <= 0) {
+            return null;
+        }
+
+        $movePercent = (($endPrice - $startPrice) / $startPrice) * 100;
+        $maxMove = max(0.1, (float) ($settings['antiChaseMaxMovePercent'] ?? 1.2));
+        $shortRsiFloor = (float) ($settings['antiChaseShortRsiFloor'] ?? 35.0);
+        $longRsiCeiling = (float) ($settings['antiChaseLongRsiCeiling'] ?? 65.0);
+        $context = [
+            'enabled' => true,
+            'symbol' => $symbol,
+            'side' => $side,
+            'timeframe' => $timeframe,
+            'lookbackCandles' => $lookback,
+            'movePercent' => round($movePercent, 4),
+            'maxMovePercent' => $maxMove,
+            'rsi' => round($rsi, 2),
+            'shortRsiFloor' => $shortRsiFloor,
+            'longRsiCeiling' => $longRsiCeiling,
+            'startPrice' => round($startPrice, 8),
+            'endPrice' => round($endPrice, 8),
+        ];
+
+        if ($side === 'SELL' && $rsi <= $shortRsiFloor) {
+            return [
+                'code' => 'late_short_oversold_rsi',
+                'message' => sprintf('Late short blocked: RSI %.2f is already oversold (<= %.2f).', $rsi, $shortRsiFloor),
+                'context' => $context,
+            ];
+        }
+
+        if ($side === 'BUY' && $rsi >= $longRsiCeiling) {
+            return [
+                'code' => 'late_long_overbought_rsi',
+                'message' => sprintf('Late long blocked: RSI %.2f is already overbought (>= %.2f).', $rsi, $longRsiCeiling),
+                'context' => $context,
+            ];
+        }
+
+        if ($side === 'SELL' && $movePercent <= -$maxMove) {
+            return [
+                'code' => 'late_short_extended_drop',
+                'message' => sprintf('Late short blocked: price already dropped %.2f%% over the last %d candles.', abs($movePercent), $lookback),
+                'context' => $context,
+            ];
+        }
+
+        if ($side === 'BUY' && $movePercent >= $maxMove) {
+            return [
+                'code' => 'late_long_extended_rally',
+                'message' => sprintf('Late long blocked: price already rallied %.2f%% over the last %d candles.', $movePercent, $lookback),
+                'context' => $context,
+            ];
+        }
+
+        return null;
+    }
+
     private function calcAtr(array $highs, array $lows, array $closes, int $period = 14): float
     {
         if (count($closes) < $period + 1 || count($highs) !== count($closes) || count($lows) !== count($closes)) {
@@ -7492,6 +7603,12 @@ class FutureTradeBotService
                 'useWebhookRiskOverrides' => false,
                 'useAtrRiskTargets' => false,
                 'confirmedCandleOnly' => true,
+                'antiChaseGuardEnabled' => true,
+                'antiChaseLookbackCandles' => 3,
+                'antiChaseMaxMovePercent' => 1.2,
+                'antiChaseRsiLength' => 14,
+                'antiChaseShortRsiFloor' => 35.0,
+                'antiChaseLongRsiCeiling' => 65.0,
                 'restrictToWorkspaceSymbols' => false,
                 'permissiveSymbolMode' => config('future_trade.permissive_symbol_mode', true),
                 'reversalMode' => 'close_only',
@@ -7537,6 +7654,12 @@ class FutureTradeBotService
             $settings['useWebhookRiskOverrides'] = filter_var($settings['useWebhookRiskOverrides'] ?? config('future_trade.webhook_risk_overrides', false), FILTER_VALIDATE_BOOLEAN);
             $settings['useAtrRiskTargets'] = filter_var($settings['useAtrRiskTargets'] ?? config('future_trade.atr_dynamic_risk_targets', false), FILTER_VALIDATE_BOOLEAN);
             $settings['confirmedCandleOnly'] = filter_var($settings['confirmedCandleOnly'] ?? config('future_trade.confirmed_candle_only', true), FILTER_VALIDATE_BOOLEAN);
+            $settings['antiChaseGuardEnabled'] = filter_var($settings['antiChaseGuardEnabled'] ?? true, FILTER_VALIDATE_BOOLEAN);
+            $settings['antiChaseLookbackCandles'] = max(2, min(8, (int) ($settings['antiChaseLookbackCandles'] ?? 3)));
+            $settings['antiChaseMaxMovePercent'] = max(0.1, min(5.0, (float) ($settings['antiChaseMaxMovePercent'] ?? 1.2)));
+            $settings['antiChaseRsiLength'] = max(5, min(30, (int) ($settings['antiChaseRsiLength'] ?? 14)));
+            $settings['antiChaseShortRsiFloor'] = max(5.0, min(50.0, (float) ($settings['antiChaseShortRsiFloor'] ?? 35.0)));
+            $settings['antiChaseLongRsiCeiling'] = max(50.0, min(95.0, (float) ($settings['antiChaseLongRsiCeiling'] ?? 65.0)));
             $settings['maxTradesPerDay'] = max(1, min(50, (int) ($settings['maxTradesPerDay'] ?? 50)));
             $settings['maxLeverage'] = max(1, min(125, (int) ($settings['maxLeverage'] ?? 2)));
             $settings['leverage'] = max(1, min((int) ($settings['leverage'] ?? 2), (int) $settings['maxLeverage']));
