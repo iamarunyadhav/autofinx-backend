@@ -154,6 +154,7 @@ Route::prefix('v1')->group(function () {
         Route::get('workspaces/{workspace}/ledger/export.csv', [TradingController::class, 'exportLedger']);
         Route::get('quick-trade/metadata', [QuickTradeController::class, 'metadata']);
         Route::get('quick-trade/chart', [QuickTradeController::class, 'chart']);
+        Route::get('quick-trade/candle-feed', [QuickTradeController::class, 'candleFeed']);
         Route::get('quick-trade/technical-summary', [QuickTradeController::class, 'technicalSummary']);
         Route::post('quick-trade/place', [QuickTradeController::class, 'place']);
         Route::post('quick-trade/settle-due', [QuickTradeController::class, 'settleDue']);

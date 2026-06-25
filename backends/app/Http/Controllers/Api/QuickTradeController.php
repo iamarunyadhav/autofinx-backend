@@ -5,7 +5,11 @@ namespace App\Http\Controllers\Api;
 use App\Domain\Trading\QuickTradeService;
 use App\Domain\Trading\TradingModuleSettingsService;
 use App\Http\Controllers\Controller;
+use App\Support\WebSocket\SimpleWebSocketClient;
+use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Http\Request;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class QuickTradeController extends Controller
 {
@@ -55,6 +59,152 @@ class QuickTradeController extends Controller
             'timeframe' => $chart['timeframe'],
             'quote' => $chart['quote'],
             'signal_preview' => $chart['signal_preview'],
+        ]);
+    }
+
+    /**
+     * Backend-owned Binance Futures candle stream for Quick Trade.
+     *
+     * The browser consumes this SSE endpoint; only the Laravel backend opens the
+     * Binance REST/WS connections. That keeps Quick Trade market data on the same
+     * server-side trust boundary as paper/live execution.
+     */
+    public function candleFeed(Request $request): StreamedResponse
+    {
+        $data = $request->validate([
+            'symbol' => 'required|string|max:32',
+            'timeframe' => 'nullable|string|max:16',
+            'history_limit' => 'nullable|integer|min:20|max:500',
+            'max_seconds' => 'nullable|integer|min:10|max:1800',
+        ]);
+
+        $symbol = strtoupper(preg_replace('/[^A-Z0-9]/', '', (string) $data['symbol']));
+        $timeframe = $this->toBinanceInterval((string) ($data['timeframe'] ?? '1m'));
+        $historyLimit = (int) ($data['history_limit'] ?? 200);
+        $maxSeconds = (int) ($data['max_seconds'] ?? 300);
+
+        $stream = function () use ($symbol, $timeframe, $historyLimit, $maxSeconds) {
+            $emit = static function (array $payload): void {
+                echo 'data: ' . json_encode($payload) . "\n\n";
+                if (function_exists('ob_flush')) {
+                    @ob_flush();
+                }
+                flush();
+            };
+
+            $history = $this->fetchBinanceHistory($symbol, $timeframe, $historyLimit);
+            if ($history !== []) {
+                $emit([
+                    'symbol' => $symbol,
+                    'timeframe' => $timeframe,
+                    'source' => 'backend_binance_rest',
+                    'candles' => $history,
+                    'current' => $history[array_key_last($history)] ?? null,
+                    'ts' => now()->toIso8601String(),
+                ]);
+            }
+
+            $client = new SimpleWebSocketClient();
+            $startedAt = time();
+            $lastPingAt = time();
+            $lastFrameAt = time();
+
+            try {
+                $baseUrl = rtrim((string) config('services.binance.futures_ws_url', 'wss://fstream.binance.com'), '/');
+                $client->connect($baseUrl . '/ws/' . strtolower($symbol) . '@kline_' . $timeframe, 10);
+
+                $emit([
+                    'symbol' => $symbol,
+                    'timeframe' => $timeframe,
+                    'source' => 'backend_binance_ws',
+                    'connected' => true,
+                    'ts' => now()->toIso8601String(),
+                ]);
+
+                while (! connection_aborted() && (time() - $startedAt) < $maxSeconds) {
+                    $frame = $client->readFrame(1);
+
+                    if ((time() - $lastPingAt) >= 20) {
+                        $client->sendPing('quick-trade');
+                        $lastPingAt = time();
+                    }
+
+                    if ($frame === null) {
+                        if ((time() - $lastFrameAt) >= 15) {
+                            $emit([
+                                'symbol' => $symbol,
+                                'timeframe' => $timeframe,
+                                'source' => 'backend_binance_ws',
+                                'heartbeat' => true,
+                                'ts' => now()->toIso8601String(),
+                            ]);
+                            $lastFrameAt = time();
+                        }
+                        continue;
+                    }
+
+                    if (($frame['type'] ?? null) === 'close') {
+                        break;
+                    }
+
+                    if (($frame['type'] ?? null) !== 'text') {
+                        continue;
+                    }
+
+                    $payload = json_decode((string) ($frame['payload'] ?? ''), true);
+                    $kline = is_array($payload) ? ($payload['k'] ?? null) : null;
+                    if (! is_array($kline)) {
+                        continue;
+                    }
+
+                    $eventTs = (int) ($payload['E'] ?? floor(microtime(true) * 1000));
+                    $candle = [
+                        'time' => (int) floor(((int) ($kline['t'] ?? $eventTs)) / 1000),
+                        'open' => (float) ($kline['o'] ?? 0),
+                        'high' => (float) ($kline['h'] ?? 0),
+                        'low' => (float) ($kline['l'] ?? 0),
+                        'close' => (float) ($kline['c'] ?? 0),
+                        'volume' => (float) ($kline['v'] ?? 0),
+                        'isClosed' => (bool) ($kline['x'] ?? false),
+                    ];
+
+                    $lastFrameAt = time();
+                    $emit([
+                        'symbol' => $symbol,
+                        'timeframe' => $timeframe,
+                        'source' => 'backend_binance_ws',
+                        'candle' => $candle,
+                        'current' => $candle,
+                        'event_ts' => $eventTs,
+                        'latency_ms' => max(0, (int) floor(microtime(true) * 1000) - $eventTs),
+                        'ts' => now()->toIso8601String(),
+                    ]);
+                }
+            } catch (\Throwable $exception) {
+                Log::warning('Quick Trade candle feed disconnected', [
+                    'symbol' => $symbol,
+                    'timeframe' => $timeframe,
+                    'message' => $exception->getMessage(),
+                ]);
+
+                $emit([
+                    'symbol' => $symbol,
+                    'timeframe' => $timeframe,
+                    'source' => 'backend_binance_ws',
+                    'connected' => false,
+                    'error' => 'backend_feed_disconnected',
+                    'ts' => now()->toIso8601String(),
+                ]);
+            } finally {
+                $client->close();
+            }
+        };
+
+        return response()->stream($stream, 200, [
+            'Content-Type' => 'text/event-stream',
+            'Cache-Control' => 'no-cache',
+            'Connection' => 'keep-alive',
+            'X-Accel-Buffering' => 'no',
         ]);
     }
 
@@ -110,5 +260,69 @@ class QuickTradeController extends Controller
         return response()->json([
             'settled' => $quickTrades->settleExpired((int) $request->input('limit', 100)),
         ]);
+    }
+
+    private function fetchBinanceHistory(string $symbol, string $timeframe, int $limit): array
+    {
+        try {
+            $baseUrl = rtrim((string) config('services.binance.futures_api_url', 'https://fapi.binance.com'), '/');
+            $rows = Http::timeout(8)
+                ->retry(1, 250)
+                ->get($baseUrl . '/fapi/v1/klines', [
+                    'symbol' => $symbol,
+                    'interval' => $timeframe,
+                    'limit' => $limit,
+                ])
+                ->throw()
+                ->json();
+
+            if (! is_array($rows)) {
+                return [];
+            }
+
+            return array_values(array_filter(array_map(static function ($row): ?array {
+                if (! is_array($row) || count($row) < 6) {
+                    return null;
+                }
+
+                return [
+                    'time' => (int) floor(((int) $row[0]) / 1000),
+                    'open' => (float) $row[1],
+                    'high' => (float) $row[2],
+                    'low' => (float) $row[3],
+                    'close' => (float) $row[4],
+                    'volume' => (float) $row[5],
+                    'isClosed' => true,
+                ];
+            }, $rows)));
+        } catch (\Throwable $exception) {
+            Log::warning('Quick Trade candle history fetch failed', [
+                'symbol' => $symbol,
+                'timeframe' => $timeframe,
+                'message' => $exception->getMessage(),
+            ]);
+
+            return [];
+        }
+    }
+
+    private function toBinanceInterval(string $timeframe): string
+    {
+        $normalized = trim($timeframe);
+        $allowed = [
+            '1m', '3m', '5m', '15m', '30m',
+            '1h', '2h', '4h', '6h', '8h', '12h',
+            '1d', '3d', '1w', '1M',
+        ];
+
+        if (in_array($normalized, $allowed, true)) {
+            return $normalized;
+        }
+
+        return match (strtolower($normalized)) {
+            '60m' => '1h',
+            '240m' => '4h',
+            default => '1m',
+        };
     }
 }
