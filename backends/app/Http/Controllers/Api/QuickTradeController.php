@@ -225,12 +225,6 @@ class QuickTradeController extends Controller
             'indicator_set' => 'nullable|array',
         ]);
 
-        if (($payload['mode'] ?? 'paper') === 'live') {
-            return response()->json([
-                'message' => 'Live quick trades are disabled during Phase 1 execution hardening.',
-            ], 422);
-        }
-
         $trade = $quickTrades->place($payload, $request->user()?->id);
 
         return response()->json($trade->fresh(), 201);
