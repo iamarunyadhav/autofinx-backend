@@ -4580,6 +4580,10 @@ class FutureTradeBotService
         }
 
         $postCloseExchange = $this->exchangePositionSnapshot($client, $symbol);
+        if (! $this->liveCloseConfirmed($response, $postCloseExchange)) {
+            usleep(350 * 1000);
+            $postCloseExchange = $this->exchangePositionSnapshot($client, $symbol);
+        }
         $positionClosed = $this->liveCloseConfirmed($response, $postCloseExchange);
 
         $closeQty = (float) $qty;
@@ -11019,6 +11023,9 @@ class FutureTradeBotService
     {
         // Both API calls are wrapped individually so a failure on open-orders
         // does not also wipe out the position-risk data (and vice versa).
+        $riskSnapshotAvailable = true;
+        $openOrdersSnapshotAvailable = true;
+
         try {
             $riskPayload = $client->fetchPositionRisk($symbol);
         } catch (Throwable $e) {
@@ -11026,6 +11033,7 @@ class FutureTradeBotService
                 'symbol' => $symbol, 'error' => $e->getMessage(),
             ]);
             $riskPayload = [];
+            $riskSnapshotAvailable = false;
         }
 
         try {
@@ -11035,6 +11043,7 @@ class FutureTradeBotService
                 'symbol' => $symbol, 'error' => $e->getMessage(),
             ]);
             $openOrdersPayload = [];
+            $openOrdersSnapshotAvailable = false;
         }
 
         $riskRows = collect(is_array($riskPayload) && array_is_list($riskPayload) ? $riskPayload : [$riskPayload])
@@ -11059,7 +11068,9 @@ class FutureTradeBotService
             'unrealized_pnl' => (float) ($activeRisk['unRealizedProfit'] ?? 0),
             'reduce_only_orders' => $reduceOnlyOrders,
             'open_orders' => $openOrders->all(),
-            'snapshot_partial' => $riskPayload === [] || $openOrdersPayload === [],
+            'position_snapshot_available' => $riskSnapshotAvailable,
+            'open_orders_snapshot_available' => $openOrdersSnapshotAvailable,
+            'snapshot_partial' => ! $riskSnapshotAvailable || ! $openOrdersSnapshotAvailable,
         ];
     }
 
@@ -11072,7 +11083,7 @@ class FutureTradeBotService
             return true;
         }
 
-        if ((bool) ($postCloseExchange['snapshot_partial'] ?? false)) {
+        if (! (bool) ($postCloseExchange['position_snapshot_available'] ?? false)) {
             return false;
         }
 
