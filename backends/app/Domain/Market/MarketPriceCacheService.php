@@ -3,6 +3,7 @@
 namespace App\Domain\Market;
 
 use App\Models\MarketPriceCache;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Redis;
 use Illuminate\Support\Str;
 
@@ -15,18 +16,43 @@ class MarketPriceCacheService
      */
     private static array $dbWriteLastAt = [];
     private const DB_WRITE_INTERVAL_S = 30;
+    private const MAX_FUTURE_SKEW_MS = 30000;
+    private const MAX_BACKWARD_SKEW_MS = 1000;
+    private const MAX_FRESH_JUMP_PERCENT = 5.0;
+    private const FRESH_JUMP_WINDOW_MS = 5000;
 
     public function setLatestPrice(string $exchange, string $symbol, float $price, ?int $tsMs = null): void
     {
         $exchange = strtolower($exchange);
         $symbol = strtoupper($symbol);
         $tsMs = $tsMs ?? (int) floor(microtime(true) * 1000);
+        $nowMs = (int) floor(microtime(true) * 1000);
+
+        if ($price <= 0 || $tsMs > ($nowMs + self::MAX_FUTURE_SKEW_MS)) {
+            return;
+        }
 
         $priceKey = $this->priceKey($exchange, $symbol);
         $tsKey = $this->tsKey($exchange, $symbol);
 
         $redisOk = false;
         try {
+            $currentTs = (int) (Redis::get($tsKey) ?? 0);
+            $currentPrice = (float) (Redis::get($priceKey) ?? 0);
+
+            if ($currentTs > 0 && $tsMs < ($currentTs - self::MAX_BACKWARD_SKEW_MS)) {
+                return;
+            }
+
+            if (
+                $currentTs > 0
+                && $currentPrice > 0
+                && abs($tsMs - $currentTs) <= self::FRESH_JUMP_WINDOW_MS
+                && abs(($price - $currentPrice) / $currentPrice) * 100 > self::MAX_FRESH_JUMP_PERCENT
+            ) {
+                return;
+            }
+
             Redis::set($priceKey, (string) $price);
             Redis::set($tsKey, (string) $tsMs);
             $redisOk = true;
@@ -49,7 +75,7 @@ class MarketPriceCacheService
                 [
                     'id' => MarketPriceCache::query()->where('exchange', $exchange)->where('symbol', $symbol)->value('id') ?: (string) Str::uuid(),
                     'last_price' => $price,
-                    'last_ts' => now(),
+                    'last_ts' => Carbon::createFromTimestampMs($tsMs),
                 ]
             );
         }

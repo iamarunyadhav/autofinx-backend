@@ -148,7 +148,7 @@ class RealtimeMarketFeedService
             // Only persist to DB when the candle is closed — open-candle updates are already
             // cached in Redis via setLatestPrice(). Writing on every tick caused 30-50+ DB
             // writes/second on a 4-symbol × 6-stream setup and saturated MariaDB.
-            if ($closedKline) {
+            if ($closedKline && $this->isPlausibleKline($kline, $timeframe)) {
                 MarketOhlc::updateOrCreate(
                     [
                         'exchange' => $exchangeKey,
@@ -514,6 +514,14 @@ class RealtimeMarketFeedService
             ? Carbon::createFromTimestampMs($timestampMs)
             : ($status === 'healthy' ? now() : $existingFeed?->last_tick_at);
 
+        if ($existingFeed?->last_tick_at && $tickAt->lt($existingFeed->last_tick_at->copy()->subSecond())) {
+            return;
+        }
+
+        if ($tickAt->gt(now()->addSeconds(30))) {
+            return;
+        }
+
         MarketFeedStatus::updateOrCreate(
             [
                 'workspace_id' => $workspaceId,
@@ -541,6 +549,33 @@ class RealtimeMarketFeedService
             'kline' => isset($data['k']['c']) ? (float) $data['k']['c'] : null,
             default => isset($data['price']) ? (float) $data['price'] : null,
         };
+    }
+
+    private function isPlausibleKline(array $kline, string $timeframe): bool
+    {
+        $open = (float) ($kline['o'] ?? 0);
+        $high = (float) ($kline['h'] ?? 0);
+        $low = (float) ($kline['l'] ?? 0);
+        $close = (float) ($kline['c'] ?? 0);
+
+        if ($open <= 0 || $high <= 0 || $low <= 0 || $close <= 0) {
+            return false;
+        }
+
+        if ($high < max($open, $close) || $low > min($open, $close) || $high < $low) {
+            return false;
+        }
+
+        $rangePercent = (($high - $low) / max($close, 0.00000001)) * 100;
+        $limit = match (strtolower(trim($timeframe))) {
+            '1m' => 3.0,
+            '3m', '5m' => 5.0,
+            '15m', '30m' => 8.0,
+            '1h', '2h' => 15.0,
+            default => 25.0,
+        };
+
+        return $rangePercent <= $limit;
     }
 
     private function exchangeKey(string $marketType): string

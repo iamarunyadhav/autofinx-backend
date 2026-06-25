@@ -33,8 +33,18 @@ class FutureTradeLiveFeedManager
             ->first();
 
         $lastTickAt = $latestFeed?->last_tick_at;
-        $ageSeconds = $this->ageSecondsSince($lastTickAt);
-        $lastTickPrice = $latestFeed?->last_price !== null ? (float) $latestFeed->last_price : null;
+        $feedAgeSeconds = $this->ageSecondsSince($lastTickAt);
+        $latestPrice = $this->freshestCachedPrice($desiredSymbols);
+        $priceAgeSeconds = $latestPrice['age_seconds'] ?? null;
+        $ageSeconds = $priceAgeSeconds !== null && $feedAgeSeconds !== null
+            ? min((int) $priceAgeSeconds, (int) $feedAgeSeconds)
+            : ($priceAgeSeconds ?? $feedAgeSeconds);
+        $lastTickAt = ($latestPrice['timestamp_ms'] ?? null)
+            ? Carbon::createFromTimestampMs((int) $latestPrice['timestamp_ms'])
+            : $lastTickAt;
+        $lastTickPrice = isset($latestPrice['price'])
+            ? (float) $latestPrice['price']
+            : ($latestFeed?->last_price !== null ? (float) $latestFeed->last_price : null);
         $isFresh = $ageSeconds !== null && $ageSeconds <= 20;
         $runningSymbols = array_values(array_filter(array_map(
             static fn ($symbol) => strtoupper(trim((string) $symbol)),
@@ -62,7 +72,7 @@ class FutureTradeLiveFeedManager
             'feedFresh' => $isFresh,
             'feedAgeSeconds' => $ageSeconds,
             'lastTickPrice' => $lastTickPrice,
-            'source' => (string) ($latestFeed?->source ?? ($isFresh ? 'websocket_cache' : 'none')),
+            'source' => (string) ($latestPrice['source'] ?? $latestFeed?->source ?? ($isFresh ? 'websocket_cache' : 'none')),
             'daemonPidKnown' => $running,
             'manualDaemonDetectedByFreshTicks' => $manualFreshTick,
             'dataSource' => $isFresh ? 'BINANCE_FUTURES_WEBSOCKET_CACHE' : ($running ? 'BINANCE_FUTURES_WEBSOCKET' : 'BINANCE_FUTURES_REST_FALLBACK'),
@@ -538,6 +548,38 @@ class FutureTradeLiveFeedManager
         }
 
         return max(0, now(config('app.timezone'))->getTimestamp() - $time->getTimestamp());
+    }
+
+    /**
+     * Redis is the realtime truth; MarketFeedStatus is throttled for DB safety.
+     *
+     * @param  string[]  $symbols
+     */
+    private function freshestCachedPrice(array $symbols): ?array
+    {
+        $cache = app(MarketPriceCacheService::class);
+        $freshest = null;
+
+        foreach ($symbols as $symbol) {
+            $latest = $cache->getLatestPrice('binance_futures', (string) $symbol);
+            if (! is_array($latest) || (float) ($latest['price'] ?? 0) <= 0) {
+                continue;
+            }
+
+            $timestampMs = (int) ($latest['timestamp_ms'] ?? 0);
+            if ($timestampMs <= 0) {
+                continue;
+            }
+
+            $ageSeconds = max(0, (int) floor((now(config('app.timezone'))->getTimestampMs() - $timestampMs) / 1000));
+            $latest['age_seconds'] = $ageSeconds;
+
+            if ($freshest === null || $ageSeconds < (int) ($freshest['age_seconds'] ?? PHP_INT_MAX)) {
+                $freshest = $latest;
+            }
+        }
+
+        return $freshest;
     }
 
     private function isoTimestamp(mixed $timestamp): ?string
