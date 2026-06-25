@@ -208,7 +208,11 @@ class QuickTradeController extends Controller
         ]);
     }
 
-    public function place(Request $request, QuickTradeService $quickTrades)
+    public function place(
+        Request $request,
+        QuickTradeService $quickTrades,
+        TradingModuleSettingsService $settings,
+    )
     {
         $payload = $request->validate([
             'workspace_id' => 'required|uuid',
@@ -225,7 +229,22 @@ class QuickTradeController extends Controller
             'indicator_set' => 'nullable|array',
         ]);
 
-        $trade = $quickTrades->place($payload, $request->user()?->id);
+        if (($payload['mode'] ?? 'paper') === 'live') {
+            $state = $settings->tradingState((string) $payload['workspace_id']);
+            if (! ($state['live_ready'] ?? false)) {
+                return response()->json([
+                    'message' => $state['live_ready_reason'] ?? 'Live quick trading is not ready for this workspace.',
+                ], 422);
+            }
+        }
+
+        try {
+            $trade = $quickTrades->place($payload, $request->user()?->id);
+        } catch (\RuntimeException $exception) {
+            return response()->json([
+                'message' => $exception->getMessage(),
+            ], 422);
+        }
 
         return response()->json($trade->fresh(), 201);
     }

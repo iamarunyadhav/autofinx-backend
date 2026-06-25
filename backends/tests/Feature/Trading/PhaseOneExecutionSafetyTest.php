@@ -228,7 +228,7 @@ test('live manual order submissions are idempotent', function () {
         ->and(Order::first()->status)->toBe(Order::STATUS_NEW);
 });
 
-test('live quick trades are disabled explicitly', function () {
+test('live quick trades require a live-ready workspace', function () {
     $user = User::factory()->create();
     $workspace = Workspace::factory()->create();
 
@@ -241,7 +241,7 @@ test('live quick trades are disabled explicitly', function () {
         'expiry_seconds' => 60,
         'mode' => 'live',
     ])->assertStatus(422)
-        ->assertJsonPath('message', 'Live quick trades are disabled during Phase 1 execution hardening.');
+        ->assertJsonPath('message', 'Workspace is currently in paper mode.');
 });
 
 test('kill switch api persists state and pauses live automation', function () {
