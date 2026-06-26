@@ -20,7 +20,9 @@ class TradingRuntimeHealthService
             $this->scheduledCommand('quick-trades:settle', 90),
             $supervisor['quick_settler'] ?? 'UNKNOWN'
         );
+        $quickSettler = $this->withRuntimeHeartbeat($quickSettler, 'autofinx-quick-settler-heartbeat.json', 30);
         $robotEvaluator = $this->robotEvaluatorHealth($workspaceId, $supervisor['robot_evaluator'] ?? 'UNKNOWN');
+        $robotEvaluator = $this->withRuntimeHeartbeat($robotEvaluator, 'autofinx-robot-evaluator-heartbeat.json', 45);
         $futureTick = $this->futureTickHealth($workspaceId, $supervisor['tick_loop'] ?? 'UNKNOWN');
         $futureReconcile = $this->scheduledCommand('future-trade:reconcile', 900);
         $futureUserStream = $this->futureUserStreamHealth($workspaceId, $supervisor['user_stream'] ?? 'UNKNOWN');
@@ -255,6 +257,59 @@ class TradingRuntimeHealthService
         }
 
         return $health;
+    }
+
+    private function withRuntimeHeartbeat(array $health, string $filename, int $maxAgeSeconds): array
+    {
+        $heartbeat = $this->runtimeHeartbeat($filename, $maxAgeSeconds);
+        $health['heartbeat_detail'] = $heartbeat;
+
+        if (($heartbeat['state'] ?? 'red') === 'green') {
+            $health['state'] = 'green';
+            $health['reason'] = 'runtime_heartbeat_fresh';
+            $health['age_seconds'] = $heartbeat['age_seconds'] ?? ($health['age_seconds'] ?? null);
+        }
+
+        return $health;
+    }
+
+    private function runtimeHeartbeat(string $filename, int $maxAgeSeconds): array
+    {
+        $path = storage_path('framework/'.$filename);
+        if (! file_exists($path)) {
+            return [
+                'state' => 'red',
+                'reason' => 'heartbeat_file_missing',
+                'path' => $path,
+                'max_age_seconds' => $maxAgeSeconds,
+            ];
+        }
+
+        $raw = @file_get_contents($path);
+        $data = $raw !== false ? @json_decode($raw, true) : null;
+        $epoch = is_array($data) ? (int) ($data['epoch'] ?? 0) : 0;
+        $age = $epoch > 0 ? max(0, time() - $epoch) : null;
+
+        if ($age === null) {
+            return [
+                'state' => 'red',
+                'reason' => 'heartbeat_file_invalid',
+                'path' => $path,
+                'max_age_seconds' => $maxAgeSeconds,
+            ];
+        }
+
+        $state = $age <= $maxAgeSeconds ? 'green' : ($age <= ($maxAgeSeconds * 3) ? 'yellow' : 'red');
+
+        return [
+            'state' => $state,
+            'reason' => $state === 'green' ? 'ok' : 'heartbeat_stale',
+            'path' => $path,
+            'age_seconds' => $age,
+            'max_age_seconds' => $maxAgeSeconds,
+            'last_tick_at' => (string) ($data['at'] ?? ''),
+            'pid' => (int) ($data['pid'] ?? 0),
+        ];
     }
 
     private function liveOrEnabledFutureConfigs(?string $workspaceId): int

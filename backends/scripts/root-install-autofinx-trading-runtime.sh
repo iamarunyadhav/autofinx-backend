@@ -74,7 +74,9 @@ echo "[quick-settler] started at \$(date -Is)"
 
 while true; do
   echo "[quick-settler] tick at \$(date -Is)"
+  printf '{"at":"%s","epoch":%s,"pid":%s}\n' "\$(date -Is)" "\$(date +%s)" "\$\$" > "\$APP_DIR/storage/framework/autofinx-quick-settler-heartbeat.json" || true
   "\$PHP_BIN" artisan quick-trades:settle --no-interaction || echo "[quick-settler] command failed at \$(date -Is)"
+  printf '{"at":"%s","epoch":%s,"pid":%s}\n' "\$(date -Is)" "\$(date +%s)" "\$\$" > "\$APP_DIR/storage/framework/autofinx-quick-settler-heartbeat.json" || true
   sleep "\$SLEEP_SECONDS"
 done
 EOF
@@ -92,12 +94,17 @@ echo "[robot-evaluator] started at \$(date -Is)"
 
 while true; do
   echo "[robot-evaluator] tick at \$(date -Is)"
+  printf '{"at":"%s","epoch":%s,"pid":%s}\n' "\$(date -Is)" "\$(date +%s)" "\$\$" > "\$APP_DIR/storage/framework/autofinx-robot-evaluator-heartbeat.json" || true
   "\$PHP_BIN" artisan robot-sessions:evaluate --no-interaction || echo "[robot-evaluator] command failed at \$(date -Is)"
+  printf '{"at":"%s","epoch":%s,"pid":%s}\n' "\$(date -Is)" "\$(date +%s)" "\$\$" > "\$APP_DIR/storage/framework/autofinx-robot-evaluator-heartbeat.json" || true
   sleep "\$SLEEP_SECONDS"
 done
 EOF
 
 chmod +x /usr/local/bin/autofinx-quick-settler.sh /usr/local/bin/autofinx-robot-evaluator.sh
+chown "$RUN_USER:$RUN_USER" /usr/local/bin/autofinx-quick-settler.sh /usr/local/bin/autofinx-robot-evaluator.sh || true
+touch "$APP_DIR/storage/framework/autofinx-quick-settler-heartbeat.json" "$APP_DIR/storage/framework/autofinx-robot-evaluator-heartbeat.json"
+chown "$RUN_USER:$RUN_USER" "$APP_DIR/storage/framework/autofinx-quick-settler-heartbeat.json" "$APP_DIR/storage/framework/autofinx-robot-evaluator-heartbeat.json" || true
 
 if [ -f "$SUP_CONF" ]; then
   cp -a "$SUP_CONF" "${SUP_CONF}.bak.$(date +%Y%m%d%H%M%S)"
