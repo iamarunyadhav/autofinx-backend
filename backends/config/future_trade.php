@@ -43,9 +43,9 @@ return [
     'robot' => [
         'allow_reverse' => filter_var(env('ROBOT_ALLOW_REVERSE', true), FILTER_VALIDATE_BOOL),
         'reverse_min_confidence' => (float) env('ROBOT_REVERSE_MIN_CONFIDENCE', 0.70),
-        'total_loss_limit_usdt' => (float) env('ROBOT_TOTAL_LOSS_LIMIT_USDT', 10),
-        'daily_loss_limit_usdt' => (float) env('ROBOT_DAILY_LOSS_LIMIT_USDT', 10),
-        'per_trade_max_loss_usdt' => (float) env('ROBOT_PER_TRADE_MAX_LOSS_USDT', 2),
+        'total_loss_limit_usdt' => (float) env('ROBOT_TOTAL_LOSS_LIMIT_USDT', 5),
+        'daily_loss_limit_usdt' => (float) env('ROBOT_DAILY_LOSS_LIMIT_USDT', 5),
+        'per_trade_max_loss_usdt' => (float) env('ROBOT_PER_TRADE_MAX_LOSS_USDT', 1.5),
         'stop_after_total_loss' => filter_var(env('ROBOT_STOP_AFTER_TOTAL_LOSS', true), FILTER_VALIDATE_BOOL),
         'take_profit_percent' => (float) env('ROBOT_TAKE_PROFIT_PERCENT', 0.5),
         'stop_loss_percent' => (float) env('ROBOT_STOP_LOSS_PERCENT', 0.25),

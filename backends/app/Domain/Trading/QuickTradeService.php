@@ -48,7 +48,8 @@ class QuickTradeService
         if (! in_array($side, ['buy', 'sell'], true)) {
             throw new RuntimeException('Trade side must be buy or sell.');
         }
-        if ($stake < (float) ($config['min_stake'] ?? 1) || $stake > (float) ($config['max_stake'] ?? 500)) {
+        $minStake = max(10.0, (float) ($config['min_stake'] ?? 10));
+        if ($stake < $minStake || $stake > (float) ($config['max_stake'] ?? 500)) {
             throw new RuntimeException('Stake amount is outside the permitted quick-trade range.');
         }
         if (! in_array($expirySeconds, $this->settings->durationsForMode($workspaceId, $mode, $providerKey), true)) {

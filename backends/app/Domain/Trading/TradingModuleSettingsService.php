@@ -22,7 +22,7 @@ class TradingModuleSettingsService
         return $this->mergedGroup('quick_trade', $workspaceId, [
             'default_duration' => 60,
             'default_timeframe' => '1m',
-            'min_stake' => 1,
+            'min_stake' => 10,
             'max_stake' => 500,
             'max_active_trades' => 5,
             'payout_rate' => 0.91,

@@ -10,6 +10,8 @@ use RuntimeException;
 
 class RobotSessionService
 {
+    private const MIN_LIVE_NOTIONAL_USDT = 10.0;
+
     public function __construct(
         private readonly TradingModuleSettingsService $settings,
         private readonly QuickTradeService $quickTrades,
@@ -26,7 +28,7 @@ class RobotSessionService
         $state = $this->settings->tradingState($workspaceId);
         $timeframe = $this->timeframes->normalize((string) ($payload['timeframe'] ?? '1m'));
         $symbol = strtoupper((string) ($payload['symbol'] ?? ''));
-        $baseStake = round((float) ($payload['base_stake'] ?? 0), 8);
+        $baseStake = $this->normalizeStake((float) ($payload['base_stake'] ?? 0));
         if ($symbol === '' || $baseStake <= 0) {
             throw new RuntimeException('Robot sessions require a symbol and a positive base stake.');
         }
@@ -55,17 +57,19 @@ class RobotSessionService
             'strategy_profile' => (string) ($payload['strategy_profile'] ?? $config['default_strategy_profile'] ?? 'balanced'),
             'base_stake' => $baseStake,
             'profit_target' => $payload['profit_target'] ?? null,
-            'loss_limit' => $payload['loss_limit'] ?? null,
-            'max_consecutive_losses' => $payload['max_consecutive_losses'] ?? null,
+            'loss_limit' => $payload['loss_limit'] ?? config('future_trade.robot.total_loss_limit_usdt', 5),
+            'max_consecutive_losses' => $payload['max_consecutive_losses'] ?? 2,
             'max_active_trades' => (int) ($payload['max_active_trades'] ?? $config['max_active_trades'] ?? 2),
             'confidence_threshold' => (int) ($payload['confidence_threshold'] ?? $config['confidence_threshold'] ?? 60),
             'bot_mode' => in_array(($payload['bot_mode'] ?? 'timed_expiry'), ['candle_direction', 'timed_expiry'], true)
                 ? (string) ($payload['bot_mode'] ?? 'timed_expiry')
                 : 'timed_expiry',
-            'stop_loss_pct' => round((float) ($payload['stop_loss_pct'] ?? 20.0), 4),
+            'stop_loss_pct' => round((float) ($payload['stop_loss_pct'] ?? 12.0), 4),
             'take_profit_pct' => isset($payload['take_profit_pct']) ? round((float) $payload['take_profit_pct'], 4) : null,
-            'cooldown_seconds' => (int) ($payload['cooldown_seconds'] ?? 300),
-            'daily_loss_limit' => isset($payload['daily_loss_limit']) ? round((float) $payload['daily_loss_limit'], 8) : null,
+            'cooldown_seconds' => (int) ($payload['cooldown_seconds'] ?? 600),
+            'daily_loss_limit' => isset($payload['daily_loss_limit'])
+                ? round((float) $payload['daily_loss_limit'], 8)
+                : config('future_trade.robot.daily_loss_limit_usdt', 5),
             'multi_symbol' => (bool) ($payload['multi_symbol'] ?? false),
             'symbol_list' => isset($payload['symbol_list'])
                 ? collect((array) $payload['symbol_list'])->map(fn ($s) => strtoupper((string) $s))->filter()->unique()->values()->all()
@@ -124,7 +128,7 @@ class RobotSessionService
             $updates['expiry_seconds'] = (int) $payload['expiry_seconds'];
         }
         if (array_key_exists('base_stake', $payload)) {
-            $updates['base_stake'] = round((float) $payload['base_stake'], 8);
+            $updates['base_stake'] = $this->normalizeStake((float) $payload['base_stake']);
         }
         if (array_key_exists('indicator_set', $payload)) {
             $updates['indicator_set'] = collect((array) $payload['indicator_set'])
@@ -418,7 +422,7 @@ class RobotSessionService
         $atrAvg = $this->computeAtrAvgPct($candles);
         $atrNow = $volatility['atr_pct'];
         $atrRatio = ($atrAvg > 0 && $atrNow > 0) ? min(1.5, max(0.5, $atrAvg / $atrNow)) : 1.0;
-        $adjustedStake = round((float) $session->base_stake * $atrRatio, 2);
+        $adjustedStake = $this->normalizeStake((float) $session->base_stake * $atrRatio, 2);
 
         $trade = $this->quickTrades->place([
             'workspace_id' => $session->workspace_id,
@@ -647,7 +651,7 @@ class RobotSessionService
             $atrAvg = $this->computeAtrAvgPct($candles);
             $atrNow = $volatility['atr_pct'];
             $atrRatio = ($atrAvg > 0 && $atrNow > 0) ? min(1.5, max(0.5, $atrAvg / $atrNow)) : 1.0;
-            $adjustedStake = round((float) $session->base_stake * $atrRatio, 2);
+            $adjustedStake = $this->normalizeStake((float) $session->base_stake * $atrRatio, 2);
 
             $trade = $this->quickTrades->place([
                 'workspace_id' => $session->workspace_id,
@@ -1201,6 +1205,11 @@ class RobotSessionService
                 ->limit(10)
                 ->get(),
         ];
+    }
+
+    private function normalizeStake(float $stake, int $precision = 8): float
+    {
+        return round(max(self::MIN_LIVE_NOTIONAL_USDT, $stake), $precision);
     }
 
     private function syncExecutionContext(RobotSession $session, bool $requireReady = false): RobotSession

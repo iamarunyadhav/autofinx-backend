@@ -107,11 +107,7 @@ class BinanceTimedFuturesProvider implements LiveTradeProviderInterface
         string $idempotencyKey
     ): array {
         $quote = $this->latestQuote($integration, $symbol);
-        $quantity = $this->normalizeQuantity($integration, $symbol, $stakeAmount / max($quote['price'], 0.00000001));
-
-        if ($quantity <= 0) {
-            throw new RuntimeException('Live trade quantity rounded to zero. Increase stake amount.');
-        }
+        $quantity = $this->normalizeQuantity($integration, $symbol, $stakeAmount / max($quote['price'], 0.00000001), $quote['price']);
 
         $response = $this->signedRequest($integration, 'POST', '/fapi/v1/order', [
             'symbol' => strtoupper($symbol),
@@ -261,7 +257,7 @@ class BinanceTimedFuturesProvider implements LiveTradeProviderInterface
         return 0.0;
     }
 
-    private function normalizeQuantity(Integration $integration, string $symbol, float $quantity): float
+    private function normalizeQuantity(Integration $integration, string $symbol, float $quantity, ?float $priceForError = null): float
     {
         $exchangeInfo = Http::get($this->baseUrl($integration) . '/fapi/v1/exchangeInfo', [
             'symbol' => strtoupper($symbol),
@@ -277,6 +273,13 @@ class BinanceTimedFuturesProvider implements LiveTradeProviderInterface
         $minQty = (float) ($marketLot['minQty'] ?? $stepSize);
 
         if ($quantity < $minQty) {
+            if ($priceForError !== null) {
+                $minStake = ceil($minQty * $priceForError * 100) / 100;
+                throw new RuntimeException(
+                    "Stake too small for {$symbol}. Minimum required: \${$minStake} at current price."
+                );
+            }
+
             return 0.0;
         }
 
