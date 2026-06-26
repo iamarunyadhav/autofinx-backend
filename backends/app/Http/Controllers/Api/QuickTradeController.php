@@ -227,7 +227,13 @@ class QuickTradeController extends Controller
             'provider' => 'nullable|string|max:32',
             'integration_id' => 'nullable|uuid',
             'indicator_set' => 'nullable|array',
+            'idempotency_key' => 'nullable|string|max:120',
         ]);
+
+        $headerKey = $request->header('Idempotency-Key');
+        if (! isset($payload['idempotency_key']) && is_string($headerKey) && trim($headerKey) !== '') {
+            $payload['idempotency_key'] = trim($headerKey);
+        }
 
         if (($payload['mode'] ?? 'paper') === 'live') {
             $state = $settings->tradingState((string) $payload['workspace_id']);

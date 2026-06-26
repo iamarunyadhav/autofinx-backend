@@ -4,13 +4,17 @@ namespace App\Domain\Trading;
 
 use App\Models\QuickTrade;
 use App\Models\RobotSession;
+use App\Models\MarketFeedStatus;
 use App\Domain\FutureTrade\FutureTradeAuditService;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 use RuntimeException;
 
 class RobotSessionService
 {
     private const MIN_LIVE_NOTIONAL_USDT = 20.0;
+    private const MAX_LIVE_FEED_AGE_SECONDS = 30;
+    private const MAX_ENTRY_PRICE_DRIFT_BPS = 20.0;
 
     public function __construct(
         private readonly TradingModuleSettingsService $settings,
@@ -424,6 +428,13 @@ class RobotSessionService
         $atrRatio = ($atrAvg > 0 && $atrNow > 0) ? min(1.5, max(0.5, $atrAvg / $atrNow)) : 1.0;
         $adjustedStake = $this->normalizeStake((float) $session->base_stake * $atrRatio, 2);
 
+        $preflightBlock = $this->entryPreflightBlock($session, $candles, (string) $signal['direction']);
+        if ($preflightBlock !== null) {
+            $this->recordEntryBlock($session, $preflightBlock);
+
+            return $preflightBlock;
+        }
+
         $trade = $this->quickTrades->place([
             'workspace_id' => $session->workspace_id,
             'wallet_account_id' => $session->wallet_account_id,
@@ -653,6 +664,13 @@ class RobotSessionService
             $atrRatio = ($atrAvg > 0 && $atrNow > 0) ? min(1.5, max(0.5, $atrAvg / $atrNow)) : 1.0;
             $adjustedStake = $this->normalizeStake((float) $session->base_stake * $atrRatio, 2);
 
+            $preflightBlock = $this->entryPreflightBlock($session, $candles, $openDirection);
+            if ($preflightBlock !== null) {
+                $this->recordEntryBlock($session, $preflightBlock);
+
+                return $preflightBlock;
+            }
+
             $trade = $this->quickTrades->place([
                 'workspace_id' => $session->workspace_id,
                 'wallet_account_id' => $session->wallet_account_id,
@@ -875,6 +893,7 @@ class RobotSessionService
                 'win_rate' => $closed > 0 ? round((int) $session->win_count / $closed * 100, 2) : 0.0,
             ],
             'last_decision' => ((array) $session->runtime_json)['latest_decision'] ?? null,
+            'last_entry_block' => ((array) $session->runtime_json)['latest_entry_block'] ?? null,
             'last_signal_analysis' => ((array) $session->runtime_json)['latest_signal_analysis'] ?? null,
             'cooldown' => $this->cooldownStatus($session),
             'daily_loss' => $this->dailyLossStatus($session),
@@ -1205,6 +1224,168 @@ class RobotSessionService
                 ->limit(10)
                 ->get(),
         ];
+    }
+
+    private function entryPreflightBlock(RobotSession $session, array $candles, string $side): ?array
+    {
+        if (strtolower((string) $session->mode) !== 'live' || strtolower((string) $session->provider_key) !== 'binance') {
+            return null;
+        }
+
+        $duplicate = QuickTrade::query()
+            ->where('workspace_id', $session->workspace_id)
+            ->where('symbol', strtoupper((string) $session->symbol))
+            ->where('mode', 'live')
+            ->where('status', 'open')
+            ->when($session->id, fn ($query) => $query->where(function ($nested) use ($session) {
+                $nested->whereNull('robot_session_id')->orWhere('robot_session_id', '!=', $session->id);
+            }))
+            ->first();
+
+        if ($duplicate) {
+            return [
+                'session_id' => $session->id,
+                'status' => 'duplicate_position_block',
+                'action' => 'skipped',
+                'reason' => 'Another live position is already open for this symbol.',
+                'symbol' => $session->symbol,
+                'blocking_trade_id' => $duplicate->id,
+            ];
+        }
+
+        $feed = $this->freshServerFeed($session);
+        if (! ($feed['fresh'] ?? false)) {
+            return [
+                'session_id' => $session->id,
+                'status' => 'stale_feed_block',
+                'action' => 'skipped',
+                'reason' => (string) ($feed['reason'] ?? 'Server websocket feed is not fresh.'),
+                'symbol' => $session->symbol,
+                'feed' => $feed,
+            ];
+        }
+
+        $latest = $candles[array_key_last($candles)] ?? [];
+        $candlePrice = (float) ($latest['close'] ?? 0);
+        $feedPrice = (float) ($feed['price'] ?? 0);
+        if ($candlePrice > 0 && $feedPrice > 0) {
+            $driftBps = abs($feedPrice - $candlePrice) / $candlePrice * 10000;
+            $maxDriftBps = (float) config('robot_trade.max_entry_price_drift_bps', self::MAX_ENTRY_PRICE_DRIFT_BPS);
+            if ($driftBps > $maxDriftBps) {
+                return [
+                    'session_id' => $session->id,
+                    'status' => 'price_drift_block',
+                    'action' => 'skipped',
+                    'reason' => 'Candle price and live websocket price diverged before entry.',
+                    'symbol' => $session->symbol,
+                    'side' => strtolower($side),
+                    'candle_price' => round($candlePrice, 8),
+                    'feed_price' => round($feedPrice, 8),
+                    'drift_bps' => round($driftBps, 4),
+                    'max_drift_bps' => $maxDriftBps,
+                ];
+            }
+        }
+
+        try {
+            $quote = $this->market->latestQuote($session->symbol, $session->timeframe, [
+                'workspace_id' => $session->workspace_id,
+                'mode' => $session->mode,
+                'provider' => $session->provider_key,
+                'integration_id' => $session->integration_id,
+            ]);
+            $quotePrice = (float) ($quote['price'] ?? 0);
+            if ($quotePrice > 0 && $feedPrice > 0) {
+                $driftBps = abs($quotePrice - $feedPrice) / $feedPrice * 10000;
+                $maxDriftBps = (float) config('robot_trade.max_entry_price_drift_bps', self::MAX_ENTRY_PRICE_DRIFT_BPS);
+                if ($driftBps > $maxDriftBps) {
+                    return [
+                        'session_id' => $session->id,
+                        'status' => 'price_drift_block',
+                        'action' => 'skipped',
+                        'reason' => 'Binance REST quote and server websocket price diverged before entry.',
+                        'symbol' => $session->symbol,
+                        'side' => strtolower($side),
+                        'quote_price' => round($quotePrice, 8),
+                        'feed_price' => round($feedPrice, 8),
+                        'drift_bps' => round($driftBps, 4),
+                        'max_drift_bps' => $maxDriftBps,
+                    ];
+                }
+            }
+        } catch (\Throwable $exception) {
+            return [
+                'session_id' => $session->id,
+                'status' => 'price_check_block',
+                'action' => 'skipped',
+                'reason' => 'Could not verify Binance price before entry: ' . $exception->getMessage(),
+                'symbol' => $session->symbol,
+                'side' => strtolower($side),
+            ];
+        }
+
+        return null;
+    }
+
+    private function freshServerFeed(RobotSession $session): array
+    {
+        if (! Schema::hasTable('market_feed_status')) {
+            return ['fresh' => false, 'reason' => 'market_feed_status table is missing'];
+        }
+
+        $maxAge = (int) config('robot_trade.max_server_feed_age_seconds', self::MAX_LIVE_FEED_AGE_SECONDS);
+        $symbol = strtoupper((string) $session->symbol);
+        $query = MarketFeedStatus::query()->where('workspace_id', $session->workspace_id);
+
+        if (Schema::hasColumn('market_feed_status', 'symbol')) {
+            $query->where('symbol', $symbol);
+        } else {
+            $query->where('symbol_id', $this->market->resolveSymbol($symbol)->id);
+        }
+
+        if (Schema::hasColumn('market_feed_status', 'exchange')) {
+            $query->where('exchange', 'binance');
+        }
+        if (Schema::hasColumn('market_feed_status', 'market_type')) {
+            $query->where('market_type', 'futures');
+        }
+
+        $row = $query->whereNotNull('last_tick_at')->orderByDesc('last_tick_at')->first();
+        if (! $row?->last_tick_at) {
+            return ['fresh' => false, 'reason' => 'No server websocket tick exists for this symbol.'];
+        }
+
+        $age = max(0, $row->last_tick_at->diffInSeconds(now(), true));
+        if ($age > $maxAge) {
+            return [
+                'fresh' => false,
+                'reason' => "Server websocket feed is stale for {$age}s.",
+                'age_seconds' => $age,
+                'max_age_seconds' => $maxAge,
+                'last_tick_at' => $row->last_tick_at->toIso8601String(),
+                'price' => (float) ($row->last_price ?? 0),
+                'source' => (string) ($row->source ?? ''),
+            ];
+        }
+
+        return [
+            'fresh' => true,
+            'age_seconds' => $age,
+            'max_age_seconds' => $maxAge,
+            'last_tick_at' => $row->last_tick_at->toIso8601String(),
+            'price' => (float) ($row->last_price ?? 0),
+            'source' => (string) ($row->source ?? ''),
+        ];
+    }
+
+    private function recordEntryBlock(RobotSession $session, array $block): void
+    {
+        $session->last_error = (string) ($block['reason'] ?? $block['status'] ?? 'Robot entry blocked.');
+        $session->runtime_json = array_merge((array) $session->runtime_json, [
+            'latest_entry_block' => $block,
+            'last_evaluation_at' => now()->toIso8601String(),
+        ]);
+        $session->save();
     }
 
     private function normalizeStake(float $stake, int $precision = 8): float

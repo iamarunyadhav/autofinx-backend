@@ -3,12 +3,14 @@
 namespace App\Domain\Trading;
 
 use App\Domain\Ops\TradingEnvironmentGuard;
+use App\Domain\Ops\TradingRuntimeHealthService;
 use App\Models\Order;
 use App\Models\QuickTrade;
 use App\Models\RobotSession;
 use App\Models\Trade;
 use App\Support\RiskGuardService;
 use Carbon\CarbonImmutable;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use RuntimeException;
@@ -44,6 +46,7 @@ class QuickTradeService
         $side = strtolower((string) $payload['side']);
         $source = (string) ($payload['source'] ?? 'manual_quick_trade');
         $robotSessionId = $payload['robot_session_id'] ?? null;
+        $requestIdempotencyKey = trim((string) ($payload['idempotency_key'] ?? ''));
 
         if (! in_array($side, ['buy', 'sell'], true)) {
             throw new RuntimeException('Trade side must be buy or sell.');
@@ -64,11 +67,38 @@ class QuickTradeService
 
         $this->riskGuard->enforceOrFail($workspaceId);
 
+        if ($requestIdempotencyKey !== '') {
+            $cacheKey = 'quick_trade:place:idempotency:'.sha1($workspaceId.'|'.$requestIdempotencyKey);
+            if (! Cache::add($cacheKey, 1, now()->addMinutes(10))) {
+                throw new RuntimeException('Duplicate quick-trade request ignored. Please wait for the first order result.');
+            }
+        }
+
         $activeCount = QuickTrade::where('workspace_id', $workspaceId)
             ->where('status', 'open')
             ->count();
         if ($activeCount >= (int) ($config['max_active_trades'] ?? 5)) {
             throw new RuntimeException('Quick-trade active limit reached for this workspace.');
+        }
+
+        if ($mode === 'live' && (bool) config('autofinx.runtime.block_duplicate_symbol_live', true)) {
+            $duplicate = QuickTrade::query()
+                ->where('workspace_id', $workspaceId)
+                ->where('symbol', $symbol)
+                ->where('mode', 'live')
+                ->where('status', 'open')
+                ->first();
+
+            if ($duplicate) {
+                throw new RuntimeException('duplicate_live_position_detected: Another live position is already open for this symbol.');
+            }
+        }
+
+        if ($mode === 'live' && (bool) config('autofinx.runtime.require_green_for_live', false)) {
+            $runtime = app(TradingRuntimeHealthService::class)->liveAllowed($workspaceId);
+            if (! ($runtime['allowed'] ?? false)) {
+                throw new RuntimeException((string) ($runtime['human_message'] ?? 'Live trading is blocked because runtime health is red.'));
+            }
         }
 
         $symbolMeta = $this->settings->symbolMeta($workspaceId, $symbol, $mode, $providerKey);
@@ -81,7 +111,9 @@ class QuickTradeService
         $traceId = (string) Str::uuid();
         $entryAt = CarbonImmutable::now();
         $walletAccountId = $payload['wallet_account_id'] ?? null;
-        $entryIdempotencyKey = (string) Str::uuid();
+        $entryIdempotencyKey = $requestIdempotencyKey !== ''
+            ? substr('qt-'.str_replace('-', '', $requestIdempotencyKey), 0, 36)
+            : (string) Str::uuid();
 
         if ($mode === 'live') {
             return $this->placeLiveTrade(

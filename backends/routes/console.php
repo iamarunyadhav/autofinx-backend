@@ -102,6 +102,15 @@ if ($schedulerEnabled && (bool) config('autofinx.scheduler.robot_sessions', true
         ->after(fn () => $markRunEnd('robot-sessions:evaluate'));
 }
 
+if ($schedulerEnabled && (bool) config('autofinx.scheduler.quick_settler', true)) {
+    Schedule::command('quick-trades:settle')
+        ->everyMinute()
+        ->withoutOverlapping()
+        ->runInBackground()
+        ->before(fn () => $markRunStart('quick-trades:settle'))
+        ->after(fn () => $markRunEnd('quick-trades:settle'));
+}
+
 /*
 Temporarily disabled to reduce unnecessary Binance REST pressure while only Future Trade and Fast2X are needed.
 Schedule::command('bots:evaluate')

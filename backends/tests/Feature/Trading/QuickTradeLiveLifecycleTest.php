@@ -267,6 +267,80 @@ test('live quick trade sell settles with positive pnl when price falls', functio
     CarbonImmutable::setTestNow();
 });
 
+test('live quick trade blocks duplicate same symbol open position', function () {
+    $user = User::factory()->create();
+    $workspace = Workspace::factory()->create();
+    $integration = liveTradingIntegration($workspace->id);
+
+    $this->actingAs($user);
+    seedLiveTradingSettings($workspace->id, $integration->id);
+
+    Http::fake(function (\Illuminate\Http\Client\Request $request) {
+        $url = $request->url();
+
+        if (str_contains($url, '/fapi/v2/balance')) {
+            return Http::response([
+                ['asset' => 'USDT', 'balance' => '1000.00', 'availableBalance' => '1000.00'],
+            ], 200);
+        }
+
+        if (str_contains($url, '/fapi/v1/ticker/price')) {
+            return Http::response(['symbol' => 'ETHUSDT', 'price' => '2000.00'], 200);
+        }
+
+        if (str_contains($url, '/fapi/v1/klines')) {
+            return Http::response([], 200);
+        }
+
+        if (str_contains($url, '/fapi/v1/exchangeInfo')) {
+            return Http::response([
+                'symbols' => [[
+                    'symbol' => 'ETHUSDT',
+                    'filters' => [[
+                        'filterType' => 'MARKET_LOT_SIZE',
+                        'stepSize' => '0.001',
+                        'minQty' => '0.001',
+                    ], [
+                        'filterType' => 'MIN_NOTIONAL',
+                        'notional' => '20.00000000',
+                    ]],
+                ]],
+            ], 200);
+        }
+
+        if (str_contains($url, '/fapi/v1/order') && $request->method() === 'POST') {
+            return Http::response([
+                'orderId' => '3201',
+                'avgPrice' => '2000.00',
+                'executedQty' => '0.010',
+            ], 200);
+        }
+
+        return Http::response([], 200);
+    });
+
+    $payload = [
+        'workspace_id' => $workspace->id,
+        'symbol' => 'ETHUSDT',
+        'side' => 'buy',
+        'stake_amount' => 20,
+        'timeframe' => '1m',
+        'expiry_seconds' => 60,
+        'mode' => 'live',
+        'provider' => 'binance',
+        'integration_id' => $integration->id,
+        'indicator_set' => ['MACD'],
+    ];
+
+    $this->postJson('/api/v1/quick-trade/place', $payload)->assertCreated();
+
+    $this->postJson('/api/v1/quick-trade/place', array_merge($payload, ['side' => 'sell']))
+        ->assertStatus(422)
+        ->assertJsonPath('message', 'duplicate_live_position_detected: Another live position is already open for this symbol.');
+
+    expect(QuickTrade::where('workspace_id', $workspace->id)->where('symbol', 'ETHUSDT')->where('status', 'open')->count())->toBe(1);
+});
+
 function seedLiveTradingSettings(string $workspaceId, string $integrationId): void
 {
     foreach ([

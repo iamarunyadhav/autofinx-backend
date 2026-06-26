@@ -56,6 +56,7 @@ use App\Http\Controllers\Api\Fast2XController;
 use App\Http\Controllers\Api\FutureTradeBotController;
 use App\Http\Controllers\Api\FuturesController;
 use App\Http\Controllers\Api\JobsController;
+use App\Http\Controllers\Api\RuntimeHealthController;
 use App\Http\Controllers\Api\SweepController;
 use App\Http\Controllers\Api\StrategySchemaController;
 use App\Http\Controllers\Api\WithdrawalScheduleController;
@@ -153,6 +154,7 @@ Route::prefix('v1')->group(function () {
         Route::get('workspaces/{workspace}/ledger', [TradingController::class, 'ledger']);
         Route::get('workspaces/{workspace}/ledger/export.csv', [TradingController::class, 'exportLedger']);
         Route::get('quick-trade/metadata', [QuickTradeController::class, 'metadata']);
+        Route::get('runtime/health', [RuntimeHealthController::class, 'show']);
         Route::get('quick-trade/chart', [QuickTradeController::class, 'chart']);
         Route::get('quick-trade/candle-feed', [QuickTradeController::class, 'candleFeed']);
         Route::get('quick-trade/technical-summary', [QuickTradeController::class, 'technicalSummary']);

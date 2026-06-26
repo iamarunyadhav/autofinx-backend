@@ -5,6 +5,7 @@ namespace App\Console\Commands;
 use App\Models\FutureTradeBotConfig;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Log;
 
 class FutureTradeLiveFeedCommand extends Command
 {
@@ -19,6 +20,19 @@ class FutureTradeLiveFeedCommand extends Command
 
     public function handle(): int
     {
+        $heartbeatPath = storage_path('framework/autofinx-live-feed-heartbeat.json');
+        $heartbeatDir = dirname($heartbeatPath);
+        if (! is_dir($heartbeatDir) || ! is_writable($heartbeatDir)) {
+            $message = "Live-feed heartbeat directory is not writable: {$heartbeatDir}";
+            $this->error($message);
+            Log::error('[FT LIVE FEED PREFLIGHT FAILED]', [
+                'reason' => 'heartbeat_directory_not_writable',
+                'path' => $heartbeatDir,
+            ]);
+
+            return self::FAILURE;
+        }
+
         $symbols = $this->resolveSymbols();
 
         if ($symbols === []) {
@@ -27,18 +41,30 @@ class FutureTradeLiveFeedCommand extends Command
 
         $streams = (string) $this->option('streams');
         $maxRuntime = max(0, (int) $this->option('max-runtime'));
+        Log::info('[FT LIVE FEED START]', [
+            'symbols' => $symbols,
+            'streams' => $streams,
+            'maxRuntime' => $maxRuntime,
+            'testnet' => (bool) $this->option('testnet'),
+            'heartbeatPath' => $heartbeatPath,
+        ]);
+
         $lock = Cache::lock(
             'autofinx:runtime:future-trade-live-feed:'.md5(implode(',', $symbols)).':'.md5($streams),
             $maxRuntime > 0 ? $maxRuntime + 60 : 86400
         );
         if (! $lock->get()) {
             $this->warn('Another Future Trade live-feed daemon is already running for this symbol/stream scope.');
+            Log::warning('[FT LIVE FEED LOCKED]', [
+                'symbols' => $symbols,
+                'streams' => $streams,
+            ]);
 
             return self::SUCCESS;
         }
 
         try {
-            return $this->call('market:ws-consume', [
+            $exitCode = $this->call('market:ws-consume', [
                 '--market-type' => 'futures',
                 '--symbols' => implode(',', $symbols),
                 '--streams' => $streams,
@@ -47,6 +73,24 @@ class FutureTradeLiveFeedCommand extends Command
                 '--testnet' => (bool) $this->option('testnet'),
                 '--no-dispatch' => true,
             ]);
+            Log::info('[FT LIVE FEED EXIT]', [
+                'exitCode' => $exitCode,
+                'symbols' => $symbols,
+                'streams' => $streams,
+                'heartbeatExists' => file_exists($heartbeatPath),
+            ]);
+
+            return $exitCode;
+        } catch (\Throwable $exception) {
+            Log::error('[FT LIVE FEED FAILED]', [
+                'class' => $exception::class,
+                'message' => $exception->getMessage(),
+                'symbols' => $symbols,
+                'streams' => $streams,
+            ]);
+            $this->error('Future Trade live-feed failed: '.$exception->getMessage());
+
+            return self::FAILURE;
         } finally {
             optional($lock)->release();
         }
