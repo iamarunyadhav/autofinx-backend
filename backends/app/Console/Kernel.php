@@ -15,6 +15,8 @@ use App\Console\Commands\OpsStaleFeedCheckCommand;
 use App\Console\Commands\OperationalReadinessCheckCommand;
 use App\Console\Commands\OpsReconcileOrdersCommand;
 use App\Console\Commands\AnalyticsRecomputeCommand;
+use App\Console\Commands\QuickTradesDoctorCommand;
+use App\Console\Commands\QuickTradesReconcileCommand;
 use App\Console\Commands\MarketBackfillCommand;
 use App\Console\Commands\ArbitrageLoopStart;
 use App\Console\Commands\YieldSimulateStart;
@@ -70,6 +72,8 @@ class Kernel extends ConsoleKernel
         OperationalReadinessCheckCommand::class,
         OpsReconcileOrdersCommand::class,
         AnalyticsRecomputeCommand::class,
+        QuickTradesDoctorCommand::class,
+        QuickTradesReconcileCommand::class,
         MarketBackfillCommand::class,
         ArbitrageLoopStart::class,
         YieldSimulateStart::class,

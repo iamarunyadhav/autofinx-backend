@@ -2,10 +2,11 @@
 
 namespace App\Domain\Trading;
 
+use App\Domain\Ops\TradingRuntimeHealthService;
+use App\Domain\FutureTrade\FutureTradeAuditService;
 use App\Models\QuickTrade;
 use App\Models\RobotSession;
 use App\Models\MarketFeedStatus;
-use App\Domain\FutureTrade\FutureTradeAuditService;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 use RuntimeException;
@@ -164,6 +165,19 @@ class RobotSessionService
         }
 
         $session = $this->syncExecutionContext($session, true);
+        if ($session->mode === 'live' && (bool) config('autofinx.runtime.require_green_for_live', false)) {
+            $runtime = app(TradingRuntimeHealthService::class)->snapshot($session->workspace_id);
+            if (($runtime['robot_trade']['evaluator'] ?? 'red') !== 'green') {
+                throw new RuntimeException('robot_evaluator_unhealthy: Robot evaluator is not running. Robot cannot auto-trade continuously.');
+            }
+            if (($runtime['robot_trade']['market_feed'] ?? 'red') === 'red') {
+                throw new RuntimeException('server_market_feed_stale: Backend market feed is stale. Browser chart data cannot bypass server-side live safety.');
+            }
+            if (($runtime['overall'] ?? 'red') === 'red') {
+                throw new RuntimeException('runtime_health_red: Live robot start is blocked because required runtime workers or feeds are unhealthy.');
+            }
+        }
+
         $session->status = 'RUNNING';
         $session->last_error = null;
         $session->save();

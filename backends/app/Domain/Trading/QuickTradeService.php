@@ -95,9 +95,12 @@ class QuickTradeService
         }
 
         if ($mode === 'live' && (bool) config('autofinx.runtime.require_green_for_live', false)) {
-            $runtime = app(TradingRuntimeHealthService::class)->liveAllowed($workspaceId);
-            if (! ($runtime['allowed'] ?? false)) {
-                throw new RuntimeException((string) ($runtime['human_message'] ?? 'Live trading is blocked because runtime health is red.'));
+            $runtime = app(TradingRuntimeHealthService::class)->snapshot($workspaceId);
+            if (($runtime['quick_trade']['settler'] ?? 'red') !== 'green') {
+                throw new RuntimeException('quick_trade_settler_unhealthy: Quick Trade settler is not running. Timed live trades may not close reliably.');
+            }
+            if (($runtime['overall'] ?? 'red') === 'red') {
+                throw new RuntimeException('runtime_health_red: Live trading is blocked because required runtime workers or feeds are unhealthy.');
             }
         }
 

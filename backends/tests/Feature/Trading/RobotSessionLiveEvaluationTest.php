@@ -167,6 +167,32 @@ test('robot session blocks live entry when server websocket feed is stale', func
         ->and(QuickTrade::where('robot_session_id', $session->id)->exists())->toBeFalse();
 });
 
+test('robot live start is blocked when required evaluator runtime is unhealthy', function () {
+    config(['autofinx.runtime.require_green_for_live' => true]);
+
+    $user = User::factory()->create();
+    $workspace = Workspace::factory()->create();
+    $integration = robotLiveIntegration($workspace->id);
+
+    robotSeedLiveTradingSettings($workspace->id, $integration->id);
+
+    $session = app(RobotSessionService::class)->create($workspace->id, [
+        'name' => 'ETH live robot',
+        'symbol' => 'ETHUSDT',
+        'timeframe' => '1m',
+        'expiry_seconds' => 60,
+        'indicator_set' => ['MACD'],
+        'strategy_profile' => 'balanced',
+        'base_stake' => 20,
+        'confidence_threshold' => 50,
+        'provider' => 'binance',
+        'integration_id' => $integration->id,
+    ], $user->id);
+
+    expect(fn () => app(RobotSessionService::class)->start($session))
+        ->toThrow(RuntimeException::class, 'robot_evaluator_unhealthy');
+});
+
 function robotSeedLiveTradingSettings(string $workspaceId, string $integrationId): void
 {
     foreach ([

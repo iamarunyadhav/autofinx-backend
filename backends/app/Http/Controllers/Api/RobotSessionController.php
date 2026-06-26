@@ -8,6 +8,7 @@ use App\Domain\Trading\TradingMarketService;
 use App\Models\RobotSession;
 use Illuminate\Http\Request;
 use App\Http\Controllers\Controller;
+use RuntimeException;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class RobotSessionController extends Controller
@@ -90,7 +91,13 @@ class RobotSessionController extends Controller
 
     public function start(RobotSession $robotSession, RobotSessionService $sessions)
     {
-        return response()->json($sessions->start($robotSession));
+        try {
+            return response()->json($sessions->start($robotSession));
+        } catch (RuntimeException $e) {
+            return response()->json([
+                'message' => $e->getMessage(),
+            ], 422);
+        }
     }
 
     public function pause(RobotSession $robotSession, RobotSessionService $sessions)

@@ -184,6 +184,31 @@ test('live quick trade rejects binance futures stake below minimum notional befo
         ->assertJsonPath('message', 'Stake too small for ETHUSDT. Minimum required: $20.');
 });
 
+test('live quick trade is blocked when required settler runtime is unhealthy', function () {
+    config(['autofinx.runtime.require_green_for_live' => true]);
+
+    $user = User::factory()->create();
+    $workspace = Workspace::factory()->create();
+    $integration = liveTradingIntegration($workspace->id);
+
+    $this->actingAs($user);
+    seedLiveTradingSettings($workspace->id, $integration->id);
+
+    $this->postJson('/api/v1/quick-trade/place', [
+        'workspace_id' => $workspace->id,
+        'symbol' => 'ETHUSDT',
+        'side' => 'buy',
+        'stake_amount' => 20,
+        'timeframe' => '1m',
+        'expiry_seconds' => 60,
+        'mode' => 'live',
+        'provider' => 'binance',
+        'integration_id' => $integration->id,
+        'indicator_set' => ['MACD'],
+    ])->assertStatus(422)
+        ->assertJsonPath('message', 'quick_trade_settler_unhealthy: Quick Trade settler is not running. Timed live trades may not close reliably.');
+});
+
 test('live quick trade sell settles with positive pnl when price falls', function () {
     $user = User::factory()->create();
     $workspace = Workspace::factory()->create();

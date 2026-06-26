@@ -49,5 +49,19 @@ test('runtime health endpoint returns trading module traffic light status', func
         ->assertJsonPath('overall', 'green')
         ->assertJsonPath('quick_trade.settler', 'green')
         ->assertJsonPath('robot_trade.evaluator', 'green')
-        ->assertJsonPath('future_trade.execution_queue', 'green');
+        ->assertJsonPath('future_trade.execution_queue', 'green')
+        ->assertJsonPath('future_trade.daily_loss_lock', false)
+        ->assertJsonStructure([
+            'quick_trade' => ['settler_age_seconds'],
+            'robot_trade' => ['evaluator_age_seconds'],
+            'future_trade' => ['live_feed_age_seconds'],
+            'supervisor' => [
+                'quick_settler',
+                'robot_evaluator',
+                'live_feed',
+                'user_stream',
+                'tick_loop',
+                'queue_critical',
+            ],
+        ]);
 });

@@ -4,7 +4,10 @@ namespace App\Domain\Ops;
 
 use App\Models\MarketFeedStatus;
 use App\Models\QuickTrade;
+use App\Models\FutureTradeBotConfig;
+use App\Models\RobotSession;
 use App\Models\SchedulerRun;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 
@@ -13,18 +16,21 @@ class TradingRuntimeHealthService
     public function snapshot(?string $workspaceId = null): array
     {
         $quickSettler = $this->scheduledCommand('quick-trades:settle', 90);
-        $robotEvaluator = $this->scheduledCommand('robot-sessions:evaluate', 90);
-        $futureTick = $this->scheduledCommand('future-trade:tick', 90);
+        $robotEvaluator = $this->robotEvaluatorHealth($workspaceId);
+        $futureTick = $this->futureTickHealth($workspaceId);
         $futureReconcile = $this->scheduledCommand('future-trade:reconcile', 900);
-        $futureUserStream = $this->scheduledCommand('future-trade:user-stream', (int) config('autofinx.runtime.user_stream_max_age_seconds', 60) + 30);
+        $futureUserStream = $this->futureUserStreamHealth($workspaceId);
         $futureLiveFeed = $this->marketFeed($workspaceId);
         $executionQueue = $this->queue(['execution', 'critical', 'reconcile', 'monitoring']);
         $marketQueue = $this->queue(['market', 'signals', 'strategies', 'ratio_bot', 'ops']);
         $defaultQueue = $this->queue(['analytics', 'notifications', 'default', 'monitoring']);
         $expiredQuickTrades = $this->expiredQuickTrades($workspaceId);
+        $supervisor = $this->supervisorStatus();
+        $dailyLossLock = $this->dailyLossLock($workspaceId);
 
         $quickTrade = [
             'settler' => $quickSettler['state'],
+            'settler_age_seconds' => $quickSettler['age_seconds'] ?? null,
             'settler_detail' => $quickSettler,
             'open_expired_count' => $expiredQuickTrades,
         ];
@@ -34,6 +40,7 @@ class TradingRuntimeHealthService
 
         $robotTrade = [
             'evaluator' => $robotEvaluator['state'],
+            'evaluator_age_seconds' => $robotEvaluator['age_seconds'] ?? null,
             'evaluator_detail' => $robotEvaluator,
             'market_feed' => $futureLiveFeed['state'],
             'market_feed_detail' => $futureLiveFeed,
@@ -41,6 +48,7 @@ class TradingRuntimeHealthService
 
         $futureTrade = [
             'live_feed' => $futureLiveFeed['state'],
+            'live_feed_age_seconds' => $futureLiveFeed['age_seconds'] ?? null,
             'live_feed_detail' => $futureLiveFeed,
             'user_stream' => $futureUserStream['state'],
             'user_stream_detail' => $futureUserStream,
@@ -54,6 +62,7 @@ class TradingRuntimeHealthService
             'tick_detail' => $futureTick,
             'reconcile' => $futureReconcile['state'],
             'reconcile_detail' => $futureReconcile,
+            'daily_loss_lock' => $dailyLossLock,
         ];
 
         $binance = [
@@ -92,6 +101,7 @@ class TradingRuntimeHealthService
             'robot_trade' => $robotTrade,
             'future_trade' => $futureTrade,
             'binance' => $binance,
+            'supervisor' => $supervisor,
             'reasons' => array_values(array_unique($reasons)),
         ];
     }
@@ -155,6 +165,85 @@ class TradingRuntimeHealthService
         ];
     }
 
+    private function robotEvaluatorHealth(?string $workspaceId): array
+    {
+        $base = $this->scheduledCommand('robot-sessions:evaluate', 90);
+        $running = Schema::hasTable('robot_sessions')
+            ? RobotSession::query()
+                ->where('status', 'RUNNING')
+                ->when($workspaceId, fn ($query) => $query->where('workspace_id', $workspaceId))
+                ->count()
+            : 0;
+
+        if ((bool) config('autofinx.runtime.supervisor', false) && $running === 0 && ($base['state'] ?? '') === 'red') {
+            $base['state'] = 'yellow';
+            $base['reason'] = 'no_running_robot_sessions_scheduler_history_missing';
+        }
+
+        if ($running === 0 && ($base['state'] ?? '') === 'yellow') {
+            $base['reason'] = 'no_running_robot_sessions';
+        }
+
+        $base['running_robot_sessions'] = $running;
+
+        return $base;
+    }
+
+    private function futureTickHealth(?string $workspaceId): array
+    {
+        $base = $this->scheduledCommand('future-trade:tick', 90);
+        $enabled = $this->liveOrEnabledFutureConfigs($workspaceId);
+
+        if ((bool) config('autofinx.runtime.supervisor', false) && $enabled === 0 && in_array(($base['state'] ?? ''), ['red', 'yellow'], true)) {
+            $base['state'] = 'yellow';
+            $base['reason'] = 'no_enabled_future_trade_configs';
+        }
+
+        $base['enabled_future_trade_configs'] = $enabled;
+
+        return $base;
+    }
+
+    private function futureUserStreamHealth(?string $workspaceId): array
+    {
+        $liveConfigs = Schema::hasTable('future_trade_bot_configs')
+            ? FutureTradeBotConfig::query()
+                ->where('enable_live_trading', true)
+                ->where('slot_index', 0)
+                ->when($workspaceId, fn ($query) => $query->where('workspace_id', $workspaceId))
+                ->count()
+            : 0;
+
+        if ($liveConfigs === 0) {
+            return [
+                'state' => 'green',
+                'reason' => 'no_live_enabled_future_trade_configs',
+                'command' => 'future-trade:user-stream',
+                'live_enabled_future_trade_configs' => 0,
+            ];
+        }
+
+        $base = $this->scheduledCommand('future-trade:user-stream', (int) config('autofinx.runtime.user_stream_max_age_seconds', 60) + 30);
+        $base['live_enabled_future_trade_configs'] = $liveConfigs;
+
+        return $base;
+    }
+
+    private function liveOrEnabledFutureConfigs(?string $workspaceId): int
+    {
+        if (! Schema::hasTable('future_trade_bot_configs')) {
+            return 0;
+        }
+
+        return FutureTradeBotConfig::query()
+            ->where('slot_index', 0)
+            ->where(function ($query): void {
+                $query->where('enabled', true)->orWhere('enable_live_trading', true);
+            })
+            ->when($workspaceId, fn ($query) => $query->where('workspace_id', $workspaceId))
+            ->count();
+    }
+
     private function marketFeed(?string $workspaceId): array
     {
         if (! Schema::hasTable('market_feed_status')) {
@@ -174,7 +263,7 @@ class TradingRuntimeHealthService
 
         $row = $query->orderByDesc('last_tick_at')->first();
         if (! $row) {
-            return ['state' => 'red', 'reason' => 'no_futures_market_feed_tick'];
+            return $this->heartbeatFeed();
         }
 
         $maxAge = (int) config('autofinx.runtime.live_feed_max_age_seconds', 15);
@@ -190,6 +279,39 @@ class TradingRuntimeHealthService
             'symbol' => (string) ($row->symbol ?? ''),
             'price' => (float) ($row->last_price ?? 0),
             'source' => (string) ($row->source ?? ''),
+        ];
+    }
+
+    private function heartbeatFeed(): array
+    {
+        $path = storage_path('framework/autofinx-live-feed-heartbeat.json');
+        if (! file_exists($path)) {
+            return ['state' => 'red', 'reason' => 'no_futures_market_feed_tick'];
+        }
+
+        $raw = @file_get_contents($path);
+        $data = $raw !== false ? @json_decode($raw, true) : null;
+        $epoch = is_array($data) ? (int) ($data['last_message_epoch'] ?? 0) : 0;
+        $age = $epoch > 0 ? max(0, time() - $epoch) : null;
+        $maxAge = (int) config('autofinx.runtime.live_feed_max_age_seconds', 15);
+
+        if ($age === null) {
+            return ['state' => 'red', 'reason' => 'live_feed_heartbeat_invalid'];
+        }
+
+        $state = $age <= $maxAge ? 'green' : ($age <= ($maxAge * 3) ? 'yellow' : 'red');
+
+        return [
+            'state' => $state,
+            'reason' => $state === 'green' ? 'ok_heartbeat_fallback' : 'live_feed_heartbeat_stale',
+            'last_tick_at' => isset($data['last_message_at']) ? (string) $data['last_message_at'] : null,
+            'age_seconds' => $age,
+            'max_age_seconds' => $maxAge,
+            'symbol' => (string) ($data['symbol'] ?? ''),
+            'source' => 'heartbeat_file',
+            'message_count' => (int) ($data['message_count'] ?? 0),
+            'reconnect_count' => (int) ($data['reconnect_count'] ?? 0),
+            'workspace_scoped' => false,
         ];
     }
 
@@ -244,6 +366,109 @@ class TradingRuntimeHealthService
             ->where('expires_at', '<', now()->subSeconds(15))
             ->when($workspaceId, fn ($query) => $query->where('workspace_id', $workspaceId))
             ->count();
+    }
+
+    private function dailyLossLock(?string $workspaceId): bool
+    {
+        if (! Schema::hasTable('future_trade_bot_configs')) {
+            return false;
+        }
+
+        $configs = FutureTradeBotConfig::query()
+            ->with('state')
+            ->when($workspaceId, fn ($query) => $query->where('workspace_id', $workspaceId))
+            ->limit(50)
+            ->get();
+
+        return $configs->contains(function (FutureTradeBotConfig $config): bool {
+            $state = $config->state;
+            if (! $state) {
+                return false;
+            }
+
+            if (strtoupper((string) ($state->state ?? '')) === 'DAILY_LOSS_LOCKED') {
+                return true;
+            }
+
+            $stopUntil = $state->daily_stop_until ?? null;
+            if (! $stopUntil) {
+                return false;
+            }
+
+            return method_exists($stopUntil, 'isFuture')
+                ? $stopUntil->isFuture()
+                : Carbon::parse((string) $stopUntil)->isFuture();
+        });
+    }
+
+    /**
+     * Supervisor is optional in local/test environments, so failure to inspect it
+     * returns UNKNOWN instead of making runtime health itself crash.
+     *
+     * @return array<string, string>
+     */
+    private function supervisorStatus(): array
+    {
+        $defaults = [
+            'quick_settler' => 'UNKNOWN',
+            'robot_evaluator' => 'UNKNOWN',
+            'live_feed' => 'UNKNOWN',
+            'user_stream' => 'UNKNOWN',
+            'tick_loop' => 'UNKNOWN',
+            'queue_critical' => 'UNKNOWN',
+        ];
+
+        if (PHP_OS_FAMILY === 'Windows' || ! function_exists('shell_exec')) {
+            return $defaults;
+        }
+
+        $output = @shell_exec('supervisorctl status 2>/dev/null');
+        if (! is_string($output) || trim($output) === '') {
+            return $defaults;
+        }
+
+        $programs = $this->parseSupervisorOutput($output);
+
+        return [
+            'quick_settler' => $this->supervisorProgram($programs, ['autofinx-quick-settler', 'autofinx-trading:quick-settler']),
+            'robot_evaluator' => $this->supervisorProgram($programs, ['autofinx-robot-evaluator', 'autofinx-trading:robot-evaluator']),
+            'live_feed' => $this->supervisorProgram($programs, ['autofinx-trading:live-feed', 'autofinx-live-feed']),
+            'user_stream' => $this->supervisorProgram($programs, ['autofinx-trading:user-stream-loop', 'autofinx-user-stream-loop']),
+            'tick_loop' => $this->supervisorProgram($programs, ['autofinx-trading:tick-loop', 'autofinx-tick-loop']),
+            'queue_critical' => $this->supervisorProgram($programs, ['autofinx-trading:queue-critical', 'autofinx-queue-critical']),
+        ];
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    private function parseSupervisorOutput(string $output): array
+    {
+        $programs = [];
+        foreach (preg_split('/\R/', trim($output)) ?: [] as $line) {
+            if (! preg_match('/^(\S+)\s+([A-Z_]+)/', trim($line), $matches)) {
+                continue;
+            }
+
+            $programs[$matches[1]] = $matches[2];
+        }
+
+        return $programs;
+    }
+
+    /**
+     * @param array<string, string> $programs
+     * @param array<int, string> $names
+     */
+    private function supervisorProgram(array $programs, array $names): string
+    {
+        foreach ($names as $name) {
+            if (isset($programs[$name])) {
+                return $programs[$name];
+            }
+        }
+
+        return 'UNKNOWN';
     }
 
     private function collectReasons(string $prefix, string $state, array $detail, array &$reasons): void
