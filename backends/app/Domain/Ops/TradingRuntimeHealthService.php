@@ -15,17 +15,20 @@ class TradingRuntimeHealthService
 {
     public function snapshot(?string $workspaceId = null): array
     {
-        $quickSettler = $this->scheduledCommand('quick-trades:settle', 90);
-        $robotEvaluator = $this->robotEvaluatorHealth($workspaceId);
-        $futureTick = $this->futureTickHealth($workspaceId);
+        $supervisor = $this->supervisorStatus();
+        $quickSettler = $this->withSupervisorProcess(
+            $this->scheduledCommand('quick-trades:settle', 90),
+            $supervisor['quick_settler'] ?? 'UNKNOWN'
+        );
+        $robotEvaluator = $this->robotEvaluatorHealth($workspaceId, $supervisor['robot_evaluator'] ?? 'UNKNOWN');
+        $futureTick = $this->futureTickHealth($workspaceId, $supervisor['tick_loop'] ?? 'UNKNOWN');
         $futureReconcile = $this->scheduledCommand('future-trade:reconcile', 900);
-        $futureUserStream = $this->futureUserStreamHealth($workspaceId);
+        $futureUserStream = $this->futureUserStreamHealth($workspaceId, $supervisor['user_stream'] ?? 'UNKNOWN');
         $futureLiveFeed = $this->marketFeed($workspaceId);
         $executionQueue = $this->queue(['execution', 'critical', 'reconcile', 'monitoring']);
         $marketQueue = $this->queue(['market', 'signals', 'strategies', 'ratio_bot', 'ops']);
         $defaultQueue = $this->queue(['analytics', 'notifications', 'default', 'monitoring']);
         $expiredQuickTrades = $this->expiredQuickTrades($workspaceId);
-        $supervisor = $this->supervisorStatus();
         $dailyLossLock = $this->dailyLossLock($workspaceId);
 
         $quickTrade = [
@@ -165,9 +168,12 @@ class TradingRuntimeHealthService
         ];
     }
 
-    private function robotEvaluatorHealth(?string $workspaceId): array
+    private function robotEvaluatorHealth(?string $workspaceId, string $supervisorStatus): array
     {
-        $base = $this->scheduledCommand('robot-sessions:evaluate', 90);
+        $base = $this->withSupervisorProcess(
+            $this->scheduledCommand('robot-sessions:evaluate', 90),
+            $supervisorStatus
+        );
         $running = Schema::hasTable('robot_sessions')
             ? RobotSession::query()
                 ->where('status', 'RUNNING')
@@ -176,7 +182,7 @@ class TradingRuntimeHealthService
             : 0;
 
         if ((bool) config('autofinx.runtime.supervisor', false) && $running === 0 && ($base['state'] ?? '') === 'red') {
-            $base['state'] = 'yellow';
+            $base['state'] = $supervisorStatus === 'RUNNING' ? 'green' : 'yellow';
             $base['reason'] = 'no_running_robot_sessions_scheduler_history_missing';
         }
 
@@ -189,9 +195,12 @@ class TradingRuntimeHealthService
         return $base;
     }
 
-    private function futureTickHealth(?string $workspaceId): array
+    private function futureTickHealth(?string $workspaceId, string $supervisorStatus): array
     {
-        $base = $this->scheduledCommand('future-trade:tick', 90);
+        $base = $this->withSupervisorProcess(
+            $this->scheduledCommand('future-trade:tick', 90),
+            $supervisorStatus
+        );
         $enabled = $this->liveOrEnabledFutureConfigs($workspaceId);
 
         if ((bool) config('autofinx.runtime.supervisor', false) && $enabled === 0 && in_array(($base['state'] ?? ''), ['red', 'yellow'], true)) {
@@ -204,7 +213,7 @@ class TradingRuntimeHealthService
         return $base;
     }
 
-    private function futureUserStreamHealth(?string $workspaceId): array
+    private function futureUserStreamHealth(?string $workspaceId, string $supervisorStatus): array
     {
         $liveConfigs = Schema::hasTable('future_trade_bot_configs')
             ? FutureTradeBotConfig::query()
@@ -223,10 +232,29 @@ class TradingRuntimeHealthService
             ];
         }
 
-        $base = $this->scheduledCommand('future-trade:user-stream', (int) config('autofinx.runtime.user_stream_max_age_seconds', 60) + 30);
+        $base = $this->withSupervisorProcess(
+            $this->scheduledCommand('future-trade:user-stream', (int) config('autofinx.runtime.user_stream_max_age_seconds', 60) + 30),
+            $supervisorStatus
+        );
         $base['live_enabled_future_trade_configs'] = $liveConfigs;
 
         return $base;
+    }
+
+    private function withSupervisorProcess(array $health, string $supervisorStatus): array
+    {
+        $health['supervisor_status'] = $supervisorStatus;
+
+        if ($supervisorStatus !== 'RUNNING') {
+            return $health;
+        }
+
+        if (($health['state'] ?? 'red') !== 'green') {
+            $health['state'] = 'green';
+            $health['reason'] = 'supervisor_process_running';
+        }
+
+        return $health;
     }
 
     private function liveOrEnabledFutureConfigs(?string $workspaceId): int
