@@ -1358,13 +1358,30 @@ class RobotSessionService
         }
 
         if (Schema::hasColumn('market_feed_status', 'exchange')) {
-            $query->where('exchange', 'binance');
+            $query->whereIn('exchange', ['binance', 'binance_futures']);
         }
         if (Schema::hasColumn('market_feed_status', 'market_type')) {
             $query->where('market_type', 'futures');
         }
 
         $row = $query->whereNotNull('last_tick_at')->orderByDesc('last_tick_at')->first();
+        if (! $row?->last_tick_at) {
+            $fallback = MarketFeedStatus::query();
+            if (Schema::hasColumn('market_feed_status', 'symbol')) {
+                $fallback->where('symbol', $symbol);
+            } else {
+                $fallback->where('symbol_id', $this->market->resolveSymbol($symbol)->id);
+            }
+            if (Schema::hasColumn('market_feed_status', 'exchange')) {
+                $fallback->whereIn('exchange', ['binance', 'binance_futures']);
+            }
+            if (Schema::hasColumn('market_feed_status', 'market_type')) {
+                $fallback->where('market_type', 'futures');
+            }
+
+            $row = $fallback->whereNotNull('last_tick_at')->orderByDesc('last_tick_at')->first();
+        }
+
         if (! $row?->last_tick_at) {
             return ['fresh' => false, 'reason' => 'No server websocket tick exists for this symbol.'];
         }
