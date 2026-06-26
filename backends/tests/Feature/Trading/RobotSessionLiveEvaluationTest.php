@@ -38,6 +38,9 @@ test('robot session evaluates in live mode and opens a live quick trade', functi
                         'filterType' => 'MARKET_LOT_SIZE',
                         'stepSize' => '0.001',
                         'minQty' => '0.001',
+                    ], [
+                        'filterType' => 'MIN_NOTIONAL',
+                        'notional' => '20.00000000',
                     ]],
                 ]],
             ], 200);
@@ -65,7 +68,7 @@ test('robot session evaluates in live mode and opens a live quick trade', functi
             return Http::response([
                 'orderId' => '7771',
                 'avgPrice' => '2000.00',
-                'executedQty' => '0.005',
+                'executedQty' => '0.010',
             ], 200);
         }
 
@@ -79,14 +82,15 @@ test('robot session evaluates in live mode and opens a live quick trade', functi
         'expiry_seconds' => 60,
         'indicator_set' => ['MACD'],
         'strategy_profile' => 'balanced',
-        'base_stake' => 10,
+        'base_stake' => 20,
         'confidence_threshold' => 50,
         'provider' => 'binance',
         'integration_id' => $integration->id,
     ], $user->id);
 
     $session = app(RobotSessionService::class)->start($session);
-    $result = app(RobotSessionService::class)->evaluateSession($session);
+    app(RobotSessionService::class)->evaluateSession($session);
+    $result = app(RobotSessionService::class)->evaluateSession($session->fresh());
 
     $trade = QuickTrade::where('robot_session_id', $session->id)->first();
 
@@ -94,7 +98,7 @@ test('robot session evaluates in live mode and opens a live quick trade', functi
         ->and($trade)->not->toBeNull()
         ->and($trade->mode)->toBe('live')
         ->and($trade->provider_key)->toBe('binance')
-        ->and((float) $trade->quantity)->toBe(0.005)
+        ->and((float) $trade->quantity)->toBe(0.01)
         ->and(RobotSession::findOrFail($session->id)->mode)->toBe('live');
 });
 

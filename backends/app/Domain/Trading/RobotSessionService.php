@@ -10,7 +10,7 @@ use RuntimeException;
 
 class RobotSessionService
 {
-    private const MIN_LIVE_NOTIONAL_USDT = 10.0;
+    private const MIN_LIVE_NOTIONAL_USDT = 20.0;
 
     public function __construct(
         private readonly TradingModuleSettingsService $settings,

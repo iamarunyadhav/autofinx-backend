@@ -49,7 +49,13 @@ class QuickTradeService
             throw new RuntimeException('Trade side must be buy or sell.');
         }
         $minStake = max(10.0, (float) ($config['min_stake'] ?? 10));
-        if ($stake < $minStake || $stake > (float) ($config['max_stake'] ?? 500)) {
+        if ($mode === 'live' && $providerKey === 'binance') {
+            $minStake = max($minStake, FuturesOrderSizingService::BINANCE_MIN_OPEN_NOTIONAL);
+        }
+        if ($stake < $minStake) {
+            throw new RuntimeException("Stake too small for {$symbol}. Minimum required: \${$minStake}.");
+        }
+        if ($stake > (float) ($config['max_stake'] ?? 500)) {
             throw new RuntimeException('Stake amount is outside the permitted quick-trade range.');
         }
         if (! in_array($expirySeconds, $this->settings->durationsForMode($workspaceId, $mode, $providerKey), true)) {

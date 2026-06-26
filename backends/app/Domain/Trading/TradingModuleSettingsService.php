@@ -3,6 +3,7 @@
 namespace App\Domain\Trading;
 
 use App\Domain\Ops\TradingEnvironmentGuard;
+use App\Domain\Trading\FuturesOrderSizingService;
 use App\Domain\Trading\Providers\LiveTradeProviderRegistry;
 use App\Models\Setting;
 use Illuminate\Support\Arr;
@@ -99,6 +100,9 @@ class TradingModuleSettingsService
             'quick_trade' => array_merge($quick, [
                 'active_mode' => $mode,
                 'selected_provider' => $provider,
+                'min_stake' => $mode === 'live' && $provider === 'binance'
+                    ? max((float) ($quick['min_stake'] ?? 10), FuturesOrderSizingService::BINANCE_MIN_OPEN_NOTIONAL)
+                    : (float) ($quick['min_stake'] ?? 10),
                 'paper_only' => true,
             ]),
             'robot_trade' => $this->robotConfig($workspaceId),

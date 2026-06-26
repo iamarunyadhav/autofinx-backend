@@ -2,6 +2,7 @@
 
 namespace App\Domain\Trading\Providers;
 
+use App\Domain\Trading\FuturesOrderSizingService;
 use App\Models\Integration;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Crypt;
@@ -271,6 +272,11 @@ class BinanceTimedFuturesProvider implements LiveTradeProviderInterface
         $marketLot = $filters->get('MARKET_LOT_SIZE') ?: $filters->get('LOT_SIZE') ?: [];
         $stepSize = (float) ($marketLot['stepSize'] ?? 0.001);
         $minQty = (float) ($marketLot['minQty'] ?? $stepSize);
+        $minNotionalFilter = $filters->get('MIN_NOTIONAL') ?: $filters->get('NOTIONAL') ?: [];
+        $minNotional = max(
+            FuturesOrderSizingService::BINANCE_MIN_OPEN_NOTIONAL,
+            (float) ($minNotionalFilter['notional'] ?? $minNotionalFilter['minNotional'] ?? 0)
+        );
 
         if ($quantity < $minQty) {
             if ($priceForError !== null) {
@@ -285,8 +291,28 @@ class BinanceTimedFuturesProvider implements LiveTradeProviderInterface
 
         $steps = floor($quantity / $stepSize);
         $normalized = $steps * $stepSize;
+        $normalized = round($normalized, 8);
 
-        return round($normalized, 8);
+        if ($priceForError !== null && $minNotional > 0 && ($normalized * $priceForError) < $minNotional) {
+            $requiredQty = $this->ceilToStep($minNotional / max($priceForError, 0.00000001), $stepSize);
+            $minStake = ceil($requiredQty * $priceForError * 100) / 100;
+
+            throw new RuntimeException(
+                "Stake too small for {$symbol}. Minimum required: \${$minStake} at current price."
+            );
+        }
+
+        return $normalized;
+    }
+
+    private function ceilToStep(float $quantity, float $stepSize): float
+    {
+        $stepSize = $stepSize > 0 ? $stepSize : 0.000001;
+        if ($quantity <= 0) {
+            return 0.0;
+        }
+
+        return round(ceil($quantity / $stepSize) * $stepSize, 8);
     }
 
     private function normalizeInterval(string $timeframe): string
