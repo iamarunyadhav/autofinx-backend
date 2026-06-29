@@ -1515,10 +1515,21 @@ class RobotSessionService
         }
 
         if (! $row?->last_tick_at) {
-            return ['fresh' => false, 'reason' => 'No server websocket tick exists for this symbol.'];
+            $heartbeat = $this->freshLiveFeedHeartbeat($symbol, $maxAge);
+
+            return $heartbeat ?? ['fresh' => false, 'reason' => 'No server websocket tick exists for this symbol.'];
         }
 
         $age = max(0, $row->last_tick_at->diffInSeconds(now(), true));
+        $heartbeat = $this->freshLiveFeedHeartbeat($symbol, $maxAge);
+        if ($heartbeat && (int) ($heartbeat['age_seconds'] ?? PHP_INT_MAX) < $age) {
+            return array_merge($heartbeat, [
+                'db_last_tick_at' => $row->last_tick_at->toIso8601String(),
+                'db_age_seconds' => $age,
+                'db_source' => (string) ($row->source ?? ''),
+            ]);
+        }
+
         if ($age > $maxAge) {
             return [
                 'fresh' => false,
@@ -1538,6 +1549,49 @@ class RobotSessionService
             'last_tick_at' => $row->last_tick_at->toIso8601String(),
             'price' => (float) ($row->last_price ?? 0),
             'source' => (string) ($row->source ?? ''),
+        ];
+    }
+
+    private function freshLiveFeedHeartbeat(string $symbol, int $maxAge): ?array
+    {
+        $path = storage_path('framework/autofinx-live-feed-heartbeat.json');
+        if (! file_exists($path)) {
+            return null;
+        }
+
+        $raw = @file_get_contents($path);
+        $data = $raw !== false ? @json_decode($raw, true) : null;
+        if (! is_array($data)) {
+            return null;
+        }
+
+        $symbols = array_map(
+            static fn ($value) => strtoupper(trim((string) $value)),
+            (array) ($data['symbols'] ?? [])
+        );
+        $lastSymbol = strtoupper(trim((string) ($data['symbol'] ?? '')));
+        if (! in_array($symbol, $symbols, true) && $lastSymbol !== $symbol) {
+            return null;
+        }
+
+        $epoch = (int) ($data['last_message_epoch'] ?? 0);
+        if ($epoch <= 0) {
+            return null;
+        }
+
+        $age = max(0, time() - $epoch);
+        if ($age > $maxAge) {
+            return null;
+        }
+
+        return [
+            'fresh' => true,
+            'reason' => 'ok_heartbeat_fallback_db_tick_stale',
+            'age_seconds' => $age,
+            'max_age_seconds' => $maxAge,
+            'last_tick_at' => (string) ($data['last_message_at'] ?? ''),
+            'price' => null,
+            'source' => 'live_feed_heartbeat',
         ];
     }
 

@@ -351,6 +351,21 @@ class TradingRuntimeHealthService
 
         $maxAge = (int) config('autofinx.runtime.live_feed_max_age_seconds', 15);
         $age = $row->last_tick_at->diffInSeconds(now(), true);
+        $heartbeat = $this->heartbeatFeed();
+        if (
+            ($heartbeat['state'] ?? 'red') === 'green'
+            && isset($heartbeat['age_seconds'])
+            && (int) $heartbeat['age_seconds'] < $age
+        ) {
+            return array_merge($heartbeat, [
+                'reason' => 'ok_heartbeat_fallback_db_tick_stale',
+                'db_last_tick_at' => $row->last_tick_at->toIso8601String(),
+                'db_age_seconds' => $age,
+                'db_symbol' => (string) ($row->symbol ?? ''),
+                'db_source' => (string) ($row->source ?? ''),
+            ]);
+        }
+
         $state = $age <= $maxAge ? 'green' : ($age <= ($maxAge * 3) ? 'yellow' : 'red');
 
         return [
