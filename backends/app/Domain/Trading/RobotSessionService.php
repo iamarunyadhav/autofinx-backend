@@ -865,6 +865,16 @@ class RobotSessionService
             'integration_id' => $session->integration_id,
         ]);
         $currentPrice = (float) ($quote['price'] ?? 0);
+        $candles = $this->market->candles($session->symbol, $session->timeframe, 120, [
+            'workspace_id' => $session->workspace_id,
+            'mode' => $session->mode,
+            'provider' => $session->provider_key,
+            'integration_id' => $session->integration_id,
+        ]);
+        $feedHealth = $this->freshServerFeed($session);
+        $volatility = ((array) $session->runtime_json)['volatility'] ?? $this->computeVolatilityGate($candles, $session->timeframe);
+        $lastDecision = ((array) $session->runtime_json)['latest_decision'] ?? null;
+        $lastEntryBlock = ((array) $session->runtime_json)['latest_entry_block'] ?? null;
 
         $position = null;
         if ($session->active_side && $session->active_entry_price !== null) {
@@ -906,14 +916,136 @@ class RobotSessionService
                 'loss_count' => (int) $session->loss_count,
                 'win_rate' => $closed > 0 ? round((int) $session->win_count / $closed * 100, 2) : 0.0,
             ],
-            'last_decision' => ((array) $session->runtime_json)['latest_decision'] ?? null,
-            'last_entry_block' => ((array) $session->runtime_json)['latest_entry_block'] ?? null,
+            'last_decision' => $lastDecision,
+            'last_entry_block' => $lastEntryBlock,
             'last_signal_analysis' => ((array) $session->runtime_json)['latest_signal_analysis'] ?? null,
             'cooldown' => $this->cooldownStatus($session),
             'daily_loss' => $this->dailyLossStatus($session),
-            'volatility' => ((array) $session->runtime_json)['volatility'] ?? null,
+            'volatility' => $volatility,
+            'market_feed' => $feedHealth,
+            'trust_chain' => $this->robotTrustChain($session, $feedHealth, $lastDecision, $lastEntryBlock, $volatility),
+            'forecast' => $this->robotForecast($session, $candles, $currentPrice, $lastDecision, $volatility),
             'signal_streak' => (int) $session->signal_streak,
             'as_of' => now()->toIso8601String(),
+        ];
+    }
+
+    private function robotTrustChain(RobotSession $session, array $feed, mixed $decision, mixed $entryBlock, mixed $volatility): array
+    {
+        $checks = [];
+        $blockers = [];
+        $warnings = [];
+
+        $push = function (string $key, bool $ok, string $label, string $detail, string $severity = 'hard') use (&$checks, &$blockers, &$warnings): void {
+            $checks[] = compact('key', 'ok', 'label', 'detail', 'severity');
+            if (! $ok) {
+                if ($severity === 'hard') {
+                    $blockers[] = $key;
+                } else {
+                    $warnings[] = $key;
+                }
+            }
+        };
+
+        $push('session_running', $session->status === 'RUNNING', 'Session running', 'Robot session must be RUNNING.');
+        $push('feed_fresh', (bool) ($feed['fresh'] ?? false), 'Backend feed fresh', (string) ($feed['reason'] ?? 'Feed is fresh.'));
+        $push('volatility_tradeable', (bool) data_get($volatility, 'tradeable', true), 'Volatility tradeable', (string) data_get($volatility, 'reason', 'Volatility is acceptable.'), 'soft');
+
+        $cooldown = $this->cooldownStatus($session);
+        $daily = $this->dailyLossStatus($session);
+        $push('cooldown_clear', ! (bool) ($cooldown['active'] ?? false), 'Cooldown clear', (bool) ($cooldown['active'] ?? false) ? 'Loss cooldown is active.' : 'No cooldown.');
+        $push('daily_loss_clear', ! (bool) ($daily['hit'] ?? false), 'Daily loss clear', (bool) ($daily['hit'] ?? false) ? 'Daily loss limit has been hit.' : 'Daily loss guard is clear.');
+
+        $decisionAction = strtoupper((string) data_get($decision, 'action', 'HOLD'));
+        $decisionOk = in_array($decisionAction, ['BUY', 'SELL', 'CLOSE', 'HOLD'], true);
+        $push('decision_current', $decisionOk, 'Decision available', $decisionOk ? "Latest action: {$decisionAction}." : 'No latest decision yet.', 'soft');
+
+        if (is_array($entryBlock) && $entryBlock !== []) {
+            $push('entry_preflight', false, 'Entry preflight', (string) ($entryBlock['reason'] ?? $entryBlock['status'] ?? 'Entry blocked.'));
+        } else {
+            $push('entry_preflight', true, 'Entry preflight', 'No current entry blocker.');
+        }
+
+        $state = $blockers !== [] ? 'blocked' : ($warnings !== [] ? 'warning' : 'ready');
+
+        return [
+            'state' => $state,
+            'ready' => $state === 'ready',
+            'summary' => $state === 'ready'
+                ? 'All live-trade trust checks are clear.'
+                : ($state === 'warning' ? 'Robot can run, but market quality is not ideal.' : 'Robot entry is blocked until hard checks clear.'),
+            'blockers' => $blockers,
+            'warnings' => $warnings,
+            'checks' => $checks,
+        ];
+    }
+
+    private function robotForecast(RobotSession $session, array $candles, float $currentPrice, mixed $decision, mixed $volatility): array
+    {
+        if (count($candles) < 10 || $currentPrice <= 0) {
+            return [
+                'available' => false,
+                'summary' => 'Not enough fresh candles to estimate the next move.',
+            ];
+        }
+
+        $tfSeconds = max(1, $this->timeframes->seconds((string) $session->timeframe));
+        $horizonSeconds = max($tfSeconds, (int) ($session->expiry_seconds ?: $tfSeconds));
+        $horizonCandles = max(1, (int) ceil($horizonSeconds / $tfSeconds));
+        $recent = array_slice($candles, -min(100, count($candles)));
+        $closes = array_map(static fn ($c) => (float) ($c['close'] ?? 0), $recent);
+        $opens = array_map(static fn ($c) => (float) ($c['open'] ?? 0), $recent);
+        $lastSlice = array_slice($recent, -min(12, count($recent)));
+        $bull = 0;
+        $bear = 0;
+        foreach ($lastSlice as $candle) {
+            $direction = $this->candleBot->candleDirection($candle);
+            if ($direction === 'BUY') {
+                $bull++;
+            } elseif ($direction === 'SELL') {
+                $bear++;
+            }
+        }
+
+        $firstClose = (float) ($closes[0] ?? 0);
+        $lastClose = (float) end($closes);
+        $driftPct = $firstClose > 0 ? (($lastClose - $firstClose) / $firstClose) * 100 : 0.0;
+        $atrPct = max(0.01, (float) data_get($volatility, 'atr_pct', $this->computeAtrAvgPct($recent)));
+        $rangePct = min(5.0, $atrPct * sqrt($horizonCandles));
+        $decisionAction = strtoupper((string) data_get($decision, 'action', 'HOLD'));
+        $confidence = (float) data_get($decision, 'confidence', 0);
+        $confidencePct = $confidence <= 1 ? $confidence * 100 : $confidence;
+
+        $biasScore = ($bull - $bear) + ($driftPct > 0 ? 1 : ($driftPct < 0 ? -1 : 0));
+        if ($decisionAction === 'BUY') {
+            $biasScore += 2;
+        } elseif ($decisionAction === 'SELL') {
+            $biasScore -= 2;
+        }
+
+        $bias = $biasScore >= 2 ? 'BUY' : ($biasScore <= -2 ? 'SELL' : 'NEUTRAL');
+        $quality = min(95, max(35, 45 + abs($biasScore) * 8 + min(20, $confidencePct / 5)));
+        $expectedMid = $bias === 'BUY'
+            ? $currentPrice * (1 + ($rangePct * 0.35) / 100)
+            : ($bias === 'SELL' ? $currentPrice * (1 - ($rangePct * 0.35) / 100) : $currentPrice);
+
+        return [
+            'available' => true,
+            'horizon_seconds' => $horizonSeconds,
+            'horizon_candles' => $horizonCandles,
+            'bias' => $bias,
+            'confidence' => round($quality, 1),
+            'current_price' => round($currentPrice, 8),
+            'expected_mid_price' => round($expectedMid, 8),
+            'expected_low' => round($currentPrice * (1 - $rangePct / 100), 8),
+            'expected_high' => round($currentPrice * (1 + $rangePct / 100), 8),
+            'atr_pct' => round($atrPct, 4),
+            'recent_bull_candles' => $bull,
+            'recent_bear_candles' => $bear,
+            'drift_pct' => round($driftPct, 4),
+            'summary' => $bias === 'NEUTRAL'
+                ? 'Near-term forecast is balanced; wait for stronger direction.'
+                : "Near-term bias favors {$bias}, based on recent candles, ATR and latest robot decision.",
         ];
     }
 

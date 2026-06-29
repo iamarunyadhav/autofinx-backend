@@ -338,7 +338,7 @@ class TradingRuntimeHealthService
             $query->where('workspace_id', $workspaceId);
         }
         if (Schema::hasColumn('market_feed_status', 'exchange')) {
-            $query->where('exchange', 'binance');
+            $query->whereIn('exchange', ['binance', 'binance_futures']);
         }
         if (Schema::hasColumn('market_feed_status', 'market_type')) {
             $query->where('market_type', 'futures');

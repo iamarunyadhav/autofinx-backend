@@ -155,6 +155,7 @@ Route::prefix('v1')->group(function () {
         Route::get('workspaces/{workspace}/ledger/export.csv', [TradingController::class, 'exportLedger']);
         Route::get('quick-trade/metadata', [QuickTradeController::class, 'metadata']);
         Route::get('runtime/health', [RuntimeHealthController::class, 'show']);
+        Route::post('runtime/repair', [RuntimeHealthController::class, 'repair'])->middleware(['require.2fa', 'throttle:5,1']);
         Route::get('quick-trade/chart', [QuickTradeController::class, 'chart']);
         Route::get('quick-trade/candle-feed', [QuickTradeController::class, 'candleFeed']);
         Route::get('quick-trade/technical-summary', [QuickTradeController::class, 'technicalSummary']);

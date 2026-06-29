@@ -8,6 +8,7 @@ use App\Models\MarketFeedStatus;
 use App\Models\MarketOhlc;
 use App\Models\RatioBotConfig;
 use App\Models\RatioBotEvent;
+use App\Models\RobotSession;
 use App\Models\Symbol;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Arr;
@@ -78,7 +79,21 @@ class RealtimeMarketFeedService
                 ->all();
         }
 
-        return collect([...$ratioSymbols, ...$futureTradeSymbols])
+        $robotSessionSymbols = [];
+        if ($botId === null || $botId === '') {
+            $robotSessionSymbols = RobotSession::query()
+                ->when($workspaceId, fn ($query) => $query->where('workspace_id', $workspaceId))
+                ->whereIn('status', ['RUNNING', 'OPEN'])
+                ->where('provider_key', 'binance')
+                ->pluck('symbol')
+                ->map(fn (string $symbol) => strtoupper(trim($symbol)))
+                ->filter()
+                ->unique()
+                ->values()
+                ->all();
+        }
+
+        return collect([...$ratioSymbols, ...$futureTradeSymbols, ...$robotSessionSymbols])
             ->filter()
             ->unique()
             ->values()
@@ -251,6 +266,13 @@ class RealtimeMarketFeedService
 
                         return in_array($symbol, $settingsSymbols, true) || $currentSymbol === $symbol;
                     })
+                    ->pluck('workspace_id')
+            )
+            ->merge(
+                RobotSession::query()
+                    ->where('symbol', $symbol)
+                    ->whereIn('status', ['RUNNING', 'OPEN'])
+                    ->where('provider_key', 'binance')
                     ->pluck('workspace_id')
             )
             ->filter()

@@ -37,6 +37,7 @@ $supervisorRuntime = (bool) config('autofinx.runtime.supervisor', false);
 $allowMarketConsumers = (bool) config('autofinx.scheduler.market_consumers', false);
 $allowBinanceRest = (bool) config('autofinx.scheduler.binance_rest', false);
 $allowMetals = (bool) config('autofinx.scheduler.metals', false);
+$allowRuntimeAutoRepair = (bool) config('autofinx.scheduler.runtime_auto_repair', true);
 $scheduleFutureTradeRuntime = (bool) config('future_trade.schedule.runtime_commands', config('future_trade.schedule_runtime_commands', false));
 $scheduleFutureTradeDiagnostics = (bool) config('future_trade.schedule.diagnostics', false);
 $scheduleFutureTradeAuditMissedSignals = (bool) config('future_trade.schedule.audit_missed_signals', false);
@@ -89,13 +90,13 @@ if ($schedulerEnabled && $allowMetals) {
         ->after(fn () => $markRunEnd('metals:poll-prices'));
 }
 
-// Candle Direction / Robot Trade autonomous evaluation. Runs every minute so
+// Candle Direction / Robot Trade autonomous evaluation. Runs every 10 seconds so
 // RUNNING robot sessions open/manage/close positions without manual "Run cycle".
 // Disable with config autofinx.scheduler.robot_sessions=false if REST pressure
 // becomes a concern.
 if ($schedulerEnabled && (bool) config('autofinx.scheduler.robot_sessions', true)) {
     Schedule::command('robot-sessions:evaluate')
-        ->everyMinute()
+        ->everyTenSeconds()
         ->withoutOverlapping()
         ->runInBackground()
         ->before(fn () => $markRunStart('robot-sessions:evaluate'))
@@ -104,11 +105,20 @@ if ($schedulerEnabled && (bool) config('autofinx.scheduler.robot_sessions', true
 
 if ($schedulerEnabled && (bool) config('autofinx.scheduler.quick_settler', true)) {
     Schedule::command('quick-trades:settle')
-        ->everyMinute()
+        ->everyTenSeconds()
         ->withoutOverlapping()
         ->runInBackground()
         ->before(fn () => $markRunStart('quick-trades:settle'))
         ->after(fn () => $markRunEnd('quick-trades:settle'));
+}
+
+if ($schedulerEnabled && $allowRuntimeAutoRepair) {
+    Schedule::command('runtime:repair --attempts=1 --sleep=2')
+        ->everyMinute()
+        ->withoutOverlapping()
+        ->runInBackground()
+        ->before(fn () => $markRunStart('runtime:repair'))
+        ->after(fn () => $markRunEnd('runtime:repair'));
 }
 
 /*

@@ -14,10 +14,11 @@ return [
 
     'scheduler' => [
         'enabled' => filter_var(env('AUTOFINX_SCHEDULER_ENABLED', true), FILTER_VALIDATE_BOOL),
-        'market_consumers' => filter_var(env('AUTOFINX_SCHEDULER_MARKET_CONSUMERS', false), FILTER_VALIDATE_BOOL),
+        'market_consumers' => filter_var(env('AUTOFINX_SCHEDULER_MARKET_CONSUMERS', true), FILTER_VALIDATE_BOOL),
         'binance_rest' => filter_var(env('AUTOFINX_SCHEDULER_BINANCE_REST', false), FILTER_VALIDATE_BOOL),
         'metals' => filter_var(env('AUTOFINX_SCHEDULER_METALS', false), FILTER_VALIDATE_BOOL),
         'robot_sessions' => filter_var(env('AUTOFINX_SCHEDULER_ROBOT_SESSIONS', true), FILTER_VALIDATE_BOOL),
         'quick_settler' => filter_var(env('AUTOFINX_SCHEDULER_QUICK_SETTLER', true), FILTER_VALIDATE_BOOL),
+        'runtime_auto_repair' => filter_var(env('AUTOFINX_SCHEDULER_RUNTIME_AUTO_REPAIR', true), FILTER_VALIDATE_BOOL),
     ],
 ];
