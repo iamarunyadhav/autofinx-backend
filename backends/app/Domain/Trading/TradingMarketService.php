@@ -233,8 +233,8 @@ class TradingMarketService
             str_contains($symbol, 'BTC') => 63850.0,
             str_contains($symbol, 'ETH') => 3220.0,
             str_contains($symbol, 'EURUSD') => 1.0824,
-            str_contains($symbol, 'SILVER') => 32.1800,
-            str_contains($symbol, 'GOLD') => 5080.2500,
+            str_contains($symbol, 'SILVER') => 36.1800,
+            str_contains($symbol, 'GOLD') => 3320.2500,
             default => 100.0,
         };
     }
