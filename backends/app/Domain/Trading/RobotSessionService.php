@@ -335,7 +335,19 @@ class RobotSessionService
             ->limit($limit);
 
         foreach ($query->get() as $session) {
-            $results[] = $this->evaluateSession($session);
+            try {
+                $results[] = $this->evaluateSession($session);
+            } catch (\Throwable $exception) {
+                $block = [
+                    'session_id' => $session->id,
+                    'status' => 'runtime_exception_block',
+                    'action' => 'skipped',
+                    'reason' => $exception->getMessage(),
+                    'symbol' => $session->symbol,
+                ];
+                $this->recordEntryBlock($session, $block);
+                $results[] = $block;
+            }
         }
 
         return $results;
@@ -450,6 +462,7 @@ class RobotSessionService
 
             return $preflightBlock;
         }
+        $this->clearEntryBlock($session);
 
         $trade = $this->quickTrades->place([
             'workspace_id' => $session->workspace_id,
@@ -686,6 +699,7 @@ class RobotSessionService
 
                 return $preflightBlock;
             }
+            $this->clearEntryBlock($session);
 
             $trade = $this->quickTrades->place([
                 'workspace_id' => $session->workspace_id,
@@ -1420,18 +1434,19 @@ class RobotSessionService
             $driftBps = abs($feedPrice - $candlePrice) / $candlePrice * 10000;
             $maxDriftBps = (float) config('robot_trade.max_entry_price_drift_bps', self::MAX_ENTRY_PRICE_DRIFT_BPS);
             if ($driftBps > $maxDriftBps) {
-                return [
-                    'session_id' => $session->id,
-                    'status' => 'price_drift_block',
-                    'action' => 'skipped',
-                    'reason' => 'Candle price and live websocket price diverged before entry.',
-                    'symbol' => $session->symbol,
-                    'side' => strtolower($side),
-                    'candle_price' => round($candlePrice, 8),
-                    'feed_price' => round($feedPrice, 8),
-                    'drift_bps' => round($driftBps, 4),
-                    'max_drift_bps' => $maxDriftBps,
-                ];
+                $session->runtime_json = array_merge((array) $session->runtime_json, [
+                    'latest_price_drift_warning' => [
+                        'status' => 'candle_feed_drift_warning',
+                        'reason' => 'Latest candle close and live websocket price differ; REST quote check will decide whether entry is safe.',
+                        'symbol' => $session->symbol,
+                        'side' => strtolower($side),
+                        'candle_price' => round($candlePrice, 8),
+                        'feed_price' => round($feedPrice, 8),
+                        'drift_bps' => round($driftBps, 4),
+                        'max_drift_bps' => $maxDriftBps,
+                    ],
+                ]);
+                $session->save();
             }
         }
 
@@ -1619,6 +1634,21 @@ class RobotSessionService
         $session->last_error = (string) ($block['reason'] ?? $block['status'] ?? 'Robot entry blocked.');
         $session->runtime_json = array_merge((array) $session->runtime_json, [
             'latest_entry_block' => $block,
+            'last_evaluation_at' => now()->toIso8601String(),
+        ]);
+        $session->save();
+    }
+
+    private function clearEntryBlock(RobotSession $session): void
+    {
+        $rt = (array) $session->runtime_json;
+        if (! array_key_exists('latest_entry_block', $rt) && $session->last_error === null) {
+            return;
+        }
+
+        $rt['latest_entry_block'] = null;
+        $session->last_error = null;
+        $session->runtime_json = array_merge($rt, [
             'last_evaluation_at' => now()->toIso8601String(),
         ]);
         $session->save();
