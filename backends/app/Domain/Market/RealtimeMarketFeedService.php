@@ -151,7 +151,12 @@ class RealtimeMarketFeedService
         $timeframe = '1m';
 
         if ($price !== null && $price > 0) {
-            $this->prices->setLatestPrice($exchangeKey, $symbol, $price, $eventTimestampMs);
+            $this->prices->setLatestPrice($exchangeKey, $symbol, $price, $eventTimestampMs, [
+                'market_type' => strtolower($marketType),
+                'stream' => $stream,
+                'event_type' => $eventType,
+                'event_lag_ms' => $eventLagMs,
+            ]);
         }
 
         if ($eventType === 'kline' && is_array($data['k'] ?? null)) {
@@ -189,7 +194,12 @@ class RealtimeMarketFeedService
 
             if ((float) ($kline['c'] ?? 0) > 0) {
                 $price = (float) $kline['c'];
-                $this->prices->setLatestPrice($exchangeKey, $symbol, $price, (int) ($kline['T'] ?? $eventTimestampMs));
+                $this->prices->setLatestPrice($exchangeKey, $symbol, $price, (int) ($kline['T'] ?? $eventTimestampMs), [
+                    'market_type' => strtolower($marketType),
+                    'stream' => $stream,
+                    'event_type' => $eventType,
+                    'event_lag_ms' => $eventLagMs,
+                ]);
             }
         }
 

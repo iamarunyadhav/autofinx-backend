@@ -49,18 +49,25 @@ class FutureTradeLiveFeedCommand extends Command
             'heartbeatPath' => $heartbeatPath,
         ]);
 
-        $lock = Cache::lock(
-            'autofinx:runtime:future-trade-live-feed:'.md5(implode(',', $symbols)).':'.md5($streams),
-            $maxRuntime > 0 ? $maxRuntime + 60 : 86400
-        );
+        $lockKey = 'autofinx:runtime:future-trade-live-feed:'.md5(implode(',', $symbols)).':'.md5($streams);
+        $lock = Cache::lock($lockKey, $maxRuntime > 0 ? $maxRuntime + 60 : 86400);
         if (! $lock->get()) {
-            $this->warn('Another Future Trade live-feed daemon is already running for this symbol/stream scope.');
-            Log::warning('[FT LIVE FEED LOCKED]', [
-                'symbols' => $symbols,
-                'streams' => $streams,
-            ]);
+            if (! $this->heartbeatFresh($heartbeatPath)) {
+                $this->warn('Stale Future Trade live-feed lock detected without a fresh heartbeat; force releasing lock and retrying.');
+                Cache::lock($lockKey, 1)->forceRelease();
+                $lock = Cache::lock($lockKey, $maxRuntime > 0 ? $maxRuntime + 60 : 86400);
+            }
 
-            return self::SUCCESS;
+            if (! $lock->get()) {
+                $this->warn('Another Future Trade live-feed daemon is already running for this symbol/stream scope.');
+                Log::warning('[FT LIVE FEED LOCKED]', [
+                    'symbols' => $symbols,
+                    'streams' => $streams,
+                    'heartbeat_fresh' => $this->heartbeatFresh($heartbeatPath),
+                ]);
+
+                return self::SUCCESS;
+            }
         }
 
         try {
@@ -130,5 +137,18 @@ class FutureTradeLiveFeedCommand extends Command
             ->unique()
             ->values()
             ->all();
+    }
+
+    private function heartbeatFresh(string $path): bool
+    {
+        if (! file_exists($path)) {
+            return false;
+        }
+
+        $raw = @file_get_contents($path);
+        $data = $raw !== false ? @json_decode($raw, true) : null;
+        $epoch = is_array($data) ? (int) ($data['last_message_epoch'] ?? 0) : 0;
+
+        return $epoch > 0 && (time() - $epoch) <= 30;
     }
 }

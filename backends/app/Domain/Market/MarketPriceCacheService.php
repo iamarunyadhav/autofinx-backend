@@ -20,9 +20,15 @@ class MarketPriceCacheService
     private const MAX_BACKWARD_SKEW_MS = 1000;
     private const MAX_FRESH_JUMP_PERCENT = 5.0;
     private const FRESH_JUMP_WINDOW_MS = 5000;
+    private const LIVE_FEED_TTL_S = 120;
 
-    public function setLatestPrice(string $exchange, string $symbol, float $price, ?int $tsMs = null): void
-    {
+    public function setLatestPrice(
+        string $exchange,
+        string $symbol,
+        float $price,
+        ?int $tsMs = null,
+        array $meta = [],
+    ): void {
         $exchange = strtolower($exchange);
         $symbol = strtoupper($symbol);
         $tsMs = $tsMs ?? (int) floor(microtime(true) * 1000);
@@ -55,6 +61,7 @@ class MarketPriceCacheService
 
             Redis::set($priceKey, (string) $price);
             Redis::set($tsKey, (string) $tsMs);
+            $this->writeLiveFeedSnapshot($exchange, $symbol, $price, $tsMs, $meta);
             $redisOk = true;
         } catch (\Throwable) {
             // Redis unavailable — fall through to unconditional DB write below.
@@ -119,6 +126,90 @@ class MarketPriceCacheService
         ];
     }
 
+    public function getLiveFeedSnapshot(string $exchange, string $symbol, int $maxAgeSeconds = 15): ?array
+    {
+        $exchange = strtolower($exchange);
+        $symbol = strtoupper($symbol);
+
+        try {
+            $raw = Redis::get($this->feedKey($exchange, $symbol));
+        } catch (\Throwable) {
+            return null;
+        }
+
+        if (! is_string($raw) || $raw === '') {
+            return null;
+        }
+
+        $data = json_decode($raw, true);
+        if (! is_array($data)) {
+            return null;
+        }
+
+        $receivedAtMs = (int) ($data['received_at_ms'] ?? 0);
+        $ageSeconds = $receivedAtMs > 0
+            ? max(0, (int) floor(((int) floor(microtime(true) * 1000) - $receivedAtMs) / 1000))
+            : null;
+
+        return [
+            'exchange' => $exchange,
+            'symbol' => $symbol,
+            'price' => (float) ($data['price'] ?? 0),
+            'event_timestamp_ms' => (int) ($data['event_timestamp_ms'] ?? 0),
+            'received_at_ms' => $receivedAtMs,
+            'received_at' => (string) ($data['received_at'] ?? ''),
+            'age_seconds' => $ageSeconds,
+            'fresh' => $ageSeconds !== null && $ageSeconds <= $maxAgeSeconds,
+            'max_age_seconds' => $maxAgeSeconds,
+            'source' => 'redis_live_feed',
+            'stream' => (string) ($data['stream'] ?? ''),
+            'event_type' => (string) ($data['event_type'] ?? ''),
+            'market_type' => (string) ($data['market_type'] ?? ''),
+            'event_lag_ms' => (int) ($data['event_lag_ms'] ?? 0),
+        ];
+    }
+
+    /**
+     * @param  string[]  $symbols
+     */
+    public function freshestLiveFeedSnapshot(string $exchange, array $symbols, int $maxAgeSeconds = 15): ?array
+    {
+        $freshest = null;
+
+        foreach ($symbols as $symbol) {
+            $snapshot = $this->getLiveFeedSnapshot($exchange, (string) $symbol, $maxAgeSeconds);
+            if (! $snapshot) {
+                continue;
+            }
+
+            if (! $freshest || (int) ($snapshot['received_at_ms'] ?? 0) > (int) ($freshest['received_at_ms'] ?? 0)) {
+                $freshest = $snapshot;
+            }
+        }
+
+        return $freshest;
+    }
+
+    private function writeLiveFeedSnapshot(string $exchange, string $symbol, float $price, int $tsMs, array $meta): void
+    {
+        $nowMs = (int) floor(microtime(true) * 1000);
+        $payload = [
+            'exchange' => $exchange,
+            'symbol' => $symbol,
+            'price' => $price,
+            'event_timestamp_ms' => $tsMs,
+            'received_at_ms' => $nowMs,
+            'received_at' => now()->toIso8601String(),
+            'stream' => (string) ($meta['stream'] ?? ''),
+            'event_type' => (string) ($meta['event_type'] ?? ''),
+            'market_type' => (string) ($meta['market_type'] ?? ''),
+            'event_lag_ms' => (int) ($meta['event_lag_ms'] ?? max(0, $nowMs - $tsMs)),
+        ];
+
+        Redis::setex($this->feedKey($exchange, $symbol), self::LIVE_FEED_TTL_S, json_encode($payload, JSON_UNESCAPED_SLASHES));
+        Redis::setex($this->feedKey($exchange, '*'), self::LIVE_FEED_TTL_S, json_encode($payload, JSON_UNESCAPED_SLASHES));
+    }
+
     private function priceKey(string $exchange, string $symbol): string
     {
         return "price:{$exchange}:{$symbol}";
@@ -127,5 +218,10 @@ class MarketPriceCacheService
     private function tsKey(string $exchange, string $symbol): string
     {
         return "ts:{$exchange}:{$symbol}";
+    }
+
+    private function feedKey(string $exchange, string $symbol): string
+    {
+        return "live-feed:{$exchange}:".strtoupper($symbol);
     }
 }

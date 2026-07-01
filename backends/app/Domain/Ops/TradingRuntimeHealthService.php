@@ -2,6 +2,7 @@
 
 namespace App\Domain\Ops;
 
+use App\Domain\Market\MarketPriceCacheService;
 use App\Models\MarketFeedStatus;
 use App\Models\QuickTrade;
 use App\Models\FutureTradeBotConfig;
@@ -13,6 +14,11 @@ use Illuminate\Support\Facades\Schema;
 
 class TradingRuntimeHealthService
 {
+    public function __construct(
+        private readonly MarketPriceCacheService $prices,
+    ) {
+    }
+
     public function snapshot(?string $workspaceId = null): array
     {
         $supervisor = $this->supervisorStatus();
@@ -329,8 +335,30 @@ class TradingRuntimeHealthService
 
     private function marketFeed(?string $workspaceId): array
     {
+        $maxAge = (int) config('autofinx.runtime.live_feed_max_age_seconds', 15);
+        $symbols = $this->monitoredFuturesSymbols($workspaceId);
+        $redisFeed = $this->prices->freshestLiveFeedSnapshot('binance_futures', $symbols, $maxAge);
+
+        if (($redisFeed['fresh'] ?? false) === true) {
+            return [
+                'state' => 'green',
+                'reason' => 'ok_redis_live_feed',
+                'last_tick_at' => (string) ($redisFeed['received_at'] ?? ''),
+                'age_seconds' => $redisFeed['age_seconds'],
+                'max_age_seconds' => $maxAge,
+                'symbol' => (string) ($redisFeed['symbol'] ?? ''),
+                'price' => (float) ($redisFeed['price'] ?? 0),
+                'source' => 'redis_live_feed',
+                'stream' => (string) ($redisFeed['stream'] ?? ''),
+                'event_type' => (string) ($redisFeed['event_type'] ?? ''),
+                'event_lag_ms' => (int) ($redisFeed['event_lag_ms'] ?? 0),
+                'truth_source' => 'websocket_redis',
+                'db_is_snapshot_only' => true,
+            ];
+        }
+
         if (! Schema::hasTable('market_feed_status')) {
-            return ['state' => 'red', 'reason' => 'market_feed_status_table_missing'];
+            return $this->heartbeatFeed($redisFeed);
         }
 
         $query = MarketFeedStatus::query()->whereNotNull('last_tick_at');
@@ -346,12 +374,11 @@ class TradingRuntimeHealthService
 
         $row = $query->orderByDesc('last_tick_at')->first();
         if (! $row) {
-            return $this->heartbeatFeed();
+            return $this->heartbeatFeed($redisFeed);
         }
 
-        $maxAge = (int) config('autofinx.runtime.live_feed_max_age_seconds', 15);
         $age = $row->last_tick_at->diffInSeconds(now(), true);
-        $heartbeat = $this->heartbeatFeed();
+        $heartbeat = $this->heartbeatFeed($redisFeed);
         if (
             ($heartbeat['state'] ?? 'red') === 'green'
             && isset($heartbeat['age_seconds'])
@@ -377,14 +404,20 @@ class TradingRuntimeHealthService
             'symbol' => (string) ($row->symbol ?? ''),
             'price' => (float) ($row->last_price ?? 0),
             'source' => (string) ($row->source ?? ''),
+            'truth_source' => 'db_snapshot_fallback',
         ];
     }
 
-    private function heartbeatFeed(): array
+    private function heartbeatFeed(?array $redisFeed = null): array
     {
         $path = storage_path('framework/autofinx-live-feed-heartbeat.json');
         if (! file_exists($path)) {
-            return ['state' => 'red', 'reason' => 'no_futures_market_feed_tick'];
+            return [
+                'state' => 'red',
+                'reason' => 'no_futures_market_feed_tick',
+                'redis_feed' => $redisFeed,
+                'truth_source' => 'websocket_redis_missing',
+            ];
         }
 
         $raw = @file_get_contents($path);
@@ -410,7 +443,55 @@ class TradingRuntimeHealthService
             'message_count' => (int) ($data['message_count'] ?? 0),
             'reconnect_count' => (int) ($data['reconnect_count'] ?? 0),
             'workspace_scoped' => false,
+            'redis_feed' => $redisFeed,
+            'truth_source' => 'heartbeat_file_fallback',
         ];
+    }
+
+    /**
+     * @return string[]
+     */
+    private function monitoredFuturesSymbols(?string $workspaceId): array
+    {
+        $symbols = [];
+
+        if (Schema::hasTable('future_trade_bot_configs')) {
+            $symbols = FutureTradeBotConfig::query()
+                ->with('state')
+                ->when($workspaceId, fn ($query) => $query->where('workspace_id', $workspaceId))
+                ->get()
+                ->flatMap(function (FutureTradeBotConfig $config): array {
+                    $settings = $config->mergedSettings();
+                    $configured = array_map(
+                        static fn ($symbol) => strtoupper(trim((string) $symbol)),
+                        (array) ($settings['symbols'] ?? config('future_trade.defaults.symbols', []))
+                    );
+                    $current = strtoupper(trim((string) ($config->state?->current_symbol ?? '')));
+
+                    return array_values(array_filter([...$configured, $current]));
+                })
+                ->all();
+        }
+
+        if (Schema::hasTable('robot_sessions')) {
+            $robotSymbols = RobotSession::query()
+                ->when($workspaceId, fn ($query) => $query->where('workspace_id', $workspaceId))
+                ->where('provider_key', 'binance')
+                ->pluck('symbol')
+                ->map(static fn ($symbol) => strtoupper(trim((string) $symbol)))
+                ->all();
+            $symbols = [...$symbols, ...$robotSymbols];
+        }
+
+        if ($symbols === []) {
+            $symbols = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT'];
+        }
+
+        return collect($symbols)
+            ->filter()
+            ->unique()
+            ->values()
+            ->all();
     }
 
     private function queue(array $queues): array

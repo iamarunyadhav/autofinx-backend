@@ -2,6 +2,7 @@
 
 namespace App\Domain\Trading;
 
+use App\Domain\Market\MarketPriceCacheService;
 use App\Domain\Ops\TradingRuntimeHealthService;
 use App\Domain\FutureTrade\FutureTradeAuditService;
 use App\Models\QuickTrade;
@@ -24,6 +25,7 @@ class RobotSessionService
         private readonly SignalPreviewService $signals,
         private readonly TimeframeRegistry $timeframes,
         private readonly CandleDirectionBotService $candleBot,
+        private readonly MarketPriceCacheService $prices,
     ) {
     }
 
@@ -1475,12 +1477,29 @@ class RobotSessionService
 
     private function freshServerFeed(RobotSession $session): array
     {
-        if (! Schema::hasTable('market_feed_status')) {
-            return ['fresh' => false, 'reason' => 'market_feed_status table is missing'];
-        }
-
         $maxAge = (int) config('robot_trade.max_server_feed_age_seconds', self::MAX_LIVE_FEED_AGE_SECONDS);
         $symbol = strtoupper((string) $session->symbol);
+        $redisFeed = $this->prices->getLiveFeedSnapshot('binance_futures', $symbol, $maxAge);
+        if (($redisFeed['fresh'] ?? false) === true) {
+            return [
+                'fresh' => true,
+                'reason' => 'ok_redis_live_feed',
+                'age_seconds' => $redisFeed['age_seconds'],
+                'max_age_seconds' => $maxAge,
+                'last_tick_at' => (string) ($redisFeed['received_at'] ?? ''),
+                'price' => (float) ($redisFeed['price'] ?? 0),
+                'source' => 'redis_live_feed',
+                'stream' => (string) ($redisFeed['stream'] ?? ''),
+                'event_lag_ms' => (int) ($redisFeed['event_lag_ms'] ?? 0),
+                'truth_source' => 'websocket_redis',
+                'db_is_snapshot_only' => true,
+            ];
+        }
+
+        if (! Schema::hasTable('market_feed_status')) {
+            return ['fresh' => false, 'reason' => 'market_feed_status table is missing', 'redis_feed' => $redisFeed];
+        }
+
         $query = MarketFeedStatus::query()->where('workspace_id', $session->workspace_id);
 
         if (Schema::hasColumn('market_feed_status', 'symbol')) {
@@ -1517,7 +1536,7 @@ class RobotSessionService
         if (! $row?->last_tick_at) {
             $heartbeat = $this->freshLiveFeedHeartbeat($symbol, $maxAge);
 
-            return $heartbeat ?? ['fresh' => false, 'reason' => 'No server websocket tick exists for this symbol.'];
+            return $heartbeat ?? ['fresh' => false, 'reason' => 'No server websocket tick exists for this symbol.', 'redis_feed' => $redisFeed];
         }
 
         $age = max(0, $row->last_tick_at->diffInSeconds(now(), true));

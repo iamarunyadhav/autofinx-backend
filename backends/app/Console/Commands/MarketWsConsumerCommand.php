@@ -53,20 +53,30 @@ class MarketWsConsumerCommand extends Command
         )));
         $maxRuntime = max(0, (int) $this->option('max-runtime'));
         $dispatchEvaluations = ! (bool) $this->option('no-dispatch');
-        $lockTtl = (bool) $this->option('once')
-            ? 120
-            : ($maxRuntime > 0 ? $maxRuntime + 60 : 86400);
-        $lock = Cache::lock(sprintf(
+        $heartbeatPath = storage_path('framework/autofinx-live-feed-heartbeat.json');
+        $lockKey = sprintf(
             'autofinx:runtime:market-ws-consume:%s:%s:%s',
             $marketType,
             md5(implode(',', $symbols)),
             md5(implode(',', $streams))
-        ), $lockTtl);
+        );
+        $lockTtl = (bool) $this->option('once')
+            ? 120
+            : ($maxRuntime > 0 ? $maxRuntime + 60 : 86400);
+        $lock = Cache::lock($lockKey, $lockTtl);
 
         if (! $lock->get()) {
-            $this->warn('Another market ws consumer is already running for this market/symbol/stream scope.');
+            if (! $this->heartbeatFresh($heartbeatPath)) {
+                $this->warn('Stale market ws lock detected without a fresh heartbeat; force releasing lock and retrying.');
+                Cache::lock($lockKey, 1)->forceRelease();
+                $lock = Cache::lock($lockKey, $lockTtl);
+            }
 
-            return self::SUCCESS;
+            if (! $lock->get()) {
+                $this->warn('Another market ws consumer is already running for this market/symbol/stream scope.');
+
+                return self::SUCCESS;
+            }
         }
 
         try {
@@ -85,7 +95,6 @@ class MarketWsConsumerCommand extends Command
             $connectedAt = null;
             $lastHeartbeatWrite = 0;
             $lastPingAt = 0;
-            $heartbeatPath = storage_path('framework/autofinx-live-feed-heartbeat.json');
 
             $this->info(sprintf(
                 'Starting realtime market feed consumer market_type=%s symbols=%s streams=%s',
@@ -405,5 +414,18 @@ class MarketWsConsumerCommand extends Command
         return $marketType === 'futures'
             ? '/fapi/v1/klines'
             : '/api/v3/klines';
+    }
+
+    private function heartbeatFresh(string $path): bool
+    {
+        if (! file_exists($path)) {
+            return false;
+        }
+
+        $raw = @file_get_contents($path);
+        $data = $raw !== false ? @json_decode($raw, true) : null;
+        $epoch = is_array($data) ? (int) ($data['last_message_epoch'] ?? 0) : 0;
+
+        return $epoch > 0 && (time() - $epoch) <= 30;
     }
 }
