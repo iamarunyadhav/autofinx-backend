@@ -49,10 +49,17 @@ class FutureTradeLiveFeedCommand extends Command
             'heartbeatPath' => $heartbeatPath,
         ]);
 
+        $startedAt = time();
         $lockKey = 'autofinx:runtime:future-trade-live-feed:'.md5(implode(',', $symbols)).':'.md5($streams);
         $lock = Cache::lock($lockKey, $maxRuntime > 0 ? $maxRuntime + 60 : 86400);
         if (! $lock->get()) {
-            if (! $this->heartbeatFresh($heartbeatPath)) {
+            if ($this->heartbeatFresh($heartbeatPath)) {
+                $this->warn('Another fresh Future Trade live-feed is active; standing by until its heartbeat goes stale.');
+                $this->waitUntilHeartbeatStale($heartbeatPath, $startedAt, $maxRuntime);
+                $this->warn('Future Trade live-feed heartbeat is stale; force releasing stale lock and taking over.');
+                Cache::lock($lockKey, 1)->forceRelease();
+                $lock = Cache::lock($lockKey, $maxRuntime > 0 ? $maxRuntime + 60 : 86400);
+            } else {
                 $this->warn('Stale Future Trade live-feed lock detected without a fresh heartbeat; force releasing lock and retrying.');
                 Cache::lock($lockKey, 1)->forceRelease();
                 $lock = Cache::lock($lockKey, $maxRuntime > 0 ? $maxRuntime + 60 : 86400);
@@ -150,5 +157,16 @@ class FutureTradeLiveFeedCommand extends Command
         $epoch = is_array($data) ? (int) ($data['last_message_epoch'] ?? 0) : 0;
 
         return $epoch > 0 && (time() - $epoch) <= 30;
+    }
+
+    private function waitUntilHeartbeatStale(string $path, int $startedAt, int $maxRuntime): void
+    {
+        while ($this->heartbeatFresh($path)) {
+            if ($maxRuntime > 0 && (time() - $startedAt) >= $maxRuntime) {
+                return;
+            }
+
+            sleep(5);
+        }
     }
 }

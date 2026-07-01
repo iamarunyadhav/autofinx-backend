@@ -54,6 +54,7 @@ class MarketWsConsumerCommand extends Command
         $maxRuntime = max(0, (int) $this->option('max-runtime'));
         $dispatchEvaluations = ! (bool) $this->option('no-dispatch');
         $heartbeatPath = storage_path('framework/autofinx-live-feed-heartbeat.json');
+        $startedAt = time();
         $lockKey = sprintf(
             'autofinx:runtime:market-ws-consume:%s:%s:%s',
             $marketType,
@@ -66,7 +67,13 @@ class MarketWsConsumerCommand extends Command
         $lock = Cache::lock($lockKey, $lockTtl);
 
         if (! $lock->get()) {
-            if (! $this->heartbeatFresh($heartbeatPath)) {
+            if (! (bool) $this->option('once') && $this->heartbeatFresh($heartbeatPath)) {
+                $this->warn('Another fresh market ws consumer is active; standing by until its heartbeat goes stale.');
+                $this->waitUntilHeartbeatStale($heartbeatPath, $startedAt, $maxRuntime);
+                $this->warn('Market ws heartbeat is stale; force releasing stale lock and taking over.');
+                Cache::lock($lockKey, 1)->forceRelease();
+                $lock = Cache::lock($lockKey, $lockTtl);
+            } elseif (! $this->heartbeatFresh($heartbeatPath)) {
                 $this->warn('Stale market ws lock detected without a fresh heartbeat; force releasing lock and retrying.');
                 Cache::lock($lockKey, 1)->forceRelease();
                 $lock = Cache::lock($lockKey, $lockTtl);
@@ -85,7 +92,6 @@ class MarketWsConsumerCommand extends Command
             }
 
             $reconnectSleepBase = max(1, (int) $this->option('reconnect-sleep'));
-            $startedAt = time();
             $testnet = (bool) $this->option('testnet');
             $client = new SimpleWebSocketClient;
 
@@ -427,5 +433,16 @@ class MarketWsConsumerCommand extends Command
         $epoch = is_array($data) ? (int) ($data['last_message_epoch'] ?? 0) : 0;
 
         return $epoch > 0 && (time() - $epoch) <= 30;
+    }
+
+    private function waitUntilHeartbeatStale(string $path, int $startedAt, int $maxRuntime): void
+    {
+        while ($this->heartbeatFresh($path)) {
+            if ($maxRuntime > 0 && (time() - $startedAt) >= $maxRuntime) {
+                return;
+            }
+
+            sleep(5);
+        }
     }
 }
