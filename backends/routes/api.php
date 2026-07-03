@@ -369,6 +369,7 @@ Route::prefix('v1')->group(function () {
 
         Route::get('ops/health', [OpsController::class, 'health']);
         Route::get('ops/audit-logs', [OpsController::class, 'auditLogs']);
+        Route::post('ops/doctor-cleanup', [OpsController::class, 'doctorCleanup'])->middleware(['require.2fa','throttle:3,1']);
         Route::get('jobs/dashboard', [JobsController::class, 'dashboard']);
         Route::post('jobs/restart-workers', [JobsController::class, 'restartWorkers'])->middleware(['require.2fa','throttle:10,1']);
         Route::post('jobs/failed/retry', [JobsController::class, 'retryFailed'])->middleware(['require.2fa','throttle:20,1']);

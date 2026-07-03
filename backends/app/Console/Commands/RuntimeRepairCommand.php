@@ -35,7 +35,7 @@ class RuntimeRepairCommand extends Command
         $failed = false;
         foreach ([
             ['queue:restart', []],
-            ['market:ws-consume', ['--once' => true, '--market-type' => 'futures', '--store-ohlc' => true, '--ohlc-intervals' => '1m,5m,15m', '--no-dispatch' => true]],
+            ['future-trade:scan-all', []],
             ['robot-sessions:evaluate', ['--limit' => 50]],
             ['future-trade:runtime-status', []],
         ] as [$command, $args]) {

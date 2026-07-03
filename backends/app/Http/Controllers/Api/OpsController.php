@@ -30,8 +30,10 @@ use App\Support\OrderStatusPoller;
 use App\Models\WebhookInbox;
 use App\Models\MarketTick;
 use App\Models\WithdrawalRequest;
+use Illuminate\Support\Facades\Artisan;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Throwable;
 
 class OpsController extends Controller
 {
@@ -113,6 +115,45 @@ class OpsController extends Controller
             ],
             'binance_connections' => $connections,
         ]);
+    }
+
+    public function doctorCleanup(Request $request)
+    {
+        @set_time_limit(180);
+
+        $data = $request->validate([
+            'sleep' => 'nullable|integer|min:3|max:45',
+            'skip_migrate' => 'nullable|boolean',
+        ]);
+
+        try {
+            Artisan::call('doctor_cleanup', [
+                '--json' => true,
+                '--sleep' => (int) ($data['sleep'] ?? 15),
+                '--skip-migrate' => (bool) ($data['skip_migrate'] ?? false),
+            ]);
+
+            $raw = trim(Artisan::output());
+            $payload = json_decode($raw, true);
+
+            if (! is_array($payload)) {
+                return response()->json([
+                    'ok' => false,
+                    'status' => 'invalid_output',
+                    'message' => 'doctor_cleanup finished but returned invalid JSON.',
+                    'raw' => $raw,
+                ], 500);
+            }
+
+            return response()->json($payload, ($payload['ok'] ?? false) ? 200 : 207);
+        } catch (Throwable $e) {
+            return response()->json([
+                'ok' => false,
+                'status' => 'failed',
+                'message' => $e->getMessage(),
+                'steps' => [],
+            ], 500);
+        }
     }
 
     public function killSwitch(Request $request)
