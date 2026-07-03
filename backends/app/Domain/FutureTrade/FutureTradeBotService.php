@@ -2347,7 +2347,7 @@ class FutureTradeBotService
 
         $context = $this->arrayContext($latest->context ?? []);
         $nextDecision = $config->logs()
-            ->whereIn('event', ['PINE_WEBHOOK_SIGNAL', 'PINE_WEBHOOK_WAIT', 'PINE_WEBHOOK_CLOSE', 'PINE_WEBHOOK_REJECTED', 'DUPLICATE_WEBHOOK_IGNORED'])
+            ->whereIn('event', ['PINE_WEBHOOK_SIGNAL', 'PINE_WEBHOOK_WAIT', 'PINE_WEBHOOK_CLOSE', 'PINE_WEBHOOK_REJECTED', 'PINE_WEBHOOK_STALE_IGNORED', 'DUPLICATE_WEBHOOK_IGNORED'])
             ->where('occurred_at', '>=', $latest->occurred_at)
             ->orderBy('occurred_at')
             ->first();
@@ -2364,11 +2364,31 @@ class FutureTradeBotService
         }
         $decisionEvent = $nextDecision?->event;
         $rejected = $decisionEvent === 'PINE_WEBHOOK_REJECTED';
+        $staleIgnored = $decisionEvent === 'PINE_WEBHOOK_STALE_IGNORED'
+            || ($decisionEvent === 'PINE_WEBHOOK_REJECTED' && $nextDecision?->reason === 'webhook_signal_latency_too_high');
         $duplicate = $decisionEvent === 'DUPLICATE_WEBHOOK_IGNORED';
         $executable = $decisionEvent === 'PINE_WEBHOOK_SIGNAL' && in_array(strtoupper((string) $nextDecision?->signal), ['BUY', 'SELL'], true);
         $decisionContext = $this->arrayContext($nextDecision?->context ?? []);
         $webhookTiming = (array) ($decisionContext['webhookTiming'] ?? []);
         $signalLatencyMs = is_numeric($webhookTiming['signalLatencyMs'] ?? null) ? (int) $webhookTiming['signalLatencyMs'] : null;
+
+        if ($staleIgnored) {
+            return [
+                'received' => false,
+                'ignored' => true,
+                'ignoredReason' => 'webhook_signal_latency_too_high',
+                'summary' => 'Latest TradingView webhook was stale and ignored. Waiting for the next fresh alert inside the latency window.',
+                'receivedAt' => optional($latest->occurred_at)->toIso8601String(),
+                'ageSeconds' => $this->ageSecondsSince($latest->occurred_at),
+                'symbol' => $latest->symbol,
+                'signal' => $latest->signal,
+                'decisionEvent' => $decisionEvent,
+                'finalReason' => $nextDecision?->reason,
+                'signalLatencyMs' => null,
+                'ignoredSignalLatencyMs' => $signalLatencyMs,
+                'maxSignalLatencyMs' => app(RuntimeSafetySettingsService::class)->webhookMaxSignalLatencyMs((string) $config->workspace_id),
+            ];
+        }
 
         // Latency telemetry from the most recent webhook execution. Stored by
         // finalizeWebhookLatency() on each ingestPineWebhook() invocation.
@@ -3148,10 +3168,18 @@ class FutureTradeBotService
     {
         $symbol = $this->normalizePineSymbol((string) ($payload['symbol'] ?? $payload['ticker'] ?? ''));
         $signal = strtoupper(trim((string) ($payload['signal'] ?? $payload['action'] ?? $payload['side'] ?? 'WAIT')));
+        $staleIgnored = $reason === 'webhook_signal_latency_too_high';
+        $event = $staleIgnored ? 'PINE_WEBHOOK_STALE_IGNORED' : 'PINE_WEBHOOK_REJECTED';
+
         app(FutureTradeAuditService::class)->markWebhookRejected($config, $payload, $reason, $context);
-        $this->log($config->fresh('state'), 'PINE_WEBHOOK_REJECTED', $symbol ?: null, $signal ?: null, 0.0, $reason, array_merge([
+        if ($staleIgnored) {
+            $this->cacheForget('future_trade_last_webhook_latency:'.$config->workspace_id);
+        }
+
+        $this->log($config->fresh('state'), $event, $symbol ?: null, $signal ?: null, 0.0, $reason, array_merge([
             'source' => 'pine_webhook',
             'profile' => self::PROFILE_PRIME_V617_CRYPTO,
+            'stale_ignored' => $staleIgnored,
             'payload' => Arr::except($payload, ['token', 'secret']),
         ], $context));
 
@@ -3159,8 +3187,9 @@ class FutureTradeBotService
             'accepted' => false,
             'executed' => false,
             'eligible' => false,
+            'ignored' => $staleIgnored,
             'source' => 'pine_webhook',
-            'execution' => 'rejected',
+            'execution' => $staleIgnored ? 'stale_ignored' : 'rejected',
             'reason' => $reason,
         ] + $context;
     }
@@ -8277,15 +8306,37 @@ class FutureTradeBotService
     {
         $latest = $config->logs()
             ->whereIn('event', ['PINE_WEBHOOK_SIGNAL', 'PINE_WEBHOOK_WAIT', 'PINE_WEBHOOK_CLOSE', 'PINE_WEBHOOK_REJECTED'])
+            ->where(function ($query) {
+                $query->where('event', '!=', 'PINE_WEBHOOK_REJECTED')
+                    ->orWhere('reason', '!=', 'webhook_signal_latency_too_high')
+                    ->orWhereNull('reason');
+            })
             ->orderByDesc('occurred_at')
             ->first();
 
         if (! $latest) {
+            $staleIgnored = $config->logs()
+                ->where(function ($query) {
+                    $query->where('event', 'PINE_WEBHOOK_STALE_IGNORED')
+                        ->orWhere(function ($nested) {
+                            $nested->where('event', 'PINE_WEBHOOK_REJECTED')
+                                ->where('reason', 'webhook_signal_latency_too_high');
+                        });
+                })
+                ->orderByDesc('occurred_at')
+                ->first();
+
             return [
-                'state' => 'waiting',
-                'summary' => 'No TradingView webhook received yet.',
-                'latestEvent' => null,
-                'ageSeconds' => null,
+                'state' => $staleIgnored ? 'ignored' : 'waiting',
+                'summary' => $staleIgnored
+                    ? 'Latest TradingView webhook was stale and ignored. Waiting for a fresh alert inside the latency window.'
+                    : 'No TradingView webhook received yet.',
+                'latestEvent' => $staleIgnored?->event,
+                'symbol' => $staleIgnored?->symbol,
+                'signal' => $staleIgnored?->signal,
+                'reason' => $staleIgnored?->reason,
+                'occurredAt' => optional($staleIgnored?->occurred_at)->toIso8601String(),
+                'ageSeconds' => $staleIgnored ? $this->ageSecondsSince($staleIgnored->occurred_at) : null,
                 'signalLatencyMs' => null,
                 'transportLatencyMs' => null,
             ];
