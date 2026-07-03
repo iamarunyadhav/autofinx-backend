@@ -1073,6 +1073,8 @@ test('non-webhook signal still blocks on stale feed', function () {
     $config = createPrimeWebhookConfig($workspace->id);
     try {
         \Illuminate\Support\Facades\Redis::del('live-feed:binance_futures:ETHUSDT');
+        \Illuminate\Support\Facades\Redis::del('price:binance_futures:ETHUSDT');
+        \Illuminate\Support\Facades\Redis::del('ts:binance_futures:ETHUSDT');
     } catch (Throwable) {
     }
 
