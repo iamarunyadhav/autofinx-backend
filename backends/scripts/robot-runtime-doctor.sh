@@ -4,7 +4,13 @@ set -uo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR" || exit 1
 
-PHP_BIN="${PHP_BIN:-php}"
+if [ -z "${PHP_BIN:-}" ]; then
+  if [ -x /usr/local/bin/ea-php82 ]; then
+    PHP_BIN="/usr/local/bin/ea-php82"
+  else
+    PHP_BIN="php"
+  fi
+fi
 LOG_DIR="$ROOT_DIR/storage/logs"
 mkdir -p "$LOG_DIR"
 
@@ -80,11 +86,10 @@ check_once() {
 
   start_process "scheduler" "artisan schedule:work" "$PHP_BIN artisan schedule:work" "schedule-work.log" || failed=1
   start_process "queue worker" "artisan queue:work" "$PHP_BIN artisan queue:work --queue=critical,execution,signals,market,default --sleep=1 --tries=1 --timeout=90" "queue-work.log" || failed=1
-  start_process "futures market feed" "artisan market:ws-consume.*market-type=futures" "$PHP_BIN artisan market:ws-consume --market-type=futures --store-ohlc --ohlc-intervals=1m,5m,15m --no-dispatch" "market-feed.log" || failed=1
+  start_process "futures market feed" "artisan future-trade:live-feed" "$PHP_BIN artisan future-trade:live-feed --symbols=ETHUSDT,BTCUSDT,SOLUSDT,BNBUSDT --streams=trade,kline_1m,kline_5m,kline_15m --reconnect-sleep=3" "future-trade-live-feed.log" || failed=1
 
   if [ "$REPAIR" -eq 1 ]; then
     run_artisan "queue restart signal" queue:restart || true
-    run_artisan "futures feed refresh" market:ws-consume --once --market-type=futures --store-ohlc --ohlc-intervals=1m,5m,15m --no-dispatch || failed=1
     run_artisan "robot session evaluate" robot-sessions:evaluate --limit=50 || failed=1
   fi
 
