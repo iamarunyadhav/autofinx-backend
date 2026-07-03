@@ -36,17 +36,22 @@ class FutureTradeLiveFeedManager
 
         $lastTickAt = $latestFeed?->last_tick_at;
         $feedAgeSeconds = $this->ageSecondsSince($lastTickAt);
+        $latestLiveFeed = $this->freshestLiveFeedSnapshot($desiredSymbols);
         $latestPrice = $this->freshestCachedPrice($desiredSymbols);
-        $priceAgeSeconds = $latestPrice['age_seconds'] ?? null;
+        $priceAgeSeconds = $latestLiveFeed['age_seconds'] ?? $latestPrice['age_seconds'] ?? null;
         $ageSeconds = $priceAgeSeconds !== null && $feedAgeSeconds !== null
             ? min((int) $priceAgeSeconds, (int) $feedAgeSeconds)
             : ($priceAgeSeconds ?? $feedAgeSeconds);
-        $lastTickAt = ($latestPrice['timestamp_ms'] ?? null)
-            ? Carbon::createFromTimestampMs((int) $latestPrice['timestamp_ms'])
-            : $lastTickAt;
-        $lastTickPrice = isset($latestPrice['price'])
+        $lastTickAt = ($latestLiveFeed['received_at_ms'] ?? null)
+            ? Carbon::createFromTimestampMs((int) $latestLiveFeed['received_at_ms'])
+            : (($latestPrice['timestamp_ms'] ?? null)
+                ? Carbon::createFromTimestampMs((int) $latestPrice['timestamp_ms'])
+                : $lastTickAt);
+        $lastTickPrice = isset($latestLiveFeed['price'])
+            ? (float) $latestLiveFeed['price']
+            : (isset($latestPrice['price'])
             ? (float) $latestPrice['price']
-            : ($latestFeed?->last_price !== null ? (float) $latestFeed->last_price : null);
+            : ($latestFeed?->last_price !== null ? (float) $latestFeed->last_price : null));
         $maxAgeSeconds = app(RuntimeSafetySettingsService::class)->liveFeedMaxAgeSeconds($workspaceId);
         $isFresh = $ageSeconds !== null && $ageSeconds <= $maxAgeSeconds;
         $runningSymbols = array_values(array_filter(array_map(
@@ -77,7 +82,7 @@ class FutureTradeLiveFeedManager
             'feedAgeSeconds' => $ageSeconds,
             'maxAgeSeconds' => $maxAgeSeconds,
             'lastTickPrice' => $lastTickPrice,
-            'source' => (string) ($latestPrice['source'] ?? $latestFeed?->source ?? ($isFresh ? 'websocket_cache' : 'none')),
+            'source' => (string) ($latestLiveFeed['source'] ?? $latestPrice['source'] ?? $latestFeed?->source ?? ($isFresh ? 'websocket_cache' : 'none')),
             'daemonPidKnown' => $running,
             'manualDaemonDetectedByFreshTicks' => $manualFreshTick,
             'dataSource' => $isFresh ? 'BINANCE_FUTURES_WEBSOCKET_CACHE' : ($running ? 'BINANCE_FUTURES_WEBSOCKET' : 'BINANCE_FUTURES_REST_FALLBACK'),
@@ -96,7 +101,7 @@ class FutureTradeLiveFeedManager
             'last_message_epoch' => $heartbeat['last_message_epoch'] ?? null,
             'per_symbol' => $this->decoratePerSymbolHeartbeat((array) ($heartbeat['per_symbol'] ?? []), $desiredSymbols),
             'last_exchange_event_time' => $heartbeat['last_exchange_event_time'] ?? null,
-            'exchange_to_backend_latency_ms' => $heartbeat['exchange_to_backend_latency_ms'] ?? null,
+            'exchange_to_backend_latency_ms' => $latestLiveFeed['event_lag_ms'] ?? $heartbeat['exchange_to_backend_latency_ms'] ?? null,
             'webhook_signal_latency_ms' => null,
             'isFresh' => $isFresh,
             'desiredSymbols' => $desiredSymbols,
@@ -601,6 +606,19 @@ class FutureTradeLiveFeedManager
         }
 
         return $freshest;
+    }
+
+    /**
+     * Redis live-feed snapshots measure when this backend received the Binance
+     * event. That is the right freshness source for execution guards; exchange
+     * event timestamps are kept as latency diagnostics only.
+     *
+     * @param  string[]  $symbols
+     */
+    private function freshestLiveFeedSnapshot(array $symbols): ?array
+    {
+        return app(MarketPriceCacheService::class)
+            ->freshestLiveFeedSnapshot('binance_futures', $symbols, 120);
     }
 
     private function loadHeartbeat(): array

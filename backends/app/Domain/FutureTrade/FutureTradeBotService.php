@@ -8357,9 +8357,14 @@ class FutureTradeBotService
     private function feedFreshnessSnapshot(?string $symbol = null, ?string $workspaceId = null): array
     {
         $symbol = strtoupper(trim((string) $symbol));
+        $liveSnapshot = $symbol !== ''
+            ? app(MarketPriceCacheService::class)->getLiveFeedSnapshot('binance_futures', $symbol, 120)
+            : null;
         $latestPrice = $symbol !== '' ? $this->cachedLatestPrice($symbol) : null;
         $priceAge = null;
-        if (is_array($latestPrice) && (int) ($latestPrice['timestamp_ms'] ?? 0) > 0) {
+        if (is_array($liveSnapshot) && ($liveSnapshot['age_seconds'] ?? null) !== null) {
+            $priceAge = (int) $liveSnapshot['age_seconds'];
+        } elseif (is_array($latestPrice) && (int) ($latestPrice['timestamp_ms'] ?? 0) > 0) {
             $priceAge = $this->ageSecondsSinceTimestampMs((int) $latestPrice['timestamp_ms']);
         }
 
@@ -8372,11 +8377,13 @@ class FutureTradeBotService
 
         $feedAge = $this->ageSecondsSince($latestFeed?->last_tick_at);
         $age = $priceAge !== null && $feedAge !== null ? min($priceAge, $feedAge) : ($priceAge ?? $feedAge);
-        $lastTickAt = $latestPrice && (int) ($latestPrice['timestamp_ms'] ?? 0) > 0
+        $lastTickAt = $liveSnapshot && (int) ($liveSnapshot['received_at_ms'] ?? 0) > 0
+            ? $this->isoTimestamp(Carbon::createFromTimestampMs((int) $liveSnapshot['received_at_ms']))
+            : ($latestPrice && (int) ($latestPrice['timestamp_ms'] ?? 0) > 0
             ? $this->isoTimestamp(Carbon::createFromTimestampMs((int) $latestPrice['timestamp_ms']))
-            : $this->isoTimestamp($latestFeed?->last_tick_at);
-        $lastTickPrice = (float) ($latestPrice['price'] ?? $latestFeed?->last_price ?? 0) ?: null;
-        $source = (string) ($latestPrice['source'] ?? $latestFeed?->source ?? 'none');
+            : $this->isoTimestamp($latestFeed?->last_tick_at));
+        $lastTickPrice = (float) ($liveSnapshot['price'] ?? $latestPrice['price'] ?? $latestFeed?->last_price ?? 0) ?: null;
+        $source = (string) ($liveSnapshot['source'] ?? $latestPrice['source'] ?? $latestFeed?->source ?? 'none');
         $maxAge = app(RuntimeSafetySettingsService::class)->liveFeedMaxAgeSeconds($workspaceId);
         $freshLive = $age !== null && $age <= $maxAge;
         $freshFallback = $age !== null && $age <= 60;
@@ -8391,6 +8398,7 @@ class FutureTradeBotService
             'lastTickAt' => $lastTickAt,
             'lastTickPrice' => $lastTickPrice,
             'source' => $source,
+            'exchangeToBackendLatencyMs' => $liveSnapshot['event_lag_ms'] ?? null,
         ];
     }
 
