@@ -338,7 +338,10 @@ test('pine webhook buy executes through prime pine mirror without old ai overrid
 });
 
 test('pine webhook records latency telemetry and sanitizes secret payload fields', function () {
-    config(['future_trade.pine_webhook_token' => 'pine-secret']);
+    config([
+        'future_trade.pine_webhook_token' => 'pine-secret',
+        'future_trade.pine_webhook_max_signal_latency_ms' => 6000,
+    ]);
     Carbon::setTestNow('2026-05-19 10:30:05');
     $workspace = Workspace::factory()->create();
     $config = createPrimeWebhookConfig($workspace->id);
@@ -358,6 +361,28 @@ test('pine webhook records latency telemetry and sanitizes secret payload fields
     $diagnostics = app(FutureTradeBotService::class)->diagnosticsPayload($config->fresh('state'));
     expect($diagnostics['webhook']['state'])->toBe('healthy')
         ->and($diagnostics['webhook']['signalLatencyMs'])->toBe(5000.0);
+});
+
+test('live pine webhook rejects executable signal above latency guard', function () {
+    config([
+        'future_trade.pine_webhook_token' => 'pine-secret',
+        'future_trade.pine_webhook_max_signal_latency_ms' => 4000,
+    ]);
+    Carbon::setTestNow('2026-05-19 10:30:05');
+    $workspace = Workspace::factory()->create();
+    $config = createPrimeWebhookLiveConfig($workspace->id);
+
+    $response = $this->postJson("/api/v1/future-trade/pine-webhook/{$workspace->id}", pineWebhookPayload([
+        'alert_time' => '2026-05-19T10:30:02Z',
+    ]))->assertOk();
+
+    expect($response->json('accepted'))->toBeFalse()
+        ->and($response->json('executed'))->toBeFalse()
+        ->and($response->json('reason'))->toBe('webhook_signal_latency_too_high')
+        ->and($response->json('signalLatencyMs'))->toBe(5000)
+        ->and($response->json('maxSignalLatencyMs'))->toBe(4000);
+
+    expect($config->logs()->where('event', 'PINE_WEBHOOK_REJECTED')->where('reason', 'webhook_signal_latency_too_high')->exists())->toBeTrue();
 });
 
 test('pine webhook risk payload is ignored by default so manual risk remains authority', function () {
@@ -1046,6 +1071,10 @@ test('non-webhook signal still blocks on stale feed', function () {
     Carbon::setTestNow('2026-05-19 10:30:05');
     $workspace = Workspace::factory()->create();
     $config = createPrimeWebhookConfig($workspace->id);
+    try {
+        \Illuminate\Support\Facades\Redis::del('live-feed:binance_futures:ETHUSDT');
+    } catch (Throwable) {
+    }
 
     $signal = [
         'symbol' => 'ETHUSDT',

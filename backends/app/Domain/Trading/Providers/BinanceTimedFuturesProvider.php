@@ -345,7 +345,7 @@ class BinanceTimedFuturesProvider implements LiveTradeProviderInterface
 
         $payload = array_merge($params, [
             'timestamp' => (int) floor(microtime(true) * 1000),
-            'recvWindow' => 5000,
+            'recvWindow' => max(5000, min(60000, (int) config('future_trade.binance_rest.recv_window_ms', 15000))),
         ]);
         ksort($payload);
 

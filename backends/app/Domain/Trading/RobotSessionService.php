@@ -15,7 +15,7 @@ use RuntimeException;
 class RobotSessionService
 {
     private const MIN_LIVE_NOTIONAL_USDT = 20.0;
-    private const MAX_LIVE_FEED_AGE_SECONDS = 30;
+    private const MAX_LIVE_FEED_AGE_SECONDS = 3;
     private const MAX_ENTRY_PRICE_DRIFT_BPS = 20.0;
 
     public function __construct(
@@ -1492,7 +1492,7 @@ class RobotSessionService
 
     private function freshServerFeed(RobotSession $session): array
     {
-        $maxAge = (int) config('robot_trade.max_server_feed_age_seconds', self::MAX_LIVE_FEED_AGE_SECONDS);
+        $maxAge = app(RuntimeSafetySettingsService::class)->liveFeedMaxAgeSeconds((string) $session->workspace_id);
         $symbol = strtoupper((string) $session->symbol);
         $redisFeed = $this->prices->getLiveFeedSnapshot('binance_futures', $symbol, $maxAge);
         if (($redisFeed['fresh'] ?? false) === true) {

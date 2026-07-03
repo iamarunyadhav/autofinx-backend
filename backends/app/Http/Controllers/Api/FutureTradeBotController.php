@@ -6,6 +6,7 @@ use App\Domain\FutureTrade\FutureTradeBacktestEngine;
 use App\Domain\FutureTrade\FutureTradeBotService;
 use App\Domain\FutureTrade\FutureTradeRuntimeConnectivityService;
 use App\Domain\Market\FutureTradeLiveFeedManager;
+use App\Domain\Trading\RuntimeSafetySettingsService;
 use App\Http\Controllers\Controller;
 use App\Jobs\ProcessPineWebhookSignalJob;
 use App\Models\FutureTradeBacktestRun;
@@ -357,6 +358,8 @@ class FutureTradeBotController extends Controller
 
     public function pineWebhook(Request $request, string $workspace): JsonResponse
     {
+        $startedAt = microtime(true);
+        $receivedAt = now();
         // Primary slot 0 always exists — used for token validation, raw audit
         // logging, and as fallback when no symbol-specific slot is available.
         $primary = $this->bot->getOrCreateConfig($workspace);
@@ -460,6 +463,76 @@ class FutureTradeBotController extends Controller
             // All safety guards (daily loss, cooldown, idempotency) run inside
             // the job — nothing is bypassed.
             $resolvedConfig = $targetConfig ?? $primary;
+            $maxSignalLatencyMs = app(RuntimeSafetySettingsService::class)->webhookMaxSignalLatencyMs((string) $resolvedConfig->workspace_id);
+            $signalLatencyMs = $this->pineWebhookSignalLatencyMs($payload, $receivedAt);
+            $liveRequested = (bool) $resolvedConfig->enable_live_trading
+                && (bool) ($resolvedConfig->mergedSettings()['liveTrading'] ?? false);
+            if ($liveRequested && in_array($rawSignal, ['BUY', 'SELL', 'LONG', 'SHORT'], true) && $signalLatencyMs !== null && $signalLatencyMs > $maxSignalLatencyMs) {
+                $webhookTiming = [
+                    'receivedAt' => $receivedAt->toIso8601String(),
+                    'candleCloseAt' => $this->pineWebhookCandleCloseAt($payload)?->toIso8601String(),
+                    'signalLatencyMs' => $signalLatencyMs,
+                ];
+                $resolvedConfig->logs()->create([
+                    'event' => 'PINE_WEBHOOK_REJECTED',
+                    'symbol' => $symbol ?: null,
+                    'signal' => $rawSignal,
+                    'confidence' => 0,
+                    'reason' => 'webhook_signal_latency_too_high',
+                    'context' => [
+                        'source' => 'pine_webhook',
+                        'webhookTiming' => $webhookTiming,
+                        'signalLatencyMs' => $signalLatencyMs,
+                        'maxSignalLatencyMs' => $maxSignalLatencyMs,
+                    ],
+                    'occurred_at' => $receivedAt,
+                ]);
+
+                return response()->json([
+                    'accepted' => false,
+                    'executed' => false,
+                    'eligible' => false,
+                    'execution' => 'rejected',
+                    'source' => 'pine_webhook',
+                    'reason' => 'webhook_signal_latency_too_high',
+                    'symbol' => $symbol ?: null,
+                    'signalLatencyMs' => $signalLatencyMs,
+                    'maxSignalLatencyMs' => $maxSignalLatencyMs,
+                    'webhookTiming' => $webhookTiming,
+                    'latency' => ['totalMs' => (int) round((microtime(true) - $startedAt) * 1000)],
+                ], 200);
+            }
+            $liveFeed = $this->liveFeedManager->status($workspace);
+            if ($liveRequested && in_array($rawSignal, ['BUY', 'SELL', 'LONG', 'SHORT'], true) && ! (bool) ($liveFeed['isFresh'] ?? false)) {
+                $resolvedConfig->logs()->create([
+                    'event' => 'PINE_WEBHOOK_REJECTED',
+                    'symbol' => $symbol ?: null,
+                    'signal' => $rawSignal,
+                    'confidence' => 0,
+                    'reason' => 'live_feed_stale',
+                    'context' => [
+                        'source' => 'pine_webhook',
+                        'liveFeed' => $liveFeed,
+                        'feedAgeSeconds' => $liveFeed['ageSeconds'] ?? null,
+                        'maxAgeSeconds' => $liveFeed['maxAgeSeconds'] ?? null,
+                    ],
+                    'occurred_at' => $receivedAt,
+                ]);
+
+                return response()->json([
+                    'accepted' => false,
+                    'executed' => false,
+                    'eligible' => false,
+                    'execution' => 'rejected',
+                    'source' => 'pine_webhook',
+                    'reason' => 'live_feed_stale',
+                    'symbol' => $symbol ?: null,
+                    'feedAgeSeconds' => $liveFeed['ageSeconds'] ?? null,
+                    'maxAgeSeconds' => $liveFeed['maxAgeSeconds'] ?? null,
+                    'liveFeed' => $liveFeed,
+                    'latency' => ['totalMs' => (int) round((microtime(true) - $startedAt) * 1000)],
+                ], 200);
+            }
             ProcessPineWebhookSignalJob::dispatch(
                 (string) $resolvedConfig->id,
                 $payload,
@@ -475,6 +548,9 @@ class FutureTradeBotController extends Controller
                 'symbol' => $symbol ?: null,
                 'slotIndex' => $targetConfig !== null ? (int) $targetConfig->slot_index : 0,
                 'queuedAt' => now()->toIso8601String(),
+                'signalLatencyMs' => $signalLatencyMs,
+                'maxSignalLatencyMs' => $maxSignalLatencyMs,
+                'latency' => ['totalMs' => (int) round((microtime(true) - $startedAt) * 1000)],
             ], 200);
         } catch (Throwable $exception) {
             Log::error('PINE_WEBHOOK_INTERNAL_ERROR', [
@@ -498,6 +574,43 @@ class FutureTradeBotController extends Controller
     public function lastWebhookPayload(string $workspace): JsonResponse
     {
         return $this->liveJson($this->bot->lastWebhookPayload($this->bot->getOrCreateConfig($workspace)));
+    }
+
+    private function pineWebhookSignalLatencyMs(array $payload, Carbon $receivedAt): ?int
+    {
+        $closeAt = $this->pineWebhookCandleCloseAt($payload);
+        if (! $closeAt) {
+            return null;
+        }
+
+        return max(0, (int) round(((float) $receivedAt->format('U.u') - (float) $closeAt->format('U.u')) * 1000));
+    }
+
+    private function pineWebhookCandleCloseAt(array $payload): ?Carbon
+    {
+        $value = $payload['candle_close_time']
+            ?? $payload['candleCloseTime']
+            ?? $payload['bar_close_time']
+            ?? $payload['time_close']
+            ?? null;
+
+        if ($value === null || $value === '') {
+            return null;
+        }
+
+        try {
+            if (is_numeric($value)) {
+                $number = (int) $value;
+
+                return $number > 9999999999
+                    ? Carbon::createFromTimestampMs($number, 'UTC')
+                    : Carbon::createFromTimestamp($number, 'UTC');
+            }
+
+            return Carbon::parse((string) $value);
+        } catch (Throwable) {
+            return null;
+        }
     }
 
     public function binanceHealth(string $workspace): JsonResponse

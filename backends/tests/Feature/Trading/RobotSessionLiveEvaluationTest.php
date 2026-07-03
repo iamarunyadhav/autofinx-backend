@@ -1,5 +1,6 @@
 <?php
 
+use App\Domain\Market\MarketPriceCacheService;
 use App\Domain\Trading\RobotSessionService;
 use App\Models\Integration;
 use App\Models\MarketFeedStatus;
@@ -10,6 +11,7 @@ use App\Models\User;
 use App\Models\Workspace;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Redis;
 use Illuminate\Support\Str;
 
 test('robot session evaluates in live mode and opens a live quick trade', function () {
@@ -91,6 +93,7 @@ test('robot session evaluates in live mode and opens a live quick trade', functi
 
     $session = app(RobotSessionService::class)->start($session);
     seedRobotFeedStatus($workspace->id, 'ETHUSDT', 2000.00);
+    seedRobotLiveFeed('ETHUSDT', 2000.00);
 
     app(RobotSessionService::class)->evaluateSession($session);
     $result = app(RobotSessionService::class)->evaluateSession($session->fresh());
@@ -158,6 +161,7 @@ test('robot session blocks live entry when server websocket feed is stale', func
     ], $user->id);
 
     $session = app(RobotSessionService::class)->start($session);
+    clearRobotLiveFeed('ETHUSDT');
     seedRobotFeedStatus($workspace->id, 'ETHUSDT', 2000.00, now()->subSeconds(60));
 
     app(RobotSessionService::class)->evaluateSession($session);
@@ -253,4 +257,27 @@ function seedRobotFeedStatus(string $workspaceId, string $symbol, float $price, 
             'meta_json' => ['test' => true],
         ]
     );
+}
+
+function seedRobotLiveFeed(string $symbol, float $price): void
+{
+    app(MarketPriceCacheService::class)->setLatestPrice(
+        'binance_futures',
+        $symbol,
+        $price,
+        (int) floor(microtime(true) * 1000),
+        [
+            'stream' => strtolower($symbol).'@trade',
+            'event_type' => 'trade',
+            'market_type' => 'futures',
+        ],
+    );
+}
+
+function clearRobotLiveFeed(string $symbol): void
+{
+    try {
+        Redis::del('live-feed:binance_futures:'.strtoupper($symbol));
+    } catch (Throwable) {
+    }
 }

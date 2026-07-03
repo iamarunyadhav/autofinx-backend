@@ -19,6 +19,8 @@ return [
     'prime_mirror_execution_enabled' => env('FUTURE_TRADE_PRIME_MIRROR_EXECUTION_ENABLED', false),
     'prime_mirror_live_enabled' => env('FUTURE_TRADE_PRIME_MIRROR_LIVE_ENABLED', false),
     'pine_webhook_live_enabled' => env('FUTURE_TRADE_PINE_WEBHOOK_LIVE_ENABLED', true),
+    'pine_webhook_max_signal_latency_ms' => max(1000, (int) env('FUTURE_TRADE_PINE_WEBHOOK_MAX_SIGNAL_LATENCY_MS', 4000)),
+    'live_feed_max_age_seconds' => max(1, (int) env('FUTURE_TRADE_LIVE_FEED_MAX_AGE_SECONDS', 3)),
     'live' => [
         'pine_webhook_enabled' => filter_var(env('FUTURE_TRADE_PINE_WEBHOOK_LIVE_ENABLED', true), FILTER_VALIDATE_BOOL),
         'prime_mirror_enabled' => filter_var(env('FUTURE_TRADE_PRIME_MIRROR_LIVE_ENABLED', false), FILTER_VALIDATE_BOOL),
@@ -109,6 +111,8 @@ return [
         'signalSource' => env('FUTURE_TRADE_SIGNAL_SOURCE', 'webhook'),
         'binanceBrainVersion' => 'v11_native_beta',
         'pineWebhookFallbackTimeoutSeconds' => (int) env('FUTURE_TRADE_PINE_WEBHOOK_FALLBACK_TIMEOUT_SECONDS', 1200),
+        'liveFeedMaxAgeSeconds' => max(1, (int) env('FUTURE_TRADE_LIVE_FEED_MAX_AGE_SECONDS', 3)),
+        'webhookMaxSignalLatencyMs' => max(1000, (int) env('FUTURE_TRADE_PINE_WEBHOOK_MAX_SIGNAL_LATENCY_MS', 4000)),
         'webhookFallbackEnabled' => env('FUTURE_TRADE_WEBHOOK_FALLBACK_ENABLED', false),
         'primeMirrorLiveEnabled' => false,
         'validatedDefaultSymbols' => ['ETHUSDT', 'BTCUSDT', 'SOLUSDT'],

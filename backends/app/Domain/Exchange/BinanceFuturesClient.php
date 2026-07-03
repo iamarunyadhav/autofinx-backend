@@ -268,6 +268,11 @@ class BinanceFuturesClient
 
         $signedPayload = $this->sign($params);
         $response = $this->request($method, $path, $signedPayload, true);
+        if ($this->isTimestampOutsideRecvWindow($response)) {
+            $this->syncServerTimeOffset();
+            $signedPayload = $this->sign($params);
+            $response = $this->request($method, $path, $signedPayload, true);
+        }
 
         if ($throw) {
             $this->assertSuccess($response, 'Binance futures signed request failed.');
@@ -349,7 +354,7 @@ class BinanceFuturesClient
 
     private function sign(array $payload): array
     {
-        $payload['timestamp'] = (int) floor(microtime(true) * 1000);
+        $payload['timestamp'] = (int) floor(microtime(true) * 1000) + $this->serverTimeOffsetMs();
         $payload['recvWindow'] = max(5000, min(60000, (int) config('future_trade.binance_rest.recv_window_ms', 15000)));
         ksort($payload);
 
@@ -357,6 +362,38 @@ class BinanceFuturesClient
         $payload['signature'] = hash_hmac('sha256', $query, $this->apiSecret);
 
         return $payload;
+    }
+
+    private function isTimestampOutsideRecvWindow(Response $response): bool
+    {
+        return (int) ($response->json('code') ?? 0) === -1021
+            || str_contains(strtolower($response->body()), 'outside of the recvwindow');
+    }
+
+    private function serverTimeOffsetKey(): string
+    {
+        return 'autofinx:binance:futures_time_offset:'.md5($this->baseUrl);
+    }
+
+    private function serverTimeOffsetMs(): int
+    {
+        return (int) Cache::get($this->serverTimeOffsetKey(), 0);
+    }
+
+    private function syncServerTimeOffset(): void
+    {
+        try {
+            $started = (int) floor(microtime(true) * 1000);
+            $response = $this->request('GET', '/fapi/v1/time');
+            $finished = (int) floor(microtime(true) * 1000);
+            $serverTime = (int) ($response->json('serverTime') ?? 0);
+            if ($response->successful() && $serverTime > 0) {
+                $localMidpoint = (int) floor(($started + $finished) / 2);
+                Cache::put($this->serverTimeOffsetKey(), $serverTime - $localMidpoint, 600);
+            }
+        } catch (\Throwable) {
+            Cache::forget($this->serverTimeOffsetKey());
+        }
     }
 
     private function assertSuccess(Response $response, string $message): void

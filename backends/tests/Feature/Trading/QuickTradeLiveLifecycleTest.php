@@ -1,5 +1,6 @@
 <?php
 
+use App\Domain\Market\MarketPriceCacheService;
 use App\Models\Integration;
 use App\Models\LedgerTransaction;
 use App\Models\QuickTrade;
@@ -11,6 +12,7 @@ use App\Models\Workspace;
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Redis;
 use Illuminate\Support\Str;
 
 test('live quick trade opens on binance and settles on expiry using timed close', function () {
@@ -82,6 +84,7 @@ test('live quick trade opens on binance and settles on expiry using timed close'
     });
 
     CarbonImmutable::setTestNow(CarbonImmutable::parse('2026-03-10 11:00:00'));
+    seedQuickTradeLiveFeed('ETHUSDT', 2000.00);
 
     $response = $this->postJson('/api/v1/quick-trade/place', [
         'workspace_id' => $workspace->id,
@@ -265,6 +268,7 @@ test('live quick trade sell settles with positive pnl when price falls', functio
     });
 
     CarbonImmutable::setTestNow(CarbonImmutable::parse('2026-03-10 12:00:00'));
+    seedQuickTradeLiveFeed('ETHUSDT', 2000.00);
 
     $response = $this->postJson('/api/v1/quick-trade/place', [
         'workspace_id' => $workspace->id,
@@ -357,6 +361,7 @@ test('live quick trade blocks duplicate same symbol open position', function () 
         'indicator_set' => ['MACD'],
     ];
 
+    seedQuickTradeLiveFeed('ETHUSDT', 2000.00);
     $this->postJson('/api/v1/quick-trade/place', $payload)->assertCreated();
 
     $this->postJson('/api/v1/quick-trade/place', array_merge($payload, ['side' => 'sell']))
@@ -364,6 +369,40 @@ test('live quick trade blocks duplicate same symbol open position', function () 
         ->assertJsonPath('message', 'duplicate_live_position_detected: Another live position is already open for this symbol.');
 
     expect(QuickTrade::where('workspace_id', $workspace->id)->where('symbol', 'ETHUSDT')->where('status', 'open')->count())->toBe(1);
+});
+
+test('live quick trade rejects stale binance websocket feed before placing order', function () {
+    $user = User::factory()->create();
+    $workspace = Workspace::factory()->create();
+    $integration = liveTradingIntegration($workspace->id);
+
+    $this->actingAs($user);
+    seedLiveTradingSettings($workspace->id, $integration->id);
+    clearQuickTradeLiveFeed('SOLUSDT');
+
+    Http::fake(function (\Illuminate\Http\Client\Request $request) {
+        if (str_contains($request->url(), '/fapi/v1/order') && $request->method() === 'POST') {
+            throw new RuntimeException('Order endpoint should not be called with stale live feed.');
+        }
+
+        return Http::response([], 200);
+    });
+
+    $response = $this->postJson('/api/v1/quick-trade/place', [
+        'workspace_id' => $workspace->id,
+        'symbol' => 'SOLUSDT',
+        'side' => 'buy',
+        'stake_amount' => 20,
+        'timeframe' => '1m',
+        'expiry_seconds' => 60,
+        'mode' => 'live',
+        'provider' => 'binance',
+        'integration_id' => $integration->id,
+        'indicator_set' => ['MACD'],
+    ])->assertStatus(422);
+
+    expect((string) $response->json('message'))->toStartWith('live_feed_stale:')
+        ->and(QuickTrade::where('workspace_id', $workspace->id)->exists())->toBeFalse();
 });
 
 function seedLiveTradingSettings(string $workspaceId, string $integrationId): void
@@ -405,4 +444,27 @@ function liveTradingIntegration(string $workspaceId): Integration
             'api_secret' => 'test-secret',
         ])),
     ]);
+}
+
+function seedQuickTradeLiveFeed(string $symbol, float $price): void
+{
+    app(MarketPriceCacheService::class)->setLatestPrice(
+        'binance_futures',
+        $symbol,
+        $price,
+        (int) floor(microtime(true) * 1000),
+        [
+            'stream' => strtolower($symbol).'@trade',
+            'event_type' => 'trade',
+            'market_type' => 'futures',
+        ],
+    );
+}
+
+function clearQuickTradeLiveFeed(string $symbol): void
+{
+    try {
+        Redis::del('live-feed:binance_futures:'.strtoupper($symbol));
+    } catch (Throwable) {
+    }
 }

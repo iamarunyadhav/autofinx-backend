@@ -101,6 +101,7 @@ class MarketWsConsumerCommand extends Command
             $connectedAt = null;
             $lastHeartbeatWrite = 0;
             $lastPingAt = 0;
+            $perSymbolHeartbeat = [];
 
             $this->info(sprintf(
                 'Starting realtime market feed consumer market_type=%s symbols=%s streams=%s',
@@ -186,9 +187,21 @@ class MarketWsConsumerCommand extends Command
                                 $symbolName = strtoupper((string) (
                                     $payload['data']['s'] ?? $payload['s'] ?? ''
                                 ));
+                                $eventTimeMs = (int) ($payload['data']['E'] ?? $payload['E'] ?? $payload['data']['T'] ?? $payload['T'] ?? 0);
+                                if ($symbolName !== '') {
+                                    $perSymbolHeartbeat[$symbolName] = [
+                                        'last_message_at' => date('c', $now),
+                                        'last_message_epoch' => $now,
+                                        'stream' => $streamName,
+                                        'last_exchange_event_time' => $eventTimeMs > 0 ? date('c', (int) floor($eventTimeMs / 1000)) : null,
+                                        'exchange_to_backend_latency_ms' => $eventTimeMs > 0 ? max(0, (int) round((microtime(true) * 1000) - $eventTimeMs)) : null,
+                                    ];
+                                }
                                 @file_put_contents($heartbeatPath, json_encode([
+                                    'server_now' => date('c', $now),
                                     'last_message_at' => date('c', $now),
                                     'last_message_epoch' => $now,
+                                    'age_seconds' => 0,
                                     'symbol' => $symbolName,
                                     'stream' => $streamName,
                                     'reconnect_count' => $reconnectCount,
@@ -196,6 +209,10 @@ class MarketWsConsumerCommand extends Command
                                     'connected_at' => $connectedAt ? date('c', $connectedAt) : null,
                                     'market_type' => $marketType,
                                     'symbols' => $symbols,
+                                    'per_symbol' => $perSymbolHeartbeat,
+                                    'last_exchange_event_time' => $eventTimeMs > 0 ? date('c', (int) floor($eventTimeMs / 1000)) : null,
+                                    'exchange_to_backend_latency_ms' => $eventTimeMs > 0 ? max(0, (int) round((microtime(true) * 1000) - $eventTimeMs)) : null,
+                                    'webhook_signal_latency_ms' => null,
                                 ], JSON_UNESCAPED_SLASHES));
                             }
                         }

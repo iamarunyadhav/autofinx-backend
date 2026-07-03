@@ -2,6 +2,7 @@
 
 namespace App\Domain\Market;
 
+use App\Domain\Trading\RuntimeSafetySettingsService;
 use App\Models\FutureTradeBotConfig;
 use App\Models\MarketFeedStatus;
 use Illuminate\Support\Carbon;
@@ -31,6 +32,7 @@ class FutureTradeLiveFeedManager
             ->whereNotNull('last_tick_at')
             ->orderByDesc('last_tick_at')
             ->first();
+        $heartbeat = $this->loadHeartbeat();
 
         $lastTickAt = $latestFeed?->last_tick_at;
         $feedAgeSeconds = $this->ageSecondsSince($lastTickAt);
@@ -45,7 +47,8 @@ class FutureTradeLiveFeedManager
         $lastTickPrice = isset($latestPrice['price'])
             ? (float) $latestPrice['price']
             : ($latestFeed?->last_price !== null ? (float) $latestFeed->last_price : null);
-        $isFresh = $ageSeconds !== null && $ageSeconds <= 20;
+        $maxAgeSeconds = app(RuntimeSafetySettingsService::class)->liveFeedMaxAgeSeconds($workspaceId);
+        $isFresh = $ageSeconds !== null && $ageSeconds <= $maxAgeSeconds;
         $runningSymbols = array_values(array_filter(array_map(
             static fn ($symbol) => strtoupper(trim((string) $symbol)),
             (array) ($meta['symbols'] ?? [])
@@ -63,6 +66,7 @@ class FutureTradeLiveFeedManager
         $manualFreshTick = ! $running && $isFresh;
 
         return [
+            'server_now' => now(config('app.timezone'))->toIso8601String(),
             'running' => $running,
             'startSupported' => $this->canSpawnDaemon(),
             'shellExecAvailable' => $this->canSpawnDaemon(),
@@ -71,6 +75,7 @@ class FutureTradeLiveFeedManager
             'feedMode' => $mode,
             'feedFresh' => $isFresh,
             'feedAgeSeconds' => $ageSeconds,
+            'maxAgeSeconds' => $maxAgeSeconds,
             'lastTickPrice' => $lastTickPrice,
             'source' => (string) ($latestPrice['source'] ?? $latestFeed?->source ?? ($isFresh ? 'websocket_cache' : 'none')),
             'daemonPidKnown' => $running,
@@ -87,11 +92,27 @@ class FutureTradeLiveFeedManager
             'workspaceScope' => 'global_shared',
             'lastTickAt' => $this->isoTimestamp($lastTickAt),
             'ageSeconds' => $ageSeconds,
+            'last_message_at' => $heartbeat['last_message_at'] ?? $this->isoTimestamp($lastTickAt),
+            'last_message_epoch' => $heartbeat['last_message_epoch'] ?? null,
+            'per_symbol' => $this->decoratePerSymbolHeartbeat((array) ($heartbeat['per_symbol'] ?? []), $desiredSymbols),
+            'last_exchange_event_time' => $heartbeat['last_exchange_event_time'] ?? null,
+            'exchange_to_backend_latency_ms' => $heartbeat['exchange_to_backend_latency_ms'] ?? null,
+            'webhook_signal_latency_ms' => null,
             'isFresh' => $isFresh,
             'desiredSymbols' => $desiredSymbols,
             'runningSymbols' => $runningSymbols,
             'symbolSetInSync' => $symbolSetInSync,
-            'restartRecommended' => $running && ! $symbolSetInSync,
+            'restartRecommended' => $running && (! $symbolSetInSync || ! $isFresh),
+            'reason' => $isFresh
+                ? null
+                : sprintf('Live feed is stale: age %ss, max %ss.', $ageSeconds ?? 'unknown', $maxAgeSeconds),
+            'autoResolve' => [
+                'action' => 'restart_live_feed',
+                'recommended' => $running && (! $symbolSetInSync || ! $isFresh),
+                'reason' => ! $symbolSetInSync
+                    ? 'symbol_set_mismatch'
+                    : (! $isFresh ? 'stale_live_feed' : null),
+            ],
             'message' => $running
                 ? ($symbolSetInSync
                     ? ($isFresh ? 'Shared futures websocket feed is live.' : 'Daemon is running, waiting for a fresh futures tick.')
@@ -580,6 +601,39 @@ class FutureTradeLiveFeedManager
         }
 
         return $freshest;
+    }
+
+    private function loadHeartbeat(): array
+    {
+        $path = storage_path('framework/autofinx-live-feed-heartbeat.json');
+        if (! is_file($path)) {
+            return [];
+        }
+
+        $raw = @file_get_contents($path);
+        $decoded = $raw !== false ? @json_decode($raw, true) : null;
+
+        return is_array($decoded) ? $decoded : [];
+    }
+
+    /**
+     * @param  array<string, array<string, mixed>>  $heartbeat
+     * @param  string[]  $symbols
+     */
+    private function decoratePerSymbolHeartbeat(array $heartbeat, array $symbols): array
+    {
+        $now = time();
+        $result = [];
+
+        foreach ($symbols as $symbol) {
+            $symbol = strtoupper((string) $symbol);
+            $row = (array) ($heartbeat[$symbol] ?? []);
+            $epoch = (int) ($row['last_message_epoch'] ?? 0);
+            $row['age_seconds'] = $epoch > 0 ? max(0, $now - $epoch) : null;
+            $result[$symbol] = $row;
+        }
+
+        return $result;
     }
 
     private function isoTimestamp(mixed $timestamp): ?string

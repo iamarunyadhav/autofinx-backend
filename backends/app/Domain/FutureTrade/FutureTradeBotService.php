@@ -10,6 +10,7 @@ use App\Domain\Portfolio\LivePortfolioGuardService;
 use App\Domain\Signals\IndicatorIntelligenceService;
 use App\Domain\Signals\StrategyResearchLabService;
 use App\Domain\Trading\FuturesOrderSizingService;
+use App\Domain\Trading\RuntimeSafetySettingsService;
 use App\Models\FutureTradeBotConfig;
 use App\Models\FutureTradeBotLog;
 use App\Models\FutureTradeBotState;
@@ -87,7 +88,8 @@ class FutureTradeBotService
         $warnings = [];
         $symbol = strtoupper((string) ($signal['symbol'] ?? $config->state?->current_symbol ?? ''));
         $isPineWebhook = (string) ($signal['source'] ?? '') === 'pine_webhook';
-        $feed = $this->feedFreshnessSnapshot($symbol);
+        $liveRequested = (bool) $config->enable_live_trading && (bool) ($config->mergedSettings()['liveTrading'] ?? false);
+        $feed = $this->feedFreshnessSnapshot($symbol, (string) $config->workspace_id);
         $stream = $this->userStreamSvc()->snapshot($config);
 
         // For pine_webhook entries, force a fresh REST account pull so we
@@ -102,7 +104,7 @@ class FutureTradeBotService
         $usedRestFallback = false;
         $userStreamWarning = false;
 
-        if (! $isPineWebhook && ! ($feed['feedFresh'] ?? false)) {
+        if (! ($feed['feedFresh'] ?? false) && (! $isPineWebhook || $liveRequested)) {
             $blockers[] = 'stale_feed';
             $freshnessGateSource = 'blocked';
         }
@@ -584,6 +586,11 @@ class FutureTradeBotService
             $requestedSettings['maxLeverage'] = (int) $requestedSettings['leverage'];
         }
         $settings = $this->normalizeFutureTradeSettings($requestedSettings);
+        app(RuntimeSafetySettingsService::class)->persistFromSettings(
+            (string) $config->workspace_id,
+            $settings,
+            auth()->user()?->id
+        );
         $liveRequested = (bool) ($settings['liveTrading'] ?? false);
         $forceTestnet = array_key_exists('forceTestnet', $settings)
             ? (bool) $settings['forceTestnet']
@@ -1855,6 +1862,20 @@ class FutureTradeBotService
         $latency['validatedMs'] = (int) round((microtime(true) - $t0) * 1000);
 
         $webhookTiming = $this->pineWebhookTiming($payload, $candle, $receivedAt);
+        $maxSignalLatencyMs = app(RuntimeSafetySettingsService::class)->webhookMaxSignalLatencyMs((string) $config->workspace_id);
+        $signalLatencyMs = is_numeric($webhookTiming['signalLatencyMs'] ?? null)
+            ? (int) $webhookTiming['signalLatencyMs']
+            : null;
+        $liveRequested = (bool) $config->enable_live_trading && (bool) ($settings['liveTrading'] ?? false);
+        if ($liveRequested && in_array($decision, ['BUY', 'SELL'], true) && $signalLatencyMs !== null && $signalLatencyMs > $maxSignalLatencyMs) {
+            return $this->rejectPineWebhook($config, $payload, 'webhook_signal_latency_too_high', [
+                'webhookTiming' => $webhookTiming,
+                'signalLatencyMs' => $signalLatencyMs,
+                'maxSignalLatencyMs' => $maxSignalLatencyMs,
+                'candleClose' => $candle['close']->toIso8601String(),
+                'receivedAt' => $receivedAt->toIso8601String(),
+            ]);
+        }
 
         $longScore = (float) ($payload['longScore'] ?? $payload['long_score'] ?? ($decision === 'BUY' ? ($payload['score'] ?? 0) : 0));
         $shortScore = (float) ($payload['shortScore'] ?? $payload['short_score'] ?? ($decision === 'SELL' ? ($payload['score'] ?? 0) : 0));
@@ -2320,6 +2341,9 @@ class FutureTradeBotService
         $rejected = $decisionEvent === 'PINE_WEBHOOK_REJECTED';
         $duplicate = $decisionEvent === 'DUPLICATE_WEBHOOK_IGNORED';
         $executable = $decisionEvent === 'PINE_WEBHOOK_SIGNAL' && in_array(strtoupper((string) $nextDecision?->signal), ['BUY', 'SELL'], true);
+        $decisionContext = $this->arrayContext($nextDecision?->context ?? []);
+        $webhookTiming = (array) ($decisionContext['webhookTiming'] ?? []);
+        $signalLatencyMs = is_numeric($webhookTiming['signalLatencyMs'] ?? null) ? (int) $webhookTiming['signalLatencyMs'] : null;
 
         // Latency telemetry from the most recent webhook execution. Stored by
         // finalizeWebhookLatency() on each ingestPineWebhook() invocation.
@@ -2363,6 +2387,8 @@ class FutureTradeBotService
             'parsedJsonValid' => ($context['parseStatus'] ?? null) === 'json',
             'rejectedReason' => $rejected ? $nextDecision?->reason : null,
             'finalReason' => $nextDecision?->reason,
+            'signalLatencyMs' => $signalLatencyMs,
+            'maxSignalLatencyMs' => app(RuntimeSafetySettingsService::class)->webhookMaxSignalLatencyMs((string) $config->workspace_id),
             'executionOutcomeEvent' => $executionOutcome?->event,
             'executionOutcomeReason' => $executionOutcome?->reason,
             'tradeBlocked' => in_array($executionOutcome?->event, ['TRADE_BLOCKED', 'SIGNAL_SKIPPED'], true),
@@ -2773,12 +2799,6 @@ class FutureTradeBotService
         $serverWarnings = array_values((array) ($health['warnings'] ?? []));
         if ($webhookAuthority) {
             $diagnosticOnlyBlockers = [
-                'stale_market_data',
-                'stale_feed',
-                'STALE_FEED',
-                'stale_feed_active',
-                'market_data_unavailable',
-                'market_data_stale',
                 'ai_trading_disabled',
                 'external_context_disabled',
                 'binance_user_stream_not_configured',
@@ -7601,6 +7621,8 @@ class FutureTradeBotService
                 'oppositeExitScore' => 78,
                 'signalSource' => 'webhook',
                 'pineWebhookFallbackTimeoutSeconds' => 1200,
+                'liveFeedMaxAgeSeconds' => app(RuntimeSafetySettingsService::class)->liveFeedMaxAgeSeconds(null),
+                'webhookMaxSignalLatencyMs' => app(RuntimeSafetySettingsService::class)->webhookMaxSignalLatencyMs(null),
                 'webhookFallbackEnabled' => false,
                 'primeMirrorLiveEnabled' => false,
                 'primeMirrorExecutionEnabled' => false,
@@ -7655,6 +7677,7 @@ class FutureTradeBotService
             }
             $settings['signalSource'] = $this->normalizedSignalSource($settings);
             $settings['webhookFallbackEnabled'] = $this->webhookFallbackEnabled($settings);
+            $settings = app(RuntimeSafetySettingsService::class)->normalize($settings);
             $settings['useWebhookRiskOverrides'] = filter_var($settings['useWebhookRiskOverrides'] ?? config('future_trade.webhook_risk_overrides', false), FILTER_VALIDATE_BOOLEAN);
             $settings['useAtrRiskTargets'] = filter_var($settings['useAtrRiskTargets'] ?? config('future_trade.atr_dynamic_risk_targets', false), FILTER_VALIDATE_BOOLEAN);
             $settings['confirmedCandleOnly'] = filter_var($settings['confirmedCandleOnly'] ?? config('future_trade.confirmed_candle_only', true), FILTER_VALIDATE_BOOLEAN);
@@ -8155,7 +8178,7 @@ class FutureTradeBotService
         $settings = $this->normalizeFutureTradeSettings($config->mergedSettings());
         $webhookAuthority = in_array($this->normalizedSignalSource($settings), ['webhook', 'webhook_fallback'], true);
         $symbol = (string) ($state->current_symbol ?? ($bestSignal['symbol'] ?? ''));
-        $feed = $this->feedFreshnessSnapshot($symbol);
+        $feed = $this->feedFreshnessSnapshot($symbol, (string) $config->workspace_id);
         $freshness = $this->preExecutionFreshnessSnapshot($config, $bestSignal);
         $openLogical = FutureTradeLogicalTrade::query()
             ->where('future_trade_bot_config_id', $config->id)
@@ -8187,9 +8210,6 @@ class FutureTradeBotService
             $blockers[] = 'DAILY_LOSS_LOCKED';
         }
         foreach ((array) ($freshness['blockers'] ?? []) as $freshnessBlocker) {
-            if ($webhookAuthority && Str::lower((string) $freshnessBlocker) === 'stale_feed') {
-                continue;
-            }
             $blockers[] = Str::upper((string) $freshnessBlocker);
         }
 
@@ -8247,9 +8267,9 @@ class FutureTradeBotService
         if ((string) $latest->event === 'PINE_WEBHOOK_REJECTED') {
             $state = 'warning';
             $summary = 'Latest webhook was rejected; check profile, symbol, timeframe, and source mode.';
-        } elseif ($signalLatency !== null && $signalLatency > 30000) {
+        } elseif ($signalLatency !== null && $signalLatency > app(RuntimeSafetySettingsService::class)->webhookMaxSignalLatencyMs((string) $config->workspace_id)) {
             $state = 'warning';
-            $summary = 'Webhook arrived more than 30 seconds after candle close.';
+            $summary = 'Webhook arrived after the live latency guard and will not execute.';
         } elseif ($age !== null && $age > 1800) {
             $state = 'stale';
             $summary = 'No recent webhook in the last 30 minutes.';
@@ -8299,7 +8319,7 @@ class FutureTradeBotService
         return $state;
     }
 
-    private function feedFreshnessSnapshot(?string $symbol = null): array
+    private function feedFreshnessSnapshot(?string $symbol = null, ?string $workspaceId = null): array
     {
         $symbol = strtoupper(trim((string) $symbol));
         $latestPrice = $symbol !== '' ? $this->cachedLatestPrice($symbol) : null;
@@ -8322,15 +8342,17 @@ class FutureTradeBotService
             : $this->isoTimestamp($latestFeed?->last_tick_at);
         $lastTickPrice = (float) ($latestPrice['price'] ?? $latestFeed?->last_price ?? 0) ?: null;
         $source = (string) ($latestPrice['source'] ?? $latestFeed?->source ?? 'none');
-        $fresh10 = $age !== null && $age <= 10;
-        $fresh20 = $age !== null && $age <= 20;
+        $maxAge = app(RuntimeSafetySettingsService::class)->liveFeedMaxAgeSeconds($workspaceId);
+        $freshLive = $age !== null && $age <= $maxAge;
+        $freshFallback = $age !== null && $age <= 60;
 
         return [
-            'feedMode' => $fresh10
+            'feedMode' => $freshLive
                 ? 'TRUE_WEBSOCKET_CACHE_LIVE'
-                : ($fresh20 ? 'TRUE_WEBSOCKET_CACHE_LIVE_MANUAL' : ($age !== null && $age <= 60 ? 'REST_FALLBACK' : 'STALE')),
-            'feedFresh' => $fresh20,
+                : ($freshFallback ? 'REST_FALLBACK_STALE_FOR_LIVE' : 'STALE'),
+            'feedFresh' => $freshLive,
             'feedAgeSeconds' => (int) ($age ?? 0),
+            'maxAgeSeconds' => $maxAge,
             'lastTickAt' => $lastTickAt,
             'lastTickPrice' => $lastTickPrice,
             'source' => $source,

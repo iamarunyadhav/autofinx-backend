@@ -2,6 +2,7 @@
 
 namespace App\Domain\Trading;
 
+use App\Domain\Market\MarketPriceCacheService;
 use App\Domain\Ops\TradingEnvironmentGuard;
 use App\Domain\Ops\TradingRuntimeHealthService;
 use App\Models\Order;
@@ -28,6 +29,7 @@ class QuickTradeService
         private readonly RiskGuardService $riskGuard,
         private readonly TradingIntegrationResolver $integrations,
         private readonly TradingEnvironmentGuard $modeGuard,
+        private readonly MarketPriceCacheService $prices,
     ) {
     }
 
@@ -103,6 +105,8 @@ class QuickTradeService
                 throw new RuntimeException('runtime_health_red: Live trading is blocked because required runtime workers or feeds are unhealthy.');
             }
         }
+
+        $this->assertFreshLiveFeedForEntry($mode, $providerKey, $symbol, $workspaceId);
 
         $symbolMeta = $this->settings->symbolMeta($workspaceId, $symbol, $mode, $providerKey);
         $marketPayload = $this->market->latestQuote($symbol, $timeframe, $context);
@@ -446,6 +450,27 @@ class QuickTradeService
             'integration_id' => $integrationId,
             'live_ready' => (bool) ($state['live_ready'] ?? false),
         ];
+    }
+
+    private function assertFreshLiveFeedForEntry(string $mode, string $providerKey, string $symbol, string $workspaceId): void
+    {
+        if ($mode !== 'live' || $providerKey !== 'binance') {
+            return;
+        }
+
+        $maxAge = app(RuntimeSafetySettingsService::class)->liveFeedMaxAgeSeconds($workspaceId);
+        $feed = $this->prices->getLiveFeedSnapshot('binance_futures', $symbol, $maxAge);
+
+        if (($feed['fresh'] ?? false) === true && (float) ($feed['price'] ?? 0) > 0) {
+            return;
+        }
+
+        $age = $feed['age_seconds'] ?? null;
+        $reason = $feed === null
+            ? 'No fresh Binance websocket tick exists for this symbol.'
+            : "Binance websocket feed is stale for {$age}s; max allowed {$maxAge}s.";
+
+        throw new RuntimeException('live_feed_stale: '.$reason);
     }
 
     private function placeLiveTrade(

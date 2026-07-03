@@ -3,6 +3,7 @@
 namespace App\Domain\Ops;
 
 use App\Domain\Market\MarketPriceCacheService;
+use App\Domain\Trading\RuntimeSafetySettingsService;
 use App\Models\MarketFeedStatus;
 use App\Models\QuickTrade;
 use App\Models\FutureTradeBotConfig;
@@ -335,7 +336,7 @@ class TradingRuntimeHealthService
 
     private function marketFeed(?string $workspaceId): array
     {
-        $maxAge = (int) config('autofinx.runtime.live_feed_max_age_seconds', 15);
+        $maxAge = app(RuntimeSafetySettingsService::class)->liveFeedMaxAgeSeconds($workspaceId);
         $symbols = $this->monitoredFuturesSymbols($workspaceId);
         $redisFeed = $this->prices->freshestLiveFeedSnapshot('binance_futures', $symbols, $maxAge);
 
@@ -424,7 +425,7 @@ class TradingRuntimeHealthService
         $data = $raw !== false ? @json_decode($raw, true) : null;
         $epoch = is_array($data) ? (int) ($data['last_message_epoch'] ?? 0) : 0;
         $age = $epoch > 0 ? max(0, time() - $epoch) : null;
-        $maxAge = (int) config('autofinx.runtime.live_feed_max_age_seconds', 15);
+        $maxAge = app(RuntimeSafetySettingsService::class)->liveFeedMaxAgeSeconds(null);
 
         if ($age === null) {
             return ['state' => 'red', 'reason' => 'live_feed_heartbeat_invalid'];
