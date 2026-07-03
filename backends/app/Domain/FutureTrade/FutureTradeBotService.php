@@ -28,6 +28,7 @@ use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 use Throwable;
 
@@ -545,7 +546,13 @@ class FutureTradeBotService
             'quantity' => (float) $logical->quantity,
             'current_price' => (float) ($state->current_price ?: $logical->entry_price),
             'connection_status' => 'Connected',
-        ]);
+        ] + $this->exitStateAttributes(
+            (float) $logical->entry_price,
+            strtoupper((string) $logical->side),
+            $config->mergedSettings(),
+            (float) $logical->quantity,
+            strtoupper((string) $logical->symbol)
+        ));
     }
 
     private function effectiveMaxOpenSlots(FutureTradeBotConfig $config, array $settings): int
@@ -896,6 +903,10 @@ class FutureTradeBotService
             'current_signal' => 'EMERGENCY_STOP',
             'quantity' => 0,
             'position_side' => null,
+            'stop_loss' => null,
+            'take_profit' => null,
+            'trailing_take_profit' => null,
+            'open_position' => [],
         ]);
         $this->log($config->fresh('state'), 'EMERGENCY_STOP', $state->current_symbol, null, 0, 'All paper futures activity halted.');
 
@@ -915,13 +926,18 @@ class FutureTradeBotService
             'entry_price' => null,
             'quantity' => 0,
             'position_side' => null,
+            'stop_loss' => null,
+            'take_profit' => null,
+            'trailing_take_profit' => null,
             'peak_price' => null,
             'bottom_price' => null,
             'unrealized_pnl' => 0,
             'unrealized_pnl_percent' => 0,
             'realized_pnl' => 0,
+            'total_profit' => 0,
             'daily_profit' => 0,
             'daily_loss' => 0,
+            'daily_loss_locked' => false,
             'trade_count_today' => 0,
             'wins' => 0,
             'losses' => 0,
@@ -929,6 +945,8 @@ class FutureTradeBotService
             'trading_day' => now()->toDateString(),
             'scanner_snapshot' => [],
             'chart_points' => [],
+            'open_position' => [],
+            'runtime_json' => [],
         ]);
 
         return $state->fresh();
@@ -1029,18 +1047,25 @@ class FutureTradeBotService
                 'entry_price' => null,
                 'quantity' => 0,
                 'position_side' => null,
+                'stop_loss' => null,
+                'take_profit' => null,
+                'trailing_take_profit' => null,
                 'peak_price' => null,
                 'bottom_price' => null,
                 'unrealized_pnl' => 0,
                 'unrealized_pnl_percent' => 0,
                 'realized_pnl' => 0,
+                'total_profit' => 0,
                 'daily_profit' => 0,
                 'daily_loss' => 0,
+                'daily_loss_locked' => false,
                 'trade_count_today' => 0,
                 'wins' => 0,
                 'losses' => 0,
                 'chart_points' => [],
                 'scanner_snapshot' => [],
+                'open_position' => [],
+                'runtime_json' => [],
                 'daily_stop_until' => null,
                 'cooldown_until' => null,
                 'trading_day' => now()->toDateString(),
@@ -3726,7 +3751,7 @@ class FutureTradeBotService
                 'trade_count_today' => (int) $state->trade_count_today + 1,
                 'status' => 'Running',
                 'connection_status' => 'Connected',
-            ]);
+            ] + $this->exitStateAttributes($price, $side, $settings, $qty, $symbolUpper));
 
             $legacyTrade = $config->trades()->create([
                 'symbol' => $signal['symbol'],
@@ -4366,7 +4391,7 @@ class FutureTradeBotService
                 'trade_count_today' => (int) $state->trade_count_today + 1,
                 'status' => 'Running',
                 'connection_status' => 'Connected',
-            ]);
+            ] + $this->exitStateAttributes($entry, $positionSide, $settings, (float) ($exchange['quantity'] ?? $qty), $symbol));
         } else {
             $this->persistState($state, [
                 'state' => 'SCANNING',
@@ -4685,9 +4710,14 @@ class FutureTradeBotService
                 'position_side' => null,
                 'entry_price' => null,
                 'quantity' => 0,
+                'stop_loss' => null,
+                'take_profit' => null,
+                'trailing_take_profit' => null,
+                'open_position' => [],
                 'unrealized_pnl' => 0,
                 'unrealized_pnl_percent' => 0,
                 'realized_pnl' => (float) $state->realized_pnl + $net,
+                'total_profit' => (float) $state->realized_pnl + $net,
                 'daily_profit' => $net > 0 ? (float) $state->daily_profit + $net : (float) $state->daily_profit,
                 'daily_loss' => $net < 0 ? (float) $state->daily_loss + abs($net) : (float) $state->daily_loss,
                 'wins' => $net > 0 ? (int) $state->wins + 1 : (int) $state->wins,
@@ -4797,9 +4827,14 @@ class FutureTradeBotService
             'position_side' => null,
             'entry_price' => null,
             'quantity' => 0,
+            'stop_loss' => null,
+            'take_profit' => null,
+            'trailing_take_profit' => null,
+            'open_position' => [],
             'unrealized_pnl' => 0,
             'unrealized_pnl_percent' => 0,
             'realized_pnl' => (float) $state->realized_pnl + $net,
+            'total_profit' => (float) $state->realized_pnl + $net,
             'daily_profit' => $net > 0 ? (float) $state->daily_profit + $net : (float) $state->daily_profit,
             'daily_loss' => $net < 0 ? (float) $state->daily_loss + abs($net) : (float) $state->daily_loss,
             'wins' => $net > 0 ? (int) $state->wins + 1 : (int) $state->wins,
@@ -10008,6 +10043,8 @@ class FutureTradeBotService
             $attributes['connection_status'] = mb_substr($attributes['connection_status'], 0, 32);
         }
 
+        $attributes = $this->filterFutureTradeStateColumns($attributes);
+
         if ($state->exists) {
             $state->update($attributes);
 
@@ -10015,6 +10052,56 @@ class FutureTradeBotService
         }
 
         $state->forceFill($attributes);
+    }
+
+    private function filterFutureTradeStateColumns(array $attributes): array
+    {
+        static $columns = null;
+
+        if ($columns === null) {
+            $columns = Schema::hasTable('future_trade_bot_states')
+                ? array_flip(Schema::getColumnListing('future_trade_bot_states'))
+                : [];
+        }
+
+        return array_intersect_key($attributes, $columns);
+    }
+
+    private function exitStateAttributes(float $entry, string $side, array $settings, ?float $quantity = null, ?string $symbol = null, ?float $peak = null): array
+    {
+        $side = strtoupper($side);
+        if ($entry <= 0 || ! in_array($side, ['LONG', 'SHORT'], true)) {
+            return [
+                'stop_loss' => null,
+                'take_profit' => null,
+                'trailing_take_profit' => null,
+                'open_position' => [],
+            ];
+        }
+
+        $trailBase = $peak && $peak > 0 ? $peak : $entry;
+        $stopLoss = round($this->stopLossPrice($entry, $side, $settings), 8);
+        $takeProfit = round($this->takeProfitPrice($entry, $side, $settings), 8);
+        $trailing = round($this->trailingPrice($trailBase, $side, $settings), 8);
+
+        return [
+            'stop_loss' => $stopLoss,
+            'take_profit' => $takeProfit,
+            'trailing_take_profit' => $trailing,
+            'open_position' => [
+                'symbol' => $symbol,
+                'side' => $side,
+                'entry_price' => round($entry, 8),
+                'quantity' => $quantity !== null ? round($quantity, 8) : null,
+                'stop_loss' => $stopLoss,
+                'take_profit' => $takeProfit,
+                'trailing_take_profit' => $trailing,
+                'stop_loss_percent' => (float) ($settings['stopLossPercent'] ?? 0),
+                'take_profit_percent' => (float) ($settings['takeProfitPercent'] ?? 0),
+                'trailing_take_profit_percent' => (float) ($settings['trailingTakeProfitPercent'] ?? 0),
+                'updated_at' => now()->toIso8601String(),
+            ],
+        ];
     }
 
     private function stopLossPrice(float $entry, string $side, array $settings): float
@@ -10733,6 +10820,10 @@ class FutureTradeBotService
                 'entry_price' => null,
                 'quantity' => 0,
                 'position_side' => null,
+                'stop_loss' => null,
+                'take_profit' => null,
+                'trailing_take_profit' => null,
+                'open_position' => [],
                 'peak_price' => null,
                 'bottom_price' => null,
                 'unrealized_pnl' => 0,
@@ -10780,7 +10871,7 @@ class FutureTradeBotService
             'unrealized_pnl' => $unrealized,
             'unrealized_pnl_percent' => $unrealizedPercent,
             'connection_status' => 'Connected',
-        ]);
+        ] + $this->exitStateAttributes($entryPrice, $side, $config->mergedSettings(), $exchangeQty, $symbol));
 
         $this->log(
             $config->fresh('state'),

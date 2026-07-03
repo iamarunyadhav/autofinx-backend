@@ -12,13 +12,18 @@ class FutureTradeBotState extends BaseModel
         'current_price' => 'decimal:8',
         'entry_price' => 'decimal:8',
         'quantity' => 'decimal:8',
+        'stop_loss' => 'decimal:8',
+        'take_profit' => 'decimal:8',
+        'trailing_take_profit' => 'decimal:8',
         'peak_price' => 'decimal:8',
         'bottom_price' => 'decimal:8',
         'unrealized_pnl' => 'decimal:8',
         'unrealized_pnl_percent' => 'decimal:6',
         'realized_pnl' => 'decimal:8',
+        'total_profit' => 'decimal:8',
         'daily_profit' => 'decimal:8',
         'daily_loss' => 'decimal:8',
+        'daily_loss_locked' => 'boolean',
         'trade_count_today' => 'integer',
         'wins' => 'integer',
         'losses' => 'integer',
@@ -29,6 +34,8 @@ class FutureTradeBotState extends BaseModel
         'daily_stop_until' => 'datetime',
         'scanner_snapshot' => 'array',
         'chart_points' => 'array',
+        'open_position' => 'array',
+        'runtime_json' => 'array',
     ];
 
     public function config(): BelongsTo
