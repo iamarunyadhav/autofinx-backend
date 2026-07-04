@@ -491,7 +491,7 @@ class RobotSessionService
         $atrAvg = $this->computeAtrAvgPct($candles);
         $atrNow = $volatility['atr_pct'];
         $atrRatio = ($atrAvg > 0 && $atrNow > 0) ? min(1.5, max(0.5, $atrAvg / $atrNow)) : 1.0;
-        $adjustedStake = $this->normalizeStake((float) $session->base_stake * $atrRatio, 2);
+        $adjustedStake = $this->robotEntryStake($session, $atrRatio);
 
         $preflightBlock = $this->entryPreflightBlock($session, $candles, (string) $signal['direction']);
         if ($preflightBlock !== null) {
@@ -728,7 +728,7 @@ class RobotSessionService
             $atrAvg = $this->computeAtrAvgPct($candles);
             $atrNow = $volatility['atr_pct'];
             $atrRatio = ($atrAvg > 0 && $atrNow > 0) ? min(1.5, max(0.5, $atrAvg / $atrNow)) : 1.0;
-            $adjustedStake = $this->normalizeStake((float) $session->base_stake * $atrRatio, 2);
+            $adjustedStake = $this->robotEntryStake($session, $atrRatio);
 
             $preflightBlock = $this->entryPreflightBlock($session, $candles, $openDirection);
             if ($preflightBlock !== null) {
@@ -1722,6 +1722,18 @@ class RobotSessionService
     private function normalizeStake(float $stake, int $precision = 8): float
     {
         return round(max(self::MIN_LIVE_NOTIONAL_USDT, $stake), $precision);
+    }
+
+    private function robotEntryStake(RobotSession $session, float $atrRatio): float
+    {
+        $baseStake = $this->normalizeStake((float) $session->base_stake, 2);
+        $adjustedStake = $this->normalizeStake($baseStake * $atrRatio, 2);
+
+        if (strtolower((string) $session->mode) === 'live' && strtolower((string) $session->provider_key) === 'binance') {
+            return max($baseStake, $adjustedStake);
+        }
+
+        return $adjustedStake;
     }
 
     private function syncExecutionContext(RobotSession $session, bool $requireReady = false): RobotSession
