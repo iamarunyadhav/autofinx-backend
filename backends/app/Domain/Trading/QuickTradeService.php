@@ -367,9 +367,9 @@ class QuickTradeService
             ->get();
     }
 
-    public function chart(string $workspaceId, string $symbol, string $timeframe, string $chartType = 'area', array $indicatorSet = []): array
+    public function chart(string $workspaceId, string $symbol, string $timeframe, string $chartType = 'area', array $indicatorSet = [], array $contextOverrides = []): array
     {
-        $context = $this->executionContext($workspaceId, [], false);
+        $context = $this->executionContext($workspaceId, $contextOverrides, false);
         $candles = $this->market->candles($symbol, $timeframe, 120, $context);
         $series = $chartType === 'heikin_ashi'
             ? \App\Domain\Market\Indicators\Indicators::heikinAshi($candles)

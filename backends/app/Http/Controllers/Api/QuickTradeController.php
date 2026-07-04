@@ -26,6 +26,9 @@ class QuickTradeController extends Controller
             'timeframe' => 'nullable|string|max:16',
             'chart_type' => 'nullable|string|max:24',
             'indicator_set' => 'nullable|array',
+            'mode' => 'nullable|string|in:paper,live',
+            'provider' => 'nullable|string|max:32',
+            'integration_id' => 'nullable|uuid',
         ]);
 
         return response()->json($quickTrades->chart(
@@ -33,7 +36,12 @@ class QuickTradeController extends Controller
             (string) $data['symbol'],
             (string) ($data['timeframe'] ?? '1m'),
             (string) ($data['chart_type'] ?? 'area'),
-            (array) ($data['indicator_set'] ?? [])
+            (array) ($data['indicator_set'] ?? []),
+            [
+                'mode' => $data['mode'] ?? null,
+                'provider' => $data['provider'] ?? null,
+                'integration_id' => $data['integration_id'] ?? null,
+            ]
         ));
     }
 
@@ -159,6 +167,8 @@ class QuickTradeController extends Controller
 
                     $eventTs = (int) ($payload['E'] ?? floor(microtime(true) * 1000));
                     $candle = [
+                        'symbol' => $symbol,
+                        'timeframe' => $timeframe,
                         'time' => (int) floor(((int) ($kline['t'] ?? $eventTs)) / 1000),
                         'open' => (float) ($kline['o'] ?? 0),
                         'high' => (float) ($kline['h'] ?? 0),
@@ -299,12 +309,14 @@ class QuickTradeController extends Controller
                 return [];
             }
 
-            return array_values(array_filter(array_map(static function ($row): ?array {
+            return array_values(array_filter(array_map(static function ($row) use ($symbol, $timeframe): ?array {
                 if (! is_array($row) || count($row) < 6) {
                     return null;
                 }
 
                 return [
+                    'symbol' => $symbol,
+                    'timeframe' => $timeframe,
                     'time' => (int) floor(((int) $row[0]) / 1000),
                     'open' => (float) $row[1],
                     'high' => (float) $row[2],

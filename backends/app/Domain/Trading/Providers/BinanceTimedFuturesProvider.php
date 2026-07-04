@@ -58,9 +58,11 @@ class BinanceTimedFuturesProvider implements LiveTradeProviderInterface
 
     public function candles(?Integration $integration, string $symbol, string $timeframe, int $limit = 120): array
     {
+        $normalizedSymbol = strtoupper($symbol);
+        $interval = $this->normalizeInterval($timeframe);
         $response = Http::get($this->baseUrl($integration) . '/fapi/v1/klines', [
-            'symbol' => strtoupper($symbol),
-            'interval' => $this->normalizeInterval($timeframe),
+            'symbol' => $normalizedSymbol,
+            'interval' => $interval,
             'limit' => min(max($limit, 10), 500),
         ]);
 
@@ -68,6 +70,8 @@ class BinanceTimedFuturesProvider implements LiveTradeProviderInterface
 
         return collect((array) $response->json())
             ->map(fn (array $row) => [
+                'symbol' => $normalizedSymbol,
+                'timeframe' => $interval,
                 'timestamp' => (int) ($row[0] ?? 0),
                 'open' => (float) ($row[1] ?? 0),
                 'high' => (float) ($row[2] ?? 0),
