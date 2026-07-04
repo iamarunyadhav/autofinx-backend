@@ -39,6 +39,11 @@ process_count() {
   pgrep -f "artisan future-trade:live-feed" 2>/dev/null | wc -l | tr -d ' '
 }
 
+supervisor_program_exists() {
+  command -v supervisorctl >/dev/null 2>&1 \
+    && supervisorctl status 2>/dev/null | awk '$1 == "autofinx-trading:live-feed" { found=1 } END { exit found ? 0 : 1 }'
+}
+
 heartbeat_epoch() {
   if [ ! -s "$HEARTBEAT_FILE" ]; then
     echo 0
@@ -50,6 +55,13 @@ heartbeat_epoch() {
 
 start_live_feed() {
   local reason="$1"
+  if supervisor_program_exists; then
+    log "starting live-feed via supervisor reason=$reason"
+    supervisorctl start "autofinx-trading:live-feed" >> "$WATCHDOG_LOG" 2>&1 || supervisorctl restart "autofinx-trading:live-feed" >> "$WATCHDOG_LOG" 2>&1 || true
+    date +%s > "$RESTART_STAMP"
+    return 0
+  fi
+
   log "starting live-feed reason=$reason symbols=$FT_SYMBOLS streams=$FT_STREAMS"
   nohup "$PHP" artisan future-trade:live-feed \
     --symbols="$FT_SYMBOLS" \
@@ -73,7 +85,7 @@ restart_live_feed() {
   fi
 
   log "restarting live-feed reason=$reason"
-  if command -v supervisorctl >/dev/null 2>&1 && supervisorctl status "autofinx-trading:live-feed" >/dev/null 2>&1; then
+  if supervisor_program_exists; then
     supervisorctl restart "autofinx-trading:live-feed" >> "$WATCHDOG_LOG" 2>&1 || true
     date +%s > "$RESTART_STAMP"
     return 0
