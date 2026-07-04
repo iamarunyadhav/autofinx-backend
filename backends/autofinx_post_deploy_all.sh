@@ -2,9 +2,8 @@
 set -euo pipefail
 
 # AutoFinX one-shot post-deploy runtime fixer.
-# Runs the important production maintenance commands in a safe order:
-# caches/migrations, stale cleanup, queue restart, supervisor/worker restart,
-# live feed/user-stream heartbeat, scheduler smoke, and final health reports.
+# Runs the important production maintenance commands in a safe order.
+# Runtime ownership is centralized in Supervisor + autofinx-runtime-master.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR="${APP_DIR:-$SCRIPT_DIR}"
@@ -31,8 +30,8 @@ Usage:
 
 Options:
   --workspace=UUID     Limit workspace-aware smoke commands.
-  --install-cron       Install heartbeat + maintenance cron entries.
-  --no-supervisor      Skip supervisorctl and use local heartbeat workers.
+  --install-cron       Install maintenance cron only; runtime is master-owned.
+  --no-supervisor      Skip supervisorctl/runtime-master checks.
   --no-composer        Skip composer install/dump-autoload.
   --no-migrate         Skip php artisan migrate --force.
   --no-cache           Skip config/route cache rebuild.
@@ -165,27 +164,21 @@ try_artisan future-trade:queue-cleanup --safe
 try_artisan queue:prune-failed --hours=168
 try_artisan queue:restart
 
-section "5. Supervisor or local worker restart"
+section "5. Supervisor and runtime master"
 if has_supervisor; then
   supervisorctl reread || true
   supervisorctl update || true
-  restart_supervisor_group "autofinx-trading:"
-  restart_supervisor_group "autofinx-queue:"
-  restart_supervisor_group "autofinx-kline-1m"
-  restart_supervisor_group "autofinx-kline-15m"
-  restart_supervisor_group "autofinx-kline-1h"
+  if [ -x "$APP_DIR/database/scripts/install-runtime-master.sh" ]; then
+    APP_DIR="$APP_DIR" PHP_BIN="$PHP" RUN_USER="${RUN_USER:-zcadmin}" bash "$APP_DIR/database/scripts/install-runtime-master.sh" || true
+  fi
+  supervisorctl restart autofinx-runtime-master || supervisorctl start autofinx-runtime-master || true
+  APP_DIR="$APP_DIR" PHP="$PHP" "$APP_DIR/autofinx-runtime-master.sh" once || true
   supervisorctl status || true
 else
-  echo "supervisorctl unavailable/skipped; using heartbeat worker bootstrap."
-  chmod +x start-workers.sh restart-workers.sh future-trade-heartbeat.sh future-trade-maintenance.sh 2>/dev/null || true
-  APP_DIR="$APP_DIR" PHP="$PHP" FT_SYMBOLS="$FT_SYMBOLS" FT_STREAMS="$FT_STREAMS" bash "$APP_DIR/restart-workers.sh" || true
+  echo "supervisorctl unavailable/skipped; runtime workers were not started."
 fi
 
-section "6. Heartbeat starts queue/live-feed/user-stream/tick/scheduler slices"
-APP_DIR="$APP_DIR" PHP="$PHP" FT_SYMBOLS="$FT_SYMBOLS" FT_STREAMS="$FT_STREAMS" bash "$APP_DIR/future-trade-heartbeat.sh" || true
-
-section "7. Scheduler, quick trade settlement, keepalive, and reconcile"
-try_artisan schedule:run
+section "6. Quick trade settlement, keepalive, and reconcile"
 try_artisan quick-trades:settle
 if [ -n "$WORKSPACE_ID" ]; then
   try_artisan future-trade:reconcile --workspace="$WORKSPACE_ID"
@@ -194,20 +187,10 @@ else
 fi
 try_artisan ops:reconcile-orders
 
-if [ "$SKIP_SMOKE" -eq 0 ]; then
-  section "8. User-stream and scanner smoke"
-  if [ -n "$WORKSPACE_ID" ]; then
-    try_artisan future-trade:user-stream --duration=20 --workspace="$WORKSPACE_ID"
-    try_artisan future-trade:tick --duration="$TICK_DURATION" --sleep-ms=1000 --workspace="$WORKSPACE_ID"
-  else
-    try_artisan future-trade:user-stream --duration=20
-    try_artisan future-trade:tick --duration="$TICK_DURATION" --sleep-ms=1000
-  fi
-else
-  section "8. Smoke skipped"
-fi
+section "7. Runtime smoke is master-owned"
+APP_DIR="$APP_DIR" PHP="$PHP" "$APP_DIR/autofinx-runtime-master.sh" status || true
 
-section "9. Diagnostics, feed stale check, queue health, readiness"
+section "8. Diagnostics, feed stale check, queue health, readiness"
 try_artisan future-trade:diagnostics --persist
 try_artisan ops:stale-feed-check
 try_artisan future-trade:queue-health
@@ -219,7 +202,7 @@ else
   try_artisan future-trade:runtime-status
 fi
 
-section "10. Process summary"
+section "9. Process summary"
 echo "queue_workers=$(count_processes 'artisan queue:work')"
 echo "live_feed=$(count_processes 'artisan future-trade:live-feed')"
 echo "future_tick=$(count_processes 'artisan future-trade:tick')"
@@ -227,20 +210,19 @@ echo "future_user_stream=$(count_processes 'artisan future-trade:user-stream')"
 echo "schedule_run=$(count_processes 'artisan schedule:run')"
 
 CRON_LINES=$(cat <<CRON
-* * * * * APP_DIR="$APP_DIR" PHP="$PHP" FT_SYMBOLS="$FT_SYMBOLS" FT_STREAMS="$FT_STREAMS" bash "$APP_DIR/future-trade-heartbeat.sh" >> "$APP_DIR/storage/logs/future-trade-heartbeat.log" 2>&1
 */10 * * * * flock -n /tmp/autofinx-future-trade-maintenance.lock -c 'APP_DIR="$APP_DIR" PHP="$PHP" bash "$APP_DIR/future-trade-maintenance.sh" >> "$APP_DIR/storage/logs/future-trade-cron.log" 2>&1'
 CRON
 )
 
 if [ "$INSTALL_CRON" -eq 1 ]; then
-  section "11. Installing cron heartbeat"
+  section "10. Installing maintenance cron"
   (crontab -l 2>/dev/null \
     | grep -v "future-trade-heartbeat.sh" \
     | grep -v "future-trade-maintenance.sh"; \
     echo "$CRON_LINES") | crontab -
-  crontab -l | grep -E "future-trade-(heartbeat|maintenance)" || true
+  crontab -l | grep -E "future-trade-maintenance" || true
 else
-  section "11. Cron not installed. Add these if needed"
+  section "10. Cron not installed. Add this maintenance-only entry if needed"
   echo "$CRON_LINES"
 fi
 

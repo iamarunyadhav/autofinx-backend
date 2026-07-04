@@ -344,7 +344,6 @@ class FutureTradeRuntimeStatusCommand extends Command
             'artisan queue:work --queue=critical,execution,reconcile,monitoring,market',
             'artisan market:ws-consume',
             'artisan metals:poll-prices',
-            'artisan schedule:run',
             'artisan future-trade:reconcile',
             'artisan future-trade:diagnostics',
         ];

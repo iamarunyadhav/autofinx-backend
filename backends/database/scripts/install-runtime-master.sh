@@ -44,7 +44,9 @@ chown -R "$RUN_USER:$RUN_USER" "$LOG_DIR" || true
 
 if supervisorctl status autofinx-live-feed-watchdog >/dev/null 2>&1; then
   supervisorctl stop autofinx-live-feed-watchdog || true
+  supervisorctl remove autofinx-live-feed-watchdog || true
 fi
+rm -f /etc/supervisord.d/autofinx-live-feed-watchdog.ini /etc/supervisor/conf.d/autofinx-live-feed-watchdog.conf
 
 cat >"$SUP_CONF" <<EOF
 [program:autofinx-runtime-master]

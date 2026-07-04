@@ -9,6 +9,7 @@ ACTION="${1:-daemon}"
 CHECK_INTERVAL_SECONDS="${AUTOFINX_MASTER_INTERVAL_SECONDS:-5}"
 LIVE_FEED_STALE_SECONDS="${AUTOFINX_MASTER_LIVE_FEED_STALE_SECONDS:-8}"
 LIVE_FEED_RESTART_COOLDOWN_SECONDS="${AUTOFINX_MASTER_LIVE_FEED_RESTART_COOLDOWN_SECONDS:-15}"
+SCHEDULE_RUN_MAX_SECONDS="${AUTOFINX_MASTER_SCHEDULE_RUN_MAX_SECONDS:-120}"
 LOG_FILE="${AUTOFINX_MASTER_LOG_FILE:-$APP_DIR/storage/logs/autofinx-runtime-master.log}"
 LOCK_DIR="$APP_DIR/storage/framework/autofinx-runtime-master.lock"
 RESTART_STAMP="$APP_DIR/storage/framework/autofinx-runtime-master-live-feed-restart.at"
@@ -178,6 +179,7 @@ run_once() {
   dedupe_supervised "robot-evaluator" "autofinx-robot-evaluator.sh" "autofinx-robot-evaluator"
   dedupe_supervised "scheduler" "artisan schedule:work" "autofinx-scheduler"
   dedupe_pattern "schedule-run" "artisan schedule:run"
+  cleanup_stale_schedule_run
 
   for program in \
     "autofinx-trading:queue-critical" \
@@ -193,6 +195,18 @@ run_once() {
   done
 
   restart_live_feed_if_stale
+}
+
+cleanup_stale_schedule_run() {
+  local now_epoch
+  now_epoch="$(date +%s)"
+  while read -r pid start_epoch; do
+    [ -z "${pid:-}" ] && continue
+    if [ $((now_epoch - start_epoch)) -gt "$SCHEDULE_RUN_MAX_SECONDS" ]; then
+      log "schedule:run stale age=$((now_epoch - start_epoch))s pid=$pid; terminating"
+      kill "$pid" >/dev/null 2>&1 || true
+    fi
+  done < <(ps -eo pid=,etimes=,args= | awk '/artisan schedule:run/ && !/awk/ { print $1, $2 }')
 }
 
 status_report() {

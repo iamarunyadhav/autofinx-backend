@@ -136,6 +136,12 @@ class FutureTradeLiveFeedManager
         if ($status['running']) {
             return $status;
         }
+        if ($this->supervisorProgramExists()) {
+            $this->runShellCommand('supervisorctl start autofinx-trading:live-feed 2>&1 || true');
+            sleep(2);
+
+            return $this->status();
+        }
         if (! $this->canSpawnDaemon()) {
             $status['message'] = 'shell_exec is disabled on this server. Start the daemon manually using the provided command.';
             $status['manualRequired'] = true;
@@ -171,6 +177,13 @@ class FutureTradeLiveFeedManager
 
     public function restart(): array
     {
+        if ($this->supervisorProgramExists()) {
+            $this->runShellCommand('supervisorctl restart autofinx-trading:live-feed 2>&1 || true');
+            sleep(2);
+
+            return $this->status();
+        }
+
         $this->stop();
 
         return $this->start();
@@ -410,6 +423,20 @@ class FutureTradeLiveFeedManager
         return \function_exists('shell_exec')
             || \function_exists('exec')
             || (PHP_OS_FAMILY !== 'Windows' && \function_exists('proc_open'));
+    }
+
+    private function supervisorProgramExists(): bool
+    {
+        if (PHP_OS_FAMILY === 'Windows') {
+            return false;
+        }
+        if (! \function_exists('shell_exec') && ! \function_exists('exec')) {
+            return false;
+        }
+
+        $output = $this->runShellCommand('command -v supervisorctl >/dev/null 2>&1 && supervisorctl status autofinx-trading:live-feed 2>/dev/null || true');
+
+        return is_string($output) && str_contains($output, 'autofinx-trading:live-feed');
     }
 
     private function runShellCommand(string $command): ?string
