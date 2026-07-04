@@ -17,8 +17,8 @@ fi
 
 FT_SYMBOLS="${FT_SYMBOLS:-ETHUSDT,BTCUSDT,SOLUSDT,BNBUSDT}"
 FT_STREAMS="${FT_STREAMS:-trade,kline_1m,kline_5m,kline_15m,kline_1h,kline_4h}"
-LIVE_FEED_STALE_SECONDS="${LIVE_FEED_STALE_SECONDS:-90}"
-LIVE_FEED_RESTART_COOLDOWN_SECONDS="${LIVE_FEED_RESTART_COOLDOWN_SECONDS:-60}"
+LIVE_FEED_STALE_SECONDS="${LIVE_FEED_STALE_SECONDS:-15}"
+LIVE_FEED_RESTART_COOLDOWN_SECONDS="${LIVE_FEED_RESTART_COOLDOWN_SECONDS:-20}"
 
 LOCK_DIR="$APP_DIR/storage/framework/future-trade-heartbeat.lock"
 RESTART_STAMP="$APP_DIR/storage/framework/future-trade-live-feed-restart.at"
@@ -103,13 +103,21 @@ restart_live_feed_if_needed() {
     return 0
   fi
 
-  # Use log file modification time instead of DB query.
-  # DB-based tinker call hangs when MySQL is overloaded, causing heartbeat
-  # to hold its lock and skip all subsequent cron fires (stale for hours).
+  # Prefer the websocket heartbeat JSON because the UI and live-entry guard use
+  # that same truth source. Fall back to log mtime only when the JSON is missing.
+  local heartbeat_file="$APP_DIR/storage/framework/autofinx-live-feed-heartbeat.json"
   local log_file="$APP_DIR/storage/logs/future-trade-live-feed.log"
   local now_epoch_tmp
   now_epoch_tmp="$(date +%s)"
-  if [ -f "$log_file" ]; then
+  if [ -s "$heartbeat_file" ]; then
+    local heartbeat_epoch
+    heartbeat_epoch="$("$PHP" -r '$p=$argv[1]; $j=json_decode((string) @file_get_contents($p), true); echo is_array($j) ? (int) ($j["last_message_epoch"] ?? 0) : 0;' "$heartbeat_file" 2>/dev/null || echo 0)"
+    if [ "$heartbeat_epoch" -gt 0 ]; then
+      feed_age=$(( now_epoch_tmp - heartbeat_epoch ))
+    else
+      feed_age=999999
+    fi
+  elif [ -f "$log_file" ]; then
     local log_mtime
     log_mtime="$(stat -c %Y "$log_file" 2>/dev/null || echo 0)"
     feed_age=$(( now_epoch_tmp - log_mtime ))
