@@ -97,6 +97,7 @@ class RobotSessionService
     public function update(RobotSession $session, array $payload): RobotSession
     {
         $updates = [];
+        $clearsEntryBlock = false;
         foreach ([
             'name',
             'wallet_account_id',
@@ -118,6 +119,26 @@ class RobotSessionService
         ] as $field) {
             if (array_key_exists($field, $payload)) {
                 $updates[$field] = $payload[$field];
+                if (in_array($field, [
+                    'wallet_account_id',
+                    'risk_profile_id',
+                    'strategy_profile',
+                    'profit_target',
+                    'loss_limit',
+                    'max_consecutive_losses',
+                    'max_active_trades',
+                    'confidence_threshold',
+                    'provider_key',
+                    'integration_id',
+                    'bot_mode',
+                    'stop_loss_pct',
+                    'take_profit_pct',
+                    'cooldown_seconds',
+                    'daily_loss_limit',
+                    'multi_symbol',
+                ], true)) {
+                    $clearsEntryBlock = true;
+                }
             }
         }
         if (array_key_exists('symbol_list', $payload)) {
@@ -127,15 +148,19 @@ class RobotSessionService
                 ->unique()
                 ->values()
                 ->all();
+            $clearsEntryBlock = true;
         }
         if (array_key_exists('timeframe', $payload)) {
             $updates['timeframe'] = $this->timeframes->normalize((string) $payload['timeframe']);
+            $clearsEntryBlock = true;
         }
         if (array_key_exists('expiry_seconds', $payload)) {
             $updates['expiry_seconds'] = (int) $payload['expiry_seconds'];
+            $clearsEntryBlock = true;
         }
         if (array_key_exists('base_stake', $payload)) {
             $updates['base_stake'] = $this->normalizeStake((float) $payload['base_stake']);
+            $clearsEntryBlock = true;
         }
         if (array_key_exists('indicator_set', $payload)) {
             $updates['indicator_set'] = collect((array) $payload['indicator_set'])
@@ -144,6 +169,7 @@ class RobotSessionService
                 ->unique()
                 ->values()
                 ->all();
+            $clearsEntryBlock = true;
         }
         if (array_key_exists('symbol', $payload)) {
             $updates['symbol'] = strtoupper((string) $payload['symbol']);
@@ -153,6 +179,17 @@ class RobotSessionService
                 (string) $session->mode,
                 (string) ($payload['provider_key'] ?? $session->provider_key ?? 'binance')
             )['asset_class'] ?? 'METALS'));
+            $clearsEntryBlock = true;
+        }
+
+        if ($clearsEntryBlock) {
+            $runtime = (array) ($session->runtime_json ?? []);
+            $runtime['latest_entry_block'] = null;
+            $runtime['entry_block_cleared_at'] = now()->toIso8601String();
+            $updates['runtime_json'] = $runtime;
+            if ($session->last_error !== null) {
+                $updates['last_error'] = null;
+            }
         }
 
         $session->update($updates);
@@ -977,7 +1014,16 @@ class RobotSessionService
         $push('decision_current', $decisionOk, 'Decision available', $decisionOk ? "Latest action: {$decisionAction}." : 'No latest decision yet.', 'soft');
 
         if (is_array($entryBlock) && $entryBlock !== []) {
-            $push('entry_preflight', false, 'Entry preflight', (string) ($entryBlock['reason'] ?? $entryBlock['status'] ?? 'Entry blocked.'));
+            $entryBlockFresh = $this->entryBlockIsFresh($session);
+            $push(
+                'entry_preflight',
+                ! $entryBlockFresh,
+                'Entry preflight',
+                $entryBlockFresh
+                    ? (string) ($entryBlock['reason'] ?? $entryBlock['status'] ?? 'Entry blocked.')
+                    : 'Previous entry block is stale; waiting for the next live signal to re-check.',
+                $entryBlockFresh ? 'hard' : 'soft'
+            );
         } else {
             $push('entry_preflight', true, 'Entry preflight', 'No current entry blocker.');
         }
@@ -1633,10 +1679,29 @@ class RobotSessionService
     {
         $session->last_error = (string) ($block['reason'] ?? $block['status'] ?? 'Robot entry blocked.');
         $session->runtime_json = array_merge((array) $session->runtime_json, [
-            'latest_entry_block' => $block,
+            'latest_entry_block' => array_merge($block, [
+                'blocked_at' => now()->toIso8601String(),
+                'base_stake' => (float) $session->base_stake,
+                'mode' => (string) $session->mode,
+                'provider' => (string) $session->provider_key,
+            ]),
             'last_evaluation_at' => now()->toIso8601String(),
         ]);
         $session->save();
+    }
+
+    private function entryBlockIsFresh(RobotSession $session): bool
+    {
+        $runtime = (array) ($session->runtime_json ?? []);
+        $block = (array) ($runtime['latest_entry_block'] ?? []);
+        $timestamp = (string) ($block['blocked_at'] ?? $runtime['last_evaluation_at'] ?? '');
+        $epoch = $timestamp !== '' ? strtotime($timestamp) : false;
+
+        if ($epoch === false) {
+            return true;
+        }
+
+        return (time() - $epoch) <= 120;
     }
 
     private function clearEntryBlock(RobotSession $session): void
