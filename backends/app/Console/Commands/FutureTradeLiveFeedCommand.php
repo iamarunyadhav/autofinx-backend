@@ -78,6 +78,9 @@ class FutureTradeLiveFeedCommand extends Command
         }
 
         try {
+            if (! $this->heartbeatFresh($heartbeatPath)) {
+                @unlink($heartbeatPath);
+            }
             $exitCode = $this->call('market:ws-consume', [
                 '--market-type' => 'futures',
                 '--symbols' => implode(',', $symbols),

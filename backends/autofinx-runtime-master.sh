@@ -236,6 +236,7 @@ restart_live_feed_if_stale() {
   fi
 
   log "live-feed stale age=${age}s; restarting supervisor-owned feed"
+  rm -f "$HEARTBEAT_FILE" >/dev/null 2>&1 || true
   supervisorctl restart "autofinx-trading:live-feed" >> "$LOG_FILE" 2>&1 || true
   date +%s > "$RESTART_STAMP"
 }
@@ -263,6 +264,7 @@ restart_user_stream_if_stale() {
   fi
 
   log "user-stream stale age=${age}s; clearing lock and restarting supervisor-owned stream"
+  rm -f "$USER_STREAM_HEARTBEAT_FILE" >/dev/null 2>&1 || true
   "$PHP" artisan cache:forget autofinx_ft:user_stream_lock >> "$LOG_FILE" 2>&1 || true
   pkill -f "artisan future-trade:user-stream" >/dev/null 2>&1 || true
   supervisorctl restart "autofinx-trading:user-stream-loop" >> "$LOG_FILE" 2>&1 || true
