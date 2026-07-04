@@ -556,6 +556,8 @@ class QuickTradeService
                     $execution,
                     $traceId
                 );
+                $entryFee = round((float) ($execution['estimated_fee'] ?? $booked['order']->fee_amount ?? 0), 8);
+                $entrySlippage = $execution['slippage_pct'] ?? $booked['order']->slippage_pct ?? null;
 
                 $quickTrade = QuickTrade::create([
                     'id' => (string) Str::uuid(),
@@ -581,9 +583,25 @@ class QuickTradeService
                     'entry_price' => (float) ($execution['price'] ?? 0),
                     'confidence' => $signalPayload['confidence'] ?? null,
                     'status' => 'open',
+                    'fees_total' => $entryFee,
                     'signal_payload' => array_merge($signalPayload, [
                         'provider' => strtolower((string) $integration->provider_key),
                         'integration_id' => $integration->id,
+                        'execution_cost' => [
+                            'fee_model' => 'estimated_binance_futures_taker',
+                            'entry_fee' => $entryFee,
+                            'exit_fee' => 0,
+                            'total_fees' => $entryFee,
+                            'gross_pnl' => 0,
+                            'net_pnl' => 0,
+                            'entry_slippage_pct' => $entrySlippage,
+                            'exit_slippage_pct' => null,
+                            'entry_reference_price' => $execution['reference_price'] ?? null,
+                            'entry_notional' => $execution['notional'] ?? null,
+                            'exit_reference_price' => null,
+                            'exit_notional' => null,
+                            'fee_rate' => $execution['estimated_fee_rate'] ?? null,
+                        ],
                     ]),
                     'indicator_snapshot' => $signalPayload['indicator_values'] ?? [],
                     'entry_at' => $entryAt,
@@ -643,11 +661,28 @@ class QuickTradeService
 
         $execution = $this->liveTimedTrades->executeExit($integration, $trade, (string) Str::uuid());
         $exitPrice = (float) ($execution['price'] ?? 0);
-        $profitLoss = $this->liveTimedTrades->pnlFor($trade, $exitPrice);
+        $grossProfitLoss = $this->liveTimedTrades->pnlFor($trade, $exitPrice);
+        $entryFee = round((float) ($trade->fees_total ?? $trade->order?->fee_amount ?? 0), 8);
+        $exitFee = round((float) ($execution['estimated_fee'] ?? 0), 8);
+        $feesTotal = round($entryFee + $exitFee, 8);
+        $profitLoss = round($grossProfitLoss - $feesTotal, 8);
         $result = $this->liveResultForPnl($trade, $profitLoss);
         $traceId = (string) Str::uuid();
 
         $bookedExit = $this->liveTimedTrades->bookExit($trade, $integration, $execution, $traceId, $profitLoss);
+        $signalPayload = (array) ($trade->signal_payload ?? []);
+        $executionCost = array_merge((array) ($signalPayload['execution_cost'] ?? []), [
+            'fee_model' => (string) data_get($signalPayload, 'execution_cost.fee_model', 'estimated_binance_futures_taker'),
+            'entry_fee' => $entryFee,
+            'exit_fee' => $exitFee,
+            'total_fees' => $feesTotal,
+            'gross_pnl' => $grossProfitLoss,
+            'net_pnl' => $profitLoss,
+            'exit_slippage_pct' => $execution['slippage_pct'] ?? null,
+            'exit_reference_price' => $execution['reference_price'] ?? null,
+            'exit_notional' => $execution['notional'] ?? null,
+            'fee_rate' => $execution['estimated_fee_rate'] ?? data_get($signalPayload, 'execution_cost.fee_rate'),
+        ]);
 
         $this->liveWallets->settleReservation(
             $trade->workspace_id,
@@ -669,6 +704,8 @@ class QuickTradeService
                 'meta' => array_merge((array) ($trade->order?->meta ?? []), [
                     'quick_trade_status' => $result['status'],
                     'quick_trade_profit_loss' => $profitLoss,
+                    'quick_trade_gross_profit_loss' => $grossProfitLoss,
+                    'quick_trade_fees_total' => $feesTotal,
                     'close_order_id' => $bookedExit['order']->id,
                     'close_trade_id' => $bookedExit['trade']->id,
                     'closed_at' => now()->toIso8601String(),
@@ -683,7 +720,10 @@ class QuickTradeService
             'status' => $result['status'],
             'profit_loss' => $profitLoss,
             'payout_amount' => $result['credit_amount'],
-            'fees_total' => 0,
+            'fees_total' => $feesTotal,
+            'signal_payload' => array_merge($signalPayload, [
+                'execution_cost' => $executionCost,
+            ]),
             'settled_at' => now(),
         ]);
 

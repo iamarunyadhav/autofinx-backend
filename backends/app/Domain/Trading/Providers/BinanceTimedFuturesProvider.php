@@ -109,6 +109,7 @@ class BinanceTimedFuturesProvider implements LiveTradeProviderInterface
     ): array {
         $quote = $this->latestQuote($integration, $symbol);
         $quantity = $this->normalizeQuantity($integration, $symbol, $stakeAmount / max($quote['price'], 0.00000001), $quote['price']);
+        $referencePrice = (float) ($quote['price'] ?? 0);
 
         $response = $this->signedRequest($integration, 'POST', '/fapi/v1/order', [
             'symbol' => strtoupper($symbol),
@@ -143,6 +144,11 @@ class BinanceTimedFuturesProvider implements LiveTradeProviderInterface
             'quote_currency' => 'USDT',
             'price' => $price,
             'quantity' => $executedQty,
+            'reference_price' => $referencePrice,
+            'notional' => round($price * $executedQty, 8),
+            'estimated_fee_rate' => $this->takerFeeRate($integration),
+            'estimated_fee' => round($price * $executedQty * $this->takerFeeRate($integration), 8),
+            'slippage_pct' => $this->slippagePct(strtolower($side) === 'sell' ? 'sell' : 'buy', $price, $referencePrice),
             'response' => $payload,
         ];
     }
@@ -195,6 +201,7 @@ class BinanceTimedFuturesProvider implements LiveTradeProviderInterface
         $payload = $response->json();
         $price = $this->fillPrice($payload);
         $executedQty = (float) ($payload['executedQty'] ?? $normalizedQuantity);
+        $referencePrice = (float) ($this->latestQuote($integration, $symbol)['price'] ?? 0);
 
         if ($price <= 0 || $executedQty <= 0) {
             $fetched = $this->safeFetchOrder($integration, strtoupper($symbol), (string) ($payload['orderId'] ?? ''));
@@ -203,7 +210,7 @@ class BinanceTimedFuturesProvider implements LiveTradeProviderInterface
             $executedQty = (float) ($payload['executedQty'] ?? $normalizedQuantity);
         }
         if ($price <= 0) {
-            $price = (float) ($this->latestQuote($integration, $symbol)['price'] ?? 0);
+            $price = $referencePrice;
         }
 
         return [
@@ -212,8 +219,33 @@ class BinanceTimedFuturesProvider implements LiveTradeProviderInterface
             'quote_currency' => 'USDT',
             'price' => $price,
             'quantity' => $executedQty,
+            'reference_price' => $referencePrice,
+            'notional' => round($price * $executedQty, 8),
+            'estimated_fee_rate' => $this->takerFeeRate($integration),
+            'estimated_fee' => round($price * $executedQty * $this->takerFeeRate($integration), 8),
+            'slippage_pct' => $this->slippagePct($closeSide === 'SELL' ? 'sell' : 'buy', $price, $referencePrice),
             'response' => $payload,
         ];
+    }
+
+    private function takerFeeRate(Integration $integration): float
+    {
+        $config = (array) ($integration->config_json ?? []);
+
+        return max(0.0, (float) ($config['futures_taker_fee_rate'] ?? config('trading.binance_futures_taker_fee_rate', 0.0005)));
+    }
+
+    private function slippagePct(string $side, float $fillPrice, float $referencePrice): ?float
+    {
+        if ($fillPrice <= 0 || $referencePrice <= 0) {
+            return null;
+        }
+
+        $raw = strtolower($side) === 'sell'
+            ? (($referencePrice - $fillPrice) / $referencePrice * 100)
+            : (($fillPrice - $referencePrice) / $referencePrice * 100);
+
+        return round($raw, 6);
     }
 
     private function fetchOrder(Integration $integration, string $symbol, string $orderId): array

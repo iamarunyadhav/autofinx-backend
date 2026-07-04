@@ -105,6 +105,7 @@ test('live quick trade opens on binance and settles on expiry using timed close'
     expect($quickTrade->mode)->toBe('live')
         ->and($quickTrade->provider_key)->toBe('binance')
         ->and((float) $quickTrade->quantity)->toBe(0.01)
+        ->and((float) $quickTrade->fees_total)->toBe(0.01)
         ->and((float) $wallet->balance)->toBe(1000.0)
         ->and((float) $wallet->available)->toBe(980.0)
         ->and((float) $wallet->locked_balance)->toBe(20.0);
@@ -117,10 +118,11 @@ test('live quick trade opens on binance and settles on expiry using timed close'
     $wallet->refresh();
 
     expect($quickTrade->status)->toBe('won')
-        ->and((float) $quickTrade->profit_loss)->toBe(1.0)
-        ->and((float) $quickTrade->payout_amount)->toBe(21.0)
-        ->and((float) $wallet->balance)->toBe(1001.0)
-        ->and((float) $wallet->available)->toBe(1001.0)
+        ->and((float) $quickTrade->profit_loss)->toBe(0.9795)
+        ->and((float) $quickTrade->payout_amount)->toBe(20.9795)
+        ->and((float) $quickTrade->fees_total)->toBe(0.0205)
+        ->and((float) $wallet->balance)->toBe(1000.9795)
+        ->and((float) $wallet->available)->toBe(1000.9795)
         ->and((float) $wallet->locked_balance)->toBe(0.0)
         ->and(Trade::count())->toBe(2)
         ->and(LedgerTransaction::where('type', 'quick_trade_live_pnl')->count())->toBe(1);
@@ -290,8 +292,9 @@ test('live quick trade sell settles with positive pnl when price falls', functio
     $quickTrade = QuickTrade::findOrFail($response->json('id'));
 
     expect($quickTrade->status)->toBe('won')
-        ->and((float) $quickTrade->profit_loss)->toBe(1.0)
-        ->and((float) $quickTrade->payout_amount)->toBe(21.0);
+        ->and((float) $quickTrade->profit_loss)->toBe(0.9805)
+        ->and((float) $quickTrade->payout_amount)->toBe(20.9805)
+        ->and((float) $quickTrade->fees_total)->toBe(0.0195);
 
     CarbonImmutable::setTestNow();
 });

@@ -73,6 +73,8 @@ class LiveTimedTradeService
         $quoteCurrency = strtoupper((string) ($execution['quote_currency'] ?? 'USDT'));
         $symbolModel = $this->market->resolveSymbol($symbol);
         $rawResponse = (array) ($execution['response'] ?? []);
+        $fee = round((float) ($execution['estimated_fee'] ?? 0), 8);
+        $slippagePct = array_key_exists('slippage_pct', $execution) ? $execution['slippage_pct'] : null;
 
         $order = Order::create([
             'id' => (string) Str::uuid(),
@@ -88,8 +90,9 @@ class LiveTimedTradeService
             'price' => $price,
             'limit_price' => $price,
             'avg_fill_price' => $price,
-            'fee_amount' => 0,
+            'fee_amount' => $fee,
             'fee_asset' => $quoteCurrency,
+            'slippage_pct' => $slippagePct,
             'status' => 'FILLED',
             'meta' => [
                 'source' => $payload['source'],
@@ -99,6 +102,11 @@ class LiveTimedTradeService
                 'timeframe' => $payload['timeframe'],
                 'provider_execution' => 'timed_futures',
                 'symbol_display' => $payload['symbol_display'] ?? $symbol,
+                'reference_price' => $execution['reference_price'] ?? null,
+                'notional' => $execution['notional'] ?? null,
+                'estimated_fee_rate' => $execution['estimated_fee_rate'] ?? null,
+                'estimated_fee' => $fee,
+                'slippage_pct' => $slippagePct,
             ],
             'raw_json' => $rawResponse,
             'idempotency_key' => $payload['idempotency_key'],
@@ -127,8 +135,8 @@ class LiveTimedTradeService
             'avg_price' => $price,
             'quantity' => $side === 'buy' ? $quantity : -1 * $quantity,
             'qty' => $quantity,
-            'fee' => 0,
-            'fees' => 0,
+            'fee' => $fee,
+            'fees' => $fee,
             'realized_pnl' => 0,
             'executed_at' => now(),
             'ts' => now(),
@@ -137,6 +145,11 @@ class LiveTimedTradeService
             'meta' => [
                 'source' => $payload['source'],
                 'execution_type' => 'entry',
+                'reference_price' => $execution['reference_price'] ?? null,
+                'notional' => $execution['notional'] ?? null,
+                'estimated_fee_rate' => $execution['estimated_fee_rate'] ?? null,
+                'estimated_fee' => $fee,
+                'slippage_pct' => $slippagePct,
             ],
         ]);
 
@@ -160,6 +173,8 @@ class LiveTimedTradeService
         $quoteCurrency = strtoupper((string) ($execution['quote_currency'] ?? $quickTrade->quote_currency ?? 'USDT'));
         $rawResponse = (array) ($execution['response'] ?? []);
         $symbolModel = $quickTrade->order?->symbol ?: $this->market->resolveSymbol($quickTrade->symbol);
+        $fee = round((float) ($execution['estimated_fee'] ?? 0), 8);
+        $slippagePct = array_key_exists('slippage_pct', $execution) ? $execution['slippage_pct'] : null;
 
         $order = Order::create([
             'id' => (string) Str::uuid(),
@@ -175,14 +190,20 @@ class LiveTimedTradeService
             'price' => $price,
             'limit_price' => $price,
             'avg_fill_price' => $price,
-            'fee_amount' => 0,
+            'fee_amount' => $fee,
             'fee_asset' => $quoteCurrency,
+            'slippage_pct' => $slippagePct,
             'status' => 'FILLED',
             'meta' => [
                 'source' => $quickTrade->source,
                 'mode' => 'live',
                 'quick_trade_id' => $quickTrade->id,
                 'execution_type' => 'expiry_close',
+                'reference_price' => $execution['reference_price'] ?? null,
+                'notional' => $execution['notional'] ?? null,
+                'estimated_fee_rate' => $execution['estimated_fee_rate'] ?? null,
+                'estimated_fee' => $fee,
+                'slippage_pct' => $slippagePct,
             ],
             'raw_json' => $rawResponse,
             'idempotency_key' => (string) Str::uuid(),
@@ -211,8 +232,8 @@ class LiveTimedTradeService
             'avg_price' => $price,
             'quantity' => $closeSide === 'buy' ? $quantity : -1 * $quantity,
             'qty' => $quantity,
-            'fee' => 0,
-            'fees' => 0,
+            'fee' => $fee,
+            'fees' => $fee,
             'realized_pnl' => $profitLoss,
             'executed_at' => now(),
             'ts' => now(),
@@ -224,6 +245,11 @@ class LiveTimedTradeService
                 'execution_type' => 'exit',
                 'entry_price' => (float) $quickTrade->entry_price,
                 'exit_price' => $price,
+                'reference_price' => $execution['reference_price'] ?? null,
+                'notional' => $execution['notional'] ?? null,
+                'estimated_fee_rate' => $execution['estimated_fee_rate'] ?? null,
+                'estimated_fee' => $fee,
+                'slippage_pct' => $slippagePct,
             ],
         ]);
 
