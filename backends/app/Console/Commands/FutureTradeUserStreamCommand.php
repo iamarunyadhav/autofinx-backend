@@ -29,10 +29,15 @@ class FutureTradeUserStreamCommand extends Command
         $perConfigSlice = 10;
 
         $lockKey = 'autofinx_ft:user_stream_lock' . ($workspaceId !== '' ? ':' . $workspaceId : '');
-        $lock = Cache::lock($lockKey, max(30, $duration + 10));
-        if (! $lock->get()) {
-            $this->warn('[FT USER STREAM SKIPPED] another consumer already holds the lock');
-            return self::SUCCESS;
+        $lockTtl = $duration > 0 ? max(30, $duration + 10) : 86400;
+        $lock = Cache::lock($lockKey, $lockTtl);
+        while (! $lock->get()) {
+            $this->warn('[FT USER STREAM WAIT] another consumer already holds the lock');
+            if ($duration > 0) {
+                return self::SUCCESS;
+            }
+            sleep($reconnectSleep);
+            $lock = Cache::lock($lockKey, $lockTtl);
         }
 
         $startedAt = time();
@@ -133,6 +138,7 @@ class FutureTradeUserStreamCommand extends Command
                             $userStream->recordHeartbeat($config, 'loop');
                             $lastHeartbeat = time();
                         }
+                        $userStream->recordHeartbeat($config, 'read_poll');
                         $frame = $client->readFrame(1);
                         if ($frame === null) {
                             continue;

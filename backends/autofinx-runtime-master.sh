@@ -68,6 +68,38 @@ process_count() {
   pgrep -f "$pattern" 2>/dev/null | wc -l | tr -d ' '
 }
 
+php_artisan_count() {
+  local pattern="$1"
+  ps -eo comm=,args= \
+    | awk -v pattern="$pattern" 'tolower($1) ~ /php/ && $0 ~ pattern { count++ } END { print count + 0 }'
+}
+
+supervisor_tree_pids() {
+  local root="$1"
+  [ -z "$root" ] && return 0
+  ps -eo pid=,ppid= \
+    | awk -v roots="$root" '
+      BEGIN {
+        split(roots, rootList, " ");
+        for (i in rootList) keep[rootList[i]] = 1;
+        changed = 1;
+      }
+      { pid[NR] = $1; ppid[NR] = $2; }
+      END {
+        while (changed) {
+          changed = 0;
+          for (i = 1; i <= NR; i++) {
+            if (keep[ppid[i]] && !keep[pid[i]]) {
+              keep[pid[i]] = 1;
+              changed = 1;
+            }
+          }
+        }
+        for (p in keep) print p;
+      }
+    '
+}
+
 oldest_pid_for_pattern() {
   local pattern="$1"
   ps -eo pid=,lstart=,cmd= \
@@ -88,19 +120,33 @@ dedupe_pattern() {
     return 0
   fi
 
-  local keep="$preferred_pid"
-  if [ -z "$keep" ]; then
-    keep="$(oldest_pid_for_pattern "$pattern")"
+  local keep_pids=()
+  if [ -n "$preferred_pid" ]; then
+    mapfile -t keep_pids < <(supervisor_tree_pids "$preferred_pid" || true)
   fi
-  if [ -z "$keep" ]; then
-    keep="${pids[0]}"
+  if [ "${#keep_pids[@]}" -eq 0 ]; then
+    local keep
+    keep="$(oldest_pid_for_pattern "$pattern")"
+    [ -z "$keep" ] && keep="${pids[0]}"
+    keep_pids=("$keep")
   fi
 
-  log "$label duplicate count=$count keep=$keep pids=${pids[*]}"
+  local kill_pids=()
   for pid in "${pids[@]}"; do
-    if [ "$pid" != "$keep" ]; then
-      kill "$pid" >/dev/null 2>&1 || true
-    fi
+    local keep_match=0
+    for keep_pid in "${keep_pids[@]}"; do
+      [ "$pid" = "$keep_pid" ] && keep_match=1 && break
+    done
+    [ "$keep_match" -eq 0 ] && kill_pids+=("$pid")
+  done
+
+  if [ "${#kill_pids[@]}" -eq 0 ]; then
+    return 0
+  fi
+
+  log "$label duplicate count=$count keep=${keep_pids[*]} kill=${kill_pids[*]} pids=${pids[*]}"
+  for pid in "${kill_pids[@]}"; do
+    kill "$pid" >/dev/null 2>&1 || true
   done
 }
 
@@ -215,10 +261,10 @@ status_report() {
   echo
   echo "== process counts =="
   printf "live_feed=%s\n" "$(process_count "artisan future-trade:live-feed")"
-  printf "tick_loop=%s\n" "$(process_count "artisan future-trade:tick")"
-  printf "user_stream=%s\n" "$(process_count "artisan future-trade:user-stream")"
-  printf "queue_workers=%s\n" "$(process_count "artisan queue:work")"
-  printf "schedule_work=%s\n" "$(process_count "artisan schedule:work")"
+  printf "tick_loop=%s\n" "$(php_artisan_count "artisan future-trade:tick")"
+  printf "user_stream=%s\n" "$(php_artisan_count "artisan future-trade:user-stream")"
+  printf "queue_workers=%s\n" "$(php_artisan_count "artisan queue:work")"
+  printf "schedule_work=%s\n" "$(php_artisan_count "artisan schedule:work")"
   printf "schedule_run=%s\n" "$(process_count "artisan schedule:run")"
   printf "quick_settler=%s\n" "$(process_count "autofinx-quick-settler.sh")"
   printf "robot_evaluator=%s\n" "$(process_count "autofinx-robot-evaluator.sh")"
