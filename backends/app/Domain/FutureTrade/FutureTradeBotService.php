@@ -10431,22 +10431,15 @@ class FutureTradeBotService
                 : 'Future Trade live trading requires Live mode enabled in My Config and valid live futures API credentials.'
             );
         }
-        $baseUrl = $forceTestnet
-            ? ((string) ($settings['testnetApiUrl'] ?? 'https://testnet.binancefuture.com'))
-            : ((string) ($settings['liveApiUrl'] ?? 'https://fapi.binance.com'));
-        $apiKey = $forceTestnet
-            ? (string) ($settings['testnetApiKey'] ?? '')
-            : (string) ($settings['liveApiKey'] ?? '');
-        $apiSecret = $forceTestnet
-            ? (string) ($settings['testnetApiSecret'] ?? '')
-            : (string) ($settings['liveApiSecret'] ?? '');
+        $client = app(FutureTradeFuturesCredentialResolver::class)->clientFromSettings($settings, $throttleScope);
+        if (! $client) {
+            throw new \RuntimeException($forceTestnet
+                ? 'Future Trade testnet trading requires valid Binance Futures API credentials.'
+                : 'Future Trade live trading requires valid Binance Futures API credentials.'
+            );
+        }
 
-        return new BinanceFuturesClient(
-            apiKey: (string) $apiKey,
-            apiSecret: (string) $apiSecret,
-            baseUrl: (string) $baseUrl,
-            throttleScope: $throttleScope,
-        );
+        return $client;
     }
 
     private function isTransientNetworkException(Throwable $e): bool
@@ -10690,7 +10683,17 @@ class FutureTradeBotService
             ? (string) ($settings['testnetApiSecret'] ?? '')
             : (string) ($settings['liveApiSecret'] ?? '');
 
-        return $key !== '' && $secret !== '';
+        if ($key !== '' && $secret !== '') {
+            return true;
+        }
+
+        $resolved = app(FutureTradeFuturesCredentialResolver::class)->resolve(
+            array_merge($settings, ['forceTestnet' => $forceTestnet]),
+            isset($settings['_workspace_id']) ? (string) $settings['_workspace_id'] : null,
+            isset($settings['_config_id']) ? (string) $settings['_config_id'] : null,
+        );
+
+        return (bool) ($resolved['configured'] ?? false);
     }
 
     private function symbolFilters(array $exchangeInfo, string $symbol): array

@@ -22,6 +22,7 @@ class FuturesPositionSyncService
     public function sync(string $workspaceId, Integration $integration, array $config): array
     {
         $client = $this->client($integration, $config);
+        $environment = $this->environment($integration, $config);
         $positionModePayload = $client->fetchPositionMode();
         $account = $client->fetchAccountInfo();
         $riskRows = collect($client->fetchPositionRisk());
@@ -30,7 +31,7 @@ class FuturesPositionSyncService
 
         $positions = $riskRows
             ->filter(fn (array $row) => abs((float) ($row['positionAmt'] ?? 0)) > 0)
-            ->map(function (array $row) use ($workspaceId, $config, $isDualSide) {
+            ->map(function (array $row) use ($workspaceId, $config, $isDualSide, $environment) {
                 $symbolCode = strtoupper((string) ($row['symbol'] ?? ''));
                 $symbol = Symbol::firstOrCreate(['symbol' => $symbolCode], [
                     'id' => (string) Str::uuid(),
@@ -61,7 +62,7 @@ class FuturesPositionSyncService
                         'asset_code' => $symbolCode,
                         'quote_currency' => $this->quoteCurrency($symbolCode),
                         'provider' => 'binance',
-                        'environment' => 'testnet',
+                        'environment' => $environment,
                         'qty' => $qty,
                         'quantity' => $qty,
                         'avg_entry' => (float) ($row['entryPrice'] ?? 0),
@@ -95,7 +96,7 @@ class FuturesPositionSyncService
             })
             ->values();
 
-        $orders = $openOrders->map(function (array $row) use ($workspaceId, $integration) {
+        $orders = $openOrders->map(function (array $row) use ($workspaceId, $integration, $environment) {
             $symbolCode = strtoupper((string) ($row['symbol'] ?? ''));
             $symbol = Symbol::firstOrCreate(['symbol' => $symbolCode], [
                 'id' => (string) Str::uuid(),
@@ -134,9 +135,9 @@ class FuturesPositionSyncService
                     'provider_synced_at' => now(),
                     'last_sync_source' => 'futures_sync',
                     'meta' => [
-                        'mode' => 'futures_testnet',
+                        'mode' => 'futures_'.$environment,
                         'market_type' => 'futures',
-                        'environment' => 'testnet',
+                        'environment' => $environment,
                         'reduce_only' => (bool) ($row['reduceOnly'] ?? false),
                         'position_side' => (string) ($row['positionSide'] ?? 'BOTH'),
                         'provider_payload' => $row,
@@ -167,10 +168,21 @@ class FuturesPositionSyncService
         return new BinanceFuturesClient(
             apiKey: (string) ($creds['api_key'] ?? $creds['key'] ?? ''),
             apiSecret: (string) ($creds['api_secret'] ?? $creds['secret'] ?? ''),
-            baseUrl: (string) (($config['futures_force_testnet'] ?? true)
+            baseUrl: (string) (($this->environment($integration, $config) === 'testnet')
                 ? config('services.binance.futures_testnet_api_url', 'https://testnet.binancefuture.com')
                 : config('services.binance.futures_api_url', 'https://fapi.binance.com')),
         );
+    }
+
+    private function environment(Integration $integration, array $config): string
+    {
+        $integrationConfig = (array) ($integration->config_json ?? []);
+        $environment = strtolower((string) ($integration->environment ?? $integrationConfig['environment'] ?? ''));
+        if ($environment === 'live' || $environment === 'testnet') {
+            return $environment;
+        }
+
+        return (bool) ($config['futures_force_testnet'] ?? true) ? 'testnet' : 'live';
     }
 
     private function liquidationBuffer(float $qty, float $markPrice, float $liquidationPrice): ?float

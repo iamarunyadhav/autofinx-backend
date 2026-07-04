@@ -7,9 +7,11 @@ use App\Domain\Exchange\BinanceRestCircuitBreaker;
 use App\Models\FutureTradeBotConfig;
 use App\Models\FutureTradeLogicalTrade;
 use App\Models\FutureTradeLogicalTradeEvent;
+use App\Models\WalletAccount;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 use Throwable;
 
 /**
@@ -45,28 +47,17 @@ class FutureTradeUserStreamService
     private const CLK_THROTTLE_KEY = 'autofinx_ft:create_listen_key_last_ms';
     private const CLK_MIN_INTERVAL_MS = 1200;
 
+    public function __construct(private readonly FutureTradeFuturesCredentialResolver $credentials)
+    {
+    }
+
     /**
-     * Resolve the per-config Binance Futures client using the credentials
-     * stored on this config's settings.
+     * Resolve the per-config Binance Futures client. Config credentials are
+     * preferred, with workspace Binance integration credentials as fallback.
      */
     public function clientFor(FutureTradeBotConfig $config): ?BinanceFuturesClient
     {
-        $settings = $config->mergedSettings();
-        $forceTestnet = (bool) ($settings['forceTestnet'] ?? true);
-        $apiKey = (string) ($forceTestnet ? ($settings['testnetApiKey'] ?? '') : ($settings['liveApiKey'] ?? ''));
-        $apiSecret = (string) ($forceTestnet ? ($settings['testnetApiSecret'] ?? '') : ($settings['liveApiSecret'] ?? ''));
-        if ($apiKey === '' || $apiSecret === '') {
-            return null;
-        }
-        $baseUrl = (string) ($forceTestnet
-            ? ($settings['testnetApiUrl'] ?? config('services.binance.futures_testnet_api_url') ?? 'https://testnet.binancefuture.com')
-            : ($settings['liveApiUrl'] ?? config('services.binance.futures_api_url') ?? 'https://fapi.binance.com'));
-
-        return new BinanceFuturesClient(
-            apiKey: $apiKey,
-            apiSecret: $apiSecret,
-            baseUrl: $baseUrl,
-        );
+        return $this->credentials->clientForConfig($config);
     }
 
     /**
@@ -86,10 +77,8 @@ class FutureTradeUserStreamService
      */
     public function snapshot(FutureTradeBotConfig $config): array
     {
-        $settings = $config->mergedSettings();
-        $forceTestnet = (bool) ($settings['forceTestnet'] ?? true);
-        $hasCreds = (string) ($forceTestnet ? ($settings['testnetApiKey'] ?? '') : ($settings['liveApiKey'] ?? '')) !== ''
-            && (string) ($forceTestnet ? ($settings['testnetApiSecret'] ?? '') : ($settings['liveApiSecret'] ?? '')) !== '';
+        $resolved = $this->credentials->resolveForConfig($config);
+        $hasCreds = (bool) ($resolved['configured'] ?? false);
 
         $state = (array) Cache::get($this->stateKey((string) $config->id), []);
         $lastEventAt = isset($state['last_event_at']) ? Carbon::parse((string) $state['last_event_at']) : null;
@@ -104,6 +93,10 @@ class FutureTradeUserStreamService
         // — the gate logic decides whether to enforce.
         return [
             'configured' => $hasCreds,
+            'credentialSource' => (string) ($resolved['source'] ?? 'none'),
+            'credentialMode' => (string) ($resolved['mode'] ?? 'unknown'),
+            'credentialReason' => $hasCreds ? null : (string) ($resolved['reason'] ?? 'not_configured'),
+            'integrationId' => $resolved['integration_id'] ?? null,
             'status' => $status,
             'lastEventAt' => $lastEventAt?->toIso8601String(),
             'lastHeartbeatAt' => $lastHeartbeatAt?->toIso8601String(),
@@ -481,6 +474,7 @@ class FutureTradeUserStreamService
 
     private function ingestAccountUpdate(FutureTradeBotConfig $config, array $payload): bool
     {
+        $balanceUpdated = $this->syncWalletFromAccountUpdate($config, $payload);
         $positions = (array) data_get($payload, 'a.P', []);
         $updated = false;
 
@@ -541,7 +535,70 @@ class FutureTradeUserStreamService
             $updated = true;
         }
 
-        return $updated;
+        return $updated || $balanceUpdated;
+    }
+
+    private function syncWalletFromAccountUpdate(FutureTradeBotConfig $config, array $payload): bool
+    {
+        $balances = (array) data_get($payload, 'a.B', []);
+        $usdt = collect($balances)->first(fn ($row) => is_array($row) && strtoupper((string) ($row['a'] ?? '')) === 'USDT');
+        if (! is_array($usdt)) {
+            return false;
+        }
+
+        $walletBalance = (float) ($usdt['wb'] ?? 0);
+        $crossWalletBalance = (float) ($usdt['cw'] ?? $walletBalance);
+        $balanceChange = (float) ($usdt['bc'] ?? 0);
+        $existing = WalletAccount::query()
+            ->where('workspace_id', (string) $config->workspace_id)
+            ->where('currency', 'USDT')
+            ->where('type', 'exchange')
+            ->first();
+        $available = $existing
+            ? min($walletBalance, max(0, (float) $existing->available + $balanceChange))
+            : $crossWalletBalance;
+
+        WalletAccount::updateOrCreate(
+            [
+                'workspace_id' => (string) $config->workspace_id,
+                'currency' => 'USDT',
+                'type' => 'exchange',
+            ],
+            [
+                'id' => $existing?->id ?: (string) Str::uuid(),
+                'name' => 'BINANCE USDT Futures Wallet',
+                'status' => 'active',
+                'wallet_type' => 'provider',
+                'balance' => $walletBalance,
+                'available' => $available,
+                'locked_balance' => max(0, $walletBalance - $available),
+                'metadata' => array_merge((array) ($existing?->metadata ?? []), [
+                    'provider' => 'binance',
+                    'market_type' => 'futures',
+                    'last_user_stream_sync_at' => now()->toIso8601String(),
+                    'cross_wallet_balance' => $crossWalletBalance,
+                    'balance_change' => $balanceChange,
+                    'source' => 'binance_user_stream_account_update',
+                ]),
+            ]
+        );
+
+        Cache::put(sprintf(FutureTradeAccountSyncService::STATE_KEY, (string) $config->workspace_id), [
+            'ok' => true,
+            'status' => 'OK',
+            'workspace_id' => (string) $config->workspace_id,
+            'config_id' => (string) $config->id,
+            'credential_source' => 'user_stream',
+            'wallet_balance' => $walletBalance,
+            'available_balance' => $available,
+            'margin_balance' => $crossWalletBalance,
+            'unrealized_pnl' => null,
+            'open_position_count' => null,
+            'last_sync_at' => now()->toIso8601String(),
+            'age_seconds' => 0,
+        ], 900);
+
+        return true;
     }
 
     private function syncRuntimePositionFromAccountUpdate(FutureTradeBotConfig $config, array $position): bool

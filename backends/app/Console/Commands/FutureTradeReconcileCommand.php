@@ -2,7 +2,7 @@
 
 namespace App\Console\Commands;
 
-use App\Domain\Exchange\BinanceFuturesClient;
+use App\Domain\FutureTrade\FutureTradeFuturesCredentialResolver;
 use App\Domain\FutureTrade\FutureTradeReconciliationService;
 use App\Models\FutureTradeBotConfig;
 use Illuminate\Console\Command;
@@ -18,11 +18,14 @@ class FutureTradeReconcileCommand extends Command
 
     protected $description = 'Reconcile local logical trades against Binance Futures REST state (positions + recent fills).';
 
-    public function handle(FutureTradeReconciliationService $reconciler): int
-    {
+    public function handle(
+        FutureTradeReconciliationService $reconciler,
+        FutureTradeFuturesCredentialResolver $credentials,
+    ): int {
         $lock = Cache::lock('autofinx_ft:reconcile_lock', 600);
         if (! $lock->get()) {
             $this->warn('[FT RECONCILE SKIPPED] another reconciliation is already running');
+
             return self::SUCCESS;
         }
 
@@ -37,28 +40,20 @@ class FutureTradeReconcileCommand extends Command
 
             if ($configs->isEmpty()) {
                 $this->info('No live-enabled future-trade configs to reconcile.');
+
                 return self::SUCCESS;
             }
 
             foreach ($configs as $config) {
                 try {
-                    $settings = $config->mergedSettings();
-                    $forceTestnet = (bool) ($settings['forceTestnet'] ?? true);
-                    $apiKey = (string) ($forceTestnet ? ($settings['testnetApiKey'] ?? '') : ($settings['liveApiKey'] ?? ''));
-                    $apiSecret = (string) ($forceTestnet ? ($settings['testnetApiSecret'] ?? '') : ($settings['liveApiSecret'] ?? ''));
-                    if ($apiKey === '' || $apiSecret === '') {
-                        $this->warn('Skipping ' . $config->workspace_id . ' — no API credentials');
+                    $client = $credentials->clientForConfig($config, 'reconcile');
+                    if (! $client) {
+                        $resolved = $credentials->resolveForConfig($config);
+                        $this->warn('Skipping '.$config->workspace_id.' - no API credentials: '.($resolved['reason'] ?? 'not_configured'));
+
                         continue;
                     }
-                    $baseUrl = (string) ($forceTestnet
-                        ? ($settings['testnetApiUrl'] ?? config('services.binance.futures_testnet_api_url') ?? 'https://testnet.binancefuture.com')
-                        : ($settings['liveApiUrl'] ?? config('services.binance.futures_api_url') ?? 'https://fapi.binance.com'));
 
-                    $client = new BinanceFuturesClient(
-                        apiKey: $apiKey,
-                        apiSecret: $apiSecret,
-                        baseUrl: $baseUrl,
-                    );
                     $report = $reconciler->reconcileConfig($config, $client, $symbol);
                     Log::info('[FT RECONCILE REPORT]', $report);
                     $this->line(sprintf(
@@ -72,7 +67,7 @@ class FutureTradeReconcileCommand extends Command
                         count($report['errors'])
                     ));
                 } catch (Throwable $e) {
-                    $this->error('[FT RECONCILE ERROR] ' . $config->workspace_id . ': ' . $e->getMessage());
+                    $this->error('[FT RECONCILE ERROR] '.$config->workspace_id.': '.$e->getMessage());
                     Log::warning('[FT RECONCILE ERROR]', [
                         'workspace_id' => $config->workspace_id,
                         'message' => $e->getMessage(),

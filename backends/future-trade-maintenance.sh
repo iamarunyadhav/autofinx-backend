@@ -20,6 +20,7 @@ cd "$APP_DIR"
 # Trading diagnostics + audit
 timeout 60 "$PHP" artisan future-trade:diagnostics --persist   2>/dev/null || true
 timeout 60 "$PHP" artisan future-trade:audit-missed-signals --limit=100 2>/dev/null || true
+timeout 90 "$PHP" artisan future-trade:account-sync            2>/dev/null || true
 timeout 60 "$PHP" artisan future-trade:queue-cleanup --safe    2>/dev/null || true
 
 # Light storage housekeeping every 5 min: trim logs > 50 MB → 10 MB

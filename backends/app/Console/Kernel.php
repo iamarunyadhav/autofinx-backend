@@ -33,6 +33,7 @@ use App\Console\Commands\TradingHealthCheckCommand;
 use App\Console\Commands\RatioBotsEvaluateCommand;
 use App\Console\Commands\Fast2XRunCommand;
 use App\Console\Commands\FutureTradeBotRunCommand;
+use App\Console\Commands\FutureTradeAccountSyncCommand;
 use App\Console\Commands\FutureTradeDiagnosticsCommand;
 use App\Console\Commands\FutureTradeDoctorCommand;
 use App\Console\Commands\FutureTradeQueueCleanupCommand;
@@ -90,6 +91,7 @@ class Kernel extends ConsoleKernel
         RatioBotsEvaluateCommand::class,
         Fast2XRunCommand::class,
         FutureTradeBotRunCommand::class,
+        FutureTradeAccountSyncCommand::class,
         FutureTradeDiagnosticsCommand::class,
         FutureTradeDoctorCommand::class,
         FutureTradeQueueCleanupCommand::class,

@@ -3,6 +3,8 @@
 namespace App\Console\Commands;
 
 use App\Domain\Exchange\BinanceRestCircuitBreaker;
+use App\Domain\FutureTrade\FutureTradeAccountSyncService;
+use App\Domain\FutureTrade\FutureTradeUserStreamService;
 use App\Models\FutureTradeBotConfig;
 use App\Models\FutureTradeBotLog;
 use App\Models\FutureTradeLogicalTrade;
@@ -35,6 +37,7 @@ class FutureTradeRuntimeStatusCommand extends Command
             'binance_rest' => app(BinanceRestCircuitBreaker::class)->status(),
             'live_feed' => $this->liveFeedStatus(),
             'user_stream' => $this->userStreamStatus($workspaceId),
+            'account_sync' => $this->accountSyncStatus($workspaceId),
             'unexpected_processes' => $this->unexpectedProcessStatus(),
             'queues' => $this->queueStatus(),
             'positions' => $this->positionStatus($workspaceId),
@@ -138,20 +141,43 @@ class FutureTradeRuntimeStatusCommand extends Command
             ->when($workspaceId !== '', fn ($q) => $q->where('workspace_id', $workspaceId));
 
         $result = [];
+        $service = app(FutureTradeUserStreamService::class);
         foreach ($query->get() as $config) {
-            $cacheKey = 'autofinx_ft:user_stream:'.$config->id.':state';
-            $state = Cache::get($cacheKey);
-            $heartbeatAt = is_array($state) ? ($state['last_heartbeat_at'] ?? null) : null;
-            $age = $heartbeatAt ? max(0, time() - strtotime((string) $heartbeatAt)) : null;
+            $snapshot = $service->snapshot($config);
 
             $result[] = [
                 'workspace_id' => $config->workspace_id,
                 'config_id' => $config->id,
                 'slot_index' => $config->slot_index,
-                'status' => is_array($state) ? ($state['status'] ?? 'UNKNOWN') : 'NOT_CONFIGURED',
-                'heartbeat_age_s' => $age,
-                'fresh' => $age !== null && $age <= 30,
+                'status' => (string) ($snapshot['status'] ?? 'UNKNOWN'),
+                'configured' => (bool) ($snapshot['configured'] ?? false),
+                'credential_source' => (string) ($snapshot['credentialSource'] ?? 'none'),
+                'credential_reason' => $snapshot['credentialReason'] ?? null,
+                'integration_id' => $snapshot['integrationId'] ?? null,
+                'heartbeat_age_s' => $snapshot['heartbeatAgeSeconds'] ?? null,
+                'fresh' => (bool) ($snapshot['fresh'] ?? false),
             ];
+        }
+
+        return $result;
+    }
+
+    private function accountSyncStatus(string $workspaceId): array
+    {
+        $workspaces = FutureTradeBotConfig::query()
+            ->where('enable_live_trading', true)
+            ->when($workspaceId !== '', fn ($q) => $q->where('workspace_id', $workspaceId))
+            ->pluck('workspace_id')
+            ->unique()
+            ->values();
+
+        $sync = app(FutureTradeAccountSyncService::class);
+        $result = [];
+        foreach ($workspaces as $id) {
+            $state = $sync->snapshot((string) $id);
+            $lastSyncAt = $state['last_sync_at'] ?? null;
+            $state['age_seconds'] = $lastSyncAt ? max(0, time() - strtotime((string) $lastSyncAt)) : null;
+            $result[] = $state;
         }
 
         return $result;
@@ -441,13 +467,45 @@ class FutureTradeRuntimeStatusCommand extends Command
         foreach ($streams as $s) {
             $label = ($s['status'] === 'CONNECTED' && $s['fresh']) ? $ok : $warn;
             $this->line(sprintf(
-                '  [%s] workspace=%s slot=%s status=%s age=%ss',
+                '  [%s] workspace=%s slot=%s status=%s configured=%s source=%s age=%ss',
                 $label,
                 $s['workspace_id'],
                 $s['config_id'],
                 $s['status'],
+                ($s['configured'] ?? false) ? 'yes' : 'no',
+                $s['credential_source'] ?? 'none',
                 $s['heartbeat_age_s'] ?? '?'
             ));
+            if (! empty($s['credential_reason'])) {
+                $this->line('       reason='.$s['credential_reason']);
+            }
+        }
+        $this->newLine();
+
+        $this->line('<options=bold>[ Account Sync ]</>');
+        $accountSync = $status['account_sync'] ?? [];
+        if (empty($accountSync)) {
+            $this->line('  No live-enabled workspace account sync state found.');
+        }
+        foreach ($accountSync as $row) {
+            $age = $row['age_seconds'] ?? null;
+            $rowStatus = (string) ($row['status'] ?? 'UNKNOWN');
+            $label = (($row['ok'] ?? false) && $age !== null && $age <= 900) ? $ok : ($rowStatus === 'UNKNOWN' ? $warn : $err);
+            $this->line(sprintf(
+                '  [%s] workspace=%s status=%s source=%s age=%ss wallet=%s available=%s unrealized=%s positions=%s',
+                $label,
+                $row['workspace_id'] ?? 'n/a',
+                $rowStatus,
+                $row['credential_source'] ?? 'n/a',
+                $age ?? '?',
+                $row['wallet_balance'] ?? '-',
+                $row['available_balance'] ?? '-',
+                $row['unrealized_pnl'] ?? '-',
+                $row['open_position_count'] ?? '-'
+            ));
+            if (! empty($row['reason'])) {
+                $this->line('       reason='.$row['reason']);
+            }
         }
         $this->newLine();
 

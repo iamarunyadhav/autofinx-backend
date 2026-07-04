@@ -71,6 +71,8 @@ class FutureTradeBotConfig extends BaseModel
             (array) config('future_trade.defaults.indicatorInfluence', []),
             (array) ($settings['indicatorInfluence'] ?? [])
         );
+        $settings['_workspace_id'] = (string) $this->workspace_id;
+        $settings['_config_id'] = (string) $this->id;
 
         return $settings;
     }
