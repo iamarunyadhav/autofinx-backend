@@ -29,7 +29,7 @@ class FutureTradeUserStreamCommand extends Command
         $perConfigSlice = 10;
 
         $lockKey = 'autofinx_ft:user_stream_lock' . ($workspaceId !== '' ? ':' . $workspaceId : '');
-        $lockTtl = $duration > 0 ? max(30, $duration + 10) : 86400;
+        $lockTtl = $duration > 0 ? max(30, $duration + 10) : 120;
         $lock = Cache::lock($lockKey, $lockTtl);
         while (! $lock->get()) {
             $this->warn('[FT USER STREAM WAIT] another consumer already holds the lock');

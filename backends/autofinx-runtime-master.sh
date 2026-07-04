@@ -9,11 +9,19 @@ ACTION="${1:-daemon}"
 CHECK_INTERVAL_SECONDS="${AUTOFINX_MASTER_INTERVAL_SECONDS:-5}"
 LIVE_FEED_STALE_SECONDS="${AUTOFINX_MASTER_LIVE_FEED_STALE_SECONDS:-8}"
 LIVE_FEED_RESTART_COOLDOWN_SECONDS="${AUTOFINX_MASTER_LIVE_FEED_RESTART_COOLDOWN_SECONDS:-15}"
+USER_STREAM_STALE_SECONDS="${AUTOFINX_MASTER_USER_STREAM_STALE_SECONDS:-30}"
+USER_STREAM_RESTART_COOLDOWN_SECONDS="${AUTOFINX_MASTER_USER_STREAM_RESTART_COOLDOWN_SECONDS:-20}"
+ACCOUNT_SYNC_MAX_AGE_SECONDS="${AUTOFINX_MASTER_ACCOUNT_SYNC_MAX_AGE_SECONDS:-120}"
+ACCOUNT_SYNC_COOLDOWN_SECONDS="${AUTOFINX_MASTER_ACCOUNT_SYNC_COOLDOWN_SECONDS:-60}"
 SCHEDULE_RUN_MAX_SECONDS="${AUTOFINX_MASTER_SCHEDULE_RUN_MAX_SECONDS:-120}"
 LOG_FILE="${AUTOFINX_MASTER_LOG_FILE:-$APP_DIR/storage/logs/autofinx-runtime-master.log}"
 LOCK_DIR="$APP_DIR/storage/framework/autofinx-runtime-master.lock"
 RESTART_STAMP="$APP_DIR/storage/framework/autofinx-runtime-master-live-feed-restart.at"
+USER_STREAM_RESTART_STAMP="$APP_DIR/storage/framework/autofinx-runtime-master-user-stream-restart.at"
+ACCOUNT_SYNC_STAMP="$APP_DIR/storage/framework/autofinx-runtime-master-account-sync.at"
 HEARTBEAT_FILE="$APP_DIR/storage/framework/autofinx-live-feed-heartbeat.json"
+USER_STREAM_HEARTBEAT_FILE="$APP_DIR/storage/framework/autofinx-user-stream-heartbeat.json"
+ACCOUNT_SYNC_HEARTBEAT_FILE="$APP_DIR/storage/framework/autofinx-account-sync-heartbeat.json"
 
 cd "$APP_DIR"
 mkdir -p storage/logs storage/framework
@@ -191,6 +199,24 @@ heartbeat_age() {
   echo "$(($(date +%s) - epoch))"
 }
 
+json_epoch_age() {
+  local path="$1"
+  local key="$2"
+  if [ ! -s "$path" ]; then
+    echo 999999
+    return 0
+  fi
+
+  local epoch
+  epoch="$("$PHP" -r '$p=$argv[1]; $k=$argv[2]; $j=json_decode((string) @file_get_contents($p), true); echo is_array($j) ? (int) ($j[$k] ?? 0) : 0;' "$path" "$key" 2>/dev/null || echo 0)"
+  if [ "$epoch" -le 0 ]; then
+    echo 999999
+    return 0
+  fi
+
+  echo "$(($(date +%s) - epoch))"
+}
+
 restart_live_feed_if_stale() {
   if ! supervisor_available || ! supervisor_exists "autofinx-trading:live-feed"; then
     return 0
@@ -212,6 +238,57 @@ restart_live_feed_if_stale() {
   log "live-feed stale age=${age}s; restarting supervisor-owned feed"
   supervisorctl restart "autofinx-trading:live-feed" >> "$LOG_FILE" 2>&1 || true
   date +%s > "$RESTART_STAMP"
+}
+
+user_stream_age() {
+  json_epoch_age "$USER_STREAM_HEARTBEAT_FILE" "heartbeat_epoch"
+}
+
+restart_user_stream_if_stale() {
+  if ! supervisor_available || ! supervisor_exists "autofinx-trading:user-stream-loop"; then
+    return 0
+  fi
+
+  local age now_epoch last_restart
+  age="$(user_stream_age)"
+  if [ "$age" -le "$USER_STREAM_STALE_SECONDS" ] && [ "$(php_artisan_count "artisan future-trade:user-stream")" -ge 1 ]; then
+    return 0
+  fi
+
+  now_epoch="$(date +%s)"
+  last_restart="$(cat "$USER_STREAM_RESTART_STAMP" 2>/dev/null || echo 0)"
+  if [ $((now_epoch - last_restart)) -lt "$USER_STREAM_RESTART_COOLDOWN_SECONDS" ]; then
+    log "user-stream stale age=${age}s; cooldown active"
+    return 0
+  fi
+
+  log "user-stream stale age=${age}s; clearing lock and restarting supervisor-owned stream"
+  "$PHP" artisan cache:forget autofinx_ft:user_stream_lock >> "$LOG_FILE" 2>&1 || true
+  pkill -f "artisan future-trade:user-stream" >/dev/null 2>&1 || true
+  supervisorctl restart "autofinx-trading:user-stream-loop" >> "$LOG_FILE" 2>&1 || true
+  date +%s > "$USER_STREAM_RESTART_STAMP"
+}
+
+latest_account_sync_age() {
+  json_epoch_age "$ACCOUNT_SYNC_HEARTBEAT_FILE" "sync_epoch"
+}
+
+run_account_sync_if_stale() {
+  local now_epoch last_sync age
+  now_epoch="$(date +%s)"
+  last_sync="$(cat "$ACCOUNT_SYNC_STAMP" 2>/dev/null || echo 0)"
+  if [ $((now_epoch - last_sync)) -lt "$ACCOUNT_SYNC_COOLDOWN_SECONDS" ]; then
+    return 0
+  fi
+
+  age="$(latest_account_sync_age)"
+  if [ "$age" -le "$ACCOUNT_SYNC_MAX_AGE_SECONDS" ]; then
+    return 0
+  fi
+
+  log "account-sync stale age=${age}s; refreshing Binance Futures account snapshot"
+  timeout 90 "$PHP" artisan future-trade:account-sync >> "$LOG_FILE" 2>&1 || true
+  date +%s > "$ACCOUNT_SYNC_STAMP"
 }
 
 run_once() {
@@ -241,6 +318,8 @@ run_once() {
   done
 
   restart_live_feed_if_stale
+  restart_user_stream_if_stale
+  run_account_sync_if_stale
 }
 
 cleanup_stale_schedule_run() {
@@ -269,6 +348,8 @@ status_report() {
   printf "quick_settler=%s\n" "$(process_count "autofinx-quick-settler.sh")"
   printf "robot_evaluator=%s\n" "$(process_count "autofinx-robot-evaluator.sh")"
   printf "live_feed_age_s=%s\n" "$(heartbeat_age)"
+  printf "user_stream_age_s=%s\n" "$(user_stream_age)"
+  printf "account_sync_age_s=%s\n" "$(latest_account_sync_age)"
 }
 
 cleanup_cron() {
@@ -306,7 +387,7 @@ case "$ACTION" in
     ;;
   daemon)
     acquire_lock
-    log "daemon started interval=${CHECK_INTERVAL_SECONDS}s live_feed_stale=${LIVE_FEED_STALE_SECONDS}s"
+    log "daemon started interval=${CHECK_INTERVAL_SECONDS}s live_feed_stale=${LIVE_FEED_STALE_SECONDS}s user_stream_stale=${USER_STREAM_STALE_SECONDS}s account_sync_max_age=${ACCOUNT_SYNC_MAX_AGE_SECONDS}s"
     while true; do
       run_once || true
       sleep "$CHECK_INTERVAL_SECONDS"

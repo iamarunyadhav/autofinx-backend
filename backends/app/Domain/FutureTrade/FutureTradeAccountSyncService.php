@@ -11,6 +11,7 @@ use Throwable;
 class FutureTradeAccountSyncService
 {
     public const STATE_KEY = 'autofinx_ft:account_sync:%s:state';
+    private const HEARTBEAT_FILE = 'framework/autofinx-account-sync-heartbeat.json';
 
     public function __construct(private readonly FutureTradeFuturesCredentialResolver $credentials)
     {
@@ -40,11 +41,21 @@ class FutureTradeAccountSyncService
 
     public function snapshot(string $workspaceId): array
     {
-        return (array) Cache::get(sprintf(self::STATE_KEY, $workspaceId), [
+        $state = (array) Cache::get(sprintf(self::STATE_KEY, $workspaceId), []);
+        if ($state !== []) {
+            return $state;
+        }
+
+        $fileState = $this->readHeartbeatFile($workspaceId);
+        if ($fileState !== []) {
+            return $fileState;
+        }
+
+        return [
             'status' => 'UNKNOWN',
             'last_sync_at' => null,
             'age_seconds' => null,
-        ]);
+        ];
     }
 
     private function syncConfigs(array $configs): array
@@ -197,7 +208,42 @@ class FutureTradeAccountSyncService
         $state['last_sync_at'] = now()->toIso8601String();
         $state['age_seconds'] = 0;
         Cache::put(sprintf(self::STATE_KEY, $workspaceId), $state, 900);
+        $this->writeHeartbeatFile($workspaceId, $state);
 
         return $state;
+    }
+
+    private function writeHeartbeatFile(string $workspaceId, array $state): void
+    {
+        try {
+            @file_put_contents(storage_path(self::HEARTBEAT_FILE), json_encode(array_merge($state, [
+                'workspace_id' => $workspaceId,
+                'server_now' => now()->toIso8601String(),
+                'sync_epoch' => time(),
+            ]), JSON_UNESCAPED_SLASHES));
+        } catch (Throwable) {
+            // Runtime-master fallback only.
+        }
+    }
+
+    private function readHeartbeatFile(string $workspaceId): array
+    {
+        try {
+            $path = storage_path(self::HEARTBEAT_FILE);
+            if (! is_file($path)) {
+                return [];
+            }
+            $payload = json_decode((string) file_get_contents($path), true);
+            if (! is_array($payload)) {
+                return [];
+            }
+            if ((string) ($payload['workspace_id'] ?? '') !== $workspaceId) {
+                return [];
+            }
+
+            return $payload;
+        } catch (Throwable) {
+            return [];
+        }
     }
 }

@@ -42,6 +42,7 @@ class FutureTradeUserStreamService
     public const STATUS_NOT_CONFIGURED = 'NOT_CONFIGURED';
 
     private const STATE_TTL_SECONDS = 3600;
+    private const HEARTBEAT_FILE = 'framework/autofinx-user-stream-heartbeat.json';
 
     // Global throttle: max 1 createListenKey attempt per 1.2 s across all configs/processes.
     private const CLK_THROTTLE_KEY = 'autofinx_ft:create_listen_key_last_ms';
@@ -81,6 +82,12 @@ class FutureTradeUserStreamService
         $hasCreds = (bool) ($resolved['configured'] ?? false);
 
         $state = (array) Cache::get($this->stateKey((string) $config->id), []);
+        if ($state === []) {
+            $fileState = $this->readHeartbeatFile($config);
+            if ($fileState !== []) {
+                $state = $fileState;
+            }
+        }
         $lastEventAt = isset($state['last_event_at']) ? Carbon::parse((string) $state['last_event_at']) : null;
         $lastHeartbeatAt = isset($state['last_heartbeat_at']) ? Carbon::parse((string) $state['last_heartbeat_at']) : null;
         $ageSeconds = $lastEventAt ? max(0, $lastEventAt->diffInSeconds(now())) : null;
@@ -127,6 +134,7 @@ class FutureTradeUserStreamService
             $state['last_event_type'] = (string) ($payload['e'] ?? '');
         }
         Cache::put($this->stateKey((string) $config->id), $state, self::STATE_TTL_SECONDS);
+        $this->writeHeartbeatFile($config, $state);
     }
 
     public function recordHeartbeat(FutureTradeBotConfig $config, string $source = 'runtime'): void
@@ -136,6 +144,7 @@ class FutureTradeUserStreamService
         $state['last_heartbeat_at'] = now()->toIso8601String();
         $state['last_heartbeat_source'] = $source;
         Cache::put($this->stateKey((string) $config->id), $state, self::STATE_TTL_SECONDS);
+        $this->writeHeartbeatFile($config, $state);
     }
 
     public function recordKeepAlive(FutureTradeBotConfig $config): void
@@ -145,6 +154,7 @@ class FutureTradeUserStreamService
         $state['last_heartbeat_at'] = now()->toIso8601String();
         $state['last_heartbeat_source'] = 'keepalive';
         Cache::put($this->stateKey((string) $config->id), $state, self::STATE_TTL_SECONDS);
+        $this->writeHeartbeatFile($config, $state);
     }
 
     public function rememberListenKey(FutureTradeBotConfig $config, string $listenKey): void
@@ -470,6 +480,42 @@ class FutureTradeUserStreamService
     private function stateKey(string $configId): string
     {
         return sprintf(self::STATE_KEY, $configId);
+    }
+
+    private function writeHeartbeatFile(FutureTradeBotConfig $config, array $state): void
+    {
+        try {
+            $payload = array_merge($state, [
+                'workspace_id' => (string) $config->workspace_id,
+                'config_id' => (string) $config->id,
+                'server_now' => now()->toIso8601String(),
+                'heartbeat_epoch' => time(),
+            ]);
+            @file_put_contents(storage_path(self::HEARTBEAT_FILE), json_encode($payload, JSON_UNESCAPED_SLASHES));
+        } catch (Throwable) {
+            // File heartbeat is a supervisor/runtime-master fallback only.
+        }
+    }
+
+    private function readHeartbeatFile(FutureTradeBotConfig $config): array
+    {
+        try {
+            $path = storage_path(self::HEARTBEAT_FILE);
+            if (! is_file($path)) {
+                return [];
+            }
+            $payload = json_decode((string) file_get_contents($path), true);
+            if (! is_array($payload)) {
+                return [];
+            }
+            if ((string) ($payload['config_id'] ?? '') !== (string) $config->id) {
+                return [];
+            }
+
+            return $payload;
+        } catch (Throwable) {
+            return [];
+        }
     }
 
     private function ingestAccountUpdate(FutureTradeBotConfig $config, array $payload): bool
