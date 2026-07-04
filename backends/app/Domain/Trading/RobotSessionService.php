@@ -493,7 +493,7 @@ class RobotSessionService
         $atrRatio = ($atrAvg > 0 && $atrNow > 0) ? min(1.5, max(0.5, $atrAvg / $atrNow)) : 1.0;
         $adjustedStake = $this->robotEntryStake($session, $atrRatio);
 
-        $preflightBlock = $this->entryPreflightBlock($session, $candles, (string) $signal['direction']);
+        $preflightBlock = $this->entryPreflightBlock($session, $candles, (string) $signal['direction'], $adjustedStake);
         if ($preflightBlock !== null) {
             $this->recordEntryBlock($session, $preflightBlock);
 
@@ -730,7 +730,7 @@ class RobotSessionService
             $atrRatio = ($atrAvg > 0 && $atrNow > 0) ? min(1.5, max(0.5, $atrAvg / $atrNow)) : 1.0;
             $adjustedStake = $this->robotEntryStake($session, $atrRatio);
 
-            $preflightBlock = $this->entryPreflightBlock($session, $candles, $openDirection);
+            $preflightBlock = $this->entryPreflightBlock($session, $candles, $openDirection, $adjustedStake);
             if ($preflightBlock !== null) {
                 $this->recordEntryBlock($session, $preflightBlock);
 
@@ -802,11 +802,13 @@ class RobotSessionService
                 $consecutiveLosses = (int) $session->consecutive_losses; // fresh after refreshPerformance
 
                 // ── Auto-pause after 3+ consecutive losses ─────────────────
-                if ($consecutiveLosses >= 3) {
+                $maxLossStreak = max(1, (int) ($session->max_consecutive_losses ?? 3));
+                if ($consecutiveLosses >= $maxLossStreak) {
                     $session->status = 'PAUSED';
                     $session->last_error = sprintf(
-                        'Auto-paused after %d consecutive losses. Resumes at UTC midnight or manual reset.',
-                        $consecutiveLosses
+                        'Auto-paused after %d consecutive losses (limit %d). Resumes at UTC midnight or manual reset.',
+                        $consecutiveLosses,
+                        $maxLossStreak
                     );
                     $extraRuntime['auto_paused_at'] = now()->toIso8601String();
                     $extraRuntime['auto_pause_reason'] = 'consecutive_losses';
@@ -1434,7 +1436,7 @@ class RobotSessionService
         ];
     }
 
-    private function entryPreflightBlock(RobotSession $session, array $candles, string $side): ?array
+    private function entryPreflightBlock(RobotSession $session, array $candles, string $side, ?float $stake = null): ?array
     {
         if (strtolower((string) $session->mode) !== 'live' || strtolower((string) $session->provider_key) !== 'binance') {
             return null;
@@ -1470,6 +1472,19 @@ class RobotSessionService
                 'reason' => (string) ($feed['reason'] ?? 'Server websocket feed is not fresh.'),
                 'symbol' => $session->symbol,
                 'feed' => $feed,
+            ];
+        }
+
+        $edge = $this->robotNetEdgeEstimate($session, $candles, $stake);
+        if (($edge['tradeable'] ?? true) === false) {
+            return [
+                'session_id' => $session->id,
+                'status' => 'net_edge_block',
+                'action' => 'skipped',
+                'reason' => (string) ($edge['reason'] ?? 'Expected move is too small after fees and slippage.'),
+                'symbol' => $session->symbol,
+                'side' => strtolower($side),
+                'edge' => $edge,
             ];
         }
 
@@ -1534,6 +1549,47 @@ class RobotSessionService
         }
 
         return null;
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function robotNetEdgeEstimate(RobotSession $session, array $candles, ?float $stake): array
+    {
+        $stakeAmount = $this->normalizeStake((float) ($stake ?: $session->base_stake), 2);
+        $atrPct = $this->computeAtrAvgPct($candles);
+        $expectedMovePct = max(0.0, $atrPct * 0.35);
+
+        $feeRate = max(0.0, (float) config('trading.binance_futures_taker_fee_rate', 0.0005));
+        $slippageBufferPct = max(0.0, (float) config('robot_trade.live_slippage_buffer_pct', 0.04));
+        $costPct = ($feeRate * 2 * 100) + $slippageBufferPct;
+        $requiredMovePct = $costPct * max(1.0, (float) config('robot_trade.live_min_edge_cost_multiplier', 1.15));
+
+        $expectedGrossUsdt = $stakeAmount * ($expectedMovePct / 100);
+        $requiredCostUsdt = $stakeAmount * ($requiredMovePct / 100);
+
+        $result = [
+            'tradeable' => $expectedMovePct >= $requiredMovePct,
+            'stake' => round($stakeAmount, 8),
+            'atr_pct' => round($atrPct, 4),
+            'expected_move_pct' => round($expectedMovePct, 4),
+            'fee_rate' => round($feeRate, 6),
+            'round_trip_fee_pct' => round($feeRate * 2 * 100, 4),
+            'slippage_buffer_pct' => round($slippageBufferPct, 4),
+            'required_move_pct' => round($requiredMovePct, 4),
+            'expected_gross_usdt' => round($expectedGrossUsdt, 8),
+            'required_cost_usdt' => round($requiredCostUsdt, 8),
+        ];
+
+        if (! $result['tradeable']) {
+            $result['reason'] = sprintf(
+                'Expected move %.4f%% is below fee/slippage break-even %.4f%%.',
+                $expectedMovePct,
+                $requiredMovePct
+            );
+        }
+
+        return $result;
     }
 
     private function freshServerFeed(RobotSession $session): array

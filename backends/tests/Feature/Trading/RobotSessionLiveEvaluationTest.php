@@ -57,8 +57,8 @@ test('robot session evaluates in live mode and opens a live quick trade', functi
                 $rows[] = [
                     1700000000000 + ($i * 60000),
                     (string) $open,
-                    (string) ($close + 2),
-                    (string) ($open - 2),
+                    (string) ($close + 8),
+                    (string) ($open - 8),
                     (string) $close,
                     '100',
                 ];
@@ -108,6 +108,76 @@ test('robot session evaluates in live mode and opens a live quick trade', functi
         ->and(RobotSession::findOrFail($session->id)->mode)->toBe('live');
 });
 
+test('robot session blocks live entry when expected move cannot beat fees and slippage', function () {
+    $user = User::factory()->create();
+    $workspace = Workspace::factory()->create();
+    $integration = robotLiveIntegration($workspace->id);
+
+    robotSeedLiveTradingSettings($workspace->id, $integration->id);
+
+    Http::fake(function (\Illuminate\Http\Client\Request $request) {
+        $url = $request->url();
+
+        if (str_contains($url, '/fapi/v2/balance')) {
+            return Http::response([
+                ['asset' => 'USDT', 'balance' => '1000.00', 'availableBalance' => '1000.00'],
+            ], 200);
+        }
+
+        if (str_contains($url, '/fapi/v1/ticker/price')) {
+            return Http::response(['symbol' => 'ETHUSDT', 'price' => '2000.00'], 200);
+        }
+
+        if (str_contains($url, '/fapi/v1/klines')) {
+            $rows = [];
+            for ($i = 0; $i < 100; $i++) {
+                $open = 1950 + ($i * 0.2);
+                $close = $open + 0.1;
+                $rows[] = [
+                    1700000000000 + ($i * 60000),
+                    (string) $open,
+                    (string) ($close + 2),
+                    (string) ($open - 2),
+                    (string) $close,
+                    '100',
+                ];
+            }
+
+            return Http::response($rows, 200);
+        }
+
+        if (str_contains($url, '/fapi/v1/order') && $request->method() === 'POST') {
+            throw new RuntimeException('Order endpoint should not be called for low-edge robot entry.');
+        }
+
+        return Http::response([], 200);
+    });
+
+    $session = app(RobotSessionService::class)->create($workspace->id, [
+        'name' => 'ETH live robot',
+        'symbol' => 'ETHUSDT',
+        'timeframe' => '1m',
+        'expiry_seconds' => 60,
+        'indicator_set' => ['MACD'],
+        'strategy_profile' => 'balanced',
+        'base_stake' => 50,
+        'confidence_threshold' => 50,
+        'provider' => 'binance',
+        'integration_id' => $integration->id,
+    ], $user->id);
+
+    $session = app(RobotSessionService::class)->start($session);
+    seedRobotFeedStatus($workspace->id, 'ETHUSDT', 2000.00);
+    seedRobotLiveFeed('ETHUSDT', 2000.00);
+
+    app(RobotSessionService::class)->evaluateSession($session);
+    $result = app(RobotSessionService::class)->evaluateSession($session->fresh());
+
+    expect($result['status'])->toBe('net_edge_block')
+        ->and($result['edge']['tradeable'])->toBeFalse()
+        ->and(QuickTrade::where('robot_session_id', $session->id)->exists())->toBeFalse();
+});
+
 test('robot session blocks live entry when server websocket feed is stale', function () {
     $user = User::factory()->create();
     $workspace = Workspace::factory()->create();
@@ -130,8 +200,8 @@ test('robot session blocks live entry when server websocket feed is stale', func
                 $rows[] = [
                     1700000000000 + ($i * 60000),
                     (string) $open,
-                    (string) ($close + 2),
-                    (string) ($open - 2),
+                    (string) ($close + 8),
+                    (string) ($open - 8),
                     (string) $close,
                     '100',
                 ];
