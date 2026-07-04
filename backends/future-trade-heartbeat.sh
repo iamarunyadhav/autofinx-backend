@@ -44,6 +44,18 @@ count_processes() {
   pgrep -f "$pattern" 2>/dev/null | wc -l | tr -d ' '
 }
 
+supervisor_program_exists() {
+  local program="$1"
+  command -v supervisorctl >/dev/null 2>&1 \
+    && supervisorctl status 2>/dev/null | awk -v program="$program" '$1 == program { found=1 } END { exit found ? 0 : 1 }'
+}
+
+supervisor_program_running() {
+  local program="$1"
+  command -v supervisorctl >/dev/null 2>&1 \
+    && supervisorctl status 2>/dev/null | awk -v program="$program" '$1 == program && $2 == "RUNNING" { found=1 } END { exit found ? 0 : 1 }'
+}
+
 kill_extra_processes() {
   local pattern="$1"
   local label="$2"
@@ -78,6 +90,13 @@ start_worker_if_missing() {
 
 start_live_feed() {
   local reason="$1"
+  if supervisor_program_exists "autofinx-trading:live-feed"; then
+    echo "[HEARTBEAT] starting live-feed via supervisor reason=$reason"
+    supervisorctl start "autofinx-trading:live-feed" >/dev/null 2>&1 || supervisorctl restart "autofinx-trading:live-feed" >/dev/null 2>&1 || true
+    date +%s > "$RESTART_STAMP"
+    return 0
+  fi
+
   echo "[HEARTBEAT] starting live-feed reason=$reason symbols=$FT_SYMBOLS streams=$FT_STREAMS"
   nohup "$PHP" artisan future-trade:live-feed \
     --symbols="$FT_SYMBOLS" \
@@ -96,10 +115,8 @@ restart_live_feed_if_needed() {
 
   feed_count="$(count_processes "artisan future-trade:live-feed")"
   if [ "$feed_count" -gt 1 ]; then
-    echo "[HEARTBEAT] live-feed duplicate count=$feed_count; restarting single feed"
-    pkill -f "artisan future-trade:live-feed" || true
-    sleep 1
-    start_live_feed "duplicate_processes"
+    echo "[HEARTBEAT] live-feed duplicate count=$feed_count; deduping"
+    APP_DIR="$APP_DIR" bash "$APP_DIR/autofinx-dedupe-runtime.sh" || true
     return 0
   fi
 
@@ -139,9 +156,14 @@ restart_live_feed_if_needed() {
     fi
 
     echo "[HEARTBEAT] live-feed stale age=${feed_age}s; restarting"
-    pkill -f "artisan future-trade:live-feed" || true
-    sleep 1
-    start_live_feed "stale_feed_${feed_age}s"
+    if supervisor_program_exists "autofinx-trading:live-feed"; then
+      supervisorctl restart "autofinx-trading:live-feed" >/dev/null 2>&1 || true
+      date +%s > "$RESTART_STAMP"
+    else
+      pkill -f "artisan future-trade:live-feed" || true
+      sleep 1
+      start_live_feed "stale_feed_${feed_age}s"
+    fi
     return 0
   fi
 
@@ -163,6 +185,10 @@ start_runtime_slice_if_missing() {
 }
 
 echo "[HEARTBEAT] start at $(date -Is)"
+
+if [ -x "$APP_DIR/autofinx-dedupe-runtime.sh" ]; then
+  APP_DIR="$APP_DIR" "$APP_DIR/autofinx-dedupe-runtime.sh" || true
+fi
 
 start_worker_if_missing \
   "queue:work.*--queue=critical,execution,reconcile,monitoring" \

@@ -86,6 +86,9 @@ restart_live_feed() {
 
   log "restarting live-feed reason=$reason"
   if supervisor_program_exists; then
+    if [ -x "$APP_DIR/autofinx-dedupe-runtime.sh" ]; then
+      APP_DIR="$APP_DIR" "$APP_DIR/autofinx-dedupe-runtime.sh" >> "$WATCHDOG_LOG" 2>&1 || true
+    fi
     supervisorctl restart "autofinx-trading:live-feed" >> "$WATCHDOG_LOG" 2>&1 || true
     date +%s > "$RESTART_STAMP"
     return 0
@@ -97,6 +100,10 @@ restart_live_feed() {
 }
 
 log "started interval=${CHECK_INTERVAL_SECONDS}s stale=${STALE_SECONDS}s cooldown=${RESTART_COOLDOWN_SECONDS}s warmup=${WARMUP_SECONDS}s"
+
+if [ -x "$APP_DIR/autofinx-dedupe-runtime.sh" ]; then
+  APP_DIR="$APP_DIR" "$APP_DIR/autofinx-dedupe-runtime.sh" >> "$WATCHDOG_LOG" 2>&1 || true
+fi
 
 while true; do
   now_epoch="$(date +%s)"

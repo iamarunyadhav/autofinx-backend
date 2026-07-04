@@ -39,7 +39,9 @@ fi
 
 mkdir -p "$LOG_DIR"
 chmod +x "$APP_DIR/future-trade-live-feed-watchdog.sh"
+chmod +x "$APP_DIR/autofinx-dedupe-runtime.sh" 2>/dev/null || true
 chown "$RUN_USER:$RUN_USER" "$APP_DIR/future-trade-live-feed-watchdog.sh" || true
+chown "$RUN_USER:$RUN_USER" "$APP_DIR/autofinx-dedupe-runtime.sh" 2>/dev/null || true
 chown -R "$RUN_USER:$RUN_USER" "$LOG_DIR" || true
 
 cat >"$SUP_CONF" <<EOF
