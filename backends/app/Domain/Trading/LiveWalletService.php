@@ -69,10 +69,17 @@ class LiveWalletService
     ): WalletAccount {
         return DB::transaction(function () use ($workspaceId, $integration, $stakeAmount, $walletAccountId, $currency, $meta) {
             $account = $this->resolveAccount($workspaceId, $integration, $walletAccountId, $currency);
+            $account = $this->refreshProviderSnapshot($account, $integration);
             $account = WalletAccount::whereKey($account->id)->lockForUpdate()->firstOrFail();
 
             if ((float) $account->available < $stakeAmount) {
-                throw new RuntimeException('Insufficient live wallet balance for this trade.');
+                throw new RuntimeException(sprintf(
+                    'Insufficient live wallet balance for this trade. Available %.8f %s, required %.8f %s.',
+                    (float) $account->available,
+                    strtoupper((string) $account->currency),
+                    $stakeAmount,
+                    strtoupper((string) $account->currency)
+                ));
             }
 
             $account->available = (float) $account->available - $stakeAmount;
@@ -237,6 +244,11 @@ class LiveWalletService
             return $account;
         }
 
+        return $this->refreshProviderSnapshot($account, $integration);
+    }
+
+    public function refreshProviderSnapshot(WalletAccount $account, Integration $integration): WalletAccount
+    {
         $provider = $this->providers->for((string) $integration->provider_key);
         $snapshot = $provider->availableBalance($integration, (string) ($account->currency ?: 'USDT'));
         $balance = (float) ($snapshot['balance'] ?? 0);
