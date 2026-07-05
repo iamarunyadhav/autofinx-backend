@@ -773,6 +773,24 @@ class RobotSessionService
         }
 
         if ($action === 'CLOSE') {
+            $closeDelay = $this->delayLiveRobotClose($session, $decision, $closePrice);
+            if ($closeDelay !== null) {
+                $session->runtime_json = array_merge((array) $session->runtime_json, [
+                    'latest_close_guard' => $closeDelay,
+                    'last_evaluation_at' => now()->toIso8601String(),
+                ]);
+                $session->save();
+
+                return [
+                    'session_id' => $session->id,
+                    'status' => 'holding_min_age',
+                    'action' => 'hold',
+                    'decision' => array_merge($decision, [
+                        'close_guard' => $closeDelay,
+                    ]),
+                ];
+            }
+
             // Capture PnL snapshot BEFORE close so we can measure the trade result.
             $pnlBefore = (float) $session->total_pnl;
             $entrySide = (string) $session->active_side;
@@ -1563,13 +1581,15 @@ class RobotSessionService
         $feeRate = max(0.0, (float) config('trading.binance_futures_taker_fee_rate', 0.0005));
         $slippageBufferPct = max(0.0, (float) config('robot_trade.live_slippage_buffer_pct', 0.04));
         $costPct = ($feeRate * 2 * 100) + $slippageBufferPct;
-        $requiredMovePct = $costPct * max(1.0, (float) config('robot_trade.live_min_edge_cost_multiplier', 1.15));
+        $requiredMovePct = $costPct * max(1.0, (float) config('robot_trade.live_min_edge_cost_multiplier', 2.0));
 
         $expectedGrossUsdt = $stakeAmount * ($expectedMovePct / 100);
         $requiredCostUsdt = $stakeAmount * ($requiredMovePct / 100);
+        $expectedNetUsdt = $expectedGrossUsdt - $requiredCostUsdt;
+        $minExpectedNetUsdt = max(0.0, (float) config('robot_trade.live_min_expected_net_usdt', 0.03));
 
         $result = [
-            'tradeable' => $expectedMovePct >= $requiredMovePct,
+            'tradeable' => $expectedMovePct >= $requiredMovePct && $expectedNetUsdt >= $minExpectedNetUsdt,
             'stake' => round($stakeAmount, 8),
             'atr_pct' => round($atrPct, 4),
             'expected_move_pct' => round($expectedMovePct, 4),
@@ -1579,17 +1599,70 @@ class RobotSessionService
             'required_move_pct' => round($requiredMovePct, 4),
             'expected_gross_usdt' => round($expectedGrossUsdt, 8),
             'required_cost_usdt' => round($requiredCostUsdt, 8),
+            'expected_net_usdt' => round($expectedNetUsdt, 8),
+            'min_expected_net_usdt' => round($minExpectedNetUsdt, 8),
         ];
 
         if (! $result['tradeable']) {
             $result['reason'] = sprintf(
-                'Expected move %.4f%% is below fee/slippage break-even %.4f%%.',
+                'Expected move %.4f%% / net %.4f USDT is below live fee/slippage requirement %.4f%% / %.4f USDT.',
                 $expectedMovePct,
-                $requiredMovePct
+                $expectedNetUsdt,
+                $requiredMovePct,
+                $minExpectedNetUsdt
             );
         }
 
         return $result;
+    }
+
+    /**
+     * @param  array<string, mixed>  $decision
+     * @return array<string, mixed>|null
+     */
+    private function delayLiveRobotClose(RobotSession $session, array $decision, float $closePrice): ?array
+    {
+        if (strtolower((string) $session->mode) !== 'live' || strtolower((string) $session->provider_key) !== 'binance') {
+            return null;
+        }
+        if (! $session->active_since || ! $session->active_side || (float) $session->active_entry_price <= 0 || $closePrice <= 0) {
+            return null;
+        }
+
+        $reason = strtolower((string) ($decision['reason'] ?? ''));
+        if (str_contains($reason, 'take profit')) {
+            return null;
+        }
+
+        $secondsInTrade = (int) abs(now()->diffInSeconds($session->active_since));
+        $minHoldSeconds = max(0, (int) config('robot_trade.live_min_hold_seconds', 60));
+        if ($secondsInTrade >= $minHoldSeconds) {
+            return null;
+        }
+
+        $side = strtoupper((string) $session->active_side);
+        $entry = (float) $session->active_entry_price;
+        $movePct = $entry > 0 ? (($closePrice - $entry) / $entry) * 100 : 0.0;
+        $adversePct = $side === 'SELL' ? $movePct : -1 * $movePct;
+        $emergencyStopPct = max(0.05, abs((float) ($session->stop_loss_pct ?? 0.4)));
+
+        if ($adversePct >= $emergencyStopPct) {
+            return null;
+        }
+
+        return [
+            'status' => 'min_hold_guard',
+            'reason' => 'Live robot close delayed to avoid fee-burning micro exits.',
+            'seconds_in_trade' => $secondsInTrade,
+            'min_hold_seconds' => $minHoldSeconds,
+            'side' => $side,
+            'entry_price' => round($entry, 8),
+            'current_price' => round($closePrice, 8),
+            'move_pct' => round($movePct, 4),
+            'adverse_pct' => round(max(0.0, $adversePct), 4),
+            'emergency_stop_pct' => round($emergencyStopPct, 4),
+            'original_close_reason' => (string) ($decision['reason'] ?? ''),
+        ];
     }
 
     private function freshServerFeed(RobotSession $session): array

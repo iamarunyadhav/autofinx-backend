@@ -57,8 +57,8 @@ test('robot session evaluates in live mode and opens a live quick trade', functi
                 $rows[] = [
                     1700000000000 + ($i * 60000),
                     (string) $open,
-                    (string) ($close + 8),
-                    (string) ($open - 8),
+                    (string) ($close + 20),
+                    (string) ($open - 20),
                     (string) $close,
                     '100',
                 ];
@@ -200,8 +200,8 @@ test('robot session blocks live entry when server websocket feed is stale', func
                 $rows[] = [
                     1700000000000 + ($i * 60000),
                     (string) $open,
-                    (string) ($close + 8),
-                    (string) ($open - 8),
+                    (string) ($close + 20),
+                    (string) ($open - 20),
                     (string) $close,
                     '100',
                 ];
