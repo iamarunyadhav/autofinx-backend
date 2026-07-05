@@ -3498,8 +3498,8 @@ class FutureTradeBotService
 
             return 'poor_regime_guard';
         }
-        $rrTp = (float) ($settings['takeProfitPercent'] ?? 0.45);
-        $rrRollback = (float) ($settings['rollbackLossPercent'] ?? 0.18);
+        $rrTp = $this->resolveRisk($settings, 'takeProfitPercent');
+        $rrRollback = $this->resolveRisk($settings, 'rollbackLossPercent');
         if (! $primePineExecution && $rrTp < $rrRollback * 1.8) {
             $this->emitTradeDecisionDebug($config, $signal, $dynamic, 'BLOCKED', ['risk_reward_guard']);
             $this->logThrottled(
@@ -3922,9 +3922,9 @@ class FutureTradeBotService
         ]);
 
         $reason = null;
-        if ($pct >= (float) ($settings['takeProfitPercent'] ?? 0.45)) {
+        if ($pct >= $this->resolveRisk($settings, 'takeProfitPercent')) {
             $reason = 'TAKE_PROFIT_HIT';
-        } elseif ($pct <= -abs((float) ($settings['rollbackLossPercent'] ?? 0.18))) {
+        } elseif ($pct <= -abs($this->resolveRisk($settings, 'rollbackLossPercent'))) {
             $reason = 'LOSS_ROLLBACK_TRIGGERED';
         } elseif (($side === 'LONG' && $price <= $this->stopLossPrice($entry, $side, $settings)) || ($side === 'SHORT' && $price >= $this->stopLossPrice($entry, $side, $settings))) {
             $reason = 'STOP_LOSS_HIT';
@@ -5534,8 +5534,8 @@ class FutureTradeBotService
                     'dynamicSlMultiplier' => round($dynamicSlMult, 2),
                     'riskDistance' => round($riskDistance, 8),
                     'riskPercent' => round($riskPercent, 4),
-                    'tp1RR' => (float) ($settings['tp1RR'] ?? 1.0),
-                    'tp2RR' => (float) ($settings['tp2RR'] ?? 2.0),
+                    'tp1RR' => $this->resolveRisk($settings, 'tp1RR'),
+                    'tp2RR' => $this->resolveRisk($settings, 'tp2RR'),
                     'trailAtrMultiplier' => (float) ($settings['trailAtrMultiplier'] ?? 1.0),
                 ],
                 'positiveFactors' => $positiveFactors,
@@ -5827,8 +5827,8 @@ class FutureTradeBotService
                 'risk' => [
                     'atr14' => round($atr14, 8),
                     'atrPercent' => round($atrPct, 4),
-                    'tp1RR' => (float) ($settings['tp1RR'] ?? 1.5),
-                    'tp2RR' => (float) ($settings['tp2RR'] ?? 3.0),
+                    'tp1RR' => $this->resolveRisk($settings, 'tp1RR'),
+                    'tp2RR' => $this->resolveRisk($settings, 'tp2RR'),
                     'trailAtrMultiplier' => (float) ($settings['trailAtrMultiplier'] ?? 1.0),
                 ],
                 'positiveFactors' => $positiveFactors,
@@ -8625,10 +8625,10 @@ class FutureTradeBotService
         $effective = $base;
         $adjustments = [];
         $next = $settings;
-        $baseTakeProfit = (float) ($settings['takeProfitPercent'] ?? 0.45);
-        $baseStopLoss = (float) ($settings['stopLossPercent'] ?? 0.25);
-        $baseTrailing = (float) ($settings['trailingTakeProfitPercent'] ?? 0.18);
-        $baseRollback = (float) ($settings['rollbackLossPercent'] ?? 0.18);
+        $baseTakeProfit = $this->resolveRisk($settings, 'takeProfitPercent');
+        $baseStopLoss = $this->resolveRisk($settings, 'stopLossPercent');
+        $baseTrailing = $this->resolveRisk($settings, 'trailingTakeProfitPercent');
+        $baseRollback = $this->resolveRisk($settings, 'rollbackLossPercent');
         $baseCooldown = max(10, (int) ($settings['cooldownSeconds'] ?? 60));
         $baseTradeAmount = max(25.0, (float) ($settings['tradeAmountUsdt'] ?? 25));
         $dynamicWeights = (array) ($settings['indicatorInfluence'] ?? []);
@@ -8873,7 +8873,7 @@ class FutureTradeBotService
         $confidence = $scoreThreshold / 100;
         $risk = (array) data_get($best, 'debug.risk', []);
         $riskPercent = max(0.0, (float) ($risk['riskPercent'] ?? 0.0));
-        $tp1RR = (float) ($settings['tp1RR'] ?? 1.0);
+        $tp1RR = $this->resolveRisk($settings, 'tp1RR');
         $trailMultiplier = (float) ($settings['trailAtrMultiplier'] ?? 1.0);
         $useAtrRiskTargets = filter_var($settings['useAtrRiskTargets'] ?? false, FILTER_VALIDATE_BOOLEAN);
         $useWebhookRiskOverrides = filter_var($settings['useWebhookRiskOverrides'] ?? false, FILTER_VALIDATE_BOOLEAN);
@@ -9114,6 +9114,18 @@ class FutureTradeBotService
     private function clamp(float $value, float $min, float $max): float
     {
         return max($min, min($max, $value));
+    }
+
+    /**
+     * Resolves a risk setting (tp1RR/tp2RR/takeProfitPercent/stopLossPercent, etc.) from the
+     * merged settings array, falling back to the single canonical config default rather than
+     * a hardcoded literal. Never introduce a new bare `?? <number>` fallback for these keys.
+     */
+    private function resolveRisk(array $settings, string $key): float
+    {
+        $value = $settings[$key] ?? config("future_trade.defaults.$key");
+
+        return (float) $value;
     }
 
     private function positivePercentOrNull(mixed $value): ?float
@@ -9734,8 +9746,8 @@ class FutureTradeBotService
     {
         $position = null;
         $trades = [];
-        $tp = max(0.0001, (float) ($settings['takeProfitPercent'] ?? 1.0) / 100);
-        $sl = max(0.0001, (float) ($settings['stopLossPercent'] ?? 0.3) / 100);
+        $tp = max(0.0001, $this->resolveRisk($settings, 'takeProfitPercent') / 100);
+        $sl = max(0.0001, $this->resolveRisk($settings, 'stopLossPercent') / 100);
 
         foreach ($candles as $index => $row) {
             if ($index === 0) {
@@ -10165,21 +10177,21 @@ class FutureTradeBotService
 
     private function stopLossPrice(float $entry, string $side, array $settings): float
     {
-        $pct = (float) ($settings['stopLossPercent'] ?? 0.25) / 100;
+        $pct = $this->resolveRisk($settings, 'stopLossPercent') / 100;
 
         return $side === 'SHORT' ? $entry * (1 + $pct) : $entry * (1 - $pct);
     }
 
     private function takeProfitPrice(float $entry, string $side, array $settings): float
     {
-        $pct = (float) ($settings['takeProfitPercent'] ?? 0.45) / 100;
+        $pct = $this->resolveRisk($settings, 'takeProfitPercent') / 100;
 
         return $side === 'SHORT' ? $entry * (1 - $pct) : $entry * (1 + $pct);
     }
 
     private function trailingPrice(float $peak, string $side, array $settings): float
     {
-        $pct = (float) ($settings['trailingTakeProfitPercent'] ?? 0.18) / 100;
+        $pct = $this->resolveRisk($settings, 'trailingTakeProfitPercent') / 100;
 
         return $side === 'SHORT' ? $peak * (1 + $pct) : $peak * (1 - $pct);
     }
@@ -11079,7 +11091,7 @@ class FutureTradeBotService
         }
 
         // New SL follows peak with the trailing gap
-        $trailPct = (float) ($settings['trailingTakeProfitPercent'] ?? 0.18) / 100;
+        $trailPct = $this->resolveRisk($settings, 'trailingTakeProfitPercent') / 100;
         $newSlPrice = $positionSide === 'SHORT'
             ? $currentPeak * (1 + $trailPct)
             : $currentPeak * (1 - $trailPct);

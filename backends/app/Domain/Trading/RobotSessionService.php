@@ -67,12 +67,12 @@ class RobotSessionService
             'loss_limit' => $payload['loss_limit'] ?? config('future_trade.robot.total_loss_limit_usdt', 5),
             'max_consecutive_losses' => $payload['max_consecutive_losses'] ?? 2,
             'max_active_trades' => (int) ($payload['max_active_trades'] ?? $config['max_active_trades'] ?? 2),
-            'confidence_threshold' => (int) ($payload['confidence_threshold'] ?? $config['confidence_threshold'] ?? 60),
+            'confidence_threshold' => (int) ($payload['confidence_threshold'] ?? $config['confidence_threshold'] ?? 70),
             'bot_mode' => in_array(($payload['bot_mode'] ?? 'timed_expiry'), ['candle_direction', 'timed_expiry'], true)
                 ? (string) ($payload['bot_mode'] ?? 'timed_expiry')
                 : 'timed_expiry',
             'stop_loss_pct' => round((float) ($payload['stop_loss_pct'] ?? 12.0), 4),
-            'take_profit_pct' => isset($payload['take_profit_pct']) ? round((float) $payload['take_profit_pct'], 4) : null,
+            'take_profit_pct' => round((float) ($payload['take_profit_pct'] ?? 2.0), 4),
             'cooldown_seconds' => (int) ($payload['cooldown_seconds'] ?? 600),
             'daily_loss_limit' => isset($payload['daily_loss_limit'])
                 ? round((float) $payload['daily_loss_limit'], 8)

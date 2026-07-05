@@ -134,7 +134,7 @@ return [
         'paperTrading' => true,
         'liveTrading' => false,
         'forceTestnet' => true,
-        'leverage' => 3,
+        'leverage' => 2,
         'marginMode' => 'isolated',
         'tradeAmountUsdt' => 25,
         'classicSimpleMode' => false,

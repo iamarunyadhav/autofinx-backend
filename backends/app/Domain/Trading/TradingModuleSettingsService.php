@@ -51,7 +51,7 @@ class TradingModuleSettingsService
             'default_indicators' => ['RSI', 'MACD'],
             'max_active_trades' => 2,
             'cooldown_seconds' => 15,
-            'confidence_threshold' => 60,
+            'confidence_threshold' => 70,
             'strategy_profiles' => [
                 ['key' => 'conservative', 'label' => 'Conservative', 'max_active_trades' => 1, 'confidence_threshold' => 70],
                 ['key' => 'balanced', 'label' => 'Balanced', 'max_active_trades' => 2, 'confidence_threshold' => 60],
