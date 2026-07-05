@@ -11,17 +11,19 @@ class AssetRegistryService
             'quote_currencies' => config('assets.quote_currencies', []),
             'crypto' => config('assets.crypto', []),
             'metals' => config('assets.metals', []),
+            'forex' => config('assets.forex', []),
         ];
     }
 
     public function listSymbols(string $assetClass): array
     {
         $assetClass = strtoupper($assetClass);
-        if ($assetClass === 'METALS') {
-            return config('assets.metals.symbols', []);
-        }
 
-        return config('assets.crypto.symbols', []);
+        return match ($assetClass) {
+            'METALS' => config('assets.metals.symbols', []),
+            'FOREX' => config('assets.forex.symbols', []),
+            default => config('assets.crypto.symbols', []),
+        };
     }
 
     public function find(string $assetClass, string $key): ?array

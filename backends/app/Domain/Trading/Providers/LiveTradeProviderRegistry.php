@@ -13,49 +13,30 @@ class LiveTradeProviderRegistry
 
     public function for(string $provider): LiveTradeProviderInterface
     {
-        return match (strtolower(trim($provider))) {
-            'binance' => $this->binance,
-            default => throw new RuntimeException("Unsupported live provider [{$provider}]."),
-        };
+        $key = strtolower(trim($provider));
+        $providerClass = config("live_providers.{$key}.provider_class");
+
+        if ($key === 'binance') {
+            return $this->binance;
+        }
+
+        if ($providerClass !== null && is_a($providerClass, LiveTradeProviderInterface::class, true)) {
+            return app($providerClass);
+        }
+
+        throw new RuntimeException("Unsupported live provider [{$provider}].");
     }
 
     public function catalog(): array
     {
-        return [
-            'binance' => $this->binance->capabilities(),
-            'coinbase' => [
-                'key' => 'coinbase',
-                'label' => 'Coinbase',
-                'live_supported' => false,
-                'default_market_type' => 'spot',
-                'supports_short' => false,
-                'requires_integration' => true,
-                'symbols' => [],
-                'timeframes' => ['1m', '5m', '15m'],
-                'durations' => [60, 300, 900],
-            ],
-            'bybit' => [
-                'key' => 'bybit',
-                'label' => 'Bybit',
-                'live_supported' => false,
-                'default_market_type' => 'futures',
-                'supports_short' => true,
-                'requires_integration' => true,
-                'symbols' => [],
-                'timeframes' => ['1m', '5m', '15m'],
-                'durations' => [60, 300, 900],
-            ],
-            'kucoin' => [
-                'key' => 'kucoin',
-                'label' => 'KuCoin',
-                'live_supported' => false,
-                'default_market_type' => 'spot',
-                'supports_short' => false,
-                'requires_integration' => true,
-                'symbols' => [],
-                'timeframes' => ['1m', '5m', '15m'],
-                'durations' => [60, 300, 900],
-            ],
-        ];
+        $catalog = [];
+
+        foreach ((array) config('live_providers', []) as $key => $entry) {
+            $catalog[$key] = $key === 'binance'
+                ? array_merge($entry, $this->binance->capabilities())
+                : $entry;
+        }
+
+        return $catalog;
     }
 }
