@@ -4,6 +4,7 @@ return [
     'classes' => [
         'CRYPTO',
         'METALS',
+        'FOREX',
     ],
 
     'quote_currencies' => [
@@ -83,6 +84,54 @@ return [
             'open' => '22:00',
             'close' => '21:00',
             'closed_weekdays' => [6], // Saturday (0=Sun..6=Sat)
+        ],
+    ],
+
+    // Currency pairs served by the same generic broker as 'metals' (see
+    // config/live_providers.php: metal_broker). Placeholder symbols/precision
+    // until a real forex broker is chosen — see docs/architecture/multi_broker_crypto_forex.md.
+    'forex' => [
+        'default_provider' => 'metal_broker',
+        'symbols' => [
+            'EURUSD' => [
+                'asset_class' => 'FOREX',
+                'asset_code' => 'EURUSD',
+                'base' => 'EUR',
+                'quote' => 'USD',
+                'min_qty' => 1000,
+                'qty_precision' => 0,
+                'price_precision' => 5,
+                'fee_pct' => 0.02,
+                'max_spread_pct_default' => 0.05,
+            ],
+            'GBPUSD' => [
+                'asset_class' => 'FOREX',
+                'asset_code' => 'GBPUSD',
+                'base' => 'GBP',
+                'quote' => 'USD',
+                'min_qty' => 1000,
+                'qty_precision' => 0,
+                'price_precision' => 5,
+                'fee_pct' => 0.02,
+                'max_spread_pct_default' => 0.05,
+            ],
+            'USDJPY' => [
+                'asset_class' => 'FOREX',
+                'asset_code' => 'USDJPY',
+                'base' => 'USD',
+                'quote' => 'JPY',
+                'min_qty' => 1000,
+                'qty_precision' => 0,
+                'price_precision' => 3,
+                'fee_pct' => 0.02,
+                'max_spread_pct_default' => 0.05,
+            ],
+        ],
+        'market_hours' => [
+            'timezone' => 'UTC',
+            'open' => '22:00',
+            'close' => '22:00',
+            'closed_weekdays' => [6], // Saturday
         ],
     ],
 ];

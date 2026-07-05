@@ -3,6 +3,7 @@
 namespace App\Domain\Venue;
 
 use App\Domain\Exchange\ExchangeClientFactory;
+use App\Domain\Integrations\IntegrationManager;
 use App\Models\Bot;
 use App\Models\ExchangeConnection;
 use App\Models\Integration;
@@ -14,6 +15,7 @@ class TradingVenueClientFactory
     public function __construct(
         private readonly ExchangeClientFactory $exchangeClients,
         private readonly ExchangeSecretVault $vault,
+        private readonly IntegrationManager $integrations,
     ) {
     }
 
@@ -55,14 +57,28 @@ class TradingVenueClientFactory
     public function forIntegration(Integration $integration): TradingVenueClientInterface
     {
         $provider = strtolower((string) $integration->provider_key);
-        if ($provider !== 'binance') {
-            throw new RuntimeException("Unsupported integration provider: {$provider}");
+        if ($provider === 'binance') {
+            return new BinanceTradingVenueClient($this->exchangeClients->makeFromIntegration($integration));
         }
 
-        return new BinanceTradingVenueClient($this->exchangeClients->makeFromIntegration($integration));
+        if ($provider === 'metal_broker' || $provider === 'metals') {
+            return $this->makeMetalBrokerClientFromIntegration($integration);
+        }
+
+        throw new RuntimeException("Unsupported integration provider: {$provider}");
     }
 
-    private function makeMetalBrokerClient(?ExchangeConnection $connection = null): MetalBrokerClient
+    private function makeMetalBrokerClientFromIntegration(Integration $integration): MetalBrokerClient
+    {
+        $secrets = $this->integrations->decryptSecrets($integration->secrets_encrypted);
+
+        return $this->makeMetalBrokerClient(null, [
+            'api_key' => (string) ($secrets['api_key'] ?? ''),
+            'api_secret' => (string) ($secrets['api_secret'] ?? ''),
+        ]);
+    }
+
+    private function makeMetalBrokerClient(?ExchangeConnection $connection = null, ?array $secretsOverride = null): MetalBrokerClient
     {
         $apiUrl = (string) config('services.metal_broker.api_url', '');
         $apiKey = (string) config('services.metal_broker.api_key', '');
@@ -71,6 +87,11 @@ class TradingVenueClientFactory
         if ($connection) {
             $apiKey = (string) ($this->vault->decrypt($connection->api_key_encrypted) ?: $apiKey);
             $apiSecret = (string) ($this->vault->decrypt($connection->api_secret_encrypted) ?: $apiSecret);
+        }
+
+        if ($secretsOverride) {
+            $apiKey = $secretsOverride['api_key'] !== '' ? $secretsOverride['api_key'] : $apiKey;
+            $apiSecret = $secretsOverride['api_secret'] !== '' ? $secretsOverride['api_secret'] : $apiSecret;
         }
 
         return new MetalBrokerClient(
