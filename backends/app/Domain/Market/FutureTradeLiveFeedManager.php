@@ -11,7 +11,7 @@ use RuntimeException;
 
 class FutureTradeLiveFeedManager
 {
-    private const STREAMS = 'trade,kline_1m,kline_5m,kline_15m,kline_1h,kline_4h';
+    private const STREAMS = 'trade,kline_1m,kline_5m,kline_15m,kline_1h,kline_4h,kline_1d';
 
     public function status(?string $workspaceId = null): array
     {

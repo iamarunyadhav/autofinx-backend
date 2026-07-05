@@ -13,6 +13,9 @@ class TimeframeRegistry
         '1m' => 60,
         '5m' => 300,
         '15m' => 900,
+        '1h' => 3600,
+        '4h' => 14400,
+        '1d' => 86400,
     ];
 
     public function normalize(?string $timeframe, string $default = '1m'): string
@@ -40,6 +43,9 @@ class TimeframeRegistry
             '1m' => '1 min',
             '5m' => '5 min',
             '15m' => '15 min',
+            '1h' => '1 hour',
+            '4h' => '4 hours',
+            '1d' => '1 day',
         ];
 
         return collect(self::MAP)

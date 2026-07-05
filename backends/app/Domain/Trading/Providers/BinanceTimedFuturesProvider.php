@@ -31,8 +31,8 @@ class BinanceTimedFuturesProvider implements LiveTradeProviderInterface
                 ['symbol' => 'BNBUSDT', 'display' => 'BNB / USDT', 'asset_class' => 'CRYPTO', 'payout_rate' => 0],
                 ['symbol' => 'SOLUSDT', 'display' => 'SOL / USDT', 'asset_class' => 'CRYPTO', 'payout_rate' => 0],
             ],
-            'timeframes' => ['1m', '5m', '15m'],
-            'durations' => [60, 300, 900],
+            'timeframes' => ['1m', '5m', '15m', '1h', '4h', '1d'],
+            'durations' => [60, 300, 900, 3600, 14400, 86400],
         ];
     }
 
@@ -356,6 +356,9 @@ class BinanceTimedFuturesProvider implements LiveTradeProviderInterface
         return match (strtolower(trim($timeframe))) {
             '5m' => '5m',
             '15m' => '15m',
+            '1h' => '1h',
+            '4h' => '4h',
+            '1d' => '1d',
             default => '1m',
         };
     }
