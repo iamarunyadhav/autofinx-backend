@@ -53,7 +53,12 @@ class MarketWsConsumerCommand extends Command
         )));
         $maxRuntime = max(0, (int) $this->option('max-runtime'));
         $dispatchEvaluations = ! (bool) $this->option('no-dispatch');
-        $heartbeatPath = storage_path('framework/autofinx-live-feed-heartbeat.json');
+        // Own heartbeat file, separate per market type — this must NOT share
+        // autofinx-live-feed-heartbeat.json with future-trade:live-feed. That
+        // daemon runs 24/7 and keeps its file permanently "fresh", so sharing
+        // it here caused market:ws-consume to see a false-positive "another
+        // consumer is active" forever and never take over the lock.
+        $heartbeatPath = storage_path("framework/autofinx-market-ws-heartbeat-{$marketType}.json");
         $startedAt = time();
         $lockKey = sprintf(
             'autofinx:runtime:market-ws-consume:%s:%s:%s',
