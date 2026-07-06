@@ -9,9 +9,15 @@ set -euo pipefail
 #   autofinx-ratio-feed        -> php artisan market:ws-consume (public WS,
 #                                  no API key needed; --symbols defaults to
 #                                  whatever Ratio Bot configs are active)
-#   autofinx-trading:queue-ratio -> php artisan queue:work --queue=ratio_bot
+#   autofinx-queue-ratio       -> php artisan queue:work --queue=ratio_bot
 #                                  (its OWN worker, not shared with
 #                                  signals/risk/billing on queue-market)
+#
+# NOTE: named autofinx-queue-ratio (no colon) — Supervisor rejects ':' in a
+# plain [program:name] section (that character is reserved for [group:name]
+# addressing, which is how the pre-existing autofinx-trading:queue-critical
+# etc. names work — those are group:program pairs defined elsewhere on the
+# server, not literal colon-containing program names).
 #
 # Mirrors the pattern in install-trading-supervisor-daemons.sh.
 
@@ -73,7 +79,7 @@ stderr_logfile=/var/log/autofinx/ratio-feed.err.log
 stderr_logfile_maxbytes=20MB
 stderr_logfile_backups=5
 
-[program:autofinx-trading:queue-ratio]
+[program:autofinx-queue-ratio]
 process_name=%(program_name)s
 command=$PHP_BIN artisan queue:work --queue=ratio_bot --sleep=1 --tries=3 --max-time=3600
 directory=$APP_DIR
@@ -104,7 +110,7 @@ $SUDO supervisorctl update
 
 echo "Starting programs"
 $SUDO supervisorctl restart autofinx-ratio-feed || $SUDO supervisorctl start autofinx-ratio-feed || true
-$SUDO supervisorctl restart "autofinx-trading:queue-ratio" || $SUDO supervisorctl start "autofinx-trading:queue-ratio" || true
+$SUDO supervisorctl restart autofinx-queue-ratio || $SUDO supervisorctl start autofinx-queue-ratio || true
 
 sleep 5
 
