@@ -209,9 +209,12 @@ section "3. Kill Legacy Or Duplicate Workers"
 if [ "$KILL_LEGACY" -eq 1 ]; then
   legacy_patterns=(
     "artisan queue:work --queue=critical,execution,reconcile,monitoring,market,signals,strategies,ratio_bot,ops,intelligence,risk,billing,copytrading,analytics,notifications,default,monitoring_safe"
-    "artisan market:ws-consume"
     "artisan metals:poll-prices"
   )
+  # NOTE: "artisan market:ws-consume" intentionally removed from this list —
+  # it is now a supervised daemon (autofinx-ratio-feed, see supervisor conf)
+  # feeding the Ratio Bot, not a legacy ad-hoc process. Do not re-add it here
+  # without also excluding the supervised instance, or this will kill it.
   killed_any=0
   for pattern in "${legacy_patterns[@]}"; do
     count="$(proc_count "$pattern")"

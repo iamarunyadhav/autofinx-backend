@@ -303,6 +303,8 @@ run_once() {
   dedupe_supervised "quick-settler" "autofinx-quick-settler.sh" "autofinx-quick-settler"
   dedupe_supervised "robot-evaluator" "autofinx-robot-evaluator.sh" "autofinx-robot-evaluator"
   dedupe_supervised "scheduler" "artisan schedule:work" "autofinx-scheduler"
+  dedupe_supervised "ratio-feed" "artisan market:ws-consume" "autofinx-ratio-feed"
+  dedupe_supervised "queue-ratio" "queue:work.*--queue=ratio_bot" "autofinx-trading:queue-ratio"
   dedupe_pattern "schedule-run" "artisan schedule:run"
   cleanup_stale_schedule_run
 
@@ -310,11 +312,13 @@ run_once() {
     "autofinx-trading:queue-critical" \
     "autofinx-trading:queue-market" \
     "autofinx-trading:queue-safe" \
+    "autofinx-trading:queue-ratio" \
     "autofinx-trading:live-feed" \
     "autofinx-trading:tick-loop" \
     "autofinx-trading:user-stream-loop" \
     "autofinx-quick-settler" \
     "autofinx-robot-evaluator" \
+    "autofinx-ratio-feed" \
     "autofinx-scheduler"; do
     ensure_supervisor_running "$program"
   done

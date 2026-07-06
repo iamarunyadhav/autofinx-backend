@@ -128,11 +128,6 @@ Schedule::command('bots:evaluate')
     ->withoutOverlapping()
     ->runInBackground();
 
-Schedule::command('ratio-bots:evaluate')
-    ->everySecond()
-    ->withoutOverlapping()
-    ->runInBackground();
-
 Schedule::command('robot-sessions:evaluate')
     ->everyFiveSeconds()
     ->withoutOverlapping()
@@ -147,6 +142,27 @@ Schedule::job(new SyncOrderStatusJob(100))
     ->everyTenSeconds()
     ->withoutOverlapping();
 */
+
+// Ratio Bot: WS (autofinx-ratio-feed supervisor daemon) is the primary driver
+// of evaluations via RunRatioBotEvaluationJob on the dedicated "ratio_bot"
+// queue. This is only a low-frequency safety net for any bot whose WS tick
+// was missed — intentionally NOT everySecond() like the old disabled block,
+// to avoid REST/circuit-breaker pressure shared with the other bots.
+if ($schedulerEnabled && (bool) config('autofinx.scheduler.ratio_bots', true)) {
+    Schedule::command('ratio-bots:evaluate')
+        ->everyMinute()
+        ->withoutOverlapping()
+        ->runInBackground()
+        ->before(fn () => $markRunStart('ratio-bots:evaluate'))
+        ->after(fn () => $markRunEnd('ratio-bots:evaluate'));
+
+    Schedule::command('ratio-bots:reconcile')
+        ->everyFiveMinutes()
+        ->withoutOverlapping()
+        ->runInBackground()
+        ->before(fn () => $markRunStart('ratio-bots:reconcile'))
+        ->after(fn () => $markRunEnd('ratio-bots:reconcile'));
+}
 
 if ($schedulerEnabled && ! $supervisorRuntime && $allowBinanceRest) {
     Schedule::job(new KeepAliveUserStreamsJob)

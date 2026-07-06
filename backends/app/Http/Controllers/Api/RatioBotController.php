@@ -13,6 +13,7 @@ use App\Models\RatioBotState;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Http;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 use Throwable;
 
 class RatioBotController extends Controller
@@ -364,6 +365,65 @@ class RatioBotController extends Controller
         $limit = max(10, min(500, (int) $request->integer('limit', 200)));
 
         return response()->json($this->runtime->recentCandles($ratioBot, $limit));
+    }
+
+    /**
+     * SSE fallback candle feed for symbols the frontend can't subscribe to
+     * directly via Binance WS (mirrors RobotSessionController::candleFeed).
+     * The primary crypto path uses a direct browser WebSocket instead — see
+     * useRatioBotCandleFeed.ts.
+     */
+    public function candleFeed(Request $request, RatioBotConfig $ratioBot): StreamedResponse
+    {
+        $iterations = (int) min(60, max(1, (int) $request->query('iterations', 30)));
+        $intervalSeconds = (int) min(10, max(1, (int) $request->query('interval', 2)));
+
+        $stream = function () use ($ratioBot, $iterations, $intervalSeconds) {
+            for ($i = 0; $i < $iterations; $i++) {
+                if (connection_aborted()) {
+                    break;
+                }
+
+                // MarketOhlc stores a `ts` datetime column, not the
+                // `time`/`is_closed` shape the frontend's normalizeCandle()
+                // expects — map it explicitly rather than assuming callers
+                // handle both shapes.
+                $candles = collect($this->runtime->recentCandles($ratioBot, 200))
+                    ->map(fn ($row) => [
+                        'time' => $row->ts?->timestamp,
+                        'open' => (float) $row->open,
+                        'high' => (float) $row->high,
+                        'low' => (float) $row->low,
+                        'close' => (float) $row->close,
+                        'volume' => (float) $row->volume,
+                        'is_closed' => true,
+                    ])
+                    ->values()
+                    ->all();
+                $latest = $candles === [] ? null : $candles[array_key_last($candles)];
+
+                echo 'data: ' . json_encode([
+                    'symbol' => $ratioBot->normalizedSymbol(),
+                    'timeframe' => $ratioBot->timeFrame(),
+                    'candles' => $candles,
+                    'current' => $latest,
+                    'ts' => now()->toIso8601String(),
+                ]) . "\n\n";
+
+                if (function_exists('ob_flush')) {
+                    @ob_flush();
+                }
+                flush();
+                sleep($intervalSeconds);
+            }
+        };
+
+        return response()->stream($stream, 200, [
+            'Content-Type' => 'text/event-stream',
+            'Cache-Control' => 'no-cache',
+            'Connection' => 'keep-alive',
+            'X-Accel-Buffering' => 'no',
+        ]);
     }
 
     public function snapshot(RatioBotConfig $ratioBot): JsonResponse
