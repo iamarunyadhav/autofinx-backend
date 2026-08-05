@@ -20,7 +20,7 @@ class FutureTradeLiveFeedCommand extends Command
 
     public function handle(): int
     {
-        $heartbeatPath = storage_path('framework/autofinx-live-feed-heartbeat.json');
+        $heartbeatPath = storage_path('framework/autofinx-market-ws-heartbeat-futures.json');
         $heartbeatDir = dirname($heartbeatPath);
         if (! is_dir($heartbeatDir) || ! is_writable($heartbeatDir)) {
             $message = "Live-feed heartbeat directory is not writable: {$heartbeatDir}";

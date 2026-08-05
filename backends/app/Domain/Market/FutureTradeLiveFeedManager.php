@@ -650,7 +650,7 @@ class FutureTradeLiveFeedManager
 
     private function loadHeartbeat(): array
     {
-        $path = storage_path('framework/autofinx-live-feed-heartbeat.json');
+        $path = storage_path('framework/autofinx-market-ws-heartbeat-futures.json');
         if (! is_file($path)) {
             return [];
         }

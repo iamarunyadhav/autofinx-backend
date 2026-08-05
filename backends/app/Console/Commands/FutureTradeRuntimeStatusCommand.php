@@ -103,7 +103,7 @@ class FutureTradeRuntimeStatusCommand extends Command
 
     private function liveFeedStatus(): array
     {
-        $path = storage_path('framework/autofinx-live-feed-heartbeat.json');
+        $path = storage_path('framework/autofinx-market-ws-heartbeat-futures.json');
         if (! file_exists($path)) {
             return [
                 'heartbeat_file' => false,

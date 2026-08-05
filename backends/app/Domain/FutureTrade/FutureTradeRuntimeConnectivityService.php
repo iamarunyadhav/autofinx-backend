@@ -65,7 +65,7 @@ class FutureTradeRuntimeConnectivityService
 
     private function marketHeartbeat(): array
     {
-        $path = storage_path('framework/autofinx-live-feed-heartbeat.json');
+        $path = storage_path('framework/autofinx-market-ws-heartbeat-futures.json');
         if (! File::exists($path)) {
             return [
                 'state' => 'waiting',
