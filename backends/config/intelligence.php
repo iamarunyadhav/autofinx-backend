@@ -3,6 +3,7 @@
 return [
     'ai_trading' => [
         'provider' => env('AI_TRADE_PROVIDER', 'heuristic'),
+        'schedule_enabled' => (bool) env('AI_TRADE_SCHEDULE_ENABLED', false),
         'proposal_expiry_minutes' => (int) env('AI_TRADE_PROPOSAL_EXPIRY_MINUTES', 15),
         'default_quote_currency' => env('AI_TRADE_QUOTE_CURRENCY', 'USDT'),
         'openai' => [
@@ -20,8 +21,9 @@ return [
         'anthropic' => [
             'api_key' => env('AI_TRADE_ANTHROPIC_API_KEY', env('ANTHROPIC_API_KEY')),
             'api_url' => env('AI_TRADE_ANTHROPIC_API_URL', env('ANTHROPIC_API_URL', 'https://api.anthropic.com/v1/messages')),
-            'model' => env('AI_TRADE_ANTHROPIC_MODEL', env('ANTHROPIC_MODEL', 'claude-3-5-sonnet-latest')),
-            'timeout_ms' => (int) env('AI_TRADE_ANTHROPIC_TIMEOUT_MS', 5000),
+            'model' => env('AI_TRADE_ANTHROPIC_MODEL', env('ANTHROPIC_MODEL', 'claude-opus-4-8')),
+            'timeout_ms' => (int) env('AI_TRADE_ANTHROPIC_TIMEOUT_MS', 10000),
+            'max_output_tokens' => (int) env('AI_TRADE_ANTHROPIC_MAX_OUTPUT_TOKENS', 800),
         ],
         'heuristic' => [
             'min_trade_confidence' => (float) env('AI_TRADE_HEURISTIC_MIN_CONFIDENCE', 0.55),

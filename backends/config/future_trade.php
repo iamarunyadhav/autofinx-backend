@@ -37,6 +37,30 @@ return [
         'websocket_enabled' => filter_var(env('FUTURE_TRADE_ORDER_WEBSOCKET_ENABLED', false), FILTER_VALIDATE_BOOL),
         'websocket_timeout_seconds' => max(3, min(30, (int) env('FUTURE_TRADE_ORDER_WEBSOCKET_TIMEOUT_SECONDS', 8))),
     ],
+    // AI confirmation gate (Claude) — infrastructure knobs. Per-bot behaviour
+    // flags (aiGateEnabled / aiGateMinConfidence / aiGateFailMode) live in
+    // `defaults` below so they flow through mergedSettings().
+    'ai_gate' => [
+        'model' => env('FUTURE_TRADE_AI_GATE_MODEL', 'claude-opus-4-8'),
+        'api_key' => env('FUTURE_TRADE_AI_GATE_API_KEY', env('AI_TRADE_ANTHROPIC_API_KEY', env('ANTHROPIC_API_KEY'))),
+        'api_url' => env('AI_TRADE_ANTHROPIC_API_URL', env('ANTHROPIC_API_URL', 'https://api.anthropic.com/v1/messages')),
+        'timeout_ms' => (int) env('FUTURE_TRADE_AI_GATE_TIMEOUT_MS', 8000),
+        'max_output_tokens' => (int) env('FUTURE_TRADE_AI_GATE_MAX_OUTPUT_TOKENS', 500),
+        // Spend cap only — when exhausted, signals execute deterministically
+        // (SKIPPED_CAP); the cap never blocks trading.
+        'max_calls_per_day' => (int) env('FUTURE_TRADE_AI_GATE_MAX_CALLS_PER_DAY', 100),
+        'min_size_multiplier' => (float) env('FUTURE_TRADE_AI_GATE_MIN_SIZE_MULTIPLIER', 0.25),
+        // sl/tp adjustments are recorded from day one but only APPLIED when
+        // this flag is on (later rollout stage); clamped to ±30% either way.
+        'apply_sl_tp_adjust' => (bool) env('FUTURE_TRADE_AI_GATE_APPLY_SLTP', false),
+        'knowledge_path' => env('FUTURE_TRADE_AI_KNOWLEDGE_PATH', 'ai-knowledge/futures-gate/v1.md'),
+        // USD per million tokens (input, output) — used for cost_usd bookkeeping.
+        'prices_per_mtok' => [
+            'claude-opus-4-8' => ['in' => 5.0, 'out' => 25.0],
+            'claude-sonnet-5' => ['in' => 3.0, 'out' => 15.0],
+            'claude-haiku-4-5' => ['in' => 1.0, 'out' => 5.0],
+        ],
+    ],
     'live_max_open_positions' => max(1, min(5, (int) env('FUTURE_TRADE_LIVE_MAX_OPEN_POSITIONS', 1))),
     'webhook_fallback_enabled' => env('FUTURE_TRADE_WEBHOOK_FALLBACK_ENABLED', false),
     'webhook_risk_overrides' => env('FUTURE_TRADE_WEBHOOK_RISK_OVERRIDES', false),
@@ -223,6 +247,18 @@ return [
         'dynamicReentryBuffer' => 0.005,
         'dynamicSuggestionEnabled' => false,
         'autoExecutePaperSignals' => true,
+        // --- AI confirmation gate (Claude) ---------------------------------
+        // Runs AFTER every deterministic risk gate and can only CONFIRM,
+        // VETO, or REDUCE size. It can never upsize, flip direction, change
+        // symbol, or bypass a risk gate (enforced in code, not prompt).
+        'aiGateEnabled' => (bool) env('FUTURE_TRADE_AI_GATE_ENABLED', false),
+        // AI confidence below this treats the response as a veto.
+        'aiGateMinConfidence' => (float) env('FUTURE_TRADE_AI_GATE_MIN_CONFIDENCE', 0.60),
+        // On AI API error/timeout:
+        //   auto   => paper fail-open (trade anyway), live/testnet fail-closed (skip)
+        //   open   => always trade on AI failure
+        //   closed => always skip on AI failure
+        'aiGateFailMode' => env('FUTURE_TRADE_AI_GATE_FAIL_MODE', 'auto'),
         // signalSource, pineWebhookFallbackTimeoutSeconds, and
         // webhookFallbackEnabled are declared earlier in the defaults array
         // (above, around the env() block). They are NOT re-declared here to

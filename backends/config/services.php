@@ -93,4 +93,12 @@ return [
         ],
     ],
 
+    // Outbound webhook (Slack/Telegram/Discord incoming-webhook URL) for
+    // OpsRuntimeHealthAlertCommand — fires on futures live-feed green<->red
+    // transitions. In-app Notification rows are always written regardless;
+    // this is an optional additional channel.
+    'ops_alert' => [
+        'webhook_url' => env('OPS_ALERT_WEBHOOK_URL', ''),
+    ],
+
 ];

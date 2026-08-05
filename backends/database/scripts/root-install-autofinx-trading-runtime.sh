@@ -103,8 +103,8 @@ EOF
 
 chmod +x /usr/local/bin/autofinx-quick-settler.sh /usr/local/bin/autofinx-robot-evaluator.sh
 chown "$RUN_USER:$RUN_USER" /usr/local/bin/autofinx-quick-settler.sh /usr/local/bin/autofinx-robot-evaluator.sh || true
-touch "$APP_DIR/storage/framework/autofinx-quick-settler-heartbeat.json" "$APP_DIR/storage/framework/autofinx-robot-evaluator-heartbeat.json"
-chown "$RUN_USER:$RUN_USER" "$APP_DIR/storage/framework/autofinx-quick-settler-heartbeat.json" "$APP_DIR/storage/framework/autofinx-robot-evaluator-heartbeat.json" || true
+touch "$APP_DIR/storage/framework/autofinx-quick-settler-heartbeat.json" "$APP_DIR/storage/framework/autofinx-robot-evaluator-heartbeat.json" "$APP_DIR/storage/framework/autofinx-live-feed-heartbeat.json"
+chown "$RUN_USER:$RUN_USER" "$APP_DIR/storage/framework/autofinx-quick-settler-heartbeat.json" "$APP_DIR/storage/framework/autofinx-robot-evaluator-heartbeat.json" "$APP_DIR/storage/framework/autofinx-live-feed-heartbeat.json" || true
 
 if [ -f "$SUP_CONF" ]; then
   cp -a "$SUP_CONF" "${SUP_CONF}.bak.$(date +%Y%m%d%H%M%S)"
@@ -153,6 +153,37 @@ stderr_logfile=$LOG_DIR/robot-evaluator.err.log
 stderr_logfile_maxbytes=20MB
 stderr_logfile_backups=5
 environment=ROBOT_EVALUATOR_SLEEP_SECONDS="10"
+
+[program:autofinx-trading:live-feed]
+process_name=%(program_name)s
+; future-trade:live-feed already runs an internal infinite reconnect/backoff
+; loop against the Binance futures websocket (writes
+; storage/framework/autofinx-live-feed-heartbeat.json once per second while
+; connected) — no bash while-wrapper needed here, unlike the two programs
+; above. autorestart only needs to catch a hard crash of the PHP process
+; itself. This is the process that keeps the 3-second live-feed freshness
+; gate (Robot Trade + Future Trade native/mirror entries) fresh — see
+; TradingRuntimeHealthService::marketFeed() / RuntimeSafetySettingsService.
+; Program name MUST stay exactly "autofinx-trading:live-feed" — the runtime
+; watchdogs (autofinx-runtime-master.sh, autofinx-dedupe-runtime.sh,
+; autofinx_ws_reset.sh) already hardcode this exact name.
+command=$PHP_BIN artisan future-trade:live-feed --reconnect-sleep=2
+directory=$APP_DIR
+autostart=true
+autorestart=true
+startsecs=5
+startretries=10
+stopwaitsecs=30
+killasgroup=true
+stopasgroup=true
+user=$RUN_USER
+redirect_stderr=false
+stdout_logfile=$LOG_DIR/live-feed.out.log
+stdout_logfile_maxbytes=20MB
+stdout_logfile_backups=5
+stderr_logfile=$LOG_DIR/live-feed.err.log
+stderr_logfile_maxbytes=20MB
+stderr_logfile_backups=5
 EOF
 
 chown "$RUN_USER:$RUN_USER" "$SUP_CONF" || true
@@ -170,6 +201,7 @@ supervisorctl update
 echo "== Starting/restarting AutoFinX Quick/Robot daemons =="
 supervisorctl restart autofinx-quick-settler || supervisorctl start autofinx-quick-settler || true
 supervisorctl restart autofinx-robot-evaluator || supervisorctl start autofinx-robot-evaluator || true
+supervisorctl restart "autofinx-trading:live-feed" || supervisorctl start "autofinx-trading:live-feed" || true
 
 sleep 10
 
@@ -192,12 +224,19 @@ echo "== Last Robot evaluator log =="
 tail -n 80 "$LOG_DIR/robot-evaluator.out.log" || true
 tail -n 80 "$LOG_DIR/robot-evaluator.err.log" || true
 
+echo "== Last Live-feed log =="
+tail -n 80 "$LOG_DIR/live-feed.out.log" || true
+tail -n 80 "$LOG_DIR/live-feed.err.log" || true
+
 echo "== DONE =="
 echo "Expected:"
-echo "  autofinx-quick-settler    RUNNING"
-echo "  autofinx-robot-evaluator  RUNNING"
+echo "  autofinx-quick-settler       RUNNING"
+echo "  autofinx-robot-evaluator     RUNNING"
+echo "  autofinx-trading:live-feed   RUNNING"
 echo ""
 echo "Verify:"
 echo "  cd $APP_DIR"
 echo "  $PHP_BIN artisan future-trade:runtime-status --workspace=\"26a36b56-4383-4edd-99d1-7622e7c191ef\""
 echo "  $PHP_BIN artisan quick-trades:doctor --workspace=\"26a36b56-4383-4edd-99d1-7622e7c191ef\""
+echo "  # Confirm the futures live-feed goes/stays green (was reported stale for ~5.5h before this fix):"
+echo "  $PHP_BIN artisan tinker --execute=\"dd(app(\\App\\Domain\\Ops\\TradingRuntimeHealthService::class)->snapshot()['future_trade']['live_feed']);\""

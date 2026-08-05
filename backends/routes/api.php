@@ -53,6 +53,7 @@ use App\Http\Controllers\Api\QuickTradeController;
 use App\Http\Controllers\Api\RobotSessionController;
 use App\Http\Controllers\Api\RatioBotController;
 use App\Http\Controllers\Api\Fast2XController;
+use App\Http\Controllers\Api\FutureTradeAiController;
 use App\Http\Controllers\Api\FutureTradeBotController;
 use App\Http\Controllers\Api\FuturesController;
 use App\Http\Controllers\Api\JobsController;
@@ -497,6 +498,11 @@ Route::prefix('v1')->group(function () {
         Route::post('workspaces/{workspace}/future-trade/import-script', [FutureTradeBotController::class, 'importScript'])->middleware('require.2fa');
         Route::post('workspaces/{workspace}/future-trade/import-trades', [FutureTradeBotController::class, 'importTrades'])->middleware('require.2fa');
         Route::post('workspaces/{workspace}/future-trade/clear-history', [FutureTradeBotController::class, 'clearHistory'])->middleware('require.2fa');
+
+        // AI confirmation gate (decision log, accuracy stats, daily reviews)
+        Route::get('workspaces/{workspace}/future-trade/ai-decisions', [FutureTradeAiController::class, 'decisions']);
+        Route::get('workspaces/{workspace}/future-trade/ai-stats', [FutureTradeAiController::class, 'stats']);
+        Route::get('workspaces/{workspace}/future-trade/ai-reviews', [FutureTradeAiController::class, 'reviews']);
 
         // Backtest
         Route::post('workspaces/{workspace}/future-trade/backtest', [FutureTradeBotController::class, 'runBacktest']);

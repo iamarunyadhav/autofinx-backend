@@ -7,6 +7,7 @@ use App\Domain\Market\MarketPriceCacheService;
 use App\Domain\Ops\KillSwitchService;
 use App\Domain\Ops\OperationalBreakerService;
 use App\Domain\Risk\WorkspaceLiveRiskService;
+use App\Domain\Trading\KlineBrainService;
 use App\Domain\Trading\TradingIntegrationResolver;
 use App\Models\MarketCandle;
 use App\Models\Order;
@@ -25,6 +26,7 @@ class AiContextBuilderService
         private readonly WorkspaceLiveRiskService $workspaceRisk,
         private readonly KillSwitchService $killSwitch,
         private readonly OperationalBreakerService $breakers,
+        private readonly KlineBrainService $klineBrain,
     ) {
     }
 
@@ -43,13 +45,23 @@ class AiContextBuilderService
         }
 
         $priceRow = $this->prices->getLatestPrice($provider, $symbol);
-        $candles = $this->recentCandles($symbol, (string) ($options['timeframe'] ?? '1m'));
+        $timeframe = (string) ($options['timeframe'] ?? '15m');
+        [$candles, $candleSource] = $this->recentCandles($symbol, $timeframe);
         if ($priceRow === null && $candles->isEmpty()) {
             $blockers[] = 'No stored price or candle history is available for this symbol.';
         }
 
         $latestPrice = (float) ($priceRow['price'] ?? $candles->last()['close'] ?? 0);
         $indicatorSnapshot = $this->indicatorSnapshot($candles);
+
+        $higherTimeframe = (string) ($options['higher_timeframe'] ?? '1h');
+        $htfSnapshot = null;
+        if ($higherTimeframe !== '' && $higherTimeframe !== $timeframe) {
+            [$htfCandles] = $this->recentCandles($symbol, $higherTimeframe);
+            if ($htfCandles->isNotEmpty()) {
+                $htfSnapshot = $this->indicatorSnapshot($htfCandles);
+            }
+        }
         $positions = $this->positionSnapshot($workspaceId, $symbol);
         $orders = $this->orderSnapshot($workspaceId, $symbol, $provider);
         $balances = $this->balanceSnapshot($workspaceId, $quoteCurrency);
@@ -92,17 +104,22 @@ class AiContextBuilderService
             ] : null,
             'price' => [
                 'latest' => $latestPrice,
-                'source' => $priceRow['source'] ?? ($candles->isEmpty() ? null : 'market_candles'),
+                'source' => $priceRow['source'] ?? ($candles->isEmpty() ? null : $candleSource),
                 'timestamp_ms' => $priceRow['timestamp_ms'] ?? null,
             ],
             'candles' => [
-                'timeframe' => (string) ($options['timeframe'] ?? '1m'),
+                'timeframe' => $timeframe,
+                'source' => $candles->isEmpty() ? null : $candleSource,
                 'count' => $candles->count(),
                 'latest_open' => (float) ($candles->last()['open'] ?? 0),
                 'latest_close' => (float) ($candles->last()['close'] ?? 0),
                 'recent_closes' => $candles->pluck('close')->map(fn ($value) => (float) $value)->values()->all(),
             ],
             'indicators' => $indicatorSnapshot,
+            'indicators_by_timeframe' => array_filter([
+                $timeframe => $indicatorSnapshot,
+                $higherTimeframe => $htfSnapshot,
+            ]),
             'positions' => $positions,
             'orders' => $orders,
             'balances' => $balances,
@@ -122,18 +139,50 @@ class AiContextBuilderService
         ];
     }
 
-    private function recentCandles(string $symbol, string $timeframe): Collection
+    /**
+     * Prefer the live WS-fed kline cache (up to 250 closed candles); fall back to the
+     * legacy market_candles table when the cache is cold for this symbol/timeframe.
+     *
+     * @return array{0: Collection<int, array{open: float, high: float, low: float, close: float, volume: float, ts: mixed}>, 1: string}
+     */
+    private function recentCandles(string $symbol, string $timeframe): array
     {
-        return MarketCandle::query()
+        $cached = $this->klineBrain->getCachedCandles($symbol, $timeframe);
+        if (count($cached) >= 30) {
+            $normalized = collect($cached)->map(fn (array $candle) => [
+                'open' => (float) ($candle['open'] ?? 0),
+                'high' => (float) ($candle['high'] ?? 0),
+                'low' => (float) ($candle['low'] ?? 0),
+                'close' => (float) ($candle['close'] ?? 0),
+                'volume' => (float) ($candle['volume'] ?? 0),
+                'ts' => $candle['ts'] ?? null,
+            ])->values();
+
+            return [$normalized, 'kline_cache'];
+        }
+
+        $rows = MarketCandle::query()
             ->whereHas('symbol', fn ($query) => $query->where('symbol', $symbol))
             ->where('timeframe', $timeframe)
             ->orderBy('opens_at')
-            ->limit(50)
-            ->get(['open', 'high', 'low', 'close', 'volume', 'opens_at']);
+            ->limit(200)
+            ->get(['open', 'high', 'low', 'close', 'volume', 'opens_at'])
+            ->map(fn (MarketCandle $candle) => [
+                'open' => (float) $candle->open,
+                'high' => (float) $candle->high,
+                'low' => (float) $candle->low,
+                'close' => (float) $candle->close,
+                'volume' => (float) $candle->volume,
+                'ts' => optional($candle->opens_at)->getTimestampMs(),
+            ])
+            ->values();
+
+        return [$rows, 'market_candles'];
     }
 
     private function indicatorSnapshot(Collection $candles): array
     {
+        $candleArrays = $candles->values()->all();
         $closes = $candles->pluck('close')->map(fn ($value) => (float) $value)->values()->all();
 
         $volatilityPct = 0.0;
@@ -155,9 +204,14 @@ class AiContextBuilderService
             'sma_21' => Indicators::sma($closes, 21),
             'ema_12' => Indicators::ema($closes, 12),
             'ema_26' => Indicators::ema($closes, 26),
+            'ema_20' => Indicators::ema($closes, 20),
+            'ema_50' => Indicators::ema($closes, 50),
+            'ema_200' => Indicators::ema($closes, 200),
             'rsi_14' => Indicators::rsi($closes, 14),
             'bollinger' => Indicators::bollinger($closes, 20),
             'macd' => Indicators::macd($closes),
+            'atr_14' => Indicators::atr($candleArrays, 14),
+            'adx_14' => Indicators::adx($candleArrays, 14),
             'volatility_pct' => $volatilityPct,
             'candle_count' => count($closes),
             'has_minimum_history' => count($closes) >= 26,

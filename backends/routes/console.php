@@ -1,6 +1,8 @@
 <?php
 
 use App\Jobs\DetectStaleFeedsJob;
+use App\Jobs\DispatchAiDecisionCycleJob;
+use App\Jobs\ExpireAiDecisionsJob;
 use App\Jobs\KeepAliveUserStreamsJob;
 use App\Models\SchedulerRun;
 use Illuminate\Foundation\Inspiring;
@@ -110,6 +112,16 @@ if ($schedulerEnabled && (bool) config('autofinx.scheduler.quick_settler', true)
         ->runInBackground()
         ->before(fn () => $markRunStart('quick-trades:settle'))
         ->after(fn () => $markRunEnd('quick-trades:settle'));
+
+    // Repairs Robot Trade's exchange-state after any interruption (e.g. the
+    // live-feed daemon or worker restarting mid-trade). Previously existed
+    // but was never scheduled — mirrors future-trade:reconcile's cadence.
+    Schedule::command('quick-trades:reconcile')
+        ->everyTenMinutes()
+        ->withoutOverlapping(10)
+        ->onOneServer()
+        ->before(fn () => $markRunStart('quick-trades:reconcile'))
+        ->after(fn () => $markRunEnd('quick-trades:reconcile'));
 }
 
 if ($schedulerEnabled && $allowRuntimeAutoRepair) {
@@ -226,6 +238,67 @@ if ($schedulerEnabled && $scheduleFutureTradeReconcile) {
         ->onOneServer()
         ->before(fn () => $markRunStart('future-trade:reconcile'))
         ->after(fn () => $markRunEnd('future-trade:reconcile'));
+}
+
+// AI gate housekeeping (futures webhook path). Cheap DB sweeps — always on;
+// they no-op instantly when the AI gate has produced no rows.
+if ($schedulerEnabled) {
+    Schedule::command('future-trade:ai-backfill-outcomes --limit=200')
+        ->everyFiveMinutes()
+        ->withoutOverlapping(5)
+        ->onOneServer()
+        ->before(fn () => $markRunStart('future-trade:ai-backfill-outcomes'))
+        ->after(fn () => $markRunEnd('future-trade:ai-backfill-outcomes'));
+
+    Schedule::command('future-trade:ai-daily-review')
+        ->dailyAt('00:15')
+        ->withoutOverlapping(60)
+        ->onOneServer()
+        ->before(fn () => $markRunStart('future-trade:ai-daily-review'))
+        ->after(fn () => $markRunEnd('future-trade:ai-daily-review'));
+}
+
+// Operational observability — surfaces runtime staleness (feed daemons,
+// schedulers, queues) that would otherwise silently block Robot Trade /
+// Future Trade entries for hours with no visible signal to the operator.
+// Both are read-only diagnostics; neither touches trading/execution code.
+if ($schedulerEnabled) {
+    Schedule::command('ops:readiness-check')
+        ->everyFiveMinutes()
+        ->onOneServer()
+        ->withoutOverlapping(5)
+        ->before(fn () => $markRunStart('ops:readiness-check'))
+        ->after(fn () => $markRunEnd('ops:readiness-check'));
+
+    // Edge-triggered (fires only on green<->red transitions, not every red
+    // minute) alert on the futures live-feed health check specifically —
+    // this is the exact 3s-freshness gate that blocks entries when the
+    // autofinx-trading:live-feed supervisor program is down.
+    Schedule::command('ops:runtime-health-alert')
+        ->everyMinute()
+        ->onOneServer()
+        ->withoutOverlapping(1)
+        ->before(fn () => $markRunStart('ops:runtime-health-alert'))
+        ->after(fn () => $markRunEnd('ops:runtime-health-alert'));
+}
+
+// AI decision cycles (spot AI trading middleware). Dormant unless
+// AI_TRADE_SCHEDULE_ENABLED=true AND per-workspace AiTradingConfig.enabled.
+// Jobs run on the dedicated 'intelligence' queue (worker_2_runtime profile).
+if ($schedulerEnabled && (bool) config('intelligence.ai_trading.schedule_enabled', false)) {
+    Schedule::job(new DispatchAiDecisionCycleJob)
+        ->everyFiveMinutes()
+        ->withoutOverlapping(5)
+        ->onOneServer()
+        ->before(fn () => $markRunStart('ai:dispatch-decision-cycles'))
+        ->after(fn () => $markRunEnd('ai:dispatch-decision-cycles'));
+
+    Schedule::job(new ExpireAiDecisionsJob)
+        ->everyTenMinutes()
+        ->withoutOverlapping(10)
+        ->onOneServer()
+        ->before(fn () => $markRunStart('ai:expire-decisions'))
+        ->after(fn () => $markRunEnd('ai:expire-decisions'));
 }
 
 // Bounded futures user-stream consumer — runs in 55s slices and re-spawns each

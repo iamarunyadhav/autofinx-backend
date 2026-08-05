@@ -75,8 +75,8 @@ EOF
 $SUDO chmod +x /usr/local/bin/autofinx-quick-settler.sh
 $SUDO chmod +x /usr/local/bin/autofinx-robot-evaluator.sh
 $SUDO chown zcadmin:zcadmin /usr/local/bin/autofinx-quick-settler.sh /usr/local/bin/autofinx-robot-evaluator.sh || true
-$SUDO touch "$APP_DIR/storage/framework/autofinx-quick-settler-heartbeat.json" "$APP_DIR/storage/framework/autofinx-robot-evaluator-heartbeat.json"
-$SUDO chown zcadmin:zcadmin "$APP_DIR/storage/framework/autofinx-quick-settler-heartbeat.json" "$APP_DIR/storage/framework/autofinx-robot-evaluator-heartbeat.json" || true
+$SUDO touch "$APP_DIR/storage/framework/autofinx-quick-settler-heartbeat.json" "$APP_DIR/storage/framework/autofinx-robot-evaluator-heartbeat.json" "$APP_DIR/storage/framework/autofinx-live-feed-heartbeat.json"
+$SUDO chown zcadmin:zcadmin "$APP_DIR/storage/framework/autofinx-quick-settler-heartbeat.json" "$APP_DIR/storage/framework/autofinx-robot-evaluator-heartbeat.json" "$APP_DIR/storage/framework/autofinx-live-feed-heartbeat.json" || true
 
 if [ -d /etc/supervisord.d ]; then
   SUP_CONF="/etc/supervisord.d/autofinx-quick-robot.ini"
@@ -129,6 +129,30 @@ stderr_logfile=/var/log/autofinx/robot-evaluator.err.log
 stderr_logfile_maxbytes=20MB
 stderr_logfile_backups=5
 environment=ROBOT_EVALUATOR_SLEEP_SECONDS="10"
+
+[program:autofinx-trading:live-feed]
+process_name=%(program_name)s
+; future-trade:live-feed already runs its own internal reconnect/backoff loop
+; against the Binance futures websocket — no bash wrapper needed. Program
+; name MUST stay exactly "autofinx-trading:live-feed" (hardcoded by
+; autofinx-runtime-master.sh / autofinx-dedupe-runtime.sh / autofinx_ws_reset.sh).
+command=$PHP_BIN artisan future-trade:live-feed --reconnect-sleep=2
+directory=$APP_DIR
+autostart=true
+autorestart=true
+startsecs=5
+startretries=10
+stopwaitsecs=30
+killasgroup=true
+stopasgroup=true
+user=zcadmin
+redirect_stderr=false
+stdout_logfile=/var/log/autofinx/live-feed.out.log
+stdout_logfile_maxbytes=20MB
+stdout_logfile_backups=5
+stderr_logfile=/var/log/autofinx/live-feed.err.log
+stderr_logfile_maxbytes=20MB
+stderr_logfile_backups=5
 EOF
 
 $SUDO chown -R zcadmin:zcadmin /var/log/autofinx || true
@@ -146,6 +170,7 @@ $SUDO supervisorctl update
 echo "Starting programs"
 $SUDO supervisorctl restart autofinx-quick-settler || $SUDO supervisorctl start autofinx-quick-settler || true
 $SUDO supervisorctl restart autofinx-robot-evaluator || $SUDO supervisorctl start autofinx-robot-evaluator || true
+$SUDO supervisorctl restart "autofinx-trading:live-feed" || $SUDO supervisorctl start "autofinx-trading:live-feed" || true
 
 sleep 10
 
@@ -165,3 +190,7 @@ $SUDO tail -n 50 /var/log/autofinx/quick-settler.err.log || true
 echo "Robot evaluator log"
 $SUDO tail -n 50 /var/log/autofinx/robot-evaluator.out.log || true
 $SUDO tail -n 50 /var/log/autofinx/robot-evaluator.err.log || true
+
+echo "Live-feed log"
+$SUDO tail -n 50 /var/log/autofinx/live-feed.out.log || true
+$SUDO tail -n 50 /var/log/autofinx/live-feed.err.log || true

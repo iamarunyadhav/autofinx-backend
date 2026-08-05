@@ -3694,6 +3694,64 @@ class FutureTradeBotService
             return 'duplicate_signal_key';
         }
 
+        // === AI confirmation gate (Claude) — feature-flagged; runs only after
+        // ALL deterministic gates above have passed. The AI can only confirm,
+        // veto, or reduce size; it can never bypass a gate, upsize, or flip
+        // direction (enforced in FutureTradeAiGateService).
+        $aiGate = app(FutureTradeAiGateService::class);
+        if ($aiGate->isEnabled($config, $settings)) {
+            $aiResult = $aiGate->evaluate(
+                $config,
+                array_merge($signal, ['signal_key' => $signalKey, 'timeframe' => $timeframe]),
+                $settings,
+                $state
+            );
+            if (! $aiResult['allow']) {
+                $reason = 'ai_gate_' . strtolower((string) $aiResult['decision']);
+                $this->recordMissedTradeAudit($config, $signal, $dynamic, [$reason]);
+                $this->emitTradeDecisionDebug($config, $signal, $dynamic, 'BLOCKED', [$reason]);
+                $this->log(
+                    $config,
+                    'AI_GATE_BLOCKED',
+                    $signal['symbol'],
+                    $signal['signal'],
+                    (float) ($signal['confidence'] ?? 0),
+                    'AI gate blocked entry: ' . (string) ($aiResult['record']?->reasoning ?: $aiResult['reason']),
+                    $this->runtimeContext($dynamic, [
+                        'status' => 'BLOCKED',
+                        'aiDecision' => $aiResult['decision'],
+                        'aiDecisionId' => $aiResult['record']?->id,
+                        'aiConfidence' => $aiResult['record']?->ai_confidence,
+                    ], $signal, [$reason])
+                );
+
+                return $reason;
+            }
+
+            $signal['ai_gate'] = [
+                'decision_id' => $aiResult['record']?->id,
+                'decision' => $aiResult['decision'],
+                'size_multiplier' => (float) $aiResult['size_multiplier'],
+            ];
+            $this->log(
+                $config,
+                (float) $aiResult['size_multiplier'] < 1.0 ? 'AI_GATE_RESIZED' : 'AI_GATE_CONFIRMED',
+                $signal['symbol'],
+                $signal['signal'],
+                (float) ($signal['confidence'] ?? 0),
+                (float) $aiResult['size_multiplier'] < 1.0
+                    ? sprintf('AI gate approved entry at %.0f%% size: %s', 100 * (float) $aiResult['size_multiplier'], (string) ($aiResult['record']?->reasoning ?? ''))
+                    : 'AI gate confirmed entry: ' . (string) ($aiResult['record']?->reasoning ?? ''),
+                $this->runtimeContext($dynamic, [
+                    'status' => 'ALLOWED',
+                    'aiDecision' => $aiResult['decision'],
+                    'aiDecisionId' => $aiResult['record']?->id,
+                    'aiConfidence' => $aiResult['record']?->ai_confidence,
+                    'sizeMultiplier' => (float) $aiResult['size_multiplier'],
+                ], $signal)
+            );
+        }
+
         if ($this->isLiveMode($config)) {
             $this->emitTradeDecisionDebug($config, $signal, $dynamic, 'OPEN', [], ['live_entry_allowed']);
             try {
@@ -3703,6 +3761,8 @@ class FutureTradeBotService
                     'timeframe' => $timeframe,
                 ]));
                 if ($liveBlock !== null) {
+                    $aiGate->markBlocked((string) data_get($signal, 'ai_gate.decision_id', ''), $liveBlock);
+
                     return $liveBlock;
                 }
             } catch (Throwable $e) {
@@ -3767,6 +3827,11 @@ class FutureTradeBotService
             if (($settings['weakSetupAction'] ?? 'reduce_size') === 'reduce_size' && (bool) ($signal['fastTimeframeWeakSetup'] ?? false)) {
                 $tradeAmountUsdt *= 0.5;
             }
+            // AI gate RESIZE — reduce-only multiplier (clamped upstream to <= 1.0).
+            $aiSizeMultiplier = (float) data_get($signal, 'ai_gate.size_multiplier', 1.0);
+            if ($aiSizeMultiplier > 0 && $aiSizeMultiplier < 1.0) {
+                $tradeAmountUsdt *= $aiSizeMultiplier;
+            }
             $qty = ($tradeAmountUsdt * (float) ($settings['leverage'] ?? 3)) / max($price, 0.00000001);
             $this->persistState($state, [
                 'state' => 'IN_POSITION',
@@ -3820,7 +3885,10 @@ class FutureTradeBotService
                 'leverage' => (float) ($settings['leverage'] ?? 3),
                 'fees' => $price * $qty * 0.0004,
                 'opened_at' => now(),
-                'meta' => ['legacy_trade_id' => $legacyTrade->id],
+                'meta' => [
+                    'legacy_trade_id' => $legacyTrade->id,
+                    'ai_gate' => $signal['ai_gate'] ?? null,
+                ],
             ]);
 
             FutureTradeLogicalTradeEvent::create([
@@ -3832,6 +3900,10 @@ class FutureTradeBotService
                 'quantity' => $qty,
                 'payload' => ['signal' => $signal, 'mode' => 'PAPER'],
             ]);
+
+            if (($signal['ai_gate']['decision_id'] ?? null) !== null) {
+                app(FutureTradeAiGateService::class)->markExecuted((string) $signal['ai_gate']['decision_id'], (string) $logical->id);
+            }
 
             // Same-candle re-entry hard block — survives even after the lock is
             // released (the cached flag lasts longer than the candle).
@@ -3869,10 +3941,13 @@ class FutureTradeBotService
                 $this->runtimeContext($dynamic, ['status' => 'BLOCKED'], $signal, ['entry_lock_active']),
                 30
             );
+            $aiGate->markBlocked((string) data_get($signal, 'ai_gate.decision_id', ''), 'entry_lock_active');
 
             return 'entry_lock_active';
         }
         if ($lockResult === false) {
+            $aiGate->markBlocked((string) data_get($signal, 'ai_gate.decision_id', ''), 'open_position_exists_locked');
+
             return 'open_position_exists_locked';
         }
 
@@ -4143,6 +4218,12 @@ class FutureTradeBotService
         $state = $this->state($config);
         $dynamic = $this->dynamicDecision($config, $state, (array) ($state->scanner_snapshot ?? []), null, $settings);
         $settings = $dynamic['settings'];
+        // AI gate RESIZE — reduce-only multiplier (clamped upstream to <= 1.0);
+        // applied before FuturesOrderSizingService reads tradeAmountUsdt.
+        $aiSizeMultiplier = (float) data_get($signal, 'ai_gate.size_multiplier', 1.0);
+        if ($aiSizeMultiplier > 0 && $aiSizeMultiplier < 1.0) {
+            $settings['tradeAmountUsdt'] = max(1.0, round((float) ($settings['tradeAmountUsdt'] ?? 25) * $aiSizeMultiplier, 4));
+        }
         $client = $this->liveClient($settings, 'execution');
         $symbol = strtoupper((string) $signal['symbol']);
         $side = $signal['signal'] === 'BUY' ? 'BUY' : 'SELL';
@@ -4483,6 +4564,7 @@ class FutureTradeBotService
                 'legacy_trade_id' => $legacyTrade->id,
                 'entry_response' => $response,
                 'exchange_snapshot_initial' => $exchange,
+                'ai_gate' => $signal['ai_gate'] ?? null,
             ],
         ]);
         FutureTradeLogicalTradeEvent::create([
@@ -4498,6 +4580,10 @@ class FutureTradeBotService
             'quantity' => (float) $qty,
             'payload' => ['entry_response' => $response, 'exchange_snapshot' => $exchange],
         ]);
+
+        if (($signal['ai_gate']['decision_id'] ?? null) !== null) {
+            app(FutureTradeAiGateService::class)->markExecuted((string) $signal['ai_gate']['decision_id'], (string) $logical->id);
+        }
 
         // Same-candle re-entry hard block.
         $candleOpenForLock = (string) ($signal['candle_open'] ?? '');
