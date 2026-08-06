@@ -160,6 +160,7 @@ Route::prefix('v1')->group(function () {
         Route::get('quick-trade/chart', [QuickTradeController::class, 'chart']);
         Route::get('quick-trade/candle-feed', [QuickTradeController::class, 'candleFeed']);
         Route::get('quick-trade/technical-summary', [QuickTradeController::class, 'technicalSummary']);
+        Route::post('quick-trade/forecast', [QuickTradeController::class, 'forecast']);
         Route::post('quick-trade/place', [QuickTradeController::class, 'place']);
         Route::post('quick-trade/settle-due', [QuickTradeController::class, 'settleDue']);
         Route::get('workspaces/{workspace}/quick-trades/active', [QuickTradeController::class, 'active']);

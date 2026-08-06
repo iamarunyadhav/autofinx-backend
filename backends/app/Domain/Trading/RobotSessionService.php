@@ -26,6 +26,7 @@ class RobotSessionService
         private readonly TimeframeRegistry $timeframes,
         private readonly CandleDirectionBotService $candleBot,
         private readonly MarketPriceCacheService $prices,
+        private readonly TradeForecastService $forecastSvc,
     ) {
     }
 
@@ -488,7 +489,7 @@ class RobotSessionService
         }
 
         // ── ATR-based position sizing ──────────────────────────────────────
-        $atrAvg = $this->computeAtrAvgPct($candles);
+        $atrAvg = $this->forecastSvc->computeAtrAvgPct($candles);
         $atrNow = $volatility['atr_pct'];
         $atrRatio = ($atrAvg > 0 && $atrNow > 0) ? min(1.5, max(0.5, $atrAvg / $atrNow)) : 1.0;
         $adjustedStake = $this->robotEntryStake($session, $atrRatio);
@@ -725,7 +726,7 @@ class RobotSessionService
             $session->last_signal_direction = null;
 
             // ── ATR-based position sizing ──────────────────────────────────
-            $atrAvg = $this->computeAtrAvgPct($candles);
+            $atrAvg = $this->forecastSvc->computeAtrAvgPct($candles);
             $atrNow = $volatility['atr_pct'];
             $atrRatio = ($atrAvg > 0 && $atrNow > 0) ? min(1.5, max(0.5, $atrAvg / $atrNow)) : 1.0;
             $adjustedStake = $this->robotEntryStake($session, $atrRatio);
@@ -1071,64 +1072,15 @@ class RobotSessionService
             ];
         }
 
-        $tfSeconds = max(1, $this->timeframes->seconds((string) $session->timeframe));
-        $horizonSeconds = max($tfSeconds, (int) ($session->expiry_seconds ?: $tfSeconds));
-        $horizonCandles = max(1, (int) ceil($horizonSeconds / $tfSeconds));
-        $recent = array_slice($candles, -min(100, count($candles)));
-        $closes = array_map(static fn ($c) => (float) ($c['close'] ?? 0), $recent);
-        $opens = array_map(static fn ($c) => (float) ($c['open'] ?? 0), $recent);
-        $lastSlice = array_slice($recent, -min(12, count($recent)));
-        $bull = 0;
-        $bear = 0;
-        foreach ($lastSlice as $candle) {
-            $direction = $this->candleBot->candleDirection($candle);
-            if ($direction === 'BUY') {
-                $bull++;
-            } elseif ($direction === 'SELL') {
-                $bear++;
-            }
-        }
+        $horizonSeconds = (int) ($session->expiry_seconds ?: $this->timeframes->seconds((string) $session->timeframe));
 
-        $firstClose = (float) ($closes[0] ?? 0);
-        $lastClose = (float) end($closes);
-        $driftPct = $firstClose > 0 ? (($lastClose - $firstClose) / $firstClose) * 100 : 0.0;
-        $atrPct = max(0.01, (float) data_get($volatility, 'atr_pct', $this->computeAtrAvgPct($recent)));
-        $rangePct = min(5.0, $atrPct * sqrt($horizonCandles));
-        $decisionAction = strtoupper((string) data_get($decision, 'action', 'HOLD'));
-        $confidence = (float) data_get($decision, 'confidence', 0);
-        $confidencePct = $confidence <= 1 ? $confidence * 100 : $confidence;
-
-        $biasScore = ($bull - $bear) + ($driftPct > 0 ? 1 : ($driftPct < 0 ? -1 : 0));
-        if ($decisionAction === 'BUY') {
-            $biasScore += 2;
-        } elseif ($decisionAction === 'SELL') {
-            $biasScore -= 2;
-        }
-
-        $bias = $biasScore >= 2 ? 'BUY' : ($biasScore <= -2 ? 'SELL' : 'NEUTRAL');
-        $quality = min(95, max(35, 45 + abs($biasScore) * 8 + min(20, $confidencePct / 5)));
-        $expectedMid = $bias === 'BUY'
-            ? $currentPrice * (1 + ($rangePct * 0.35) / 100)
-            : ($bias === 'SELL' ? $currentPrice * (1 - ($rangePct * 0.35) / 100) : $currentPrice);
-
-        return [
-            'available' => true,
-            'horizon_seconds' => $horizonSeconds,
-            'horizon_candles' => $horizonCandles,
-            'bias' => $bias,
-            'confidence' => round($quality, 1),
-            'current_price' => round($currentPrice, 8),
-            'expected_mid_price' => round($expectedMid, 8),
-            'expected_low' => round($currentPrice * (1 - $rangePct / 100), 8),
-            'expected_high' => round($currentPrice * (1 + $rangePct / 100), 8),
-            'atr_pct' => round($atrPct, 4),
-            'recent_bull_candles' => $bull,
-            'recent_bear_candles' => $bear,
-            'drift_pct' => round($driftPct, 4),
-            'summary' => $bias === 'NEUTRAL'
-                ? 'Near-term forecast is balanced; wait for stronger direction.'
-                : "Near-term bias favors {$bias}, based on recent candles, ATR and latest robot decision.",
-        ];
+        return $this->forecastSvc->forecast(
+            $candles,
+            (string) $session->timeframe,
+            $horizonSeconds,
+            is_array($decision) ? $decision : null,
+            is_array($volatility) ? $volatility : null,
+        );
     }
 
     // ─── Volatility helpers ───────────────────────────────────────────────────
@@ -1200,29 +1152,6 @@ class RobotSessionService
         }
 
         return ['tradeable' => true, 'reason' => 'ok', 'atr_pct' => round($atrPct, 4), 'bb_width_pct' => round($bbWidthPct, 4)];
-    }
-
-    /**
-     * Average ATR as % of price over the last 20 periods. Used for position sizing.
-     *
-     * @param  array<array{high:mixed,low:mixed,close:mixed}>  $candles
-     */
-    private function computeAtrAvgPct(array $candles): float
-    {
-        $highs  = array_column($candles, 'high');
-        $lows   = array_column($candles, 'low');
-        $closes = array_column($candles, 'close');
-        $trs    = [];
-        $count  = min(count($candles), 21);
-        for ($i = 1; $i < $count; $i++) {
-            $trs[] = max(
-                (float) $highs[$i] - (float) $lows[$i],
-                abs((float) $highs[$i] - (float) $closes[$i - 1]),
-                abs((float) $lows[$i]  - (float) $closes[$i - 1])
-            );
-        }
-        $last = (float) end($closes);
-        return (count($trs) > 0 && $last > 0) ? (array_sum($trs) / count($trs) / $last) * 100 : 0.0;
     }
 
     // ─── Cooldown & daily-loss helpers ───────────────────────────────────────
@@ -1575,45 +1504,8 @@ class RobotSessionService
     private function robotNetEdgeEstimate(RobotSession $session, array $candles, ?float $stake): array
     {
         $stakeAmount = $this->normalizeStake((float) ($stake ?: $session->base_stake), 2);
-        $atrPct = $this->computeAtrAvgPct($candles);
-        $expectedMovePct = max(0.0, $atrPct * 0.35);
 
-        $feeRate = max(0.0, (float) config('trading.binance_futures_taker_fee_rate', 0.0005));
-        $slippageBufferPct = max(0.0, (float) config('robot_trade.live_slippage_buffer_pct', 0.04));
-        $costPct = ($feeRate * 2 * 100) + $slippageBufferPct;
-        $requiredMovePct = $costPct * max(1.0, (float) config('robot_trade.live_min_edge_cost_multiplier', 2.0));
-
-        $expectedGrossUsdt = $stakeAmount * ($expectedMovePct / 100);
-        $requiredCostUsdt = $stakeAmount * ($requiredMovePct / 100);
-        $expectedNetUsdt = $expectedGrossUsdt - $requiredCostUsdt;
-        $minExpectedNetUsdt = max(0.0, (float) config('robot_trade.live_min_expected_net_usdt', 0.03));
-
-        $result = [
-            'tradeable' => $expectedMovePct >= $requiredMovePct && $expectedNetUsdt >= $minExpectedNetUsdt,
-            'stake' => round($stakeAmount, 8),
-            'atr_pct' => round($atrPct, 4),
-            'expected_move_pct' => round($expectedMovePct, 4),
-            'fee_rate' => round($feeRate, 6),
-            'round_trip_fee_pct' => round($feeRate * 2 * 100, 4),
-            'slippage_buffer_pct' => round($slippageBufferPct, 4),
-            'required_move_pct' => round($requiredMovePct, 4),
-            'expected_gross_usdt' => round($expectedGrossUsdt, 8),
-            'required_cost_usdt' => round($requiredCostUsdt, 8),
-            'expected_net_usdt' => round($expectedNetUsdt, 8),
-            'min_expected_net_usdt' => round($minExpectedNetUsdt, 8),
-        ];
-
-        if (! $result['tradeable']) {
-            $result['reason'] = sprintf(
-                'Expected move %.4f%% / net %.4f USDT is below live fee/slippage requirement %.4f%% / %.4f USDT.',
-                $expectedMovePct,
-                $expectedNetUsdt,
-                $requiredMovePct,
-                $minExpectedNetUsdt
-            );
-        }
-
-        return $result;
+        return $this->forecastSvc->netEdge($candles, $stakeAmount);
     }
 
     /**

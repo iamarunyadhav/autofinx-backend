@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Domain\Trading\QuickTradeService;
+use App\Domain\Trading\TradeForecastService;
 use App\Domain\Trading\TradingModuleSettingsService;
 use App\Http\Controllers\Controller;
 use App\Support\WebSocket\SimpleWebSocketClient;
@@ -67,6 +68,43 @@ class QuickTradeController extends Controller
             'timeframe' => $chart['timeframe'],
             'quote' => $chart['quote'],
             'signal_preview' => $chart['signal_preview'],
+        ]);
+    }
+
+    /**
+     * Near-term forecast + fee/slippage-aware net edge for the trade the
+     * user is about to place — pure compute, no market-data fetching.
+     * The caller supplies candles/signal it already has from its own
+     * chart poll, so this never doubles the Binance REST calls that
+     * feed the chart.
+     */
+    public function forecast(Request $request, TradeForecastService $forecastSvc)
+    {
+        $data = $request->validate([
+            'candles' => 'required|array|min:10',
+            'candles.*.open' => 'required|numeric',
+            'candles.*.high' => 'required|numeric',
+            'candles.*.low' => 'required|numeric',
+            'candles.*.close' => 'required|numeric',
+            'signal' => 'nullable|array',
+            'signal.direction' => 'nullable|string',
+            'signal.confidence' => 'nullable|numeric',
+            'timeframe' => 'required|string|max:16',
+            'expiry_seconds' => 'required|integer|min:5|max:3600',
+            'stake_amount' => 'required|numeric|min:0.01',
+        ]);
+
+        $candles = $data['candles'];
+        $decision = isset($data['signal']) ? $forecastSvc->decisionFromSignalPreview($data['signal']) : null;
+
+        return response()->json([
+            'forecast' => $forecastSvc->forecast(
+                $candles,
+                (string) $data['timeframe'],
+                (int) $data['expiry_seconds'],
+                $decision,
+            ),
+            'net_edge' => $forecastSvc->netEdge($candles, (float) $data['stake_amount']),
         ]);
     }
 
