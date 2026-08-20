@@ -9,6 +9,8 @@ use App\Domain\Execution\ExecutionEngine;
 use App\Domain\Execution\Adapters\BinanceAdapter;
 use App\Domain\Execution\Adapters\CoinbaseAdapter;
 use App\Domain\Ops\SafeLiveGate;
+use App\Domain\RatioBot\Contracts\AnchorCandidateProviderInterface;
+use App\Domain\RatioBot\NullAnchorCandidateProvider;
 
 class AppServiceProvider extends ServiceProvider
 {
@@ -26,6 +28,12 @@ class AppServiceProvider extends ServiceProvider
                 $app->make(SafeLiveGate::class)
             );
         });
+
+        // Real Anchor Manager (VWAP/swing-high-low/etc.) is a separate,
+        // later design pass — bind the null (always-zero-confidence)
+        // provider so Ratio Bot V2 recovery review works today, safely
+        // falling back to CONTINUE_WAIT until a real implementation exists.
+        $this->app->bind(AnchorCandidateProviderInterface::class, NullAnchorCandidateProvider::class);
     }
 
     /**

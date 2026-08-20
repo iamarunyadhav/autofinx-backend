@@ -11,7 +11,11 @@ class RatioBotConfig extends BaseModel
     protected $casts = [
         'enabled'                     => 'boolean',
         'kill_switch'                => 'boolean',
+        'brain_enabled'               => 'boolean',
+        'brain_min_confidence'        => 'integer',
         'base_quote_amount'           => 'decimal:8',
+        'initial_entry_pct'           => 'decimal:4',
+        'reserve_tranche_count'       => 'integer',
         'base_asset_budget'           => 'decimal:8',
         'quote_asset_budget'          => 'decimal:8',
         'max_trade_size_pct'          => 'decimal:4',
@@ -65,6 +69,14 @@ class RatioBotConfig extends BaseModel
         'risk_per_trade'              => 'decimal:4',
         'max_daily_loss'              => 'decimal:8',
         'max_consecutive_losses'      => 'integer',
+        'max_entry_price_drift_bps'   => 'decimal:4',
+        'v2_enabled'                  => 'boolean',
+        'sell_tranche_count'          => 'integer',
+        'initial_exit_pct'            => 'decimal:4',
+        'reserve_min_pct'             => 'decimal:4',
+        'reserve_max_pct'             => 'decimal:4',
+        'recovery_enabled'            => 'boolean',
+        'recovery_timeout_minutes'    => 'integer',
     ];
 
     public function workspace(): BelongsTo
@@ -90,6 +102,11 @@ class RatioBotConfig extends BaseModel
     public function reconciliationLogs(): HasMany
     {
         return $this->hasMany(RatioBotReconciliationLog::class, 'ratio_bot_config_id');
+    }
+
+    public function brainSnapshots(): HasMany
+    {
+        return $this->hasMany(RatioBotBrainSnapshot::class, 'ratio_bot_config_id');
     }
 
     public function isLiveMode(): bool
@@ -170,5 +187,56 @@ class RatioBotConfig extends BaseModel
     public function timeFrame(): string
     {
         return strtolower(trim((string) ($this->timeframe ?: '1m')));
+    }
+
+    /**
+     * Dynamic reserve tranches (Phase 2) — spot + ratio_threshold only.
+     * Trailing/RSI/MA/breakout algorithms keep their own arm/peak/trough
+     * state, which doesn't cleanly combine with tranche accumulation.
+     */
+    public function reserveEnabled(): bool
+    {
+        return $this->marketType() === 'spot'
+            && $this->algorithmKey() === 'ratio_threshold'
+            && (float) ($this->initial_entry_pct ?? 1.0) < 1.0
+            && (int) ($this->reserve_tranche_count ?? 0) > 0;
+    }
+
+    /**
+     * Pre-submit price-drift guard threshold (bps). 0 disables the check for
+     * this bot. Default mirrors the migration default (50 bps / 0.5%).
+     */
+    public function maxEntryPriceDriftBps(): float
+    {
+        return max(0.0, (float) ($this->max_entry_price_drift_bps ?? 50.0));
+    }
+
+    /**
+     * Staged SELL (V2) — spot + ratio_threshold only, mirrors reserveEnabled()'s
+     * exact gating shape. Inert unless the bot has explicitly opted into v2_enabled.
+     */
+    public function sellTranchesEnabled(): bool
+    {
+        return (bool) $this->v2_enabled
+            && $this->marketType() === 'spot'
+            && $this->algorithmKey() === 'ratio_threshold'
+            && (float) ($this->initial_exit_pct ?? 1.0) < 1.0
+            && (int) ($this->sell_tranche_count ?? 0) > 0;
+    }
+
+    /**
+     * Recovery/re-anchor monitoring (V2) — requires an explicit opt-in on
+     * top of v2_enabled, a configured timeout, spot + ratio_threshold only
+     * (mirrors reserveEnabled()'s scope — trailing/RSI/MA/breakout algorithms
+     * keep their own arm/peak/trough state, not accounted for by the
+     * recovery evaluation branches).
+     */
+    public function recoveryEnabled(): bool
+    {
+        return (bool) $this->v2_enabled
+            && (bool) $this->recovery_enabled
+            && (int) ($this->recovery_timeout_minutes ?? 0) > 0
+            && $this->marketType() === 'spot'
+            && $this->algorithmKey() === 'ratio_threshold';
     }
 }

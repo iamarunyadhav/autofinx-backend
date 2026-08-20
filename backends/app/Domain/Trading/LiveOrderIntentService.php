@@ -270,6 +270,21 @@ class LiveOrderIntentService
         }
     }
 
+    /**
+     * Fetch a fresh reference price for the same venue/symbol a live order
+     * would use, without placing an order. Used by callers (e.g. Ratio Bot's
+     * pre-submit price-drift guard) that need to revalidate freshness right
+     * before submission using the exact execution target resolution.
+     */
+    public function fetchReferencePrice(array $payload): float
+    {
+        $workspaceId = (string) $payload['workspace_id'];
+        $target = $this->resolveExecutionTarget($workspaceId, $payload);
+        $symbolCode = BinanceSymbolNormalizer::normalize((string) $payload['symbol']);
+
+        return $this->marketReferencePrice($target['venue'], $symbolCode);
+    }
+
     private function resolveExecutionTarget(string $workspaceId, array $payload): array
     {
         $integrationId = trim((string) ($payload['integration_id'] ?? ''));

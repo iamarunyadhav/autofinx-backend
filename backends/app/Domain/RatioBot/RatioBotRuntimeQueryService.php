@@ -6,6 +6,7 @@ use App\Models\MarketFeedStatus;
 use App\Models\MarketOhlc;
 use App\Models\Order;
 use App\Models\Position;
+use App\Models\RatioBotBrainSnapshot;
 use App\Models\RatioBotConfig;
 use App\Models\Trade;
 
@@ -99,6 +100,51 @@ class RatioBotRuntimeQueryService
             ->first();
 
         return $position?->toArray();
+    }
+
+    /**
+     * Shaped to match the frontend's SignalPreview + ForecastPayload types
+     * (see useQuickTrade.ts) so QuickTrade's existing SignalSummaryCard /
+     * NearTermForecastCard components can render it unmodified.
+     */
+    public function brainSnapshot(RatioBotConfig $config): array
+    {
+        $row = RatioBotBrainSnapshot::query()
+            ->where('ratio_bot_config_id', $config->id)
+            ->latest('created_at')
+            ->first();
+
+        if (! $row) {
+            return ['enabled' => (bool) $config->brain_enabled, 'signal' => null, 'forecast' => null];
+        }
+
+        return [
+            'enabled' => (bool) $config->brain_enabled,
+            'evaluated_at' => optional($row->created_at)->toIso8601String(),
+            'signal' => [
+                'direction' => $row->direction,
+                'confidence' => (int) $row->confidence,
+                'bullish_score' => (float) $row->bullish_score,
+                'bearish_score' => (float) $row->bearish_score,
+                'neutral_score' => (float) $row->neutral_score,
+                'supporting_indicators' => [],
+                'conflicting_indicators' => [],
+                'reasons' => (array) $row->reasons,
+                'indicator_values' => [],
+                'timeframe' => $row->timeframe,
+            ],
+            'forecast' => [
+                'available' => true,
+                'horizon_seconds' => $row->horizon_seconds,
+                'bias' => $row->forecast_bias,
+                'confidence' => (float) $row->forecast_confidence,
+                'current_price' => (float) $row->price_at_evaluation,
+                'expected_mid_price' => (float) $row->expected_mid_price,
+                'expected_low' => (float) $row->expected_low,
+                'expected_high' => (float) $row->expected_high,
+                'atr_pct' => (float) $row->atr_pct,
+            ],
+        ];
     }
 
     public function pnlSummary(RatioBotConfig $config): array

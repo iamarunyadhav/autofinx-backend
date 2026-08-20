@@ -3,6 +3,7 @@
 namespace Tests\Unit\RatioBot;
 
 use App\Domain\RatioBot\RatioBotDecisionService;
+use App\Models\RatioBotBrainSnapshot;
 use App\Models\RatioBotConfig;
 use App\Models\RatioBotDecision;
 use App\Models\RatioBotState;
@@ -426,8 +427,212 @@ class RatioBotDecisionServiceTest extends TestCase
     }
 
     // -----------------------------------------------------------------------
+    // Master Brain confirmation (Phase 1)
+    // -----------------------------------------------------------------------
+
+    /** @test */
+    public function brain_disabled_by_default_fires_immediately_like_before(): void
+    {
+        [$config] = $this->makeHoldingConfig(buyPrice: 60_000, sellThreshold: 0.50);
+        $this->assertFalse((bool) $config->brain_enabled);
+
+        $result = $this->service->evaluate($config, 90_000.0);
+
+        $this->assertSame(RatioBotDecision::DECISION_SELL, $result['decision']);
+    }
+
+    /** @test */
+    public function conflicting_brain_signal_adds_one_confirmation_tick_but_still_fires(): void
+    {
+        [$config] = $this->makeHoldingConfig(buyPrice: 60_000, sellThreshold: 0.50);
+        $config->update(['brain_enabled' => true, 'brain_min_confidence' => 65]);
+        $config->refresh();
+
+        RatioBotBrainSnapshot::create([
+            'ratio_bot_config_id' => $config->id,
+            'symbol' => 'BTCUSDT',
+            'timeframe' => '1h',
+            'horizon_seconds' => 3600,
+            'direction' => 'buy', // conflicts with the SELL side about to trigger
+            'confidence' => 80,
+        ]);
+
+        $first = $this->service->evaluate($config->fresh('state'), 90_000.0);
+        $this->assertSame(RatioBotDecision::DECISION_HOLD, $first['decision']);
+        $this->assertTrue((bool) $first['decision_record']->metadata['confirmation_pending']);
+        $this->assertSame(1, (int) $first['decision_record']->metadata['brain_confirm_bump']);
+
+        $second = $this->service->evaluate($config->fresh('state'), 90_000.0);
+        $this->assertSame(RatioBotDecision::DECISION_SELL, $second['decision']);
+    }
+
+    /** @test */
+    public function agreeing_brain_signal_does_not_delay_trade(): void
+    {
+        [$config] = $this->makeHoldingConfig(buyPrice: 60_000, sellThreshold: 0.50);
+        $config->update(['brain_enabled' => true, 'brain_min_confidence' => 65]);
+        $config->refresh();
+
+        RatioBotBrainSnapshot::create([
+            'ratio_bot_config_id' => $config->id,
+            'symbol' => 'BTCUSDT',
+            'timeframe' => '1h',
+            'horizon_seconds' => 3600,
+            'direction' => 'sell', // agrees with the SELL side about to trigger
+            'confidence' => 90,
+        ]);
+
+        $result = $this->service->evaluate($config, 90_000.0);
+
+        $this->assertSame(RatioBotDecision::DECISION_SELL, $result['decision']);
+    }
+
+    /** @test */
+    public function stale_brain_snapshot_beyond_freshness_window_is_ignored(): void
+    {
+        [$config] = $this->makeHoldingConfig(buyPrice: 60_000, sellThreshold: 0.50);
+        $config->update(['brain_enabled' => true, 'brain_min_confidence' => 65]);
+        $config->refresh();
+
+        $snapshot = RatioBotBrainSnapshot::create([
+            'ratio_bot_config_id' => $config->id,
+            'symbol' => 'BTCUSDT',
+            'timeframe' => '1h',
+            'horizon_seconds' => 3600,
+            'direction' => 'buy',
+            'confidence' => 90,
+        ]);
+        $snapshot->timestamps = false;
+        $snapshot->created_at = now()->subHours(3); // > 2x horizon (7200s)
+        $snapshot->save();
+
+        $result = $this->service->evaluate($config, 90_000.0);
+
+        $this->assertSame(RatioBotDecision::DECISION_SELL, $result['decision']);
+    }
+
+    /** @test */
+    public function low_confidence_brain_signal_below_min_confidence_does_not_delay_trade(): void
+    {
+        [$config] = $this->makeHoldingConfig(buyPrice: 60_000, sellThreshold: 0.50);
+        $config->update(['brain_enabled' => true, 'brain_min_confidence' => 65]);
+        $config->refresh();
+
+        RatioBotBrainSnapshot::create([
+            'ratio_bot_config_id' => $config->id,
+            'symbol' => 'BTCUSDT',
+            'timeframe' => '1h',
+            'horizon_seconds' => 3600,
+            'direction' => 'buy', // conflicting direction, but confidence is below threshold
+            'confidence' => 40,
+        ]);
+
+        $result = $this->service->evaluate($config, 90_000.0);
+
+        $this->assertSame(RatioBotDecision::DECISION_SELL, $result['decision']);
+    }
+
+    // -----------------------------------------------------------------------
+    // Reserve tranches (Phase 2)
+    // -----------------------------------------------------------------------
+
+    /** @test */
+    public function partial_holding_sell_uses_weighted_average_anchor(): void
+    {
+        [$config] = $this->makePartialHoldingConfig(avgEntry: 800.0, sellThreshold: 0.5, buyThreshold: 0.25, tranchesRemaining: 1);
+
+        $result = $this->service->evaluate($config, 1200.0); // ratio = 1200/800 - 1 = 0.5
+
+        $this->assertSame(RatioBotDecision::DECISION_SELL, $result['decision']);
+    }
+
+    /** @test */
+    public function partial_holding_reserve_tranche_buy_triggers_on_further_drop(): void
+    {
+        [$config] = $this->makePartialHoldingConfig(avgEntry: 900.0, sellThreshold: 0.5, buyThreshold: 0.25, tranchesRemaining: 2);
+
+        $result = $this->service->evaluate($config, 675.0); // ratio = 900/675 - 1 = 0.333 >= 0.25
+
+        $this->assertSame(RatioBotDecision::DECISION_BUY, $result['decision']);
+        $this->assertSame('reserve_tranche_buy', $result['decision_record']->metadata['trigger']);
+    }
+
+    /** @test */
+    public function partial_holding_holds_when_neither_sell_nor_buy_condition_met(): void
+    {
+        [$config] = $this->makePartialHoldingConfig(avgEntry: 900.0, sellThreshold: 0.5, buyThreshold: 0.25, tranchesRemaining: 2);
+
+        $result = $this->service->evaluate($config, 850.0);
+
+        $this->assertSame(RatioBotDecision::DECISION_HOLD, $result['decision']);
+    }
+
+    /** @test */
+    public function partial_holding_never_deploys_reserve_when_none_remaining(): void
+    {
+        [$config] = $this->makePartialHoldingConfig(avgEntry: 900.0, sellThreshold: 0.5, buyThreshold: 0.25, tranchesRemaining: 0);
+
+        $result = $this->service->evaluate($config, 500.0); // would trigger a tranche buy if reserve existed
+
+        $this->assertSame(RatioBotDecision::DECISION_HOLD, $result['decision']);
+        $this->assertStringContainsString('no reserve tranches remaining', $result['reason']);
+    }
+
+    /** @test */
+    public function reserve_tranche_buy_delayed_one_tick_by_conflicting_brain_but_still_fires(): void
+    {
+        [$config] = $this->makePartialHoldingConfig(avgEntry: 900.0, sellThreshold: 0.5, buyThreshold: 0.25, tranchesRemaining: 2);
+        $config->update(['brain_enabled' => true, 'brain_min_confidence' => 65]);
+        $config->refresh();
+
+        RatioBotBrainSnapshot::create([
+            'ratio_bot_config_id' => $config->id,
+            'symbol' => 'BTCUSDT',
+            'timeframe' => '1h',
+            'horizon_seconds' => 3600,
+            'direction' => 'sell', // conflicts with the reserve tranche BUY
+            'confidence' => 80,
+        ]);
+
+        $first = $this->service->evaluate($config->fresh('state'), 675.0);
+        $this->assertSame(RatioBotDecision::DECISION_HOLD, $first['decision']);
+        $this->assertTrue((bool) $first['decision_record']->metadata['confirmation_pending']);
+
+        $second = $this->service->evaluate($config->fresh('state'), 675.0);
+        $this->assertSame(RatioBotDecision::DECISION_BUY, $second['decision']);
+        $this->assertSame('reserve_tranche_buy', $second['decision_record']->metadata['trigger']);
+    }
+
+    // -----------------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------------
+
+    private function makePartialHoldingConfig(float $avgEntry, float $sellThreshold, float $buyThreshold, int $tranchesRemaining): array
+    {
+        $config = RatioBotConfig::create([
+            'workspace_id'          => '00000000-0000-0000-0000-000000000001',
+            'symbol'                => 'BTCUSDT',
+            'enabled'               => true,
+            'market_type'           => 'spot',
+            'algorithm'             => 'ratio_threshold',
+            'initial_entry_pct'     => 0.6,
+            'reserve_tranche_count' => 2,
+            'sell_threshold_ratio'  => $sellThreshold,
+            'buy_threshold_ratio'   => $buyThreshold,
+        ]);
+        $state = RatioBotState::create([
+            'ratio_bot_config_id'        => $config->id,
+            'position_state'             => RatioBotState::STATE_PARTIAL_HOLDING,
+            'last_buy_price'             => $avgEntry,
+            'last_buy_quantity'          => 1.0,
+            'active_anchor_price'        => $avgEntry,
+            'active_anchor_type'         => 'buy_anchor',
+            'reserve_tranches_remaining' => $tranchesRemaining,
+            'reserve_quote_remaining'    => 40.0,
+        ]);
+        $config->setRelation('state', $state);
+        return [$config, $state];
+    }
 
     private function makeIdleConfig(): array
     {

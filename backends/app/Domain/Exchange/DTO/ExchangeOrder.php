@@ -17,9 +17,10 @@ class ExchangeOrder
     ) {
     }
 
-    public static function fromBinance(array $payload): self
+    public static function fromBinance(array $payload, ?float $resolvedPrice = null): self
     {
         $orderId = (string) ($payload['orderId'] ?? $payload['orderListId'] ?? '');
+        $price = $resolvedPrice ?? (isset($payload['price']) ? (float) $payload['price'] : null);
 
         return new self(
             orderId: $orderId,
@@ -29,7 +30,7 @@ class ExchangeOrder
             type: isset($payload['type']) ? strtoupper((string) $payload['type']) : null,
             origQty: (float) ($payload['origQty'] ?? $payload['quantity'] ?? 0),
             executedQty: (float) ($payload['executedQty'] ?? 0),
-            price: isset($payload['price']) ? (float) $payload['price'] : null,
+            price: $price,
             raw: $payload
         );
     }

@@ -19,6 +19,7 @@ class RatioBotRealtimeEngine
         private readonly IndicatorService $indicators,
         private readonly DynamicThresholdService $dynamicThresholds,
         private readonly TrailingProfitService $trailingProfits,
+        private readonly RatioBotBrainService $brain,
     ) {
     }
 
@@ -28,6 +29,7 @@ class RatioBotRealtimeEngine
         $dynamicThresholds = $this->dynamicThresholds->resolve($config, $currentPrice, $indicatorSnapshot);
         $trailingProfit = $this->trailingProfits->resolve($config, $config->state, $currentPrice, $dynamicThresholds);
         $marketHealth = $this->marketHealthSnapshot($config, $context, $indicatorSnapshot, $dynamicThresholds);
+        $brainSnapshot = $config->brain_enabled ? $this->brain->resolve($config, $currentPrice) : null;
 
         $this->stateService->markMarketSnapshot(
             $config,
@@ -39,6 +41,12 @@ class RatioBotRealtimeEngine
                 'indicator_snapshot' => $indicatorSnapshot,
                 'trailing_profit' => $trailingProfit,
                 'market_health' => $marketHealth,
+                'brain_snapshot' => $brainSnapshot ? [
+                    'direction' => $brainSnapshot->direction,
+                    'confidence' => $brainSnapshot->confidence,
+                    'forecast_bias' => $brainSnapshot->forecast_bias,
+                    'forecast_confidence' => $brainSnapshot->forecast_confidence,
+                ] : null,
             ],
         );
 

@@ -31,6 +31,12 @@ class RatioBotEvent extends BaseModel
     public const EVENT_SIGNAL_EMITTED         = 'signal_emitted';
     public const EVENT_RECONCILIATION_RUN     = 'reconciliation_run';
 
+    // V2 (gated behind config.v2_enabled)
+    public const EVENT_STAGED_SELL_FILLED           = 'staged_sell_filled';
+    public const EVENT_RECOVERY_MONITORING_ENTERED  = 'recovery_monitoring_entered';
+    public const EVENT_RECOVERY_REVIEW_COMPLETED    = 'recovery_review_completed';
+    public const EVENT_STRATEGY_REANCHORED          = 'strategy_reanchored';
+
     public function config(): BelongsTo
     {
         return $this->belongsTo(RatioBotConfig::class, 'ratio_bot_config_id');

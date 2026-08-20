@@ -4,9 +4,11 @@ namespace App\Domain\Exchange;
 
 use App\Domain\Exchange\DTO\ExchangeOrder;
 use Illuminate\Http\Client\Response;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use RuntimeException;
+use Throwable;
 
 class BinanceSpotClient implements ExchangeClientInterface
 {
@@ -76,8 +78,9 @@ class BinanceSpotClient implements ExchangeClientInterface
         float $qty,
         ?string $clientOrderId = null
     ): ExchangeOrder {
+        $normalizedSymbol = $this->normalizeSymbol($symbol);
         $payload = [
-            'symbol' => $this->normalizeSymbol($symbol),
+            'symbol' => $normalizedSymbol,
             'side' => strtoupper($side),
             'type' => 'MARKET',
             'quantity' => $this->formatDecimal($qty),
@@ -88,8 +91,101 @@ class BinanceSpotClient implements ExchangeClientInterface
         }
 
         $response = $this->signedRequestWithRetry('POST', '/api/v3/order', $payload);
+        $json = (array) $response->json();
 
-        return ExchangeOrder::fromBinance($response->json());
+        $price = $this->resolveFillPrice($json);
+        $executedQty = (float) ($json['executedQty'] ?? 0);
+
+        // Binance MARKET RESULT responses (notably on testnet) can return
+        // price="0.00" with an empty/absent `fills` array. Re-querying the
+        // order by orderId is best-effort — testnet can transiently
+        // 400/-2013 ("order does not exist") for a few hundred ms right
+        // after the fill — and must never fail an already-confirmed order.
+        if ($price <= 0 || $executedQty <= 0) {
+            $fetched = $this->safeFetchOrderRaw($normalizedSymbol, (string) ($json['orderId'] ?? ''));
+            if ($fetched !== []) {
+                $json = array_merge($json, $fetched);
+                $price = $this->resolveFillPrice($json);
+                $executedQty = (float) ($json['executedQty'] ?? $executedQty);
+            }
+        }
+
+        if ($price <= 0) {
+            // Final fallback: live reference quote. Callers separately guard
+            // on executedQty<=0 (an invalid/unfilled order), so backfilling
+            // price here never masks a genuinely-unfilled order.
+            $price = $this->getLatestPrice($symbol);
+            Log::warning('binance_spot.market_order_price_fallback_to_quote', [
+                'symbol' => $normalizedSymbol,
+                'order_id' => $json['orderId'] ?? null,
+                'client_order_id' => $clientOrderId,
+                'executed_qty' => $executedQty,
+            ]);
+        }
+
+        return ExchangeOrder::fromBinance($json, $price > 0 ? $price : null);
+    }
+
+    /**
+     * Resolve a usable average fill price for a Spot order payload, in order
+     * of reliability. Spot has no `avgPrice` field (unlike Futures) — MARKET
+     * orders must be priced from `fills` (POST response only) or
+     * `cummulativeQuoteQty / executedQty` (present on both POST and GET
+     * /api/v3/order responses). Treats 0/absent as missing rather than a
+     * real price, since Binance returns "0.00" (not null) on responses that
+     * omit a real fill price.
+     */
+    private function resolveFillPrice(array $payload): float
+    {
+        $fills = (array) ($payload['fills'] ?? []);
+        if ($fills !== []) {
+            $qty = 0.0;
+            $quote = 0.0;
+            foreach ($fills as $fill) {
+                $fillQty = (float) ($fill['qty'] ?? 0);
+                $fillPrice = (float) ($fill['price'] ?? 0);
+                $qty += $fillQty;
+                $quote += $fillQty * $fillPrice;
+            }
+            if ($qty > 0 && $quote > 0) {
+                return round($quote / $qty, 8);
+            }
+        }
+
+        $executedQty = (float) ($payload['executedQty'] ?? 0);
+        $cumQuote = (float) ($payload['cummulativeQuoteQty'] ?? 0);
+        if ($executedQty > 0 && $cumQuote > 0) {
+            return round($cumQuote / $executedQty, 8);
+        }
+
+        foreach (['avgPrice', 'price'] as $key) {
+            $value = (float) ($payload[$key] ?? 0);
+            if ($value > 0) {
+                return $value;
+            }
+        }
+
+        return 0.0;
+    }
+
+    /**
+     * Best-effort order lookup that never throws — mirrors
+     * BinanceTimedFuturesProvider::safeFetchOrder(). Binance (testnet
+     * especially) can -2013 "Order does not exist" for a few hundred ms
+     * right after a market fill, which must not fail an already-confirmed
+     * order.
+     */
+    private function safeFetchOrderRaw(string $symbol, string $orderId): array
+    {
+        if ($orderId === '') {
+            return [];
+        }
+
+        try {
+            return $this->fetchOrder($symbol, $orderId)->raw;
+        } catch (Throwable) {
+            return [];
+        }
     }
 
     public function placeOCOOrder(
@@ -284,18 +380,28 @@ class BinanceSpotClient implements ExchangeClientInterface
     private function signedRequest(string $method, string $path, array $params = [], bool $throw = true): Response
     {
         $signedPayload = $this->sign($params);
+        $response = $this->dispatch($method, $path, $signedPayload);
 
-        $response = match (strtoupper($method)) {
-            'GET' => Http::withHeaders($this->apiHeaders())->get($this->url($path), $signedPayload),
-            'DELETE' => Http::withHeaders($this->apiHeaders())->delete($this->url($path), $signedPayload),
-            default => Http::withHeaders($this->apiHeaders())->asForm()->post($this->url($path), $signedPayload),
-        };
+        if ($this->isTimestampOutsideRecvWindow($response)) {
+            $this->syncServerTimeOffset();
+            $signedPayload = $this->sign($params);
+            $response = $this->dispatch($method, $path, $signedPayload);
+        }
 
         if ($throw) {
             $this->assertSuccess($response, 'Binance signed request failed.');
         }
 
         return $response;
+    }
+
+    private function dispatch(string $method, string $path, array $signedPayload): Response
+    {
+        return match (strtoupper($method)) {
+            'GET' => Http::withHeaders($this->apiHeaders())->get($this->url($path), $signedPayload),
+            'DELETE' => Http::withHeaders($this->apiHeaders())->delete($this->url($path), $signedPayload),
+            default => Http::withHeaders($this->apiHeaders())->asForm()->post($this->url($path), $signedPayload),
+        };
     }
 
     private function apiHeaders(): array
@@ -305,8 +411,8 @@ class BinanceSpotClient implements ExchangeClientInterface
 
     private function sign(array $payload): array
     {
-        $payload['timestamp'] = (int) floor(microtime(true) * 1000);
-        $payload['recvWindow'] = 5000;
+        $payload['timestamp'] = (int) floor(microtime(true) * 1000) + $this->serverTimeOffsetMs();
+        $payload['recvWindow'] = max(5000, min(60000, (int) config('services.binance.spot_recv_window_ms', 5000)));
         ksort($payload);
 
         $query = http_build_query($payload, '', '&');
@@ -314,6 +420,48 @@ class BinanceSpotClient implements ExchangeClientInterface
         $payload['signature'] = $signature;
 
         return $payload;
+    }
+
+    /**
+     * Detect Binance's -1021 "Timestamp for this request was outside of the
+     * recvWindow" error, which indicates local/server clock skew.
+     */
+    private function isTimestampOutsideRecvWindow(Response $response): bool
+    {
+        return (int) ($response->json('code') ?? 0) === -1021
+            || str_contains(strtolower($response->body()), 'outside of the recvwindow');
+    }
+
+    private function serverTimeOffsetKey(): string
+    {
+        return 'autofinx:binance:spot_time_offset:' . md5($this->baseUrl);
+    }
+
+    private function serverTimeOffsetMs(): int
+    {
+        return (int) Cache::get($this->serverTimeOffsetKey(), 0);
+    }
+
+    /**
+     * Reactively correct for local/server clock skew: fetch Binance's server
+     * time, compute the offset against the local request midpoint, and cache
+     * it briefly so subsequent signed requests self-correct without needing
+     * a persistent NTP-style sync process.
+     */
+    private function syncServerTimeOffset(): void
+    {
+        try {
+            $started = (int) floor(microtime(true) * 1000);
+            $response = Http::get($this->url('/api/v3/time'));
+            $finished = (int) floor(microtime(true) * 1000);
+            $serverTime = (int) ($response->json('serverTime') ?? 0);
+            if ($response->successful() && $serverTime > 0) {
+                $localMidpoint = (int) floor(($started + $finished) / 2);
+                Cache::put($this->serverTimeOffsetKey(), $serverTime - $localMidpoint, 600);
+            }
+        } catch (Throwable) {
+            Cache::forget($this->serverTimeOffsetKey());
+        }
     }
 
     /**

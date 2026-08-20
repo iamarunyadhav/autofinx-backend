@@ -18,6 +18,7 @@ use App\Console\Commands\AnalyticsRecomputeCommand;
 use App\Console\Commands\QuickTradesDoctorCommand;
 use App\Console\Commands\QuickTradesReconcileCommand;
 use App\Console\Commands\MarketBackfillCommand;
+use App\Console\Commands\MarketOhlcBackfillCommand;
 use App\Console\Commands\ArbitrageLoopStart;
 use App\Console\Commands\YieldSimulateStart;
 use App\Console\Commands\DefiYieldSimulateStart;
@@ -76,6 +77,7 @@ class Kernel extends ConsoleKernel
         QuickTradesDoctorCommand::class,
         QuickTradesReconcileCommand::class,
         MarketBackfillCommand::class,
+        MarketOhlcBackfillCommand::class,
         ArbitrageLoopStart::class,
         YieldSimulateStart::class,
         DefiYieldSimulateStart::class,

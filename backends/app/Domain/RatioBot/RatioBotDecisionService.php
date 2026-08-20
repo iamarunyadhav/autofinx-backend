@@ -4,6 +4,7 @@ namespace App\Domain\RatioBot;
 
 use App\Models\RatioBotConfig;
 use App\Models\RatioBotDecision;
+use App\Models\RatioBotEvent;
 use App\Models\RatioBotState;
 use DateTimeInterface;
 use Illuminate\Support\Carbon;
@@ -30,7 +31,7 @@ class RatioBotDecisionService
         $correlationId = Str::uuid()->toString();
         $priceSource = isset($context['price_source']) ? (string) $context['price_source'] : null;
         $priceTimestamp = $this->normalizePriceTimestamp($context['price_timestamp'] ?? null);
-        $policy = $this->resolveRuntimePolicy($config, $context);
+        $policy = $this->applyStrategyManagerOverrides($config, $state, $currentPrice, $this->resolveRuntimePolicy($config, $context));
 
         Log::info('[RatioBot] Evaluating', [
             'config_id' => $config->id,
@@ -167,12 +168,39 @@ class RatioBotDecisionService
             return $spikeRejection;
         }
 
+        if ($config->recoveryEnabled()) {
+            try {
+                $this->maybeEnterRecoveryMonitoring($config, $state);
+            } catch (Throwable $e) {
+                Log::warning('[RatioBot] Recovery-entry check failed, continuing without recovery', [
+                    'config_id' => $config->id,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
+
         if ($state->isHolding()) {
             return $this->evaluateHolding($config, $state, $currentPrice, $correlationId, $priceSource, $priceTimestamp, $policy);
         }
 
+        if ($state->isPartialHolding()) {
+            return $this->evaluatePartialHolding($config, $state, $currentPrice, $correlationId, $priceSource, $priceTimestamp, $policy);
+        }
+
+        if ($state->isPartialSold()) {
+            return $this->evaluatePartialSold($config, $state, $currentPrice, $correlationId, $priceSource, $priceTimestamp, $policy);
+        }
+
         if ($state->isFlat()) {
             return $this->evaluateFlat($config, $state, $currentPrice, $correlationId, $priceSource, $priceTimestamp, $policy);
+        }
+
+        if ($state->position_state === RatioBotState::STATE_RECOVERY_MONITORING) {
+            return $this->evaluateRecoveryMonitoring($config, $state, $currentPrice, $correlationId, $priceSource, $priceTimestamp, $policy);
+        }
+
+        if ($state->position_state === RatioBotState::STATE_CASH_RECOVERY_MONITORING) {
+            return $this->evaluateCashRecoveryMonitoring($config, $state, $currentPrice, $correlationId, $priceSource, $priceTimestamp, $policy);
         }
 
         return $this->record(
@@ -258,9 +286,11 @@ class RatioBotDecisionService
             'pending_trigger_updates' => (int) ($state->pending_trigger_updates ?? 0),
             'pending_trigger_ratio' => $state->pending_trigger_ratio,
             'pending_trigger_price' => $state->pending_trigger_price,
+            'reserve_tranches_remaining' => (int) ($state->reserve_tranches_remaining ?? 0),
+            'reserve_quote_remaining' => (float) ($state->reserve_quote_remaining ?? 0),
         ];
 
-        if ($state->isHolding() && $state->last_buy_price > 0) {
+        if (($state->isHolding() || $state->isPartialHolding()) && $state->last_buy_price > 0) {
             $ratio = ($currentPrice / (float) $state->last_buy_price) - 1;
             $effective = $ratio - $costRatio;
             $result['sell_ratio'] = round($ratio, 6);
@@ -271,6 +301,13 @@ class RatioBotDecisionService
                 $costBasis = (float) $state->last_buy_price * (float) $state->last_buy_quantity;
                 $result['position_value_quote'] = round($posVal, 8);
                 $result['unrealized_pnl'] = round($posVal - $costBasis, 8);
+            }
+
+            if ($state->isPartialHolding() && (int) ($state->reserve_tranches_remaining ?? 0) > 0) {
+                $buyRatio = ((float) $state->last_buy_price / $currentPrice) - 1;
+                $result['buy_ratio'] = round($buyRatio, 6);
+                $result['effective_buy_ratio'] = round($buyRatio - $costRatio, 6);
+                $result['buy_distance_pct'] = round(((float) $config->buy_threshold_ratio + $costRatio - $buyRatio) * 100, 4);
             }
         }
 
@@ -303,6 +340,196 @@ class RatioBotDecisionService
             return $this->record($config, $state, RatioBotDecision::DECISION_HOLD, $currentPrice, $anchor, 0, (float) $config->sell_threshold_ratio, $correlationId, 'invalid buy anchor (zero)', [], $priceSource, $priceTimestamp);
         }
 
+        $sellResult = $this->checkSellConditions($config, $state, $currentPrice, $anchor, $correlationId, $priceSource, $priceTimestamp, $policy);
+        if ($sellResult !== null) {
+            return $sellResult;
+        }
+
+        // Only reachable for non-trailing algorithms (trailing always
+        // returns non-null from checkSellConditions above).
+        $ratio = ($currentPrice / $anchor) - 1;
+        $threshold = (float) ($policy['sell_threshold_ratio'] ?? $config->sell_threshold_ratio);
+        $costRatio = $this->executionCostRatio($config);
+        $requiredRatio = $threshold + $costRatio;
+        $baseMetadata = array_merge(
+            $this->costMetadata($config, $costRatio, $ratio - $costRatio),
+            $policy['audit'] ?? [],
+            [
+                'dynamic_threshold_enabled' => (bool) ($policy['dynamic_threshold_enabled'] ?? false),
+            ],
+        );
+
+        return $this->record(
+            $config,
+            $state,
+            RatioBotDecision::DECISION_HOLD,
+            $currentPrice,
+            $anchor,
+            $ratio,
+            $threshold,
+            $correlationId,
+            "holding: ratio {$ratio} < required sell ratio {$requiredRatio}",
+            array_merge($baseMetadata, ['trigger' => 'sell_threshold', 'required_ratio' => $requiredRatio]),
+            $priceSource,
+            $priceTimestamp,
+        );
+    }
+
+    /**
+     * Reserve tranches (Phase 2): watches BOTH the sell threshold (using the
+     * running weighted-average entry as anchor) AND, if no sell condition
+     * fires, whether price has dropped far enough again to justify deploying
+     * the next reserve tranche. The tranche BUY goes through the exact same
+     * finalizeTradeSignal()/confirmTrigger() path as any other BUY, so
+     * Phase 1's brain-conflict confirmation delay applies to it unchanged.
+     */
+    private function evaluatePartialHolding(
+        RatioBotConfig $config,
+        RatioBotState $state,
+        float $currentPrice,
+        string $correlationId,
+        ?string $priceSource,
+        ?DateTimeInterface $priceTimestamp,
+        array $policy,
+    ): array {
+        $anchor = (float) $state->last_buy_price; // weighted-average entry
+        if ($anchor <= 0) {
+            return $this->record($config, $state, RatioBotDecision::DECISION_HOLD, $currentPrice, $anchor, 0, (float) $config->sell_threshold_ratio, $correlationId, 'invalid buy anchor (zero)', [], $priceSource, $priceTimestamp);
+        }
+
+        $sellResult = $this->checkSellConditions($config, $state, $currentPrice, $anchor, $correlationId, $priceSource, $priceTimestamp, $policy);
+        if ($sellResult !== null) {
+            return $sellResult;
+        }
+
+        $tranchesRemaining = (int) ($state->reserve_tranches_remaining ?? 0);
+        if ($tranchesRemaining <= 0) {
+            // Shouldn't normally happen — onBuyFilled() promotes to plain
+            // HOLDING once tranches hit 0 — but stay safe either way.
+            return $this->record($config, $state, RatioBotDecision::DECISION_HOLD, $currentPrice, $anchor, 0, (float) $config->buy_threshold_ratio, $correlationId, 'partial holding: no reserve tranches remaining', [], $priceSource, $priceTimestamp);
+        }
+
+        $buyRatio = ($anchor / $currentPrice) - 1; // same formula evaluateFlat() uses for its buy check
+        $buyThreshold = (float) ($policy['buy_threshold_ratio'] ?? $config->buy_threshold_ratio);
+        $costRatio = $this->executionCostRatio($config);
+        $requiredBuyRatio = $buyThreshold + $costRatio;
+        $metadata = array_merge(
+            $this->costMetadata($config, $costRatio, $buyRatio - $costRatio),
+            $policy['audit'] ?? [],
+            [
+                'dynamic_threshold_enabled' => (bool) ($policy['dynamic_threshold_enabled'] ?? false),
+                'reserve_tranches_remaining_before' => $tranchesRemaining,
+                'reserve_quote_remaining' => (float) ($state->reserve_quote_remaining ?? 0),
+            ],
+        );
+
+        if ($buyRatio >= $requiredBuyRatio) {
+            return $this->finalizeTradeSignal(
+                $config,
+                $state,
+                RatioBotDecision::DECISION_BUY,
+                $currentPrice,
+                $anchor,
+                $buyRatio,
+                $buyThreshold,
+                $correlationId,
+                "reserve tranche buy triggered: ratio {$buyRatio} >= required {$requiredBuyRatio} (threshold {$buyThreshold}, weighted avg entry {$anchor}), {$tranchesRemaining} tranche(s) remaining",
+                array_merge($metadata, ['trigger' => 'reserve_tranche_buy', 'required_ratio' => $requiredBuyRatio]),
+                $priceSource,
+                $priceTimestamp,
+            );
+        }
+
+        return $this->record(
+            $config,
+            $state,
+            RatioBotDecision::DECISION_HOLD,
+            $currentPrice,
+            $anchor,
+            $buyRatio,
+            $buyThreshold,
+            $correlationId,
+            "partial holding: ratio {$buyRatio} < required reserve-tranche buy ratio {$requiredBuyRatio}, {$tranchesRemaining} tranche(s) remaining",
+            array_merge($metadata, ['trigger' => 'reserve_tranche_buy', 'required_ratio' => $requiredBuyRatio]),
+            $priceSource,
+            $priceTimestamp,
+        );
+    }
+
+    /**
+     * Staged SELL (V2), remaining stage(s). Mirrors evaluateHolding() exactly
+     * except there is no re-buy branch — a partially-sold position only ever
+     * watches for its next sell stage. Anchor is ALWAYS true cost basis
+     * (last_buy_price), never active_anchor_price — a partial exit's
+     * economics must never be affected by any strategy-anchor re-anchoring.
+     */
+    private function evaluatePartialSold(
+        RatioBotConfig $config,
+        RatioBotState $state,
+        float $currentPrice,
+        string $correlationId,
+        ?string $priceSource,
+        ?DateTimeInterface $priceTimestamp,
+        array $policy,
+    ): array {
+        $anchor = (float) $state->last_buy_price;
+        if ($anchor <= 0) {
+            return $this->record($config, $state, RatioBotDecision::DECISION_HOLD, $currentPrice, $anchor, 0, (float) $config->sell_threshold_ratio, $correlationId, 'invalid buy anchor (zero)', [], $priceSource, $priceTimestamp);
+        }
+
+        $sellResult = $this->checkSellConditions($config, $state, $currentPrice, $anchor, $correlationId, $priceSource, $priceTimestamp, $policy);
+        if ($sellResult !== null) {
+            return $sellResult;
+        }
+
+        $ratio = ($currentPrice / $anchor) - 1;
+        $threshold = (float) ($policy['sell_threshold_ratio'] ?? $config->sell_threshold_ratio);
+        $costRatio = $this->executionCostRatio($config);
+        $requiredRatio = $threshold + $costRatio;
+        $tranchesRemaining = (int) ($state->sell_tranches_remaining ?? 0);
+        $baseMetadata = array_merge(
+            $this->costMetadata($config, $costRatio, $ratio - $costRatio),
+            $policy['audit'] ?? [],
+            [
+                'dynamic_threshold_enabled' => (bool) ($policy['dynamic_threshold_enabled'] ?? false),
+                'sell_tranches_remaining' => $tranchesRemaining,
+            ],
+        );
+
+        return $this->record(
+            $config,
+            $state,
+            RatioBotDecision::DECISION_HOLD,
+            $currentPrice,
+            $anchor,
+            $ratio,
+            $threshold,
+            $correlationId,
+            "partial sold: ratio {$ratio} < required sell ratio {$requiredRatio}, {$tranchesRemaining} sell stage(s) remaining",
+            array_merge($baseMetadata, ['trigger' => 'sell_threshold', 'required_ratio' => $requiredRatio]),
+            $priceSource,
+            $priceTimestamp,
+        );
+    }
+
+    /**
+     * Stop-loss / take-profit / time-stop / sell-threshold-or-trailing.
+     * Shared by evaluateHolding() and evaluatePartialHolding() — both watch
+     * the same exit conditions against the same (possibly weighted-average)
+     * anchor. Returns null only when nothing fired AND the algorithm is the
+     * plain (non-trailing) ratio-threshold, meaning the caller should keep
+     * evaluating (e.g. check for a reserve-tranche buy).
+     */
+    private function checkSellConditions(
+        RatioBotConfig $config,
+        RatioBotState $state,
+        float $currentPrice,
+        float $anchor,
+        string $correlationId,
+        ?string $priceSource,
+        ?DateTimeInterface $priceTimestamp,
+        array $policy,
+    ): ?array {
         $ratio = ($currentPrice / $anchor) - 1;
         $threshold = (float) ($policy['sell_threshold_ratio'] ?? $config->sell_threshold_ratio);
         $costRatio = $this->executionCostRatio($config);
@@ -411,20 +638,7 @@ class RatioBotDecisionService
             );
         }
 
-        return $this->record(
-            $config,
-            $state,
-            RatioBotDecision::DECISION_HOLD,
-            $currentPrice,
-            $anchor,
-            $ratio,
-            $threshold,
-            $correlationId,
-            "holding: ratio {$ratio} < required sell ratio {$requiredRatio}",
-            array_merge($baseMetadata, ['trigger' => 'sell_threshold', 'required_ratio' => $requiredRatio]),
-            $priceSource,
-            $priceTimestamp,
-        );
+        return null;
     }
 
     private function evaluateFlat(
@@ -508,6 +722,121 @@ class RatioBotDecisionService
             $correlationId,
             "flat: ratio {$ratio} < required buy ratio {$requiredRatio}",
             array_merge($metadata, ['trigger' => 'buy_threshold', 'required_ratio' => $requiredRatio]),
+            $priceSource,
+            $priceTimestamp,
+        );
+    }
+
+    /**
+     * Position stuck (long, reserve exhausted, no profitable sell for over
+     * recovery_timeout_minutes). Normal sell conditions ALWAYS run first — a
+     * real exit always wins over recovery bookkeeping — using true cost
+     * basis (last_buy_price), never active_anchor_price. Only when nothing
+     * fires AND the review timer is due does this fall into a
+     * RecoveryReviewService review, which can never itself return a trade.
+     */
+    private function evaluateRecoveryMonitoring(
+        RatioBotConfig $config,
+        RatioBotState $state,
+        float $currentPrice,
+        string $correlationId,
+        ?string $priceSource,
+        ?DateTimeInterface $priceTimestamp,
+        array $policy,
+    ): array {
+        $anchor = (float) $state->last_buy_price;
+        if ($anchor > 0) {
+            $sellResult = $this->checkSellConditions($config, $state, $currentPrice, $anchor, $correlationId, $priceSource, $priceTimestamp, $policy);
+            if ($sellResult !== null) {
+                return $sellResult;
+            }
+        }
+
+        if ($this->recoveryReviewDue($state)) {
+            return $this->runRecoveryReview($config, $state, $currentPrice, 'position_stuck', $correlationId, $priceSource, $priceTimestamp);
+        }
+
+        return $this->record(
+            $config,
+            $state,
+            RatioBotDecision::DECISION_HOLD,
+            $currentPrice,
+            $anchor > 0 ? $anchor : null,
+            0,
+            0,
+            $correlationId,
+            'recovery monitoring: waiting for next review window',
+            ['recovery_mode' => $state->recovery_mode, 'recovery_review_at' => optional($state->recovery_review_at)->toIso8601String()],
+            $priceSource,
+            $priceTimestamp,
+        );
+    }
+
+    /**
+     * Cash stuck (fully sold, price kept rising past the old sell anchor).
+     * Unlike the position-stuck side, the buy-side reference HERE is
+     * legitimately re-anchorable (active_anchor_price) — buying at a fresh
+     * observation point carries no "realize a loss" risk the way re-pricing
+     * a stuck long's sell trigger would. Normal buy conditions always run
+     * first; only when nothing fires AND the review timer is due does this
+     * fall into a recovery review.
+     */
+    private function evaluateCashRecoveryMonitoring(
+        RatioBotConfig $config,
+        RatioBotState $state,
+        float $currentPrice,
+        string $correlationId,
+        ?string $priceSource,
+        ?DateTimeInterface $priceTimestamp,
+        array $policy,
+    ): array {
+        $anchor = (float) ($state->active_anchor_price ?? $state->last_sell_price);
+        if ($anchor <= 0) {
+            return $this->record($config, $state, RatioBotDecision::DECISION_HOLD, $currentPrice, null, 0, (float) $config->buy_threshold_ratio, $correlationId, 'invalid sell anchor (zero)', [], $priceSource, $priceTimestamp);
+        }
+
+        $ratio = ($anchor / $currentPrice) - 1;
+        $threshold = (float) ($policy['buy_threshold_ratio'] ?? $config->buy_threshold_ratio);
+        $costRatio = $this->executionCostRatio($config);
+        $requiredRatio = $threshold + $costRatio;
+        $metadata = array_merge(
+            $this->costMetadata($config, $costRatio, $ratio - $costRatio),
+            $policy['audit'] ?? [],
+            ['dynamic_threshold_enabled' => (bool) ($policy['dynamic_threshold_enabled'] ?? false)],
+        );
+
+        if ($ratio >= $requiredRatio) {
+            return $this->finalizeTradeSignal(
+                $config,
+                $state,
+                RatioBotDecision::DECISION_BUY,
+                $currentPrice,
+                $anchor,
+                $ratio,
+                $threshold,
+                $correlationId,
+                "buy triggered during cash recovery: ratio {$ratio} >= required {$requiredRatio} (threshold {$threshold}, anchor {$anchor})",
+                array_merge($metadata, ['trigger' => 'buy_threshold', 'required_ratio' => $requiredRatio]),
+                $priceSource,
+                $priceTimestamp,
+            );
+        }
+
+        if ($this->recoveryReviewDue($state)) {
+            return $this->runRecoveryReview($config, $state, $currentPrice, 'cash_stuck', $correlationId, $priceSource, $priceTimestamp);
+        }
+
+        return $this->record(
+            $config,
+            $state,
+            RatioBotDecision::DECISION_HOLD,
+            $currentPrice,
+            $anchor,
+            $ratio,
+            $threshold,
+            $correlationId,
+            "cash recovery monitoring: ratio {$ratio} < required buy ratio {$requiredRatio}",
+            array_merge($metadata, ['trigger' => 'buy_threshold', 'required_ratio' => $requiredRatio, 'recovery_mode' => $state->recovery_mode]),
             $priceSource,
             $priceTimestamp,
         );
@@ -998,7 +1327,8 @@ class RatioBotDecisionService
 
     private function confirmTrigger(RatioBotConfig $config, RatioBotState $state, string $side, float $price, float $ratio, ?string $priceSource): array
     {
-        $requiredUpdates = max(1, (int) ($config->trigger_confirm_updates ?? 1));
+        $brainBump = $this->brainConflictBump($config, $side);
+        $requiredUpdates = max(1, (int) ($config->trigger_confirm_updates ?? 1)) + $brainBump;
         $requiredSeconds = max(0, (int) ($config->trigger_confirm_seconds ?? 0));
         $stabilitySeconds = max(0, (int) ($config->min_price_stability_seconds ?? 0));
         $maxDeviation = max(0.0, (float) ($config->max_spike_deviation_bps ?? 0)) / 10000;
@@ -1014,6 +1344,7 @@ class RatioBotDecisionService
                     'trigger_confirm_seconds_required' => $requiredSeconds,
                     'use_candle_close_confirmation' => $candleRequired,
                     'candle_close_ready' => $candleReady,
+                    'brain_confirm_bump' => $brainBump,
                 ],
             ];
         }
@@ -1079,8 +1410,47 @@ class RatioBotDecisionService
                 'pending_trigger_updates' => $updates,
                 'pending_trigger_ratio' => $ratio,
                 'pending_trigger_price' => $firstPrice,
+                'brain_confirm_bump' => $brainBump,
             ],
         ];
+    }
+
+    /**
+     * Confirmation-only Master Brain check: if brain_enabled and the latest
+     * (fresh) brain snapshot strongly disagrees with the side about to
+     * trigger, require one extra confirmation tick before firing. Never
+     * blocks the trade outright — always fails open (returns 0) on any
+     * error, missing/stale snapshot, or when brain_enabled is off.
+     */
+    private function brainConflictBump(RatioBotConfig $config, string $side): int
+    {
+        if (! (bool) $config->brain_enabled) {
+            return 0;
+        }
+
+        try {
+            $brain = app(RatioBotBrainService::class);
+            $snapshot = $brain->latest($config);
+            if (! $snapshot || ! $snapshot->created_at) {
+                return 0;
+            }
+
+            $freshnessLimitSeconds = 2 * $brain->horizonSeconds($config);
+            if ($snapshot->created_at->diffInSeconds(now()) > $freshnessLimitSeconds) {
+                return 0;
+            }
+
+            $minConfidence = max(1, (int) ($config->brain_min_confidence ?? 65));
+
+            return $snapshot->conflictsWith($side, $minConfidence) ? 1 : 0;
+        } catch (Throwable $e) {
+            Log::warning('[RatioBot] Brain conflict check failed, failing open', [
+                'config_id' => $config->id,
+                'error' => $e->getMessage(),
+            ]);
+
+            return 0;
+        }
     }
 
     private function rejectSingleTickSpike(
@@ -1188,6 +1558,209 @@ class RatioBotDecisionService
             'ratio_bot_config_id' => $config->id,
             'position_state' => RatioBotState::STATE_IDLE,
         ]);
+    }
+
+    /**
+     * V2 recovery entry. Only fires once config->recoveryEnabled() (checked
+     * by the caller) — position_stuck requires an open position AND the buy
+     * reserve fully exhausted (otherwise a further reserve tranche is still
+     * the correct next move, not recovery); cash_stuck requires flat.
+     */
+    private function maybeEnterRecoveryMonitoring(RatioBotConfig $config, RatioBotState $state): void
+    {
+        if ($state->isRecoveryMonitoring()) {
+            return;
+        }
+
+        $timeoutMinutes = max(1, (int) $config->recovery_timeout_minutes);
+        $stuckSince = $state->last_trade_time;
+        if (! $stuckSince || ! $stuckSince->copy()->addMinutes($timeoutMinutes)->isPast()) {
+            return;
+        }
+
+        $hasOpenPosition = in_array($state->position_state, [
+            RatioBotState::STATE_HOLDING,
+            RatioBotState::STATE_PARTIAL_HOLDING,
+            RatioBotState::STATE_PARTIAL_SOLD,
+        ], true);
+
+        if ($hasOpenPosition && (int) ($state->reserve_tranches_remaining ?? 0) <= 0) {
+            app(RatioBotStateService::class)->enterRecoveryMonitoring(
+                $config,
+                'position_stuck',
+                "no sell trigger and reserve exhausted for over {$timeoutMinutes} minutes"
+            );
+            $state->refresh();
+            return;
+        }
+
+        if ($state->isFlat()) {
+            app(RatioBotStateService::class)->enterRecoveryMonitoring(
+                $config,
+                'cash_stuck',
+                "no buy trigger for over {$timeoutMinutes} minutes"
+            );
+            $state->refresh();
+        }
+    }
+
+    private function recoveryReviewDue(RatioBotState $state): bool
+    {
+        return $state->recovery_review_at !== null && $state->recovery_review_at->isPast();
+    }
+
+    /**
+     * Runs RecoveryReviewService and applies its outcome. Structurally
+     * cannot execute a trade — REANCHOR_STRATEGY only ever moves
+     * active_anchor_price/active_anchor_type (never last_buy_price/
+     * entry_price), and PAUSE only ever blocks (never sells at a loss).
+     */
+    private function runRecoveryReview(
+        RatioBotConfig $config,
+        RatioBotState $state,
+        float $currentPrice,
+        string $recoveryMode,
+        string $correlationId,
+        ?string $priceSource,
+        ?DateTimeInterface $priceTimestamp,
+    ): array {
+        $timeoutMinutes = max(1, (int) $config->recovery_timeout_minutes);
+
+        try {
+            $review = app(RecoveryReviewService::class)->review($config, $state, $currentPrice, $recoveryMode);
+        } catch (Throwable $e) {
+            Log::warning('[RatioBot] Recovery review failed, extending review window', [
+                'config_id' => $config->id,
+                'error' => $e->getMessage(),
+            ]);
+            $state->update(['recovery_review_at' => now()->addMinutes($timeoutMinutes)]);
+
+            return $this->record(
+                $config,
+                $state,
+                RatioBotDecision::DECISION_HOLD,
+                $currentPrice,
+                $state->active_anchor_price ? (float) $state->active_anchor_price : null,
+                0,
+                0,
+                $correlationId,
+                'recovery review failed, will retry next window',
+                ['recovery_mode' => $recoveryMode],
+                $priceSource,
+                $priceTimestamp,
+            );
+        }
+
+        $outcome = (string) $review['outcome'];
+
+        if ($outcome === RecoveryReviewService::OUTCOME_PAUSE) {
+            app(RatioBotStateService::class)->block($config, 'recovery_review_pause', $review['reason']);
+        } elseif ($outcome === RecoveryReviewService::OUTCOME_REANCHOR_STRATEGY) {
+            $candidatePrice = (float) ($review['suggested_anchor']['candidate_price'] ?? 0);
+            if ($candidatePrice > 0) {
+                $anchorType = $recoveryMode === 'cash_stuck' ? 'sell_anchor' : 'buy_anchor';
+                app(RatioBotStateService::class)->reanchorStrategy($config, $anchorType, $candidatePrice, $review['reason']);
+            } else {
+                $state->update(['recovery_review_at' => now()->addMinutes($timeoutMinutes)]);
+            }
+        } else {
+            // KEEP_EXISTING_ANCHOR or CONTINUE_WAIT — stay in recovery, push the review window out.
+            $state->update(['recovery_review_at' => now()->addMinutes($timeoutMinutes)]);
+        }
+
+        RatioBotEvent::create([
+            'ratio_bot_config_id' => $config->id,
+            'event_type' => RatioBotEvent::EVENT_RECOVERY_REVIEW_COMPLETED,
+            'context' => $review,
+            'occurred_at' => now(),
+        ]);
+
+        $state->refresh();
+
+        return $this->record(
+            $config,
+            $state,
+            RatioBotDecision::DECISION_HOLD,
+            $currentPrice,
+            $state->active_anchor_price ? (float) $state->active_anchor_price : null,
+            0,
+            0,
+            $correlationId,
+            "recovery review completed: {$outcome} — {$review['reason']}",
+            ['recovery_mode' => $recoveryMode, 'recovery_review' => $review],
+            $priceSource,
+            $priceTimestamp,
+        );
+    }
+
+    /**
+     * Fail-open V2 hook: composes Strategy Manager regime + dynamic-threshold
+     * overrides into the runtime policy. Returns $policy completely
+     * unchanged (byte-identical) whenever v2_enabled is off, the analysis
+     * is inert, or anything throws — this is the sole gate that keeps every
+     * pre-existing (V1) bot's evaluation behavior untouched.
+     */
+    private function applyStrategyManagerOverrides(RatioBotConfig $config, RatioBotState $state, float $currentPrice, array $policy): array
+    {
+        if (! $config->v2_enabled) {
+            return $policy;
+        }
+
+        try {
+            $analysis = app(StrategyManagerService::class)->analyze($config, $state, $currentPrice);
+        } catch (Throwable $e) {
+            Log::warning('[RatioBot] Strategy manager analysis failed, using existing policy unchanged', [
+                'config_id' => $config->id,
+                'error' => $e->getMessage(),
+            ]);
+
+            return $policy;
+        }
+
+        if (! (bool) ($analysis['enabled'] ?? false)) {
+            return $policy;
+        }
+
+        $dynamic = (array) ($analysis['dynamic_thresholds'] ?? []);
+        if ($dynamic === []) {
+            return $policy;
+        }
+
+        // Regime-aware sell/buy thresholds are the new V2 capability and are
+        // always safe to apply: the regime factor is a no-op (1.0x) whenever
+        // the regime resolves to UNCERTAIN (e.g. insufficient candle
+        // history), so a v2_enabled bot with no real regime signal yet sees
+        // byte-identical sell/buy thresholds.
+        $policy['dynamic_threshold_enabled'] = (bool) ($dynamic['enabled'] ?? $policy['dynamic_threshold_enabled']);
+        $policy['sell_threshold_ratio'] = $this->normalizeRuntimeRatio($dynamic['sell_threshold_ratio'] ?? null, $policy['sell_threshold_ratio']);
+        $policy['buy_threshold_ratio'] = $this->normalizeRuntimeBuyRatio($dynamic['buy_threshold_ratio'] ?? null, $policy['buy_threshold_ratio']);
+
+        // Stop-loss/take-profit/pullback/rebound, unlike sell/buy threshold,
+        // are NOT purely regime-gated inside DynamicThresholdService — it
+        // derives them from trailing/ATR math that runs even when
+        // `enabled` is false. Only apply them here when the bot has ALSO
+        // explicitly opted into use_dynamic_thresholds — otherwise a bot
+        // that only wanted staged-sell/reserve/recovery would see its
+        // stop-loss silently widen for no reason it asked for.
+        if ((bool) ($dynamic['enabled'] ?? false)) {
+            $takeProfitFallback = $this->ratioFromConfigPct($config->take_profit_pct);
+            $useDynamicTakeProfitGuard = (bool) data_get($config->strategy_params ?? [], 'use_dynamic_take_profit_guard', false);
+            if ($useDynamicTakeProfitGuard || (bool) $config->require_take_profit) {
+                $policy['take_profit_ratio'] = $this->normalizeRuntimeRatio($dynamic['trailing_take_profit_ratio'] ?? null, $policy['take_profit_ratio'] ?: $takeProfitFallback);
+            }
+            $policy['stop_loss_ratio'] = $this->normalizeRuntimeRatio($dynamic['stop_loss_ratio'] ?? null, $policy['stop_loss_ratio']);
+            $policy['pullback_ratio'] = $this->normalizeRuntimeRatio($dynamic['pullback_ratio'] ?? null, $policy['pullback_ratio']);
+            $policy['rebound_ratio'] = $this->normalizeRuntimeRatio($dynamic['rebound_ratio'] ?? null, $policy['rebound_ratio']);
+        }
+
+        $policy['audit']['strategy_manager'] = [
+            'regime' => $analysis['regime'] ?? null,
+            'regime_reason' => $analysis['regime_reason'] ?? null,
+            'reserve' => $analysis['reserve'] ?? null,
+            'dynamic_thresholds' => $dynamic,
+        ];
+
+        return $policy;
     }
 
     private function executionCostRatio(RatioBotConfig $config): float

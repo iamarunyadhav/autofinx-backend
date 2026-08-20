@@ -116,6 +116,45 @@ class RatioBotRiskService
         return null;
     }
 
+    /**
+     * Pre-submit revalidation: compares a fresh reference price (fetched
+     * immediately before order submission) against the price the decision
+     * was originally evaluated at. This is a DIFFERENT concept from the
+     * stale-feed/age checks above (those check how OLD the data is; this
+     * checks how much the price has MOVED since the decision was made) —
+     * mirrors RobotSessionService::entryPreflightBlock()'s drift guard.
+     */
+    public function priceDriftBlock(RatioBotConfig $config, float $decisionPrice, float $freshPrice): ?array
+    {
+        $maxDriftBps = $config->maxEntryPriceDriftBps();
+        if ($maxDriftBps <= 0 || $decisionPrice <= 0 || $freshPrice <= 0) {
+            return null;
+        }
+
+        $driftBps = abs($freshPrice - $decisionPrice) / $decisionPrice * 10000;
+        if ($driftBps <= $maxDriftBps) {
+            return null;
+        }
+
+        return $this->reason(
+            'price_drift_exceeded',
+            sprintf(
+                'Fresh quote %.8f diverged %.2f bps from decision price %.8f (max %.2f bps).',
+                $freshPrice,
+                $driftBps,
+                $decisionPrice,
+                $maxDriftBps
+            ),
+            false, // transient — skip this submission, do not pause the whole bot
+            [
+                'decision_price' => $decisionPrice,
+                'fresh_price' => $freshPrice,
+                'drift_bps' => round($driftBps, 4),
+                'max_drift_bps' => $maxDriftBps,
+            ]
+        );
+    }
+
     private function duplicateSignal(mixed $state, RatioBotDecision $decision): bool
     {
         $signalHash = (string) data_get($decision->metadata, 'signal_hash', '');

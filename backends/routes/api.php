@@ -445,6 +445,7 @@ Route::prefix('v1')->group(function () {
         Route::get('ratio-bots/{ratioBot}/candles', [RatioBotController::class, 'candles']);
         Route::get('ratio-bots/{ratioBot}/candle-feed', [RatioBotController::class, 'candleFeed']);
         Route::get('ratio-bots/{ratioBot}/snapshot', [RatioBotController::class, 'snapshot']);
+        Route::get('ratio-bots/{ratioBot}/brain-snapshot', [RatioBotController::class, 'brainSnapshot']);
 
         // ---- Fast2X ---------------------------------------------------------
         Route::get('workspaces/{workspace}/fast2x/status', [Fast2XController::class, 'status']);

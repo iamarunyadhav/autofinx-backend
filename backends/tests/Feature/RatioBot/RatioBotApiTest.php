@@ -7,6 +7,7 @@ use App\Models\RatioBotState;
 use App\Models\User;
 use App\Models\Workspace;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Queue;
 use Tests\TestCase;
 
 class RatioBotApiTest extends TestCase
@@ -24,6 +25,12 @@ class RatioBotApiTest extends TestCase
             'two_factor_confirmed_at' => now(),
         ]);
         $this->workspace = Workspace::factory()->create();
+
+        // store()/update() dispatch BackfillMarketOhlcJob (real Binance REST
+        // call). With QUEUE_CONNECTION=sync in tests that would otherwise
+        // run synchronously inside every HTTP request here — fake it so CRUD
+        // tests never make a live network call.
+        Queue::fake();
     }
 
     // -----------------------------------------------------------------------
@@ -356,6 +363,82 @@ class RatioBotApiTest extends TestCase
 
         $this->assertDatabaseMissing('ratio_bot_configs', ['id' => $config->id]);
         $this->assertDatabaseMissing('ratio_bot_states', ['ratio_bot_config_id' => $config->id]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Master Brain (Phase 1)
+    // -----------------------------------------------------------------------
+
+    /** @test */
+    public function brain_snapshot_endpoint_returns_empty_shape_when_none_exists(): void
+    {
+        $config = $this->createConfig();
+
+        $response = $this->actingAs($this->user)
+            ->getJson("/api/v1/ratio-bots/{$config->id}/brain-snapshot");
+
+        $response->assertOk()
+            ->assertJsonPath('enabled', false)
+            ->assertJsonPath('signal', null)
+            ->assertJsonPath('forecast', null);
+    }
+
+    /** @test */
+    public function brain_snapshot_endpoint_returns_latest_row_when_present(): void
+    {
+        $config = $this->createConfig(['brain_enabled' => true, 'timeframe' => '1h']);
+        \App\Models\RatioBotBrainSnapshot::create([
+            'ratio_bot_config_id' => $config->id,
+            'symbol' => 'BTCUSDT',
+            'timeframe' => '1h',
+            'horizon_seconds' => 3600,
+            'direction' => 'buy',
+            'confidence' => 72,
+            'forecast_bias' => 'BUY',
+            'forecast_confidence' => 60,
+        ]);
+
+        $response = $this->actingAs($this->user)
+            ->getJson("/api/v1/ratio-bots/{$config->id}/brain-snapshot");
+
+        $response->assertOk()
+            ->assertJsonPath('enabled', true)
+            ->assertJsonPath('signal.direction', 'buy')
+            ->assertJsonPath('signal.confidence', 72)
+            ->assertJsonPath('forecast.horizon_seconds', 3600)
+            ->assertJsonPath('forecast.bias', 'BUY');
+    }
+
+    /** @test */
+    public function reserve_tranche_fields_are_accepted_and_persisted(): void
+    {
+        $config = $this->createConfig();
+
+        $response = $this->actingAs($this->user)
+            ->putJson("/api/v1/ratio-bots/{$config->id}", [
+                'initial_entry_pct' => 0.6,
+                'reserve_tranche_count' => 2,
+            ]);
+
+        $response->assertOk()
+            ->assertJsonPath('initial_entry_pct', '0.6000')
+            ->assertJsonPath('reserve_tranche_count', 2);
+    }
+
+    /** @test */
+    public function timeframe_accepts_1h_and_4h_for_brain_horizon(): void
+    {
+        $config = $this->createConfig();
+
+        $response = $this->actingAs($this->user)
+            ->putJson("/api/v1/ratio-bots/{$config->id}", [
+                'timeframe' => '4h',
+                'brain_enabled' => true,
+            ]);
+
+        $response->assertOk()
+            ->assertJsonPath('timeframe', '4h')
+            ->assertJsonPath('brain_enabled', true);
     }
 
     // -----------------------------------------------------------------------

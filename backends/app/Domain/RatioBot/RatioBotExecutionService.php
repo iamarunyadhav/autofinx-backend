@@ -26,6 +26,7 @@ class RatioBotExecutionService
         private readonly RatioBotStateService $stateService,
         private readonly FuturesOrderIntentService $futuresOrders,
         private readonly FuturesConfigService $futuresConfigs,
+        private readonly RatioBotRiskService $risk,
     ) {
     }
 
@@ -102,6 +103,10 @@ class RatioBotExecutionService
             return;
         }
 
+        if ($config->marketType() !== 'futures' && $this->entryPriceDriftBlock($config, $decision, $symbol)) {
+            return;
+        }
+
         $this->stateService->onAwaitingExecution($config, $decision, $clientOrderId);
 
         try {
@@ -142,6 +147,77 @@ class RatioBotExecutionService
         } catch (Throwable $e) {
             $this->handleOrderException($config, $decision, $e, $clientOrderId);
         }
+    }
+
+    /**
+     * Pre-submit revalidation: re-fetch a fresh reference price for the
+     * exact venue/symbol the order is about to use, and compare it against
+     * the price the decision was evaluated at. Catches drift accumulated in
+     * the confirmation/guard window between decision time and submission.
+     * Mirrors RobotSessionService::entryPreflightBlock()'s drift gate.
+     */
+    private function entryPriceDriftBlock(RatioBotConfig $config, RatioBotDecision $decision, string $symbol): bool
+    {
+        if (! $config->connection_id) {
+            return false; // let the existing "live_execution_requires_connection_id" path handle it
+        }
+
+        if ($config->maxEntryPriceDriftBps() <= 0) {
+            return false; // disabled for this bot — skip the reference-price fetch entirely
+        }
+
+        $decisionPrice = (float) ($decision->evaluated_price ?? 0);
+
+        try {
+            $freshPrice = $this->orders->fetchReferencePrice([
+                'workspace_id' => (string) $config->workspace_id,
+                'connection_id' => (string) $config->connection_id,
+                'symbol' => $symbol,
+            ]);
+        } catch (Throwable $e) {
+            // Fail closed: if freshness cannot be verified immediately before
+            // submission, do not submit blind.
+            $this->applyEntryBlock($config, $decision, [
+                'code' => 'price_drift_check_failed',
+                'detail' => 'Could not verify a fresh reference price before submission: ' . $e->getMessage(),
+                'pause' => false,
+                'meta' => [],
+            ]);
+            return true;
+        }
+
+        $block = $this->risk->priceDriftBlock($config, $decisionPrice, $freshPrice);
+        if ($block === null) {
+            return false;
+        }
+
+        $this->applyEntryBlock($config, $decision, $block);
+        return true;
+    }
+
+    private function applyEntryBlock(RatioBotConfig $config, RatioBotDecision $decision, array $block): void
+    {
+        $decision->update([
+            'execution_status' => RatioBotDecision::EXEC_SKIPPED,
+            'reason' => $block['detail'],
+            'metadata' => array_merge((array) ($decision->metadata ?? []), ['risk_block' => $block]),
+        ]);
+
+        if ((bool) ($block['pause'] ?? false)) {
+            $this->stateService->block($config, (string) $block['code'], (string) $block['detail']);
+        } else {
+            $state = $this->stateService->getOrCreate($config);
+            $state->update([
+                'block_reason_code' => $block['code'],
+                'block_reason_detail' => $block['detail'],
+            ]);
+        }
+
+        Log::warning('[RatioBotExec] Entry blocked before submission', [
+            'config_id' => $config->id,
+            'decision_id' => $decision->id,
+            'code' => $block['code'],
+        ]);
     }
 
     private function executeFutures(
@@ -360,12 +436,18 @@ class RatioBotExecutionService
 
         if ($side === RatioBotDecision::DECISION_SELL) {
             $state = $this->stateService->getOrCreate($config);
-            $qty = (float) ($state->last_buy_quantity ?? 0);
+            $totalQty = (float) ($state->last_buy_quantity ?? 0);
+            if ($totalQty <= 0) {
+                throw new RuntimeException('Cannot sell: last_buy_quantity is zero');
+            }
+
+            if ($config->sellTranchesEnabled()) {
+                return $this->resolveStagedSellQuantity($config, $state, $totalQty);
+            }
+
+            $qty = $totalQty;
             if ($config->allow_partial_sell && (float) ($config->partial_sell_pct ?? 0) > 0) {
                 $qty *= min(1.0, max(0.0, (float) $config->partial_sell_pct));
-            }
-            if ($qty <= 0) {
-                throw new RuntimeException('Cannot sell: last_buy_quantity is zero');
             }
 
             return round($qty, 8);
@@ -376,9 +458,30 @@ class RatioBotExecutionService
             throw new RuntimeException("Cannot buy: invalid evaluated price {$price}");
         }
 
+        $state = $this->stateService->getOrCreate($config);
+
+        // Reserve tranches (Phase 2): a buy fired while already partial-
+        // holding spends an equal split of whatever reserve remains across
+        // whatever tranches remain — self-correcting for rounding, the
+        // final tranche always spends 100% of what's left.
+        if ($state->isPartialHolding() && (int) ($state->reserve_tranches_remaining ?? 0) > 0) {
+            $tranchesRemaining = (int) $state->reserve_tranches_remaining;
+            $quoteRemaining = (float) ($state->reserve_quote_remaining ?? 0);
+            $quoteForTranche = $quoteRemaining / $tranchesRemaining;
+            if ($quoteForTranche <= 0) {
+                throw new RuntimeException('Cannot buy reserve tranche: reserve_quote_remaining is zero');
+            }
+
+            return round($quoteForTranche / $price, 8);
+        }
+
         $amount = (float) $config->base_quote_amount;
         if ($amount <= 0) {
             throw new RuntimeException('Cannot buy: base_quote_amount is zero');
+        }
+
+        if ($config->reserveEnabled()) {
+            $amount *= $this->effectiveInitialEntryPct($config, $state, $price);
         }
 
         $qty = match ((string) $config->order_size_mode) {
@@ -392,6 +495,55 @@ class RatioBotExecutionService
         }
 
         return round($qty, 8);
+    }
+
+    /**
+     * Staged SELL (V2) — mirrors the existing staged-BUY tranche split:
+     * self-correcting even split across whatever sell stages remain, so the
+     * final stage always sells 100% of whatever quantity is left.
+     */
+    private function resolveStagedSellQuantity(RatioBotConfig $config, RatioBotState $state, float $totalQty): float
+    {
+        if ($state->isPartialSold() && (int) ($state->sell_tranches_remaining ?? 0) > 0) {
+            return round($totalQty / (int) $state->sell_tranches_remaining, 8);
+        }
+
+        $pct = min(1.0, max(0.01, (float) ($config->initial_exit_pct ?? 1.0)));
+
+        return round($totalQty * $pct, 8);
+    }
+
+    /**
+     * Resolve the effective fraction of base_quote_amount to spend on a
+     * fresh entry. Static (config.initial_entry_pct) unless V2 dynamic
+     * reserve mode is enabled, in which case the Strategy Manager may adjust
+     * it within the bot's own configured reserve_min_pct/reserve_max_pct
+     * bounds. Fails open to the static value on any error.
+     */
+    private function effectiveInitialEntryPct(RatioBotConfig $config, RatioBotState $state, float $price): float
+    {
+        $static = max(0.01, min(1.0, (float) ($config->initial_entry_pct ?? 1.0)));
+
+        if (! $config->v2_enabled || (string) $config->reserve_mode !== 'dynamic') {
+            return $static;
+        }
+
+        try {
+            $analysis = app(StrategyManagerService::class)->analyze($config, $state, $price);
+            $reservePct = $analysis['reserve']['effective_pct'] ?? null;
+            if ($reservePct === null) {
+                return $static;
+            }
+
+            return max(0.01, min(1.0, 1 - (float) $reservePct));
+        } catch (Throwable $e) {
+            Log::warning('[RatioBotExec] Dynamic reserve resolution failed, using static initial_entry_pct', [
+                'config_id' => $config->id,
+                'error' => $e->getMessage(),
+            ]);
+
+            return $static;
+        }
     }
 
     private function resolveFuturesQuantity(RatioBotConfig $config, RatioBotDecision $decision, string $side): float

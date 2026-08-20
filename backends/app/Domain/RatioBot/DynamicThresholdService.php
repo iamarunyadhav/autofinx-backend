@@ -6,7 +6,14 @@ use App\Models\RatioBotConfig;
 
 class DynamicThresholdService
 {
-    public function resolve(RatioBotConfig $config, float $currentPrice, array $indicatorSnapshot = []): array
+    /**
+     * @param array $regimeContext Optional V2 Strategy Manager output
+     *     (`{regime, reason}`, see StrategyManagerService::classifyRegime()).
+     *     Defaults to [] so every pre-existing call site (RatioBotRealtimeEngine)
+     *     is byte-identical — the regime factor is only applied when a caller
+     *     explicitly opts in by passing this.
+     */
+    public function resolve(RatioBotConfig $config, float $currentPrice, array $indicatorSnapshot = [], array $regimeContext = []): array
     {
         $params = (array) ($config->strategy_params ?? []);
         $enabled = (bool) ($params['use_dynamic_thresholds'] ?? false);
@@ -36,6 +43,18 @@ class DynamicThresholdService
         $dynamicFactor = $enabled
             ? $this->clamp((1 + ($volatilityComponent * 18)) * $trendFactor * $volumeFactor * $liquidityFactor / $spreadPenalty, 0.75, 2.40)
             : 1.0;
+
+        $regime = (string) ($regimeContext['regime'] ?? '');
+        if ($regime !== '') {
+            $regimeFactor = match ($regime) {
+                'STRONG_UPTREND', 'STRONG_DOWNTREND' => 1.10,
+                'HIGH_VOLATILITY' => 1.20,
+                'LOW_LIQUIDITY' => 1.15,
+                'RANGE' => 0.90,
+                default => 1.00, // WEAK_UPTREND, WEAK_DOWNTREND, UNCERTAIN
+            };
+            $dynamicFactor = $this->clamp($dynamicFactor * $regimeFactor, 0.75, 2.40);
+        }
 
         $sellThreshold = $this->clamp($baseSell * $dynamicFactor, $baseSell * 0.75, max($baseSell * 2.5, $baseSell + 0.0025));
         $buyMagnitude = $this->clamp($baseBuyMagnitude * $dynamicFactor, $baseBuyMagnitude * 0.75, max($baseBuyMagnitude * 2.5, $baseBuyMagnitude + 0.0025));
@@ -101,6 +120,17 @@ class DynamicThresholdService
             0.25
         );
 
+        $reason = sprintf(
+            'dynamic_thresholds=%s regime=%s market_mode=%s volatility=%s(%.4f) volume_ratio=%.2f factor=%.3f',
+            $enabled ? 'on' : 'off',
+            $regime !== '' ? $regime : 'none',
+            $marketMode,
+            $volatilityLevel,
+            $volatilityComponent,
+            $volumeRatio,
+            $dynamicFactor
+        );
+
         return [
             'enabled' => $enabled,
             'sell_threshold_ratio' => round($sellThreshold, 6),
@@ -113,6 +143,22 @@ class DynamicThresholdService
             'volatility_level' => $volatilityLevel,
             'market_mode' => $marketMode,
             'dynamic_factor' => round($dynamicFactor, 6),
+            'reason' => $reason,
+            'regime' => $regime !== '' ? $regime : null,
+            'sell_threshold_bounds' => [
+                'base' => round($baseSell, 6),
+                'min' => round($baseSell * 0.75, 6),
+                'max' => round(max($baseSell * 2.5, $baseSell + 0.0025), 6),
+                'effective' => round($sellThreshold, 6),
+                'reason' => $reason,
+            ],
+            'buy_threshold_bounds' => [
+                'base' => round($baseBuyMagnitude, 6),
+                'min' => round($baseBuyMagnitude * 0.75, 6),
+                'max' => round(max($baseBuyMagnitude * 2.5, $baseBuyMagnitude + 0.0025), 6),
+                'effective' => round($buyMagnitude, 6),
+                'reason' => $reason,
+            ],
             'metrics' => [
                 'atr_pct' => $atrPct,
                 'range_pct' => $rangePct,

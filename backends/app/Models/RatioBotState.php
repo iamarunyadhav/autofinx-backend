@@ -44,17 +44,29 @@ class RatioBotState extends BaseModel
         'daily_trade_count'     => 'integer',
         'daily_loss_total'      => 'decimal:8',
         'consecutive_losses'    => 'integer',
+        'reserve_tranches_remaining' => 'integer',
+        'reserve_quote_remaining' => 'decimal:8',
+        'sell_tranches_remaining' => 'integer',
+        'realized_pnl'          => 'decimal:8',
+        'recovery_started_at'   => 'datetime',
+        'recovery_review_at'    => 'datetime',
     ];
 
     // Valid position states
     public const STATE_IDLE                    = 'idle';
     public const STATE_HOLDING                 = 'holding';
+    public const STATE_PARTIAL_HOLDING         = 'partial_holding';
     public const STATE_FLAT                    = 'flat';
     public const STATE_PAUSED                  = 'paused';
     public const STATE_COOLDOWN                = 'cooldown';
     public const STATE_BLOCKED                 = 'blocked';
     public const STATE_AWAITING_EXECUTION      = 'awaiting_execution_result';
     public const STATE_ERROR_REVIEW            = 'error_review_required';
+
+    // V2 (gated behind config.v2_enabled)
+    public const STATE_PARTIAL_SOLD             = 'partial_sold';
+    public const STATE_RECOVERY_MONITORING      = 'recovery_monitoring';
+    public const STATE_CASH_RECOVERY_MONITORING = 'cash_recovery_monitoring';
 
     public function config(): BelongsTo
     {
@@ -63,7 +75,27 @@ class RatioBotState extends BaseModel
 
     public function isTrading(): bool
     {
-        return in_array($this->position_state, [self::STATE_HOLDING, self::STATE_FLAT], true);
+        return in_array($this->position_state, [
+            self::STATE_HOLDING,
+            self::STATE_PARTIAL_HOLDING,
+            self::STATE_PARTIAL_SOLD,
+            self::STATE_FLAT,
+            self::STATE_RECOVERY_MONITORING,
+            self::STATE_CASH_RECOVERY_MONITORING,
+        ], true);
+    }
+
+    public function isPartialSold(): bool
+    {
+        return $this->position_state === self::STATE_PARTIAL_SOLD;
+    }
+
+    public function isRecoveryMonitoring(): bool
+    {
+        return in_array($this->position_state, [
+            self::STATE_RECOVERY_MONITORING,
+            self::STATE_CASH_RECOVERY_MONITORING,
+        ], true);
     }
 
     public function isBlocked(): bool
@@ -79,6 +111,11 @@ class RatioBotState extends BaseModel
     public function isHolding(): bool
     {
         return $this->position_state === self::STATE_HOLDING;
+    }
+
+    public function isPartialHolding(): bool
+    {
+        return $this->position_state === self::STATE_PARTIAL_HOLDING;
     }
 
     public function isFlat(): bool
@@ -99,11 +136,15 @@ class RatioBotState extends BaseModel
     public function resumableTradingState(): string
     {
         if ($this->last_trade_side === 'SELL') {
-            return self::STATE_FLAT;
+            return (int) ($this->sell_tranches_remaining ?? 0) > 0 && (float) ($this->last_buy_quantity ?? 0) > 0
+                ? self::STATE_PARTIAL_SOLD
+                : self::STATE_FLAT;
         }
 
         if ((float) ($this->last_buy_price ?? 0) > 0) {
-            return self::STATE_HOLDING;
+            return (int) ($this->reserve_tranches_remaining ?? 0) > 0
+                ? self::STATE_PARTIAL_HOLDING
+                : self::STATE_HOLDING;
         }
 
         return self::STATE_IDLE;

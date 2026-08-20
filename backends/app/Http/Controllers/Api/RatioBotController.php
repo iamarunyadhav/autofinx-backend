@@ -6,6 +6,7 @@ use App\Domain\RatioBot\RatioBotDecisionService;
 use App\Domain\RatioBot\RatioBotRuntimeQueryService;
 use App\Domain\RatioBot\RatioBotStateService;
 use App\Http\Controllers\Controller;
+use App\Jobs\BackfillMarketOhlcJob;
 use App\Jobs\RunRatioBotEvaluationJob;
 use App\Models\RatioBotConfig;
 use App\Models\RatioBotDecision;
@@ -56,6 +57,7 @@ class RatioBotController extends Controller
 
         // Auto-create state row
         $this->stateService->getOrCreate($config);
+        BackfillMarketOhlcJob::dispatch((string) $config->id);
 
         return response()->json($config->load('state'), 201);
     }
@@ -80,6 +82,7 @@ class RatioBotController extends Controller
         $data = $this->validatedPayload($request, true);
 
         $ratioBot->update($this->normalizePayload($data));
+        BackfillMarketOhlcJob::dispatch((string) $ratioBot->id);
 
         $fresh = $ratioBot->fresh('state');
 
@@ -431,6 +434,18 @@ class RatioBotController extends Controller
         return response()->json($this->runtime->snapshot($ratioBot));
     }
 
+    /**
+     * GET /ratio-bots/{config}/brain-snapshot
+     *
+     * Latest Master Brain (Robot Signal + Near-term Forecast) evaluation,
+     * shaped to match Quick Trade's SignalPreview/ForecastPayload types so
+     * the frontend can reuse the same cards.
+     */
+    public function brainSnapshot(RatioBotConfig $ratioBot): JsonResponse
+    {
+        return response()->json($this->runtime->brainSnapshot($ratioBot));
+    }
+
     private function validatedPayload(Request $request, bool $partial = false): array
     {
         $required = $partial ? 'sometimes' : 'required';
@@ -442,11 +457,15 @@ class RatioBotController extends Controller
             'exchange'                     => 'nullable|string|max:32',
             'market_type'                  => $optional . '|string|in:spot,futures',
             'algorithm'                    => $optional . '|string|in:ratio_threshold,trailing_ratio,ma_crossover,ma,rsi,breakout',
-            'timeframe'                    => $optional . '|string|in:1m,3m,5m,15m',
+            'timeframe'                    => $optional . '|string|in:1m,3m,5m,15m,1h,4h',
+            'brain_enabled'                => 'nullable|boolean',
+            'brain_min_confidence'         => 'nullable|integer|min:0|max:100',
             'side_mode'                    => $optional . '|string|in:buy_sell,long_only,short_only,both',
             'mode'                         => $optional . '|string|in:advisor,manual_approval,restricted_auto',
             'execution_mode'               => $optional . '|string|in:sandbox,live',
             'base_quote_amount'            => $optional . '|numeric|min:0',
+            'initial_entry_pct'            => 'nullable|numeric|min:0.01|max:1',
+            'reserve_tranche_count'        => 'nullable|integer|min:0|max:10',
             'base_asset_budget'            => 'nullable|numeric|min:0',
             'quote_asset_budget'           => 'nullable|numeric|min:0',
             'order_size_mode'              => 'nullable|string|in:fixed_quote,fixed_base,percent_of_balance',
@@ -462,6 +481,7 @@ class RatioBotController extends Controller
             'fee_bps'                      => 'nullable|numeric|min:0|max:10000',
             'max_slippage_bps'             => 'nullable|numeric|min:0|max:10000',
             'max_allowed_slippage_bps'     => 'nullable|numeric|min:0|max:10000',
+            'max_entry_price_drift_bps'    => 'nullable|numeric|min:0|max:10000',
             'min_net_profit_bps'           => 'nullable|numeric|min:0|max:10000',
             'max_trades_per_hour'          => 'nullable|integer|min:1|max:1000',
             'max_trades_per_day'           => 'nullable|integer|min:1|max:10000',
@@ -508,6 +528,15 @@ class RatioBotController extends Controller
             'max_daily_loss'               => 'nullable|numeric|min:0',
             'max_consecutive_losses'       => 'nullable|integer|min:1|max:1000',
             'is_active'                    => 'nullable|boolean',
+            // V2 (gated behind v2_enabled — defaults false, never auto-enabled)
+            'v2_enabled'                   => 'nullable|boolean',
+            'sell_tranche_count'           => 'nullable|integer|min:0|max:10',
+            'initial_exit_pct'             => 'nullable|numeric|min:0.01|max:1',
+            'reserve_mode'                 => 'nullable|string|in:manual,dynamic',
+            'reserve_min_pct'              => 'nullable|numeric|min:0|max:1',
+            'reserve_max_pct'              => 'nullable|numeric|min:0|max:1',
+            'recovery_enabled'             => 'nullable|boolean',
+            'recovery_timeout_minutes'     => 'nullable|integer|min:1|max:100000',
         ]);
     }
 
