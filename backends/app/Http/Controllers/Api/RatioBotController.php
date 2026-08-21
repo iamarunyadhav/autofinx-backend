@@ -234,6 +234,17 @@ class RatioBotController extends Controller
             'cooldown_until' => optional($ratioBot->state?->cooldown_until)->toIso8601String(),
             'kill_switch' => (bool) $ratioBot->kill_switch,
             'error_state' => $ratioBot->state?->last_runtime_error,
+            // Execution Safety panel telemetry — all values already computed/persisted
+            // every tick by RatioBotRealtimeEngine/RatioBotStateService, exposed here
+            // read-only for the frontend guard panel + trust chain.
+            'last_price_timestamp' => optional($ratioBot->state?->last_price_timestamp)->toIso8601String(),
+            'last_evaluated_at' => optional($ratioBot->state?->last_evaluated_at)->toIso8601String(),
+            'daily_loss_total' => $ratioBot->state?->daily_loss_total,
+            'consecutive_losses' => $ratioBot->state?->consecutive_losses,
+            'consecutive_order_failures' => $ratioBot->state?->consecutive_order_failures,
+            'block_reason_code' => $ratioBot->state?->block_reason_code,
+            'block_reason_detail' => $ratioBot->state?->block_reason_detail,
+            'market_health' => (array) ($ratioBot->state?->runtime_meta['market_health'] ?? []) ?: null,
         ]);
     }
 
