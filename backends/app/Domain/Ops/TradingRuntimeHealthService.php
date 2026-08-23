@@ -7,6 +7,7 @@ use App\Domain\Trading\RuntimeSafetySettingsService;
 use App\Models\MarketFeedStatus;
 use App\Models\QuickTrade;
 use App\Models\FutureTradeBotConfig;
+use App\Models\RatioBotConfig;
 use App\Models\RobotSession;
 use App\Models\SchedulerRun;
 use Illuminate\Support\Carbon;
@@ -337,8 +338,12 @@ class TradingRuntimeHealthService
     private function marketFeed(?string $workspaceId): array
     {
         $maxAge = app(RuntimeSafetySettingsService::class)->liveFeedMaxAgeSeconds($workspaceId);
-        $symbols = $this->monitoredFuturesSymbols($workspaceId);
-        $redisFeed = $this->prices->freshestLiveFeedSnapshot('binance_futures', $symbols, $maxAge);
+        $symbols = $this->monitoredMarketSymbols($workspaceId);
+        $redisFeeds = array_values(array_filter([
+            $this->prices->freshestLiveFeedSnapshot('binance', $symbols['spot'], $maxAge),
+            $this->prices->freshestLiveFeedSnapshot('binance_futures', $symbols['futures'], $maxAge),
+        ]));
+        $redisFeed = $this->freshestSnapshot($redisFeeds);
 
         if (($redisFeed['fresh'] ?? false) === true) {
             return [
@@ -368,9 +373,6 @@ class TradingRuntimeHealthService
         }
         if (Schema::hasColumn('market_feed_status', 'exchange')) {
             $query->whereIn('exchange', ['binance', 'binance_futures']);
-        }
-        if (Schema::hasColumn('market_feed_status', 'market_type')) {
-            $query->where('market_type', 'futures');
         }
 
         $row = $query->orderByDesc('last_tick_at')->first();
@@ -411,18 +413,22 @@ class TradingRuntimeHealthService
 
     private function heartbeatFeed(?array $redisFeed = null): array
     {
-        $path = storage_path('framework/autofinx-market-ws-heartbeat-futures.json');
+        $heartbeat = $this->freshestHeartbeat([
+            storage_path('framework/autofinx-market-ws-heartbeat-spot.json'),
+            storage_path('framework/autofinx-market-ws-heartbeat-futures.json'),
+        ]);
+
+        $path = $heartbeat['path'] ?? storage_path('framework/autofinx-market-ws-heartbeat-spot.json');
+        $data = $heartbeat['data'] ?? null;
         if (! file_exists($path)) {
             return [
                 'state' => 'red',
-                'reason' => 'no_futures_market_feed_tick',
+                'reason' => 'no_market_feed_tick',
                 'redis_feed' => $redisFeed,
                 'truth_source' => 'websocket_redis_missing',
             ];
         }
 
-        $raw = @file_get_contents($path);
-        $data = $raw !== false ? @json_decode($raw, true) : null;
         $epoch = is_array($data) ? (int) ($data['last_message_epoch'] ?? 0) : 0;
         $age = $epoch > 0 ? max(0, time() - $epoch) : null;
         $maxAge = app(RuntimeSafetySettingsService::class)->liveFeedMaxAgeSeconds(null);
@@ -441,6 +447,8 @@ class TradingRuntimeHealthService
             'max_age_seconds' => $maxAge,
             'symbol' => (string) ($data['symbol'] ?? ''),
             'source' => 'heartbeat_file',
+            'market_type' => (string) ($data['market_type'] ?? ''),
+            'heartbeat_path' => $path,
             'message_count' => (int) ($data['message_count'] ?? 0),
             'reconnect_count' => (int) ($data['reconnect_count'] ?? 0),
             'workspace_scoped' => false,
@@ -450,14 +458,34 @@ class TradingRuntimeHealthService
     }
 
     /**
-     * @return string[]
+     * @return array{spot: string[], futures: string[]}
      */
-    private function monitoredFuturesSymbols(?string $workspaceId): array
+    private function monitoredMarketSymbols(?string $workspaceId): array
     {
-        $symbols = [];
+        $spot = [];
+        $futures = [];
+
+        if (Schema::hasTable('ratio_bot_configs')) {
+            RatioBotConfig::query()
+                ->when($workspaceId, fn ($query) => $query->where('workspace_id', $workspaceId))
+                ->where('enabled', true)
+                ->get(['symbol', 'market_type'])
+                ->each(function (RatioBotConfig $config) use (&$spot, &$futures): void {
+                    $symbol = strtoupper(trim((string) $config->symbol));
+                    if ($symbol === '') {
+                        return;
+                    }
+
+                    if ($config->marketType() === 'futures') {
+                        $futures[] = $symbol;
+                    } else {
+                        $spot[] = $symbol;
+                    }
+                });
+        }
 
         if (Schema::hasTable('future_trade_bot_configs')) {
-            $symbols = FutureTradeBotConfig::query()
+            $futureTradeSymbols = FutureTradeBotConfig::query()
                 ->with('state')
                 ->when($workspaceId, fn ($query) => $query->where('workspace_id', $workspaceId))
                 ->get()
@@ -472,6 +500,7 @@ class TradingRuntimeHealthService
                     return array_values(array_filter([...$configured, $current]));
                 })
                 ->all();
+            $futures = [...$futures, ...$futureTradeSymbols];
         }
 
         if (Schema::hasTable('robot_sessions')) {
@@ -481,18 +510,65 @@ class TradingRuntimeHealthService
                 ->pluck('symbol')
                 ->map(static fn ($symbol) => strtoupper(trim((string) $symbol)))
                 ->all();
-            $symbols = [...$symbols, ...$robotSymbols];
+            $spot = [...$spot, ...$robotSymbols];
         }
 
-        if ($symbols === []) {
-            $symbols = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT'];
+        $defaults = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT'];
+
+        return [
+            'spot' => collect($spot ?: $defaults)->filter()->unique()->values()->all(),
+            'futures' => collect($futures ?: $defaults)->filter()->unique()->values()->all(),
+        ];
+    }
+
+    /**
+     * @param array<int, array<string, mixed>> $snapshots
+     */
+    private function freshestSnapshot(array $snapshots): ?array
+    {
+        $freshest = null;
+
+        foreach ($snapshots as $snapshot) {
+            if (! is_array($snapshot)) {
+                continue;
+            }
+
+            if (! $freshest || (int) ($snapshot['received_at_ms'] ?? 0) > (int) ($freshest['received_at_ms'] ?? 0)) {
+                $freshest = $snapshot;
+            }
         }
 
-        return collect($symbols)
-            ->filter()
-            ->unique()
-            ->values()
-            ->all();
+        return $freshest;
+    }
+
+    /**
+     * @param string[] $paths
+     * @return array{path?: string, data?: array<string, mixed>}
+     */
+    private function freshestHeartbeat(array $paths): array
+    {
+        $freshest = [];
+        $freshestEpoch = 0;
+
+        foreach ($paths as $path) {
+            if (! file_exists($path)) {
+                continue;
+            }
+
+            $raw = @file_get_contents($path);
+            $data = $raw !== false ? @json_decode($raw, true) : null;
+            if (! is_array($data)) {
+                continue;
+            }
+
+            $epoch = (int) ($data['last_message_epoch'] ?? 0);
+            if ($epoch > $freshestEpoch) {
+                $freshestEpoch = $epoch;
+                $freshest = ['path' => $path, 'data' => $data];
+            }
+        }
+
+        return $freshest;
     }
 
     private function queue(array $queues): array

@@ -2,6 +2,7 @@
 
 namespace App\Console\Commands;
 
+use App\Domain\Ops\TradingRuntimeHealthService;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
@@ -109,6 +110,8 @@ class DoctorCleanupCommand extends Command
             'autofinx-trading:live-feed',
             'autofinx-trading:tick-loop',
             'autofinx-trading:user-stream-loop',
+            'autofinx-ratio-feed',
+            'autofinx-queue-ratio',
             'autofinx-horizon',
             'autofinx-trading:queue-critical',
             'autofinx-trading:queue-market',
@@ -150,6 +153,8 @@ class DoctorCleanupCommand extends Command
         $deleted = [];
         foreach ([
             storage_path('framework/autofinx-live-feed-heartbeat.json'),
+            storage_path('framework/autofinx-market-ws-heartbeat-spot.json'),
+            storage_path('framework/autofinx-market-ws-heartbeat-futures.json'),
             storage_path('framework/future-trade-live-feed.json'),
             storage_path('app/runtime/future-trade-live-feed.json'),
         ] as $path) {
@@ -172,6 +177,8 @@ class DoctorCleanupCommand extends Command
         try {
             foreach ([
                 'live-feed:*',
+                'price:binance:*',
+                'ts:binance:*',
                 'price:binance_futures:*',
                 'ts:binance_futures:*',
                 'binance:*',
@@ -213,7 +220,7 @@ class DoctorCleanupCommand extends Command
 
         try {
             foreach (['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT'] as $symbol) {
-                $raw = Redis::get("live-feed:binance_futures:{$symbol}");
+                $raw = Redis::get("live-feed:binance_futures:{$symbol}") ?: Redis::get("live-feed:binance:{$symbol}");
                 $data = $raw ? json_decode((string) $raw, true) : null;
                 $receivedMs = is_array($data) ? (float) ($data['received_at_ms'] ?? 0) : 0.0;
                 $age = $receivedMs > 0 ? (int) floor(((microtime(true) * 1000) - $receivedMs) / 1000) : null;
@@ -246,12 +253,11 @@ class DoctorCleanupCommand extends Command
     private function runtimeStatusCheck(): void
     {
         try {
-            Artisan::call('future-trade:runtime-status', ['--json' => true]);
-            $raw = trim(Artisan::output());
-            $runtime = json_decode($raw, true);
-            $liveFeed = is_array($runtime) ? ($runtime['live_feed'] ?? []) : [];
-            $unexpected = is_array($runtime) ? ($runtime['unexpected_processes']['matches'] ?? []) : [];
-            $stale = (bool) ($liveFeed['stale'] ?? true);
+            $runtime = app(TradingRuntimeHealthService::class)->snapshot();
+            $liveFeed = is_array($runtime) ? ($runtime['future_trade']['live_feed_detail'] ?? []) : [];
+            $unexpected = [];
+            $stateValue = (string) ($runtime['future_trade']['live_feed'] ?? 'red');
+            $stale = $stateValue !== 'green';
             $age = $liveFeed['age_seconds'] ?? null;
             $badProcesses = array_values(array_filter((array) $unexpected, function ($line) {
                 return str_contains((string) $line, 'market:ws-consume')
@@ -265,11 +271,16 @@ class DoctorCleanupCommand extends Command
                 'live_feed' => $liveFeed,
                 'unexpected_processes' => $unexpected,
                 'bad_processes' => $badProcesses,
-                'queues' => $runtime['queues'] ?? null,
-                'positions' => $runtime['positions'] ?? null,
+                'queues' => [
+                    'execution' => $runtime['future_trade']['execution_queue_detail'] ?? null,
+                    'market' => $runtime['future_trade']['market_queue_detail'] ?? null,
+                    'default' => $runtime['future_trade']['default_queue_detail'] ?? null,
+                ],
+                'overall' => $runtime['overall'] ?? null,
+                'reasons' => $runtime['reasons'] ?? [],
             ], $state === 'ok'
-                ? 'live feed fresh and no duplicate runtime workers detected'
-                : 'runtime still reports stale feed or duplicate workers');
+                ? 'global Binance live feed fresh and no duplicate runtime workers detected'
+                : 'global runtime health still reports stale feed or duplicate workers');
         } catch (Throwable $e) {
             $this->record('runtime_status', 'Runtime status check', 'error', [
                 'error' => $e->getMessage(),

@@ -3,6 +3,7 @@
 namespace App\Console\Commands;
 
 use Illuminate\Console\Command;
+use App\Domain\Ops\TradingRuntimeHealthService;
 use Illuminate\Support\Facades\Artisan;
 use Symfony\Component\Process\Process;
 use Throwable;
@@ -33,12 +34,44 @@ class RuntimeRepairCommand extends Command
         }
 
         $failed = false;
-        foreach ([
+        $health = app(TradingRuntimeHealthService::class)->snapshot();
+        $liveFeedState = (string) ($health['future_trade']['live_feed'] ?? 'red');
+
+        if ((bool) config('autofinx.runtime.supervisor', false) && $liveFeedState !== 'green') {
+            foreach ([
+                'autofinx-ratio-feed',
+                'autofinx-queue-ratio',
+            ] as $program) {
+                try {
+                    $this->line('$ supervisorctl restart '.$program);
+                    $process = new Process(['supervisorctl', 'restart', $program], base_path(), null, null, 30);
+                    $process->run(function ($type, $buffer): void {
+                        $this->output->write($buffer);
+                    });
+                    if (! $process->isSuccessful()) {
+                        $failed = true;
+                        $this->error('supervisor restart '.$program.' returned exit code '.$process->getExitCode());
+                    }
+                } catch (Throwable $e) {
+                    $failed = true;
+                    $this->error('supervisor restart '.$program.' failed: '.$e->getMessage());
+                }
+            }
+        } elseif ((bool) config('autofinx.runtime.supervisor', false)) {
+            $this->line('Runtime live feed is green; supervisor ratio daemon restart skipped.');
+        }
+
+        $commands = [
             ['queue:restart', []],
             ['future-trade:scan-all', []],
             ['robot-sessions:evaluate', ['--limit' => 50]],
             ['future-trade:runtime-status', []],
-        ] as [$command, $args]) {
+        ];
+        if ($liveFeedState !== 'green') {
+            $commands[] = ['market:ws-consume', ['--once' => true, '--market-type' => 'spot', '--store-ohlc' => true, '--no-dispatch' => true]];
+        }
+
+        foreach ($commands as [$command, $args]) {
             try {
                 $this->line('$ php artisan '.$command);
                 Artisan::call($command, $args);
