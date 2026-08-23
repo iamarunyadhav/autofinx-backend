@@ -567,6 +567,44 @@ class RatioBotController extends Controller
             $data['side_mode'] = 'both';
         }
 
+        // Most ratio_bot_configs columns are NOT NULL with a DB-level default
+        // (e.g. max_position_pct defaults to 1.00). Validation marks nearly
+        // every field "nullable" so partial payloads are accepted, but an
+        // explicit null in the insert bypasses the column default entirely
+        // and trips a "column cannot be null" SQL error. Omitting the key
+        // lets the DB default apply instead — only strip null for columns
+        // that are genuinely nullable in the schema.
+        foreach ($data as $key => $value) {
+            if ($value === null && ! in_array($key, self::NULLABLE_COLUMNS, true)) {
+                unset($data[$key]);
+            }
+        }
+
         return $data;
     }
+
+    /**
+     * Columns on ratio_bot_configs that are actually ->nullable() in the
+     * migrations — everything else has a NOT NULL + default definition, so
+     * an explicit null must be stripped rather than inserted (see
+     * normalizePayload()).
+     */
+    private const NULLABLE_COLUMNS = [
+        'partial_sell_pct', 'partial_buy_pct',
+        'daily_loss_limit_pct', 'max_drawdown_pct',
+        'stop_loss_pct', 'take_profit_pct', 'time_stop_minutes',
+        'connection_id', 'integration_id',
+        'base_asset_budget', 'quote_asset_budget',
+        'strategy_params',
+        'stale_feed_timeout_seconds',
+        'leverage', 'margin_type', 'position_mode',
+        'max_open_position_per_symbol',
+        'risk_per_trade', 'max_daily_loss', 'max_consecutive_losses',
+        'max_allowed_slippage_bps',
+        'max_trades_per_hour', 'max_trades_per_day',
+        'selling_loss_ratio', 'buying_loss_ratio',
+        'max_spike_deviation_bps',
+        'max_entry_price_drift_bps',
+        'recovery_timeout_minutes',
+    ];
 }
