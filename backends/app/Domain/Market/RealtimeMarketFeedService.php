@@ -2,6 +2,7 @@
 
 namespace App\Domain\Market;
 
+use App\Domain\Ops\OperationalBreakerService;
 use App\Domain\RatioBot\RatioBotStateService;
 use App\Jobs\RunRatioBotEvaluationJob;
 use App\Models\FutureTradeBotConfig;
@@ -31,9 +32,13 @@ class RealtimeMarketFeedService
     private const FEED_STATUS_WRITE_INTERVAL_S = 12;
     private const RATIO_STATE_WRITE_INTERVAL_S  = 30;
 
+    /** Block reasons a sandbox bot may recover from on its own once the underlying condition clears. */
+    private const AUTO_RECOVERABLE_SANDBOX_CODES = ['feed_stale', 'stale_feed', 'exchange_unhealthy', 'websocket_unhealthy'];
+
     public function __construct(
         private readonly MarketPriceCacheService $prices,
         private readonly RatioBotStateService $ratioBotState,
+        private readonly OperationalBreakerService $breakers,
     ) {
     }
 
@@ -228,7 +233,7 @@ class RealtimeMarketFeedService
             }
 
             if (! $config->enabled && $config->execution_mode === 'sandbox'
-                && $config->state?->block_reason_code === 'feed_stale') {
+                && in_array(strtolower((string) $config->state?->block_reason_code), self::AUTO_RECOVERABLE_SANDBOX_CODES, true)) {
                 $this->maybeAutoRecoverStaleSandboxBot($config, $exchangeKey, $symbol);
             }
 
@@ -257,14 +262,29 @@ class RealtimeMarketFeedService
 
     /**
      * Sandbox bots that got auto-disabled by RunRatioBotEvaluationJob's
-     * stale-feed guard (see handleStaleFeed()) never come back on their own
-     * — the operator has to notice and click Start again. Since sandbox
-     * mode risks no real money, self-heal them the moment the live feed
-     * we just wrote to Redis is fresh again. Live-mode bots are untouched;
-     * that guard stays a manual, operator-confirmed restart.
+     * health guards (stale feed / exchange or websocket breaker) never come
+     * back on their own — the operator has to notice and click Start again.
+     * Since sandbox mode risks no real money, self-heal them the moment the
+     * underlying condition clears. Deliberately NOT covered here:
+     * ORDER_FAILURE_STREAK — that means real (simulated) order submissions
+     * kept failing, which points at a config/API bug rather than a transient
+     * blip, so it always needs a human to look before resuming. Live-mode
+     * bots are untouched everywhere in this method — those guards stay a
+     * manual, operator-confirmed restart regardless of execution mode.
      */
     private function maybeAutoRecoverStaleSandboxBot(RatioBotConfig $config, string $exchangeKey, string $symbol): void
     {
+        $code = strtolower((string) $config->state?->block_reason_code);
+
+        if (in_array($code, ['exchange_unhealthy', 'websocket_unhealthy'], true)
+            && $this->breakers->isProviderOutageActive($config->workspace_id, 'binance')) {
+            return;
+        }
+
+        if ($code === 'stale_feed' && $this->breakers->isStaleFeedBreakerActive($config->workspace_id)) {
+            return;
+        }
+
         $cached = $this->prices->getLatestPrice($exchangeKey, $symbol);
         if (! $cached || empty($cached['timestamp_ms'])) {
             return;
@@ -276,9 +296,10 @@ class RealtimeMarketFeedService
         }
 
         $this->ratioBotState->start($config);
-        Log::info('[RatioBot] Auto-recovered sandbox bot after live feed became fresh again', [
+        Log::info('[RatioBot] Auto-recovered sandbox bot after health guard cleared', [
             'config_id' => $config->id,
             'symbol' => $symbol,
+            'code' => $code,
             'age_seconds' => $ageSeconds,
         ]);
     }
