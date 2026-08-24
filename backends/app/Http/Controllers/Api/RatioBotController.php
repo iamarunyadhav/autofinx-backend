@@ -307,7 +307,12 @@ class RatioBotController extends Controller
      */
     public function evaluate(RatioBotConfig $ratioBot): JsonResponse
     {
-        RunRatioBotEvaluationJob::dispatch($ratioBot->id, false);
+        // manualTrigger=true — an operator clicking "Evaluate now" on a
+        // disabled/paused bot to sanity-check config before re-enabling it
+        // must actually run; RunRatioBotEvaluationJob::handle() silently
+        // no-ops disabled bots unless this is true, which was returning a
+        // false-positive "dispatched" response that did nothing.
+        RunRatioBotEvaluationJob::dispatch($ratioBot->id, true);
         return response()->json(['message' => 'Evaluation job dispatched.', 'config_id' => $ratioBot->id]);
     }
 

@@ -90,7 +90,10 @@ class StrategyManagerService
         $volumeRatio = ($indicatorSnapshot['volume_ratio'] ?? null) !== null ? (float) $indicatorSnapshot['volume_ratio'] : null;
         // Mirrors DynamicThresholdService's own dynamic_liquidity_soft_floor default.
         $liquidityFloor = 10_000.0;
-        if ($liquidityNotional > 0 && $liquidityNotional < $liquidityFloor
+        // liquidity_notional === 0 (a completely dead market) must classify as
+        // LOW_LIQUIDITY too, not skip past it — see DynamicThresholdService's
+        // identical fix for the same `> 0` guard.
+        if ($liquidityNotional < $liquidityFloor
             && $volumeRatio !== null && $volumeRatio < self::LOW_LIQUIDITY_VOLUME_RATIO
         ) {
             return [

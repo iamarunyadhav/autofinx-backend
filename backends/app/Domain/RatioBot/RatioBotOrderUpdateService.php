@@ -95,6 +95,12 @@ class RatioBotOrderUpdateService
             return;
         }
 
+        // Capture before the update below overwrites it — a replayed/duplicate
+        // FILLED webhook for an order already processed once must refresh the
+        // decision row (harmless) but must NOT re-run the position/PnL side
+        // effects beneath it a second time.
+        $alreadyProcessed = $decision->execution_status === RatioBotDecision::EXEC_FILLED;
+
         $decision->update([
             'execution_status' => $status === 'FILLED' ? RatioBotDecision::EXEC_FILLED : RatioBotDecision::EXEC_PARTIAL,
             'order_id' => (string) ($order->exchange_order_id ?: $order->id),
@@ -103,6 +109,10 @@ class RatioBotOrderUpdateService
             'executed_price' => $executedPrice > 0 ? $executedPrice : $decision->executed_price,
             'executed_at' => now(),
         ]);
+
+        if ($alreadyProcessed) {
+            return;
+        }
 
         if (in_array($signal, [RatioBotDecision::DECISION_LONG, RatioBotDecision::DECISION_SHORT], true)) {
             $this->stateService->syncPositionSnapshot(

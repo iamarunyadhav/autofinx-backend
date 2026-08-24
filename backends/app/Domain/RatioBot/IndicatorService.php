@@ -53,7 +53,11 @@ class IndicatorService
             array_slice($candles, -20)
         );
 
-        $volumeWindow = array_slice($volumes, -20);
+        // The average must be over the candles PRECEDING the current one —
+        // including the current candle's own volume in its baseline biases
+        // the ratio toward 1.0 and understates real spikes/droughts.
+        $priorVolumes = count($volumes) > 1 ? array_slice($volumes, 0, -1) : [];
+        $volumeWindow = array_slice($priorVolumes, -20);
         $volumeAverage = $this->avg($volumeWindow);
         $currentVolume = (float) ($last['volume'] ?? 0);
         $volumeRatio = $volumeAverage > 0 ? $currentVolume / $volumeAverage : null;

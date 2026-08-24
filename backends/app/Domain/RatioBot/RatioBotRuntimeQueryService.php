@@ -70,13 +70,15 @@ class RatioBotRuntimeQueryService
 
     public function lastOrder(RatioBotConfig $config): ?array
     {
+        // Scoped strictly to THIS bot's own orders — the previous `orWhere
+        // meta->market_type` fallback matched any order on the same
+        // symbol/market_type placed by a different ratio bot, Quick Trade,
+        // or Robot Trade, misattributing someone else's order as this
+        // config's "last order".
         $order = Order::query()
             ->where('workspace_id', $config->workspace_id)
             ->where('asset_code', $config->normalizedSymbol())
-            ->where(function ($query) use ($config): void {
-                $query->where('meta->ratio_bot_config_id', (string) $config->id)
-                    ->orWhere('meta->market_type', $config->marketType());
-            })
+            ->where('meta->ratio_bot_config_id', (string) $config->id)
             ->orderByDesc('created_at')
             ->first();
 

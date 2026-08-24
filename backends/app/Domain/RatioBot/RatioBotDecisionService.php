@@ -290,7 +290,7 @@ class RatioBotDecisionService
             'reserve_quote_remaining' => (float) ($state->reserve_quote_remaining ?? 0),
         ];
 
-        if (($state->isHolding() || $state->isPartialHolding()) && $state->last_buy_price > 0) {
+        if (($state->isHolding() || $state->isPartialHolding() || $state->isPartialSold()) && $state->last_buy_price > 0) {
             $ratio = ($currentPrice / (float) $state->last_buy_price) - 1;
             $effective = $ratio - $costRatio;
             $result['sell_ratio'] = round($ratio, 6);
@@ -885,7 +885,16 @@ class RatioBotDecisionService
             $stateUpdates['last_seen_price'] = $price;
             $stateUpdates['current_ratio'] = $ratio;
         }
+        // Transient guard HOLDs (slippage/net-profit/duplicate-trade/rate-limit/
+        // single-tick-spike — all tagged with a 'guard' key, see finalizeTradeSignal()
+        // and rejectSingleTickSpike()) fire on reasons unrelated to the multi-tick
+        // confirmation state machine. Resetting pending_trigger_* here would wipe
+        // confirmation progress accumulated over prior ticks even though the
+        // underlying threshold breach never actually cleared — which can stall
+        // a real, price-justified trade indefinitely on a noisy feed.
+        $isTransientGuardHold = isset($metadata['guard']);
         if (! in_array($decision, [RatioBotDecision::DECISION_BUY, RatioBotDecision::DECISION_SELL], true)
+            && ! $isTransientGuardHold
             && ! (bool) ($metadata['confirmation_pending'] ?? false)) {
             $stateUpdates['pending_trigger_side'] = null;
             $stateUpdates['pending_trigger_started_at'] = null;

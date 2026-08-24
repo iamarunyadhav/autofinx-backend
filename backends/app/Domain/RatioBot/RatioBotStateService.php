@@ -24,10 +24,24 @@ class RatioBotStateService
      */
     public function getOrCreate(RatioBotConfig $config): RatioBotState
     {
-        return $config->state ?? RatioBotState::create([
+        if ($config->state) {
+            return $config->state;
+        }
+
+        $state = RatioBotState::create([
             'ratio_bot_config_id' => $config->id,
             'position_state'      => RatioBotState::STATE_IDLE,
         ]);
+
+        // Without this, a $config instance whose `state` relation was already
+        // resolved to null (e.g. loaded via with('state') before this row
+        // existed) keeps returning null from $config->state afterward, and a
+        // second getOrCreate() call on that same instance would try to
+        // RatioBotState::create() again and hit the unique constraint on
+        // ratio_bot_config_id.
+        $config->setRelation('state', $state);
+
+        return $state;
     }
 
     /**
@@ -408,6 +422,7 @@ class RatioBotStateService
             'position_state'                  => RatioBotState::STATE_FLAT,
             'last_sell_price'                 => $executedPrice,
             'last_sell_quantity'              => $executedQty,
+            'last_buy_price'                   => 0,
             'last_buy_quantity'                => 0,
             'sell_tranches_remaining'          => 0,
             'realized_pnl'                     => $realizedPnlTotal,

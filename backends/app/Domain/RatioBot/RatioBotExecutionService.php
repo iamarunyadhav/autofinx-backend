@@ -279,7 +279,17 @@ class RatioBotExecutionService
             if ($side === RatioBotDecision::DECISION_BUY) {
                 $this->stateService->onBuyFilled($config, $decision, $executedPrice, $executedQty, $orderId, $clientOrderId);
             } else {
+                // Read the cost basis before onSellFilled() overwrites/clears it,
+                // then feed the realized PnL into the daily-loss/consecutive-loss
+                // risk gates — otherwise max_daily_loss / max_consecutive_losses
+                // never actually see this trade (they were only ever fed from
+                // RatioBotOrderUpdateService's async webhook path, which this
+                // synchronous fill path bypasses entirely).
+                $entryPrice = (float) ($config->state?->last_buy_price ?? 0);
                 $this->stateService->onSellFilled($config, $decision, $executedPrice, $executedQty, $orderId, $clientOrderId);
+                if ($entryPrice > 0 && $executedQty > 0) {
+                    $this->stateService->recordTradeOutcome($config, ($executedPrice - $entryPrice) * $executedQty);
+                }
             }
 
             Log::info('[RatioBotExec] Order filled', [
@@ -334,6 +344,11 @@ class RatioBotExecutionService
         $config->state?->update([
             'last_order_status' => $order->status,
             'last_fill_price' => $executedPrice > 0 ? $executedPrice : $config->state?->last_fill_price,
+            // A fill/partial-fill is successful order progress, not a failure —
+            // reset the streak the same way onBuyFilled()/onSellFilled() do for
+            // spot, otherwise an unrelated earlier failure can still trip
+            // pause_on_order_failure_streak after this trade actually succeeded.
+            ...(in_array($status, ['FILLED', 'PARTIAL'], true) ? ['consecutive_order_failures' => 0] : []),
         ]);
 
         $this->stateService->rememberSignal($config, $decision->decision, (string) $decision->reason, (string) data_get($decision->metadata, 'signal_hash', ''), [
@@ -421,7 +436,11 @@ class RatioBotExecutionService
         }
 
         if ($side === RatioBotDecision::DECISION_SELL) {
+            $entryPrice = (float) ($config->state?->last_buy_price ?? 0);
             $this->stateService->onSellFilled($config, $decision, $price, $qty, $fakeOrderId, $clientOrderId);
+            if ($entryPrice > 0 && $qty > 0) {
+                $this->stateService->recordTradeOutcome($config, ($price - $entryPrice) * $qty);
+            }
             return;
         }
 

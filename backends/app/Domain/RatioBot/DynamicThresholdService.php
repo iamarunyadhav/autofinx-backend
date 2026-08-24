@@ -36,7 +36,11 @@ class DynamicThresholdService
         $trendFactor = $marketMode === 'TRENDING' ? 1.15 : ($marketMode === 'SIDEWAYS' ? 0.90 : 1.00);
         $volumeFactor = $volumeRatio >= 1.25 ? 1.08 : ($volumeRatio > 0 && $volumeRatio < 0.75 ? 0.92 : 1.00);
         $spreadPenalty = 1 + min(0.75, $spreadRatio * 12);
-        $liquidityFactor = $liquidityNotional > 0 && $liquidityNotional < (float) ($params['dynamic_liquidity_soft_floor'] ?? 10_000)
+        // A liquidity_notional of exactly 0 (a completely dead market / zero
+        // traded volume) is worse than any positive-but-thin value, so it
+        // must trip this protective factor too — not fall through to the
+        // "normal" 1.00 factor the old `> 0` guard sent it to.
+        $liquidityFactor = $liquidityNotional < (float) ($params['dynamic_liquidity_soft_floor'] ?? 10_000)
             ? 0.90
             : 1.00;
 
