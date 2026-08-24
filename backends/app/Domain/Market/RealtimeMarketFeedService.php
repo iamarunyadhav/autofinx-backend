@@ -2,6 +2,7 @@
 
 namespace App\Domain\Market;
 
+use App\Domain\RatioBot\RatioBotStateService;
 use App\Jobs\RunRatioBotEvaluationJob;
 use App\Models\FutureTradeBotConfig;
 use App\Models\MarketFeedStatus;
@@ -32,6 +33,7 @@ class RealtimeMarketFeedService
 
     public function __construct(
         private readonly MarketPriceCacheService $prices,
+        private readonly RatioBotStateService $ratioBotState,
     ) {
     }
 
@@ -225,6 +227,11 @@ class RealtimeMarketFeedService
                 $config->state?->update(['last_candle_close_at' => Carbon::createFromTimestampMs($eventTimestampMs)]);
             }
 
+            if (! $config->enabled && $config->execution_mode === 'sandbox'
+                && $config->state?->block_reason_code === 'feed_stale') {
+                $this->maybeAutoRecoverStaleSandboxBot($config, $exchangeKey, $symbol);
+            }
+
             if (! $dispatchEvaluations || ! $config->enabled) {
                 continue;
             }
@@ -246,6 +253,34 @@ class RealtimeMarketFeedService
 
             RunRatioBotEvaluationJob::dispatch((string) $config->id, false);
         }
+    }
+
+    /**
+     * Sandbox bots that got auto-disabled by RunRatioBotEvaluationJob's
+     * stale-feed guard (see handleStaleFeed()) never come back on their own
+     * — the operator has to notice and click Start again. Since sandbox
+     * mode risks no real money, self-heal them the moment the live feed
+     * we just wrote to Redis is fresh again. Live-mode bots are untouched;
+     * that guard stays a manual, operator-confirmed restart.
+     */
+    private function maybeAutoRecoverStaleSandboxBot(RatioBotConfig $config, string $exchangeKey, string $symbol): void
+    {
+        $cached = $this->prices->getLatestPrice($exchangeKey, $symbol);
+        if (! $cached || empty($cached['timestamp_ms'])) {
+            return;
+        }
+
+        $ageSeconds = Carbon::createFromTimestampMs((int) $cached['timestamp_ms'])->diffInSeconds(now());
+        if ($ageSeconds > $config->staleFeedWindowSeconds()) {
+            return;
+        }
+
+        $this->ratioBotState->start($config);
+        Log::info('[RatioBot] Auto-recovered sandbox bot after live feed became fresh again', [
+            'config_id' => $config->id,
+            'symbol' => $symbol,
+            'age_seconds' => $ageSeconds,
+        ]);
     }
 
     private function touchWorkspaceFeedStatuses(

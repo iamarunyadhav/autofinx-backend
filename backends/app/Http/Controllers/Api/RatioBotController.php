@@ -13,6 +13,7 @@ use App\Models\RatioBotDecision;
 use App\Models\RatioBotState;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 use Throwable;
@@ -97,7 +98,19 @@ class RatioBotController extends Controller
     public function destroy(RatioBotConfig $ratioBot): JsonResponse
     {
         $this->stateService->stop($ratioBot);
-        $ratioBot->delete();
+
+        // ratio_bot_states cascades via FK, but decisions/events/reconciliation
+        // logs/brain snapshots don't have one — delete them explicitly so a
+        // removed bot leaves no orphaned rows behind (and never gets loaded
+        // by a future bot that happens to reuse the same symbol).
+        DB::transaction(function () use ($ratioBot): void {
+            $ratioBot->decisions()->delete();
+            $ratioBot->events()->delete();
+            $ratioBot->reconciliationLogs()->delete();
+            $ratioBot->brainSnapshots()->delete();
+            $ratioBot->delete();
+        });
+
         return response()->json(['deleted' => true]);
     }
 
