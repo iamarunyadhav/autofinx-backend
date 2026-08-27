@@ -33,11 +33,13 @@ class LiveWalletController extends Controller
      * account equity instead of the internal/seeded wallet ledger.
      */
     public function exchangeBalance(
+        Request $request,
         string $workspaceId,
         TradingModuleSettingsService $settings,
         TradingIntegrationResolver $integrations,
         LiveTradeProviderRegistry $providers,
     ) {
+        $asset = strtoupper(trim((string) $request->query('asset', 'USDT'))) ?: 'USDT';
         $state = $settings->tradingState($workspaceId);
 
         if (($state['mode'] ?? 'paper') !== 'live') {
@@ -46,13 +48,14 @@ class LiveWalletController extends Controller
                 'mode' => $state['mode'] ?? 'paper',
                 'environment' => null,
                 'available' => null,
+                'asset' => $asset,
             ]);
         }
 
         try {
             $provider = (string) ($state['preferred_provider'] ?? 'binance');
             $integration = $integrations->resolve($workspaceId, $provider, $state['preferred_integration_id'] ?? null);
-            $balance = $providers->for($provider)->availableBalance($integration, 'USDT');
+            $balance = $providers->for($provider)->availableBalance($integration, $asset);
 
             return response()->json([
                 'source' => 'exchange',
@@ -69,6 +72,7 @@ class LiveWalletController extends Controller
                 'source' => 'exchange',
                 'mode' => 'live',
                 'environment' => $state['exchange_environment'] ?? null,
+                'asset' => $asset,
                 'available' => null,
                 'error' => $e->getMessage(),
             ], 200);

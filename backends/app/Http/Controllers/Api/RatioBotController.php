@@ -123,8 +123,138 @@ class RatioBotController extends Controller
      */
     public function start(Request $request, RatioBotConfig $ratioBot): JsonResponse
     {
+        $readiness = $this->runtime->startingEntryReadiness($ratioBot);
+        if (! $readiness['ready']) {
+            return response()->json(['message' => $readiness['reason'], 'readiness' => $readiness], 422);
+        }
+
         $state = $this->stateService->start($ratioBot, $request->user()?->id);
-        return response()->json(['state' => $state, 'message' => 'Bot started. Set initial anchor via /anchor-buy if not already set.']);
+        return response()->json(['state' => $state, 'readiness' => $readiness, 'message' => 'Bot started. Set initial anchor via /anchor-buy if not already set.']);
+    }
+
+    /**
+     * GET /ratio-bots/{config}/readiness — pre-Start balance check, callable
+     * independently so the UI can show BOT NOT READY before the user even
+     * presses Start.
+     */
+    public function readiness(RatioBotConfig $ratioBot): JsonResponse
+    {
+        return response()->json($this->runtime->startingEntryReadiness($ratioBot));
+    }
+
+    /**
+     * GET /ratio-bots/{config}/startup-checklist — rich, per-item Start
+     * readiness (spec §3): exchange connection, wallet, market feed,
+     * symbol, risk state, exchange filters.
+     */
+    public function startupChecklist(RatioBotConfig $ratioBot): JsonResponse
+    {
+        return response()->json($this->runtime->startupChecklist($ratioBot));
+    }
+
+    /**
+     * GET /ratio-bots/{config}/wallet — live exchange balance for both sides
+     * of the trading pair (spec §4/§52 wallet dashboard).
+     */
+    public function wallet(RatioBotConfig $ratioBot): JsonResponse
+    {
+        return response()->json($this->runtime->walletBalances($ratioBot));
+    }
+
+    /**
+     * GET /ratio-bots/{config}/lots — per-lot cost-basis ledger (spec §17/§57),
+     * including Stage 4 Recovery lots.
+     */
+    public function lots(RatioBotConfig $ratioBot): JsonResponse
+    {
+        return response()->json($this->runtime->lots($ratioBot));
+    }
+
+    /**
+     * GET /ratio-bots/{config}/effective-feed-status — the same freshness
+     * check execution gates on (spec §60-61); the UI should show this
+     * instead of deriving freshness from raw price age on its own.
+     */
+    public function effectiveFeedStatus(RatioBotConfig $ratioBot): JsonResponse
+    {
+        return response()->json($this->runtime->effectiveFeedStatus($ratioBot));
+    }
+
+    /**
+     * GET /ratio-bots/{config}/daily-report — per-day trade/P&L rollup for
+     * Testnet observation (spec §80-81).
+     */
+    public function dailyReport(RatioBotConfig $ratioBot): JsonResponse
+    {
+        return response()->json($this->runtime->dailyReport($ratioBot));
+    }
+
+    // -----------------------------------------------------------------------
+    // Manual / Assisted mode (spec §51) — same decision engine as automatic
+    // mode, execution just waits for an explicit operator approval.
+    // -----------------------------------------------------------------------
+
+    /**
+     * GET /ratio-bots/{config}/pending-approval
+     */
+    public function pendingApproval(RatioBotConfig $ratioBot): JsonResponse
+    {
+        return response()->json($this->runtime->pendingApproval($ratioBot));
+    }
+
+    /**
+     * POST /ratio-bots/{config}/decisions/{decision}/approve
+     */
+    public function approveDecision(Request $request, RatioBotConfig $ratioBot, RatioBotDecision $decision): JsonResponse
+    {
+        if ((string) $decision->ratio_bot_config_id !== (string) $ratioBot->id) {
+            return response()->json(['message' => 'Decision does not belong to this bot.'], 404);
+        }
+
+        if (! (bool) data_get($decision->metadata, 'requires_manual_approval', false) || data_get($decision->metadata, 'manual_decision') !== null) {
+            return response()->json(['message' => 'This suggestion is no longer pending approval.'], 422);
+        }
+
+        if (! $decision->decided_at || $decision->decided_at->lt(now()->subMinutes(10))) {
+            return response()->json(['message' => 'This suggestion has expired — wait for a fresh one before approving.'], 422);
+        }
+
+        $decision->update([
+            'execution_status' => RatioBotDecision::EXEC_PENDING,
+            'metadata' => array_merge((array) ($decision->metadata ?? []), [
+                'manual_decision' => 'approved',
+                'approved_by' => $request->user()?->id,
+                'approved_at' => now()->toIso8601String(),
+            ]),
+        ]);
+
+        app(\App\Domain\RatioBot\RatioBotExecutionService::class)->execute($ratioBot, $decision->fresh());
+
+        return response()->json(['message' => 'Approved — sent through the same execution safety pipeline as automatic mode.', 'decision' => $decision->fresh()]);
+    }
+
+    /**
+     * POST /ratio-bots/{config}/decisions/{decision}/reject
+     */
+    public function rejectDecision(Request $request, RatioBotConfig $ratioBot, RatioBotDecision $decision): JsonResponse
+    {
+        if ((string) $decision->ratio_bot_config_id !== (string) $ratioBot->id) {
+            return response()->json(['message' => 'Decision does not belong to this bot.'], 404);
+        }
+
+        if (! (bool) data_get($decision->metadata, 'requires_manual_approval', false) || data_get($decision->metadata, 'manual_decision') !== null) {
+            return response()->json(['message' => 'This suggestion is no longer pending approval.'], 422);
+        }
+
+        $decision->update([
+            'metadata' => array_merge((array) ($decision->metadata ?? []), [
+                'manual_decision' => 'rejected',
+                'rejected_by' => $request->user()?->id,
+                'rejected_at' => now()->toIso8601String(),
+            ]),
+        ]);
+
+        return response()->json(['message' => 'Rejected.', 'decision' => $decision->fresh()]);
     }
 
     /**
@@ -144,6 +274,60 @@ class RatioBotController extends Controller
     {
         $this->stateService->resume($ratioBot, $request->user()?->id);
         return response()->json(['message' => 'Bot resumed.', 'state' => $ratioBot->state]);
+    }
+
+    public function recalculateResume(Request $request, RatioBotConfig $ratioBot): JsonResponse
+    {
+        $state = $this->stateService->getOrCreate($ratioBot);
+        if ($state->position_state !== \App\Models\RatioBotState::STATE_PAUSED) {
+            return response()->json([
+                'message' => 'Pause the bot before recalculating strategy settings.',
+                'state' => $state,
+            ], 422);
+        }
+
+        $data = $request->validate([
+            'stage_buy_allocations'        => 'nullable|array|min:1|max:12',
+            'stage_buy_allocations.*'      => 'numeric|min:0.0001|max:100',
+            'stage_buy_drops'              => 'nullable|array|min:1|max:12',
+            'stage_buy_drops.*'            => 'numeric|min:0.0001|max:100',
+            'stage_sell_allocations'       => 'nullable|array|min:1|max:12',
+            'stage_sell_allocations.*'     => 'numeric|min:0.0001|max:100',
+            'stage_sell_rises'             => 'nullable|array|min:1|max:12',
+            'stage_sell_rises.*'           => 'numeric|min:0.0001|max:100',
+            'strategy_reserve_pct'         => 'nullable|numeric|min:0|max:100',
+            'recovery_buy_drop_pct'        => 'nullable|numeric|min:0.0001|max:100',
+            'recovery_sell_rise_pct'       => 'nullable|numeric|min:0.0001|max:100',
+            'min_net_profit_bps'           => 'nullable|numeric|min:0|max:10000',
+            'trigger_confirm_seconds'      => 'nullable|integer|min:0|max:86400',
+            'trigger_confirm_updates'      => 'nullable|integer|min:1|max:100',
+            'min_price_stability_seconds'  => 'nullable|integer|min:0|max:86400',
+            'max_spike_deviation_bps'      => 'nullable|numeric|min:0|max:10000',
+            'apply_mode'                   => 'nullable|string|in:next_stage,reset_current_observation',
+        ]);
+
+        $applyMode = (string) ($data['apply_mode'] ?? 'next_stage');
+        unset($data['apply_mode']);
+        $ratioBot->update($data);
+
+        if ($applyMode === 'reset_current_observation') {
+            $state->update([
+                'pending_trigger_side' => null,
+                'pending_trigger_started_at' => null,
+                'pending_trigger_updates' => 0,
+                'pending_trigger_ratio' => null,
+                'pending_trigger_price' => null,
+                'current_stage_side' => null,
+                'current_stage_index' => null,
+            ]);
+        }
+
+        $this->stateService->resume($ratioBot->fresh('state'), $request->user()?->id);
+
+        return response()->json([
+            'message' => 'Strategy recalculated and bot resumed. Historical lots and fills were preserved.',
+            'config' => $ratioBot->fresh('state'),
+        ]);
     }
 
     /**
@@ -215,6 +399,43 @@ class RatioBotController extends Controller
         ]);
     }
 
+    /**
+     * POST /ratio-bots/{config}/anchor-starting-inventory
+     *
+     * Onboards a SELL-starting-entry bot's pre-existing coin holdings (spec
+     * §2) — the operator already owns this coin, it wasn't bought through
+     * the bot. Only valid once, before any fill exists, and only when
+     * starting_entry=SELL.
+     */
+    public function anchorStartingInventory(Request $request, RatioBotConfig $ratioBot): JsonResponse
+    {
+        if ($ratioBot->startingEntry() !== 'SELL') {
+            return response()->json(['message' => 'Starting inventory can only be declared when Starting Entry is set to SELL.'], 422);
+        }
+
+        $existingState = $this->stateService->getOrCreate($ratioBot);
+        if ($existingState->hasOpenPosition() || (float) ($existingState->last_buy_quantity ?? 0) > 0) {
+            return response()->json(['message' => 'Bot already holds a position — starting inventory can only be declared once, before the first fill.'], 422);
+        }
+
+        $data = $request->validate([
+            'cost_basis_price' => 'required|numeric|min:0.000001',
+            'quantity' => 'required|numeric|min:0.000001',
+        ]);
+
+        $state = $this->stateService->anchorStartingInventory(
+            config: $ratioBot,
+            costBasisPrice: (float) $data['cost_basis_price'],
+            quantity: (float) $data['quantity'],
+            userId: $request->user()?->id,
+        );
+
+        return response()->json([
+            'message' => 'Starting inventory recorded. Bot is now HOLDING and will manage normal sell stages plus the recovery reserve from this position.',
+            'state' => $state,
+        ]);
+    }
+
     // -----------------------------------------------------------------------
     // State / monitoring
     // -----------------------------------------------------------------------
@@ -244,6 +465,15 @@ class RatioBotController extends Controller
             'current_position_side' => $ratioBot->state?->last_position_side,
             'current_position_qty' => $ratioBot->state?->last_position_qty,
             'unrealized_pnl' => $ratioBot->state?->unrealized_pnl,
+            'strategy_health_status' => $ratioBot->state?->strategy_health_status,
+            'market_regime' => $ratioBot->state?->market_regime,
+            'range_status' => $ratioBot->state?->range_status,
+            'current_stage_side' => $ratioBot->state?->current_stage_side,
+            'current_stage_index' => $ratioBot->state?->current_stage_index,
+            'used_buy_allocation_pct' => $ratioBot->state?->used_buy_allocation_pct,
+            'used_sell_allocation_pct' => $ratioBot->state?->used_sell_allocation_pct,
+            'observed_low_price' => $ratioBot->state?->observed_low_price,
+            'observed_high_price' => $ratioBot->state?->observed_high_price,
             'cooldown_until' => optional($ratioBot->state?->cooldown_until)->toIso8601String(),
             'kill_switch' => (bool) $ratioBot->kill_switch,
             'error_state' => $ratioBot->state?->last_runtime_error,
@@ -490,11 +720,21 @@ class RatioBotController extends Controller
             'brain_enabled'                => 'nullable|boolean',
             'brain_min_confidence'         => 'nullable|integer|min:0|max:100',
             'side_mode'                    => $optional . '|string|in:buy_sell,long_only,short_only,both',
+            'starting_entry'               => 'nullable|string|in:BUY,SELL',
             'mode'                         => $optional . '|string|in:advisor,manual_approval,restricted_auto',
             'execution_mode'               => $optional . '|string|in:sandbox,live',
             'base_quote_amount'            => $optional . '|numeric|min:0',
             'initial_entry_pct'            => 'nullable|numeric|min:0.01|max:1',
             'reserve_tranche_count'        => 'nullable|integer|min:0|max:10',
+            'stage_buy_allocations'        => 'nullable|array|min:1|max:12',
+            'stage_buy_allocations.*'      => 'numeric|min:0.0001|max:100',
+            'stage_buy_drops'              => 'nullable|array|min:1|max:12',
+            'stage_buy_drops.*'            => 'numeric|min:0.0001|max:100',
+            'stage_sell_allocations'       => 'nullable|array|min:1|max:12',
+            'stage_sell_allocations.*'     => 'numeric|min:0.0001|max:100',
+            'stage_sell_rises'             => 'nullable|array|min:1|max:12',
+            'stage_sell_rises.*'           => 'numeric|min:0.0001|max:100',
+            'strategy_reserve_pct'         => 'nullable|numeric|min:0|max:100',
             'base_asset_budget'            => 'nullable|numeric|min:0',
             'quote_asset_budget'           => 'nullable|numeric|min:0',
             'order_size_mode'              => 'nullable|string|in:fixed_quote,fixed_base,percent_of_balance',
@@ -566,6 +806,9 @@ class RatioBotController extends Controller
             'reserve_max_pct'              => 'nullable|numeric|min:0|max:1',
             'recovery_enabled'             => 'nullable|boolean',
             'recovery_timeout_minutes'     => 'nullable|integer|min:1|max:100000',
+            'recovery_buy_drop_pct'        => 'nullable|numeric|min:0.0001|max:100',
+            'recovery_sell_rise_pct'       => 'nullable|numeric|min:0.0001|max:100',
+            'no_trade_alert_minutes'       => 'nullable|integer|min:1|max:100000',
         ]);
     }
 
@@ -624,5 +867,9 @@ class RatioBotController extends Controller
         'max_spike_deviation_bps',
         'max_entry_price_drift_bps',
         'recovery_timeout_minutes',
+        'starting_entry',
+        'recovery_buy_drop_pct',
+        'recovery_sell_rise_pct',
+        'no_trade_alert_minutes',
     ];
 }

@@ -155,6 +155,65 @@ class RatioBotRiskService
         );
     }
 
+    /**
+     * Flash-drop/flash-pump protection (spec §24): immediately before a SELL
+     * submits, recompute the min-net-profit gate against the FRESH price
+     * fetched right before submission — the fresh-price re-fetch itself
+     * already happens for priceDriftBlock() above, this just also re-checks
+     * profitability with it, not only how far price moved. A SELL can be
+     * within the allowed drift band and still have flipped unprofitable
+     * (e.g. it was only barely above the profit floor at decision time).
+     * Reuses anchor_price/minimum_net_profit_ratio already persisted on the
+     * decision by RatioBotDecisionService::finalizeTradeSignal() — no new
+     * profit computation, just re-run with the fresher price. Protective
+     * exits (stop-loss/time-stop) bypass this the same way they bypass the
+     * original gate — they must still fire even at a worse price.
+     */
+    public function sellNetProfitBlock(RatioBotConfig $config, RatioBotDecision $decision, float $freshPrice): ?array
+    {
+        if ((string) $decision->decision !== RatioBotDecision::DECISION_SELL) {
+            return null;
+        }
+
+        $metadata = (array) ($decision->metadata ?? []);
+        if ((bool) ($metadata['protective_exit'] ?? false)) {
+            return null;
+        }
+
+        $anchor = (float) ($decision->anchor_price ?? 0);
+        $minimumNetRatio = (float) ($metadata['minimum_net_profit_ratio'] ?? 0);
+        if ($anchor <= 0 || $minimumNetRatio <= 0 || $freshPrice <= 0) {
+            return null;
+        }
+
+        $feeBps = max(0.0, (float) ($config->fee_bps ?? 0));
+        $slippageBps = max(0.0, (float) ($config->max_slippage_bps ?? 0));
+        $costRatio = (($feeBps * 2) + $slippageBps) / 10000;
+        $freshRatio = ($freshPrice / $anchor) - 1;
+        $effectiveRatio = $freshRatio - $costRatio;
+
+        if ($effectiveRatio >= $minimumNetRatio) {
+            return null;
+        }
+
+        return $this->reason(
+            'net_profit_gate_failed_on_refresh',
+            sprintf(
+                'Fresh price %.8f no longer clears the minimum net-profit floor (effective ratio %.6f < required %.6f).',
+                $freshPrice,
+                $effectiveRatio,
+                $minimumNetRatio
+            ),
+            false, // transient — HOLD and let the sell watch re-arm, do not pause the whole bot
+            [
+                'fresh_price' => $freshPrice,
+                'anchor_price' => $anchor,
+                'effective_ratio' => $effectiveRatio,
+                'minimum_net_profit_ratio' => $minimumNetRatio,
+            ]
+        );
+    }
+
     private function duplicateSignal(mixed $state, RatioBotDecision $decision): bool
     {
         $signalHash = (string) data_get($decision->metadata, 'signal_hash', '');

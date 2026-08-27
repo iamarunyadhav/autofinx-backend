@@ -100,6 +100,8 @@ class RatioBotExecutionServiceDriftTest extends TestCase
             Mockery::mock(FuturesOrderIntentService::class),
             Mockery::mock(FuturesConfigService::class),
             new RatioBotRiskService(),
+            app(\App\Domain\RatioBot\StrategyManagerService::class),
+            app(\App\Domain\Exchange\ExchangeClientFactory::class),
         );
     }
 

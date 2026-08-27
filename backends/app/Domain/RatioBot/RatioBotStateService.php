@@ -109,6 +109,114 @@ class RatioBotStateService
     }
 
     /**
+     * Onboards a SELL-starting-entry bot's pre-existing coin holdings (spec
+     * §2 SELL Starting Entry) — the operator already owns the coin; it
+     * wasn't bought through the bot. Unlike anchorManualBuy() (which only
+     * sets aggregate RatioBotState fields), this ALSO seeds real
+     * RatioBotLot rows split across the configured stage_buy_allocations
+     * percentages (so buyStagesFilled() reads as fully consumed — no
+     * further normal BUY will fire) plus, if recovery is enabled, one
+     * RECOVERY-tagged lot for the reserved pct — reusing the exact same
+     * stage-sell and recovery-sell logic a normally-filled position would,
+     * with no special-casing required elsewhere. Only valid once per bot,
+     * before any fill exists.
+     */
+    public function anchorStartingInventory(
+        RatioBotConfig $config,
+        float $costBasisPrice,
+        float $quantity,
+        ?string $userId = null
+    ): RatioBotState {
+        $state = $this->getOrCreate($config);
+        $stagePlanEnabled = app(RatioBotStagePlanService::class)->enabled($config);
+        $reservePct = ($stagePlanEnabled && $config->recoveryEnabled()) ? $config->recoveryReservePct() : 0.0;
+        $recoveryQty = $reservePct > 0 ? round($quantity * ($reservePct / 100), 8) : 0.0;
+        $normalQty = round($quantity - $recoveryQty, 8);
+
+        $state->update([
+            'position_state'      => RatioBotState::STATE_HOLDING,
+            'last_buy_price'      => $costBasisPrice,
+            'last_buy_quantity'   => $quantity,
+            'reserve_tranches_remaining' => 0,
+            'reserve_quote_remaining' => 0,
+            'last_trade_side'     => 'BUY',
+            'last_trade_time'     => now(),
+            'active_anchor_price' => $costBasisPrice,
+            'active_anchor_type'  => 'buy_anchor',
+            'block_reason_code'   => null,
+            'block_reason_detail' => null,
+            'cooldown_until'      => null,
+            'awaiting_since'      => null,
+            'recovery_action_required' => false,
+            'sell_armed'          => false,
+            'sell_peak_ratio'     => null,
+            'sell_peak_price'     => null,
+            'buy_armed'           => false,
+            'buy_trough_ratio'    => null,
+            'buy_trough_price'    => null,
+            'pending_trigger_side' => null,
+            'pending_trigger_started_at' => null,
+            'pending_trigger_updates' => 0,
+            'pending_trigger_ratio' => null,
+            'pending_trigger_price' => null,
+            'last_active_idempotency_key' => null,
+            'last_unresolved_order_id' => null,
+            'last_unresolved_client_order_id' => null,
+            'last_position_side' => 'long',
+            'last_position_qty' => $quantity,
+            'entry_price' => $costBasisPrice,
+            'unrealized_pnl' => 0,
+            'recovery_used_at' => null,
+            'recovery_mode' => null,
+            'recovery_started_at' => null,
+            'recovery_review_at' => null,
+        ]);
+
+        $lotIds = [];
+        if ($stagePlanEnabled) {
+            $lots = app(RatioBotLotService::class);
+            $buyAllocations = app(RatioBotStagePlanService::class)->plan($config)['buy_allocations'];
+            $sumAllocations = array_sum($buyAllocations) ?: 1.0;
+            $remaining = $normalQty;
+
+            foreach ($buyAllocations as $index => $pct) {
+                $isLast = $index === count($buyAllocations) - 1;
+                $qtyForStage = $isLast ? $remaining : round($normalQty * ($pct / $sumAllocations), 8);
+                $remaining = round($remaining - $qtyForStage, 8);
+                if ($qtyForStage > 0) {
+                    $lotIds[] = app(RatioBotLotService::class)->createStartingLot(
+                        $config, \App\Models\RatioBotLot::TYPE_NORMAL, $index + 1, $pct, $costBasisPrice, $qtyForStage
+                    )->id;
+                }
+            }
+
+            if ($recoveryQty > 0) {
+                $lotIds[] = $lots->createStartingLot(
+                    $config, \App\Models\RatioBotLot::TYPE_RECOVERY, count($buyAllocations) + 1, $reservePct, $costBasisPrice, $recoveryQty
+                )->id;
+            }
+        }
+
+        $this->emitEvent($config, RatioBotEvent::EVENT_MANUAL_BUY_ANCHORED, [
+            'starting_inventory' => true,
+            'cost_basis_price' => $costBasisPrice,
+            'quantity' => $quantity,
+            'normal_qty' => $normalQty,
+            'recovery_qty' => $recoveryQty,
+            'lot_ids' => $lotIds,
+        ], $userId);
+
+        Log::info('[RatioBot] Starting inventory anchored', [
+            'config_id' => $config->id,
+            'cost_basis_price' => $costBasisPrice,
+            'quantity' => $quantity,
+            'lots_created' => count($lotIds),
+        ]);
+
+        return $state->refresh();
+    }
+
+    /**
      * Operator manually records a sell anchor.
      * Transitions the bot to flat so the next automatic action can only be BUY.
      */
@@ -189,9 +297,16 @@ class RatioBotStateService
         // PARTIAL_HOLDING position accumulates into a weighted-average
         // entry instead of overwriting the anchor. A fill from FLAT/IDLE
         // is always a fresh entry, regardless of leftover reserve fields.
-        $isTrancheFill = $state->isPartialHolding();
+        // A Stage 4 Recovery buy (position_state RECOVERY_MONITORING, fired
+        // from RatioBotDecisionService::evaluateStagePlanBuyRecovery()) is
+        // ALSO an accumulating fill on top of the still-open normal lots —
+        // never a fresh entry, or the aggregate last_buy_price/quantity used
+        // for display and the portfolio-wide stop-loss would silently drop
+        // every normal lot bought before it.
+        $isRecoveryFill = (string) data_get($decision->metadata, 'stage.type', '') === \App\Models\RatioBotLot::TYPE_RECOVERY;
         $priorQty = (float) ($state->last_buy_quantity ?? 0);
         $priorAvg = (float) ($state->last_buy_price ?? 0);
+        $isTrancheFill = $state->isPartialHolding() || ($isRecoveryFill && $priorQty > 0);
 
         if ($isTrancheFill && $priorQty > 0) {
             $newQty = $priorQty + $executedQty;
@@ -214,6 +329,10 @@ class RatioBotStateService
             $nextPositionState = $reserveEnabled ? RatioBotState::STATE_PARTIAL_HOLDING : RatioBotState::STATE_HOLDING;
         }
 
+        if (app(RatioBotStagePlanService::class)->enabled($config)) {
+            app(RatioBotLotService::class)->createBuyLot($config, $decision, $executedPrice, $executedQty, $orderId);
+        }
+
         $state->update([
             'position_state'                  => $nextPositionState,
             'last_buy_price'                   => $newAvgPrice,
@@ -232,6 +351,15 @@ class RatioBotStateService
             'block_reason_detail'             => null,
             'awaiting_since'                  => null,
             'recovery_action_required'         => false,
+            // A Stage 4 Recovery fill consumes the recovery reserve for this
+            // exhaustion cycle (recovery_used_at) and clears the monitoring
+            // fields — RatioBotDecisionService::evaluateStagePlanBuyRecovery()
+            // checks recovery_used_at to enforce "recovery may execute only
+            // once per exhaustion event" (no Stage 5).
+            'recovery_used_at'                 => $isRecoveryFill ? now() : $state->recovery_used_at,
+            'recovery_mode'                     => $isRecoveryFill ? null : $state->recovery_mode,
+            'recovery_started_at'               => $isRecoveryFill ? null : $state->recovery_started_at,
+            'recovery_review_at'                => $isRecoveryFill ? null : $state->recovery_review_at,
             'sell_armed'                       => false,
             'sell_peak_ratio'                  => null,
             'sell_peak_price'                  => null,
@@ -253,6 +381,20 @@ class RatioBotStateService
             'entry_price'                      => $newAvgPrice,
             'unrealized_pnl'                   => 0,
         ]);
+
+        if ($isRecoveryFill) {
+            RatioBotEvent::create([
+                'ratio_bot_config_id' => $config->id,
+                'event_type' => RatioBotEvent::EVENT_RECOVERY_TRADE_EXECUTED,
+                'context' => [
+                    'side' => 'BUY',
+                    'executed_price' => $executedPrice,
+                    'executed_qty' => $executedQty,
+                    'order_id' => $orderId,
+                ],
+                'occurred_at' => now(),
+            ]);
+        }
 
         $decision->update([
             'execution_status'      => RatioBotDecision::EXEC_FILLED,
@@ -312,12 +454,23 @@ class RatioBotStateService
         $priorQty = (float) ($state->last_buy_quantity ?? 0);
         $costBasisPrice = (float) ($state->last_buy_price ?? 0);
         $remainingQty = round(max(0.0, $priorQty - $executedQty), 8);
-        $realizedPnlThisStage = $costBasisPrice > 0 ? ($executedPrice - $costBasisPrice) * $executedQty : 0.0;
+        $selectedLotIds = (array) data_get($decision->metadata, 'sell_lot_ids', []);
+        $realizedPnlFromLots = [];
+        if (app(RatioBotStagePlanService::class)->enabled($config) && $selectedLotIds !== []) {
+            $realizedPnlFromLots = [
+                'value' => app(RatioBotLotService::class)->applySellFill($config, $selectedLotIds, $executedPrice, $executedQty, $decision, $orderId),
+            ];
+        }
+        $realizedPnlThisStage = $realizedPnlFromLots['value'] ?? ($costBasisPrice > 0 ? ($executedPrice - $costBasisPrice) * $executedQty : 0.0);
         $realizedPnlTotal = (float) ($state->realized_pnl ?? 0) + $realizedPnlThisStage;
 
-        $stagedExit = $config->sellTranchesEnabled();
+        $stagePlanExit = app(RatioBotStagePlanService::class)->enabled($config) && $selectedLotIds !== [];
+        $stagedExit = $config->sellTranchesEnabled() || $stagePlanExit;
         $tranchesRemaining = 0;
-        if ($stagedExit) {
+        if ($stagePlanExit) {
+            $sellStages = count(app(RatioBotStagePlanService::class)->plan($config)['sell_allocations'] ?? []);
+            $tranchesRemaining = max(0, $sellStages - app(RatioBotLotService::class)->sellStagesCompleted($config));
+        } elseif ($stagedExit) {
             $tranchesRemaining = $state->isPartialSold()
                 ? max(0, (int) ($state->sell_tranches_remaining ?? 0) - 1)
                 : max(0, (int) $config->sell_tranche_count - 1);
@@ -431,6 +584,20 @@ class RatioBotStateService
             // re-splits fresh from config, it never carries over.
             'reserve_tranches_remaining'       => 0,
             'reserve_quote_remaining'          => 0,
+            // A full exit closes out the exhaustion cycle the Recovery
+            // Reserve (if any) was scoped to — the next BUY→...→FLAT cycle
+            // starts with a fresh, unused recovery reserve (spec: recovery is
+            // "one-time per directional exhaustion event", not one-time ever).
+            'recovery_used_at'                  => null,
+            'recovery_mode'                      => null,
+            'recovery_started_at'                => null,
+            'recovery_review_at'                 => null,
+            // A full exit ends this cycle — bump the counter so
+            // RatioBotLotService::buyStagesFilled()/sellStagesCompleted()
+            // stop counting THIS cycle's (now all-closed) lots and the next
+            // normal cooldown->re-evaluation naturally starts Stage 1 fresh,
+            // fully automatically (no manual Recalculate & Resume needed).
+            'current_cycle_number'            => (int) ($state->current_cycle_number ?? 1) + 1,
             'last_trade_side'                 => 'SELL',
             'last_trade_time'                 => now(),
             'active_anchor_price'             => $executedPrice,
@@ -485,6 +652,21 @@ class RatioBotStateService
             'cooldown_until' => $cooldownUntil->toIso8601String(),
             'previous_tracking' => $previousTracking,
         ]);
+
+        if ((bool) data_get($decision->metadata, 'recovery', false)) {
+            RatioBotEvent::create([
+                'ratio_bot_config_id' => $config->id,
+                'event_type' => RatioBotEvent::EVENT_RECOVERY_TRADE_EXECUTED,
+                'context' => [
+                    'side' => 'SELL',
+                    'executed_price' => $executedPrice,
+                    'executed_qty' => $executedQty,
+                    'order_id' => $orderId,
+                    'realized_pnl' => $realizedPnlThisStage,
+                ],
+                'occurred_at' => now(),
+            ]);
+        }
 
         return $state->refresh();
     }

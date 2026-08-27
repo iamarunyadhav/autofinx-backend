@@ -427,9 +427,11 @@ Route::prefix('v1')->group(function () {
         Route::post('ratio-bots/{ratioBot}/start', [RatioBotController::class, 'start'])->middleware('require.2fa');
         Route::post('ratio-bots/{ratioBot}/pause', [RatioBotController::class, 'pause'])->middleware('require.2fa');
         Route::post('ratio-bots/{ratioBot}/resume', [RatioBotController::class, 'resume'])->middleware('require.2fa');
+        Route::post('ratio-bots/{ratioBot}/recalculate-resume', [RatioBotController::class, 'recalculateResume'])->middleware('require.2fa');
         Route::post('ratio-bots/{ratioBot}/stop', [RatioBotController::class, 'stop'])->middleware('require.2fa');
         Route::post('ratio-bots/{ratioBot}/anchor-buy', [RatioBotController::class, 'anchorBuy'])->middleware('require.2fa');
         Route::post('ratio-bots/{ratioBot}/anchor-sell', [RatioBotController::class, 'anchorSell'])->middleware('require.2fa');
+        Route::post('ratio-bots/{ratioBot}/anchor-starting-inventory', [RatioBotController::class, 'anchorStartingInventory'])->middleware('require.2fa');
         Route::get('ratio-bots/{ratioBot}/state', [RatioBotController::class, 'state']);
         Route::get('ratio-bots/{ratioBot}/status', [RatioBotController::class, 'status']);
         Route::get('ratio-bots/{ratioBot}/ratio', [RatioBotController::class, 'currentRatio']);
@@ -446,6 +448,15 @@ Route::prefix('v1')->group(function () {
         Route::get('ratio-bots/{ratioBot}/candle-feed', [RatioBotController::class, 'candleFeed']);
         Route::get('ratio-bots/{ratioBot}/snapshot', [RatioBotController::class, 'snapshot']);
         Route::get('ratio-bots/{ratioBot}/brain-snapshot', [RatioBotController::class, 'brainSnapshot']);
+        Route::get('ratio-bots/{ratioBot}/lots', [RatioBotController::class, 'lots']);
+        Route::get('ratio-bots/{ratioBot}/wallet', [RatioBotController::class, 'wallet']);
+        Route::get('ratio-bots/{ratioBot}/readiness', [RatioBotController::class, 'readiness']);
+        Route::get('ratio-bots/{ratioBot}/startup-checklist', [RatioBotController::class, 'startupChecklist']);
+        Route::get('ratio-bots/{ratioBot}/daily-report', [RatioBotController::class, 'dailyReport']);
+        Route::get('ratio-bots/{ratioBot}/effective-feed-status', [RatioBotController::class, 'effectiveFeedStatus']);
+        Route::get('ratio-bots/{ratioBot}/pending-approval', [RatioBotController::class, 'pendingApproval']);
+        Route::post('ratio-bots/{ratioBot}/decisions/{decision}/approve', [RatioBotController::class, 'approveDecision'])->middleware('require.2fa');
+        Route::post('ratio-bots/{ratioBot}/decisions/{decision}/reject', [RatioBotController::class, 'rejectDecision'])->middleware('require.2fa');
 
         // ---- Fast2X ---------------------------------------------------------
         Route::get('workspaces/{workspace}/fast2x/status', [Fast2XController::class, 'status']);

@@ -36,6 +36,7 @@ class RatioBotEvent extends BaseModel
     public const EVENT_RECOVERY_MONITORING_ENTERED  = 'recovery_monitoring_entered';
     public const EVENT_RECOVERY_REVIEW_COMPLETED    = 'recovery_review_completed';
     public const EVENT_STRATEGY_REANCHORED          = 'strategy_reanchored';
+    public const EVENT_RECOVERY_TRADE_EXECUTED      = 'recovery_trade_executed';
 
     public function config(): BelongsTo
     {

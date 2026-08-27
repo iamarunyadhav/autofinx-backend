@@ -20,6 +20,11 @@ class RatioBotConfig extends BaseModel
         'quote_asset_budget'          => 'decimal:8',
         'max_trade_size_pct'          => 'decimal:4',
         'reserve_cash_buffer_pct'     => 'decimal:4',
+        'strategy_reserve_pct'        => 'decimal:4',
+        'stage_buy_allocations'       => 'array',
+        'stage_buy_drops'             => 'array',
+        'stage_sell_allocations'      => 'array',
+        'stage_sell_rises'            => 'array',
         'sell_threshold_ratio'        => 'decimal:6',
         'buy_threshold_ratio'         => 'decimal:6',
         'allow_partial_sell'          => 'boolean',
@@ -77,6 +82,9 @@ class RatioBotConfig extends BaseModel
         'reserve_max_pct'             => 'decimal:4',
         'recovery_enabled'            => 'boolean',
         'recovery_timeout_minutes'    => 'integer',
+        'recovery_buy_drop_pct'       => 'decimal:4',
+        'recovery_sell_rise_pct'      => 'decimal:4',
+        'no_trade_alert_minutes'      => 'integer',
     ];
 
     public function workspace(): BelongsTo
@@ -107,6 +115,11 @@ class RatioBotConfig extends BaseModel
     public function brainSnapshots(): HasMany
     {
         return $this->hasMany(RatioBotBrainSnapshot::class, 'ratio_bot_config_id');
+    }
+
+    public function lots(): HasMany
+    {
+        return $this->hasMany(RatioBotLot::class, 'ratio_bot_config_id');
     }
 
     public function isLiveMode(): bool
@@ -184,6 +197,15 @@ class RatioBotConfig extends BaseModel
         return max(1, (int) ($this->stale_feed_timeout_seconds ?? $this->stale_feed_max_age_seconds ?? 30));
     }
 
+    public function stagePlanEnabled(): bool
+    {
+        return (bool) $this->v2_enabled
+            && $this->marketType() === 'spot'
+            && $this->algorithmKey() === 'ratio_threshold'
+            && is_array($this->stage_buy_allocations)
+            && count($this->stage_buy_allocations) > 0;
+    }
+
     public function timeFrame(): string
     {
         return strtolower(trim((string) ($this->timeframe ?: '1m')));
@@ -238,5 +260,58 @@ class RatioBotConfig extends BaseModel
             && (int) ($this->recovery_timeout_minutes ?? 0) > 0
             && $this->marketType() === 'spot'
             && $this->algorithmKey() === 'ratio_threshold';
+    }
+
+    /**
+     * The Stage 4 Recovery Reserve — the slice of strategy_reserve_pct that
+     * stage_buy_allocations never deploys during normal Stage 1-3 trading.
+     * Only meaningful when recoveryEnabled() and stagePlanEnabled() are both
+     * true; deploying it is otherwise a no-op (see RatioBotDecisionService).
+     */
+    public function recoveryReservePct(): float
+    {
+        return max(0.0, min(100.0, (float) ($this->strategy_reserve_pct ?? 0)));
+    }
+
+    public function recoveryBuyDropRatio(): float
+    {
+        return max(0.0001, (float) ($this->recovery_buy_drop_pct ?? 5.0)) / 100;
+    }
+
+    public function recoverySellRiseRatio(): float
+    {
+        return max(0.0001, (float) ($this->recovery_sell_rise_pct ?? 2.0)) / 100;
+    }
+
+    public function startingEntry(): ?string
+    {
+        $value = strtoupper(trim((string) ($this->starting_entry ?? '')));
+
+        return in_array($value, ['BUY', 'SELL'], true) ? $value : null;
+    }
+
+    /**
+     * @return array{0: ?string, 1: ?string} [base, quote], e.g. ["BTC", "USDT"]
+     */
+    public function splitSymbolAssets(): array
+    {
+        $symbol = $this->normalizedSymbol();
+        foreach (['USDT', 'USDC', 'BUSD', 'USD', 'BTC', 'ETH', 'EUR', 'LKR'] as $quote) {
+            if (str_ends_with($symbol, $quote) && strlen($symbol) > strlen($quote)) {
+                return [substr($symbol, 0, -strlen($quote)), $quote];
+            }
+        }
+
+        return [null, null];
+    }
+
+    public function baseAsset(): ?string
+    {
+        return $this->splitSymbolAssets()[0];
+    }
+
+    public function quoteAsset(): ?string
+    {
+        return $this->splitSymbolAssets()[1];
     }
 }

@@ -201,6 +201,35 @@ class RatioBotApiTest extends TestCase
     }
 
     /** @test */
+    public function can_recalculate_and_resume_from_paused_without_rewriting_strategy_history(): void
+    {
+        $config = $this->createConfig([
+            'v2_enabled' => true,
+            'stage_buy_allocations' => [50, 25, 25],
+            'stage_buy_drops' => [10, 5, 5],
+            'stage_sell_allocations' => [25, 25, 50],
+            'stage_sell_rises' => [5, 5, 10],
+        ]);
+        $this->actingAs($this->user)->postJson("/api/v1/ratio-bots/{$config->id}/start");
+        $this->actingAs($this->user)->postJson("/api/v1/ratio-bots/{$config->id}/pause");
+
+        $response = $this->actingAs($this->user)
+            ->postJson("/api/v1/ratio-bots/{$config->id}/recalculate-resume", [
+                'stage_buy_allocations' => [40, 30, 30],
+                'stage_buy_drops' => [8, 6, 6],
+                'stage_sell_allocations' => [30, 30, 40],
+                'stage_sell_rises' => [4, 6, 8],
+                'apply_mode' => 'next_stage',
+            ]);
+
+        $response->assertOk();
+        $config->refresh();
+        $this->assertSame([40, 30, 30], $config->stage_buy_allocations);
+        $this->assertSame([30, 30, 40], $config->stage_sell_allocations);
+        $this->assertNotSame('paused', $config->state()->first()->position_state);
+    }
+
+    /** @test */
     public function can_stop_bot(): void
     {
         $config = $this->createConfig();

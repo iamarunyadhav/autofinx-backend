@@ -2,15 +2,18 @@
 
 namespace App\Domain\RatioBot;
 
+use App\Domain\Exchange\ExchangeClientFactory;
 use App\Domain\Trading\LiveOrderIntentService;
 use App\Domain\Trading\FuturesConfigService;
 use App\Domain\Trading\FuturesOrderIntentService;
 use App\Domain\Trading\UncertainLiveOrderException;
+use App\Models\ExchangeConnection;
 use App\Models\Integration;
 use App\Models\Order;
 use App\Models\RatioBotConfig;
 use App\Models\RatioBotDecision;
 use App\Models\RatioBotState;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use RuntimeException;
@@ -27,6 +30,8 @@ class RatioBotExecutionService
         private readonly FuturesOrderIntentService $futuresOrders,
         private readonly FuturesConfigService $futuresConfigs,
         private readonly RatioBotRiskService $risk,
+        private readonly StrategyManagerService $strategyManager,
+        private readonly ExchangeClientFactory $exchangeClients,
     ) {
     }
 
@@ -62,6 +67,23 @@ class RatioBotExecutionService
         $symbol = $config->normalizedSymbol();
         $clientOrderId = substr('rb-' . str_replace('-', '', (string) $decision->id), 0, 36);
 
+        // Latency: this is a free, local DB check — run it before
+        // resolveQuantity() so a duplicate-blocked trade never pays for a
+        // live balance fetch (capBuyQuoteToLiveBalance) it won't use.
+        if (! $config->isSandbox() && $this->hasSameSideOpenLiveOrder($config, $side, $clientOrderId)) {
+            $decision->update([
+                'execution_status' => RatioBotDecision::EXEC_DUPLICATE_BLOCKED,
+                'reason' => "duplicate_prevented: same-side {$side} live order is still open or uncertain",
+                'client_order_id' => $clientOrderId,
+            ]);
+            Log::warning('[RatioBotExec] Same-side open live order blocked execution', [
+                'config_id' => $config->id,
+                'side' => $side,
+                'client_order_id' => $clientOrderId,
+            ]);
+            return;
+        }
+
         try {
             $qty = $this->resolveQuantity($config, $decision, $side);
         } catch (Throwable $e) {
@@ -89,17 +111,7 @@ class RatioBotExecutionService
             return;
         }
 
-        if ($this->hasSameSideOpenLiveOrder($config, $side, $clientOrderId)) {
-            $decision->update([
-                'execution_status' => RatioBotDecision::EXEC_DUPLICATE_BLOCKED,
-                'reason' => "duplicate_prevented: same-side {$side} live order is still open or uncertain",
-                'client_order_id' => $clientOrderId,
-            ]);
-            Log::warning('[RatioBotExec] Same-side open live order blocked execution', [
-                'config_id' => $config->id,
-                'side' => $side,
-                'client_order_id' => $clientOrderId,
-            ]);
+        if ($this->shockBlock($config, $decision)) {
             return;
         }
 
@@ -150,6 +162,52 @@ class RatioBotExecutionService
     }
 
     /**
+     * Shock Detector (spec §63): immediately before submitting, freeze the
+     * order if the market is currently classified HIGH_VOLATILITY (an
+     * abnormal one-second move / spread explosion — IndicatorService's
+     * volatility_level=EXTREME) or LOW_LIQUIDITY (liquidity/volume just
+     * disappeared) — reusing StrategyManagerService's existing regime
+     * classifier rather than building a second detector. Only meaningful
+     * for v2_enabled bots (regime classification is a V2 concept and is
+     * inert otherwise, matching StrategyManagerService::analyze()'s own
+     * gate) and fails open on any error — a shock freeze that can itself
+     * throw and silently block every trade forever would be worse than no
+     * shock detector at all. Transient: never pauses the whole bot, the
+     * next evaluation cycle simply reassesses.
+     */
+    private function shockBlock(RatioBotConfig $config, RatioBotDecision $decision): bool
+    {
+        if (! $config->v2_enabled) {
+            return false;
+        }
+
+        try {
+            $state = $this->stateService->getOrCreate($config);
+            $analysis = $this->strategyManager->analyze($config, $state, (float) $decision->evaluated_price);
+        } catch (Throwable $e) {
+            Log::warning('[RatioBotExec] Shock detector check failed, continuing without it', [
+                'config_id' => $config->id,
+                'error' => $e->getMessage(),
+            ]);
+            return false;
+        }
+
+        $regime = (string) ($analysis['regime'] ?? '');
+        if (! in_array($regime, [StrategyManagerService::REGIME_HIGH_VOLATILITY, StrategyManagerService::REGIME_LOW_LIQUIDITY], true)) {
+            return false;
+        }
+
+        $this->applyEntryBlock($config, $decision, [
+            'code' => 'market_shock_detected',
+            'detail' => "Market shock detected (regime={$regime}: " . (string) ($analysis['regime_reason'] ?? 'n/a') . '). Order frozen — will re-evaluate next cycle.',
+            'pause' => false,
+            'meta' => ['regime' => $regime, 'analysis' => $analysis],
+        ]);
+
+        return true;
+    }
+
+    /**
      * Pre-submit revalidation: re-fetch a fresh reference price for the
      * exact venue/symbol the order is about to use, and compare it against
      * the price the decision was evaluated at. Catches drift accumulated in
@@ -162,8 +220,8 @@ class RatioBotExecutionService
             return false; // let the existing "live_execution_requires_connection_id" path handle it
         }
 
-        if ($config->maxEntryPriceDriftBps() <= 0) {
-            return false; // disabled for this bot — skip the reference-price fetch entirely
+        if ($config->maxEntryPriceDriftBps() <= 0 && (string) $decision->decision !== RatioBotDecision::DECISION_SELL) {
+            return false; // drift checking disabled and there's no SELL net-profit refresh to run either — skip the fetch entirely
         }
 
         $decisionPrice = (float) ($decision->evaluated_price ?? 0);
@@ -186,7 +244,8 @@ class RatioBotExecutionService
             return true;
         }
 
-        $block = $this->risk->priceDriftBlock($config, $decisionPrice, $freshPrice);
+        $block = $this->risk->priceDriftBlock($config, $decisionPrice, $freshPrice)
+            ?? $this->risk->sellNetProfitBlock($config, $decision, $freshPrice);
         if ($block === null) {
             return false;
         }
@@ -454,27 +513,37 @@ class RatioBotExecutionService
         }
 
         if ($side === RatioBotDecision::DECISION_SELL) {
-            $state = $this->stateService->getOrCreate($config);
-            $totalQty = (float) ($state->last_buy_quantity ?? 0);
-            if ($totalQty <= 0) {
-                throw new RuntimeException('Cannot sell: last_buy_quantity is zero');
+            $metadataQty = (float) data_get($decision->metadata, 'sell_quantity', 0);
+            if ($metadataQty > 0) {
+                $qty = $metadataQty;
+            } else {
+                $state = $this->stateService->getOrCreate($config);
+                $totalQty = (float) ($state->last_buy_quantity ?? 0);
+                if ($totalQty <= 0) {
+                    throw new RuntimeException('Cannot sell: last_buy_quantity is zero');
+                }
+
+                if ($config->sellTranchesEnabled()) {
+                    $qty = $this->resolveStagedSellQuantity($config, $state, $totalQty);
+                } else {
+                    $qty = $totalQty;
+                    if ($config->allow_partial_sell && (float) ($config->partial_sell_pct ?? 0) > 0) {
+                        $qty *= min(1.0, max(0.0, (float) $config->partial_sell_pct));
+                    }
+                }
             }
 
-            if ($config->sellTranchesEnabled()) {
-                return $this->resolveStagedSellQuantity($config, $state, $totalQty);
-            }
-
-            $qty = $totalQty;
-            if ($config->allow_partial_sell && (float) ($config->partial_sell_pct ?? 0) > 0) {
-                $qty *= min(1.0, max(0.0, (float) $config->partial_sell_pct));
-            }
-
-            return round($qty, 8);
+            return round($this->capSellQtyToLiveBalance($config, $qty), 8);
         }
 
         $price = (float) ($decision->evaluated_price ?? 0);
         if ($price <= 0) {
             throw new RuntimeException("Cannot buy: invalid evaluated price {$price}");
+        }
+
+        $stageQuoteAmount = (float) data_get($decision->metadata, 'stage_quote_amount', 0);
+        if ($stageQuoteAmount > 0) {
+            return round($this->capBuyQuoteToLiveBalance($config, $stageQuoteAmount) / $price, 8);
         }
 
         $state = $this->stateService->getOrCreate($config);
@@ -491,7 +560,7 @@ class RatioBotExecutionService
                 throw new RuntimeException('Cannot buy reserve tranche: reserve_quote_remaining is zero');
             }
 
-            return round($quoteForTranche / $price, 8);
+            return round($this->capBuyQuoteToLiveBalance($config, $quoteForTranche) / $price, 8);
         }
 
         $amount = (float) $config->base_quote_amount;
@@ -501,6 +570,13 @@ class RatioBotExecutionService
 
         if ($config->reserveEnabled()) {
             $amount *= $this->effectiveInitialEntryPct($config, $state, $price);
+        }
+
+        // fixed_base means $amount is already a BASE-asset quantity, not
+        // quote currency — capping it against the quote balance would be
+        // meaningless (wrong unit), so it's the one mode this skips.
+        if ((string) $config->order_size_mode !== 'fixed_base') {
+            $amount = $this->capBuyQuoteToLiveBalance($config, $amount);
         }
 
         $qty = match ((string) $config->order_size_mode) {
@@ -514,6 +590,147 @@ class RatioBotExecutionService
         }
 
         return round($qty, 8);
+    }
+
+    /**
+     * Multi-bot / shared-wallet safety: never assume more quote-currency
+     * capital is available than what's ACTUALLY free on the exchange right
+     * now. Two bots on different symbols (e.g. BTCUSDT and ETHUSDT) with
+     * independent base_quote_amount budgets but sharing the same real
+     * account would otherwise both size against their full configured
+     * budget even after the other has already spent from the same USDT
+     * pool. Capping every BUY at min(configured amount, live free balance)
+     * makes each bot naturally spend only what's genuinely left — the
+     * exchange would reject an actual overspend anyway, just less
+     * gracefully (a failed order instead of a smaller, successful one).
+     * Fails open (returns the configured amount unchanged) on sandbox,
+     * futures, missing connection, or any live-check error — this is a
+     * safety refinement on top of the exchange's own hard balance
+     * enforcement, not a replacement for it.
+     *
+     * Latency/rate-limit: the actual exchange fetch is cached for a few
+     * seconds, keyed by connection+asset (not per-bot). Free balance only
+     * ever moves when an order actually fills — it never drifts with market
+     * price the way a reference price does — so a several-second-old read
+     * cannot cause an overspend the exchange's own hard balance check
+     * wouldn't already catch (see docblock above). This is what actually
+     * matters for the multi-bot case: N bots sharing one exchange account
+     * evaluating around the same tick now share ONE live balance fetch
+     * instead of firing N, without weakening the cap itself.
+     */
+    private function capBuyQuoteToLiveBalance(RatioBotConfig $config, float $desiredQuote): float
+    {
+        if ($desiredQuote <= 0 || $config->isSandbox() || $config->marketType() === 'futures' || ! $config->connection_id) {
+            return $desiredQuote;
+        }
+
+        $quoteAsset = $config->quoteAsset();
+        if (! $quoteAsset) {
+            return $desiredQuote;
+        }
+
+        try {
+            $free = $this->liveFreeBalance($config, $quoteAsset);
+            if ($free === null) {
+                return $desiredQuote;
+            }
+
+            if ($free < $desiredQuote) {
+                Log::info('[RatioBotExec] Live balance cap reduced buy size', [
+                    'config_id' => $config->id,
+                    'quote_asset' => $quoteAsset,
+                    'desired_quote' => $desiredQuote,
+                    'live_free_balance' => $free,
+                ]);
+            }
+
+            return max(0.0, min($desiredQuote, $free));
+        } catch (Throwable $e) {
+            Log::warning('[RatioBotExec] Live balance cap check failed, using configured amount unchanged', [
+                'config_id' => $config->id,
+                'error' => $e->getMessage(),
+            ]);
+
+            return $desiredQuote;
+        }
+    }
+
+    /**
+     * SELL-side counterpart to capBuyQuoteToLiveBalance: this bot's own lot
+     * / state bookkeeping is what sizes a sell, but if the real account
+     * currently holds less BASE asset than that bookkeeping expects —
+     * another bot on the same shared wallet already spent it, a manual
+     * withdrawal, a partial-fill mismatch — submitting the bookkeeping's qty
+     * would either be exchange-rejected or, worse, attempt to sell into
+     * another bot's inventory. Same fail-open contract as the BUY-side cap:
+     * sandbox, futures, missing connection, or any live-check error returns
+     * the resolved quantity unchanged.
+     */
+    private function capSellQtyToLiveBalance(RatioBotConfig $config, float $desiredQty): float
+    {
+        if ($desiredQty <= 0 || $config->isSandbox() || $config->marketType() === 'futures' || ! $config->connection_id) {
+            return $desiredQty;
+        }
+
+        $baseAsset = $config->baseAsset();
+        if (! $baseAsset) {
+            return $desiredQty;
+        }
+
+        try {
+            $free = $this->liveFreeBalance($config, $baseAsset);
+            if ($free === null) {
+                return $desiredQty;
+            }
+
+            if ($free < $desiredQty) {
+                Log::info('[RatioBotExec] Live balance cap reduced sell size', [
+                    'config_id' => $config->id,
+                    'base_asset' => $baseAsset,
+                    'desired_qty' => $desiredQty,
+                    'live_free_balance' => $free,
+                ]);
+            }
+
+            return max(0.0, min($desiredQty, $free));
+        } catch (Throwable $e) {
+            Log::warning('[RatioBotExec] Live sell balance cap check failed, using resolved quantity unchanged', [
+                'config_id' => $config->id,
+                'error' => $e->getMessage(),
+            ]);
+
+            return $desiredQty;
+        }
+    }
+
+    /**
+     * Free balance for one asset on one exchange connection, cached for a
+     * short TTL so concurrent bots on the same account don't each pay for
+     * their own round trip. Returns null (caller fails open) when the
+     * connection is missing/inactive or the asset isn't found.
+     */
+    private function liveFreeBalance(RatioBotConfig $config, string $asset): ?float
+    {
+        $cacheKey = "ratio_bot:live_free_balance:{$config->connection_id}:{$asset}";
+
+        return Cache::remember($cacheKey, 4, function () use ($config, $asset) {
+            $connection = ExchangeConnection::query()
+                ->where('workspace_id', $config->workspace_id)
+                ->whereKey($config->connection_id)
+                ->first();
+            if (! $connection || ! $connection->is_active) {
+                return null;
+            }
+
+            $balances = $this->exchangeClients->makeFromConnection($connection)->fetchBalances();
+            foreach ($balances as $balance) {
+                if (strtoupper((string) ($balance['asset'] ?? '')) === $asset) {
+                    return (float) ($balance['free'] ?? 0);
+                }
+            }
+
+            return 0.0;
+        });
     }
 
     /**

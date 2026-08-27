@@ -141,9 +141,20 @@ class RatioBotRealtimeEngine
             return ['decision' => $decision->decision, 'decision_record' => $decision, 'reason' => $decision->reason];
         }
 
+        // Same decision engine as auto mode — only the execution authorization
+        // differs (spec §51: "do not maintain two independent algorithms").
+        // Tagged in metadata (not just the reason string) so
+        // RatioBotRuntimeQueryService::pendingApproval() can find it reliably,
+        // and left query-able by RatioBotController::approveDecision() to be
+        // executed later through the exact same RatioBotExecutionService path
+        // auto mode uses — including its fresh-price/net-profit re-check.
         $decision->update([
             'execution_status' => RatioBotDecision::EXEC_SKIPPED,
             'reason' => 'mode=' . $config->mode . ' requires manual approval',
+            'metadata' => array_merge((array) ($decision->metadata ?? []), [
+                'requires_manual_approval' => true,
+                'manual_decision' => null,
+            ]),
         ]);
 
         return ['decision' => $decision->decision, 'decision_record' => $decision, 'reason' => $decision->reason];

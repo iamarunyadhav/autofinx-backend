@@ -6,6 +6,7 @@ use App\Domain\Exchange\BinanceSpotHealthService;
 use App\Domain\Exchange\ExchangeClientFactory;
 use App\Domain\Market\MarketPriceCacheService;
 use App\Domain\Ops\OperationalBreakerService;
+use App\Domain\RatioBot\RatioBotAlertService;
 use App\Domain\RatioBot\RatioBotDecisionService;
 use App\Domain\RatioBot\RatioBotRealtimeEngine;
 use App\Domain\RatioBot\RatioBotStateService;
@@ -63,6 +64,7 @@ class RunRatioBotEvaluationJob implements ShouldQueue, ShouldBeUnique
         ExchangeClientFactory $clients,
         OperationalBreakerService $breakers,
         BinanceSpotHealthService $health,
+        RatioBotAlertService $alerts,
     ): void {
         $config = RatioBotConfig::with('state')->find($this->ratioBotConfigId);
 
@@ -134,6 +136,8 @@ class RunRatioBotEvaluationJob implements ShouldQueue, ShouldBeUnique
                 'price_age_seconds' => $pricePayload['price_age_seconds'] ?? null,
                 'latency_ms' => $pricePayload['latency_ms'] ?? null,
             ]);
+
+            $alerts->checkAndNotify($config);
         } finally {
             $lock->release();
         }

@@ -5,9 +5,11 @@ namespace App\Domain\RatioBot;
 use App\Models\RatioBotConfig;
 use App\Models\RatioBotDecision;
 use App\Models\RatioBotEvent;
+use App\Models\RatioBotLot;
 use App\Models\RatioBotState;
 use DateTimeInterface;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Throwable;
@@ -168,6 +170,13 @@ class RatioBotDecisionService
             return $spikeRejection;
         }
 
+        if (app(RatioBotStagePlanService::class)->enabled($config)) {
+            $stageResult = $this->evaluateStagePlan($config, $state, $currentPrice, $correlationId, $priceSource, $priceTimestamp, $policy);
+            if ($stageResult !== null) {
+                return $stageResult;
+            }
+        }
+
         if ($config->recoveryEnabled()) {
             try {
                 $this->maybeEnterRecoveryMonitoring($config, $state);
@@ -217,6 +226,828 @@ class RatioBotDecisionService
             $priceSource,
             $priceTimestamp,
         );
+    }
+
+    /**
+     * The Priority Action Manager (spec §29-30). Not a separate module by
+     * design — the priority order below IS this method's control flow, so
+     * there's no second copy of the ordering that could drift out of sync
+     * with what actually executes:
+     *
+     *   1. Emergency Capital Protection  -> stop-loss check, first, below.
+     *   2. Reconcile pending/unknown order -> handled upstream, before this
+     *      method is ever reached: evaluate()'s isBlocked()/
+     *      STATE_AWAITING_EXECUTION guards + the ratio-bots:reconcile job.
+     *   3. Existing position risk        -> StrategyHealthMonitor::update()
+     *      (called first, below) + the sell branch runs before any buy
+     *      branch, so an existing position is always assessed first.
+     *   4. Confirmed profitable SELL     -> normal Stage sell / Recovery
+     *      sell branches, evaluated before any BUY branch.
+     *   5. Confirmed BUY opportunity     -> normal Stage buy / Recovery buy,
+     *      only reached once no SELL fired.
+     *   6. HOLD / WAIT                   -> the fallback every branch
+     *      degrades to when its own conditions aren't met.
+     */
+    private function evaluateStagePlan(
+        RatioBotConfig $config,
+        RatioBotState $state,
+        float $currentPrice,
+        string $correlationId,
+        ?string $priceSource,
+        ?DateTimeInterface $priceTimestamp,
+        array $policy,
+    ): ?array {
+        $stagePlan = app(RatioBotStagePlanService::class);
+        $lotService = app(RatioBotLotService::class);
+        $health = app(StrategyHealthMonitor::class)->update($config, $state, $currentPrice);
+        $state->refresh();
+        $plan = $stagePlan->plan($config);
+        $openLots = $lotService->openLots($config);
+        $buyFilled = $lotService->buyStagesFilled($config);
+        $sellCompleted = $lotService->sellStagesCompleted($config);
+        $costRatio = $this->executionCostRatio($config);
+
+        if ($openLots->isNotEmpty()) {
+            $anchor = (float) ($state->last_buy_price ?: $openLots->avg('buy_price'));
+            if ($anchor > 0) {
+                $stopLoss = (float) ($policy['stop_loss_ratio'] ?? $this->ratioFromConfigPct($config->stop_loss_pct));
+                $ratio = ($currentPrice / $anchor) - 1;
+                if ($stopLoss > 0 && $ratio <= -$stopLoss) {
+                    return $this->finalizeTradeSignal(
+                        $config,
+                        $state,
+                        RatioBotDecision::DECISION_SELL,
+                        $currentPrice,
+                        $anchor,
+                        $ratio,
+                        -$stopLoss,
+                        $correlationId,
+                        "capital protection stop-loss triggered: ratio {$ratio} <= -{$stopLoss}",
+                        ['trigger' => 'capital_protection_stop_loss', 'protective_exit' => true, 'strategy_health' => $health],
+                        $priceSource,
+                        $priceTimestamp,
+                    );
+                }
+            }
+
+            $normalOpenLots = $lotService->openLots($config, RatioBotLot::TYPE_NORMAL);
+            $recoveryOpenLots = $lotService->openLots($config, RatioBotLot::TYPE_RECOVERY);
+
+            if ($normalOpenLots->isNotEmpty()) {
+                $sellResult = $this->evaluateNormalStageSell(
+                    $config,
+                    $state,
+                    $currentPrice,
+                    $plan,
+                    $normalOpenLots,
+                    $sellCompleted,
+                    $costRatio,
+                    $correlationId,
+                    $priceSource,
+                    $priceTimestamp,
+                    $health,
+                );
+                if ($sellResult !== null) {
+                    return $sellResult;
+                }
+            } elseif ($recoveryOpenLots->isNotEmpty() && $config->recoveryEnabled()) {
+                // All NORMAL lots are already sold — the only inventory left is
+                // the Stage 4 Recovery lot, which gets its own dedicated
+                // eligibility/track-high/reversal watch and profit floor
+                // instead of the normal per-stage rise%. "Existing exposure
+                // before new exposure" (Core Dynamic Rule) is satisfied simply
+                // by ordering: this branch is only reached once normalOpenLots
+                // is empty. Same review-window gate as the BUY-side reserve
+                // (spec §43: "do NOT immediately sell the remaining 20% after
+                // the timer — observe first") — covers both a Stage 4 lot
+                // bought through the recovery-BUY flow AND one seeded at
+                // onboarding for a SELL-starting-entry bot that already held
+                // inventory (see RatioBotStateService::anchorStartingInventory()).
+                $timeoutMinutes = max(1, (int) $config->recovery_timeout_minutes);
+                $reviewAt = $this->recoveryReviewWindow(
+                    $config,
+                    $state,
+                    'sell_stuck',
+                    "all normal sell lots are gone and only the recovery lot remains, exhausted for over {$timeoutMinutes} minutes",
+                );
+
+                if ($reviewAt === null || $reviewAt->isFuture()) {
+                    return $this->record(
+                        $config,
+                        $state,
+                        RatioBotDecision::DECISION_HOLD,
+                        $currentPrice,
+                        (float) $recoveryOpenLots->min('buy_price') ?: null,
+                        0,
+                        0,
+                        $correlationId,
+                        'recovery reserve: waiting for the recovery review window before observing a recovery sell',
+                        [
+                            'trigger' => 'recovery_sell_review_wait',
+                            'recovery' => true,
+                            'recovery_review_at' => optional($reviewAt)->toIso8601String(),
+                            'strategy_health' => $health,
+                        ],
+                        $priceSource,
+                        $priceTimestamp,
+                    );
+                }
+
+                $recoverySellResult = $this->evaluateRecoveryLotSell(
+                    $config,
+                    $state,
+                    $currentPrice,
+                    $recoveryOpenLots,
+                    $costRatio,
+                    $correlationId,
+                    $priceSource,
+                    $priceTimestamp,
+                    $health,
+                );
+                if ($recoverySellResult !== null) {
+                    return $recoverySellResult;
+                }
+            }
+        }
+
+        if ($openLots->isEmpty() && $sellCompleted >= count($plan['sell_allocations']) && (float) ($state->last_sell_price ?? 0) > 0 && $currentPrice > (float) $state->last_sell_price) {
+            $state->update(['position_state' => RatioBotState::STATE_STRATEGY_RANGE_EXHAUSTED_UP]);
+
+            return $this->record(
+                $config,
+                $state->fresh(),
+                RatioBotDecision::DECISION_HOLD,
+                $currentPrice,
+                (float) $state->last_sell_price,
+                0,
+                0,
+                $correlationId,
+                'stage plan: all configured SELL lots are completed; price is still above the sell range, so the bot will not chase',
+                ['strategy_health' => $health, 'trigger' => 'sell_range_exhausted'],
+                $priceSource,
+                $priceTimestamp,
+            );
+        }
+
+        if ($buyFilled >= count($plan['buy_allocations'])) {
+            $recoveryResult = $this->evaluateStagePlanBuyRecovery(
+                $config,
+                $state,
+                $currentPrice,
+                $health,
+                $openLots,
+                $correlationId,
+                $priceSource,
+                $priceTimestamp,
+            );
+            if ($recoveryResult !== null) {
+                return $recoveryResult;
+            }
+
+            $status = $health['health'] === StrategyHealthMonitor::STRATEGY_RANGE_EXHAUSTED_DOWN
+                ? RatioBotState::STATE_STRATEGY_RANGE_EXHAUSTED_DOWN
+                : $state->position_state;
+            if ($status !== $state->position_state && $openLots->isNotEmpty()) {
+                $state->update(['position_state' => $status]);
+            }
+
+            return $this->record(
+                $config,
+                $state->fresh(),
+                RatioBotDecision::DECISION_HOLD,
+                $currentPrice,
+                $state->last_buy_price ? (float) $state->last_buy_price : null,
+                0,
+                0,
+                $correlationId,
+                $state->recovery_used_at !== null
+                    ? 'stage plan: all configured BUY stages are consumed and the recovery reserve has already been used this cycle; no further BUY will be generated'
+                    : 'stage plan: all configured BUY stages are consumed; no additional normal BUY will be generated',
+                ['strategy_health' => $health, 'trigger' => 'buy_range_exhausted'],
+                $priceSource,
+                $priceTimestamp,
+            );
+        }
+
+        $buyStage = $buyFilled + 1;
+        $anchor = $this->stageBuyAnchor($config, $state, $buyFilled);
+        if ($anchor <= 0) {
+            return $this->record(
+                $config,
+                $state,
+                RatioBotDecision::DECISION_HOLD,
+                $currentPrice,
+                null,
+                0,
+                0,
+                $correlationId,
+                'stage plan: set a starting sell anchor or existing buy lot before automatic BUY can begin',
+                ['strategy_health' => $health, 'trigger' => 'missing_stage_anchor'],
+                $priceSource,
+                $priceTimestamp,
+            );
+        }
+
+        $state->update([
+            'current_stage_side' => 'BUY',
+            'current_stage_index' => $buyStage,
+        ]);
+
+        return $this->evaluateNormalStageBuy(
+            $config,
+            $state->fresh(),
+            $currentPrice,
+            $plan,
+            $buyStage,
+            $anchor,
+            $stagePlan,
+            $correlationId,
+            $priceSource,
+            $priceTimestamp,
+            $health,
+        );
+    }
+
+    /**
+     * Normal Stage 1-3 BUY — eligibility (drop% from anchor) -> observe the
+     * low -> reversal-watch -> confirm -> execute (spec §9-11: "never buy
+     * simply because eligibility was hit"). Anchor is the previous stage's
+     * actual fill price (or the starting sell anchor for stage 1) — see
+     * stageBuyAnchor(). Shares the exact same reversal-tracking mechanics as
+     * the Stage 4 Recovery buy via updateBuyReversalTracking().
+     */
+    private function evaluateNormalStageBuy(
+        RatioBotConfig $config,
+        RatioBotState $state,
+        float $currentPrice,
+        array $plan,
+        int $buyStage,
+        float $anchor,
+        RatioBotStagePlanService $stagePlan,
+        string $correlationId,
+        ?string $priceSource,
+        ?DateTimeInterface $priceTimestamp,
+        array $health,
+    ): array {
+        $dropPct = (float) ($plan['buy_drops'][$buyStage - 1] ?? 0);
+        $dropRatio = $dropPct / 100;
+
+        if ($dropRatio <= 0) {
+            return $this->record(
+                $config, $state, RatioBotDecision::DECISION_HOLD, $currentPrice, $anchor, 0, 0, $correlationId,
+                "stage {$buyStage} buy drop is not configured", ['trigger' => 'stage_buy_not_configured', 'strategy_health' => $health],
+                $priceSource, $priceTimestamp,
+            );
+        }
+
+        $costRatio = $this->executionCostRatio($config);
+        $tracking = $this->updateBuyReversalTracking($state, $currentPrice, $anchor, $dropRatio, $costRatio);
+
+        if (! $tracking['armed']) {
+            return $this->record(
+                $config, $state, RatioBotDecision::DECISION_HOLD, $currentPrice, $anchor, $tracking['ratio'], $tracking['boundary'], $correlationId,
+                "stage {$buyStage} buy waiting: drop {$tracking['ratio']} has not yet reached required {$tracking['boundary']}",
+                ['trigger' => 'stage_buy_eligible_tracking', 'strategy_health' => $health],
+                $priceSource, $priceTimestamp,
+            );
+        }
+
+        $metadata = [
+            'trigger' => 'stage_buy_reversal_watch',
+            'buy_trough_ratio' => $tracking['trough_ratio'],
+            'buy_trough_price' => $tracking['trough_price'],
+            'rebound_from_trough_ratio' => $tracking['rebound'],
+            'strategy_health' => $health,
+        ];
+
+        $reversalConfirm = $this->ratioFromConfigPct($config->buying_loss_ratio);
+        if ($reversalConfirm <= 0) {
+            return $this->record(
+                $config, $state, RatioBotDecision::DECISION_HOLD, $currentPrice, $anchor, $tracking['ratio'], $tracking['boundary'], $correlationId,
+                "stage {$buyStage} buy reversal is being tracked but buying_loss_ratio is not configured to confirm it",
+                $metadata, $priceSource, $priceTimestamp,
+            );
+        }
+
+        if ($tracking['rebound'] >= $reversalConfirm && $tracking['ratio'] <= $tracking['boundary']) {
+            $allocation = (float) ($plan['buy_allocations'][$buyStage - 1] ?? 0);
+            $quote = $stagePlan->deployableQuote($config) * ($allocation / 100);
+
+            return $this->finalizeTradeSignal(
+                $config, $state, RatioBotDecision::DECISION_BUY, $currentPrice, $anchor, $tracking['ratio'], $tracking['boundary'], $correlationId,
+                "stage {$buyStage} buy triggered: trough {$tracking['trough_ratio']}, rebound {$tracking['rebound']} >= required {$reversalConfirm}",
+                array_merge($metadata, [
+                    'trigger' => 'stage_buy',
+                    'stage' => ['side' => 'BUY', 'index' => $buyStage, 'allocation_pct' => $allocation, 'drop_pct' => $dropPct],
+                    'stage_quote_amount' => $quote,
+                ]),
+                $priceSource, $priceTimestamp,
+            );
+        }
+
+        return $this->record(
+            $config, $state, RatioBotDecision::DECISION_HOLD, $currentPrice, $anchor, $tracking['ratio'], $tracking['boundary'], $correlationId,
+            "stage {$buyStage} buy armed: trough {$tracking['trough_ratio']}, rebound {$tracking['rebound']} < required {$reversalConfirm}",
+            $metadata, $priceSource, $priceTimestamp,
+        );
+    }
+
+    /**
+     * Normal Stage 1-3 SELL — eligibility (rise% from the LIFO top lot's
+     * fill price) -> observe the high -> reversal-watch -> confirm ->
+     * execute (spec §21-22: "do not exit simply because the minimum
+     * threshold was reached"). Once a reversal is confirmed,
+     * RatioBotLotService::reverseSellPlan() still determines the actual
+     * lots/quantity to sell (it may include more than just the top lot, if
+     * several consecutive LIFO lots are all individually profitable at the
+     * confirmed price) — the reversal watch only decides WHEN, the lot
+     * selection logic (unchanged) still decides WHAT.
+     */
+    private function evaluateNormalStageSell(
+        RatioBotConfig $config,
+        RatioBotState $state,
+        float $currentPrice,
+        array $plan,
+        Collection $normalOpenLots,
+        int $sellCompleted,
+        float $costRatio,
+        string $correlationId,
+        ?string $priceSource,
+        ?DateTimeInterface $priceTimestamp,
+        array $health,
+    ): ?array {
+        $sellStage = min($sellCompleted + 1, count($plan['sell_allocations']));
+        $sellRise = ((float) ($plan['sell_rises'][$sellStage - 1] ?? $config->sell_threshold_ratio)) / 100;
+        $targetAllocation = (float) ($plan['sell_allocations'][$sellStage - 1] ?? 100);
+        $minimumNet = max((float) ($config->min_net_profit_bps ?? 0) / 10000, $sellRise + $costRatio);
+
+        $topLot = $normalOpenLots->sortByDesc('buy_stage_index')->first();
+        $sellAnchor = (float) ($topLot?->buy_price ?? 0);
+        if ($sellAnchor <= 0) {
+            return null;
+        }
+
+        $tracking = $this->updateSellReversalTracking($state, $currentPrice, $sellAnchor, $sellRise);
+
+        if (! $tracking['armed']) {
+            // Not even close to eligible yet — fall through (return null)
+            // rather than terminate here, exactly like the pre-reversal-watch
+            // behavior did when reverseSellPlan() found nothing sellable:
+            // lets the caller still evaluate buy-range-exhaustion/health
+            // transitions below instead of masking them with a sell-wait HOLD.
+            return null;
+        }
+
+        $metadata = [
+            'trigger' => 'stage_sell_reversal_watch',
+            'stage' => ['side' => 'SELL', 'index' => $sellStage],
+            'sell_peak_ratio' => $tracking['peak_ratio'],
+            'sell_peak_price' => $tracking['peak_price'],
+            'pullback_from_peak_ratio' => $tracking['pullback'],
+            'strategy_health' => $health,
+        ];
+
+        $reversalConfirm = $this->ratioFromConfigPct($config->selling_loss_ratio);
+        if ($reversalConfirm <= 0) {
+            return $this->record(
+                $config, $state, RatioBotDecision::DECISION_HOLD, $currentPrice, $sellAnchor, $tracking['ratio'], $sellRise, $correlationId,
+                "stage {$sellStage} sell reversal is being tracked but selling_loss_ratio is not configured to confirm it",
+                $metadata, $priceSource, $priceTimestamp,
+            );
+        }
+
+        if ($tracking['pullback'] >= $reversalConfirm && $tracking['ratio'] >= $sellRise) {
+            $lotService = app(RatioBotLotService::class);
+            $sellPlan = $lotService->reverseSellPlan($config, $currentPrice, $minimumNet, $targetAllocation, RatioBotLot::TYPE_NORMAL);
+
+            if ($sellPlan['qty'] > 0 && $sellPlan['min_buy_price'] !== null) {
+                $ratio = ($currentPrice / (float) $sellPlan['min_buy_price']) - 1;
+
+                return $this->finalizeTradeSignal(
+                    $config, $state, RatioBotDecision::DECISION_SELL, $currentPrice, (float) $sellPlan['min_buy_price'], $ratio, $sellRise, $correlationId,
+                    "stage {$sellStage} reverse-lot sell triggered after confirmed reversal: peak {$tracking['peak_ratio']}, pullback {$tracking['pullback']} >= required {$reversalConfirm}",
+                    array_merge($metadata, [
+                        'trigger' => 'stage_reverse_lot_sell',
+                        'stage' => ['side' => 'SELL', 'index' => $sellStage, 'allocation_pct' => $targetAllocation, 'rise_pct' => $sellRise * 100],
+                        'sell_quantity' => $sellPlan['qty'],
+                        'sell_lot_ids' => $sellPlan['lot_ids'],
+                        'reverse_lot_selling' => true,
+                        'cost_ratio' => $costRatio,
+                        'minimum_net_profit_ratio' => $minimumNet,
+                    ]),
+                    $priceSource, $priceTimestamp,
+                );
+            }
+
+            // Reversal confirmed off the top lot (pullback and ratio both
+            // cleared), but reverseSellPlan()'s own fresh-price profit
+            // re-check didn't clear (e.g. fees/slippage moved between
+            // ticks) — HOLD with the actual cause. Falling through to the
+            // generic "pullback < required" message below would be wrong
+            // here: the pullback DID clear, that's not why this held.
+            return $this->record(
+                $config, $state, RatioBotDecision::DECISION_HOLD, $currentPrice, $sellAnchor, $tracking['ratio'], $sellRise, $correlationId,
+                "stage {$sellStage} sell reversal confirmed (peak {$tracking['peak_ratio']}, pullback {$tracking['pullback']}) but no lot currently clears the net-profit floor at the fresh price",
+                $metadata, $priceSource, $priceTimestamp,
+            );
+        }
+
+        return $this->record(
+            $config, $state, RatioBotDecision::DECISION_HOLD, $currentPrice, $sellAnchor, $tracking['ratio'], $sellRise, $correlationId,
+            "stage {$sellStage} sell armed: peak {$tracking['peak_ratio']}, pullback {$tracking['pullback']} < required {$reversalConfirm}",
+            $metadata, $priceSource, $priceTimestamp,
+        );
+    }
+
+    /**
+     * Shared Stage 4 recovery review-window gate for both directions (BUY
+     * reserve deployment and SELL-recovery-lot exit). Starts the timer on
+     * first entry into this mode (persisted via recovery_started_at/
+     * recovery_review_at so a worker restart doesn't lose it — spec §32
+     * "do not use a blocking sleep"), and returns the review deadline every
+     * call after. Callers compare the returned Carbon against now() to know
+     * whether the window has elapsed.
+     */
+    private function recoveryReviewWindow(RatioBotConfig $config, RatioBotState $state, string $mode, string $reason): ?Carbon
+    {
+        $timeoutMinutes = max(1, (int) $config->recovery_timeout_minutes);
+        $stuckSince = $state->last_trade_time;
+        $reviewAt = $stuckSince ? $stuckSince->copy()->addMinutes($timeoutMinutes) : null;
+
+        if ($state->recovery_mode !== $mode || $state->recovery_started_at === null) {
+            $state->update([
+                'position_state' => RatioBotState::STATE_RECOVERY_MONITORING,
+                'recovery_mode' => $mode,
+                'recovery_started_at' => now(),
+                'recovery_review_at' => $reviewAt,
+            ]);
+            RatioBotEvent::create([
+                'ratio_bot_config_id' => $config->id,
+                'event_type' => RatioBotEvent::EVENT_RECOVERY_MONITORING_ENTERED,
+                'context' => [
+                    'mode' => $mode,
+                    'reason' => $reason,
+                    'review_at' => optional($reviewAt)->toIso8601String(),
+                ],
+                'occurred_at' => now(),
+            ]);
+        }
+
+        return $reviewAt;
+    }
+
+    /**
+     * Shared eligibility->observe->reversal-watch tracking for a BUY
+     * anchored on a drop from a reference price (spec §9-11: "never buy
+     * simply because eligibility was hit" — track the low, wait for a
+     * confirmed rebound). Used identically by normal Stage 1-3 buys and the
+     * Stage 4 Recovery buy. Signed ratio convention matches
+     * evaluateTrailingBuy(): negative once price has fallen below anchor,
+     * more negative the further it falls; boundary is the negated drop
+     * threshold. Mutates buy_armed/buy_trough_* on $state as a side effect.
+     *
+     * @return array{ratio: float, boundary: float, armed: bool, trough_ratio: ?float, trough_price: ?float, rebound: ?float}
+     */
+    private function updateBuyReversalTracking(RatioBotState $state, float $currentPrice, float $anchor, float $dropRatio, float $costRatio): array
+    {
+        $boundary = -$dropRatio - $costRatio;
+        $ratio = ($currentPrice / $anchor) - 1;
+
+        if ($ratio > $boundary) {
+            // Price fully recovered back past the eligible drop line -- not
+            // just a partial rebound off the tracked trough. Re-arm from
+            // scratch (mirrors updateSellReversalTracking()'s equivalent
+            // reset) so a later, unrelated dip can't ride a stale, deeper
+            // trough left over from this abandoned one straight into a
+            // premature "confirmed reversal".
+            if ((bool) ($state->buy_armed ?? false)) {
+                $state->update(['buy_armed' => false, 'buy_trough_ratio' => null, 'buy_trough_price' => null]);
+            }
+            return ['ratio' => $ratio, 'boundary' => $boundary, 'armed' => false, 'trough_ratio' => null, 'trough_price' => null, 'rebound' => null];
+        }
+
+        $troughRatio = (bool) ($state->buy_armed ?? false) && $state->buy_trough_ratio !== null
+            ? min((float) $state->buy_trough_ratio, $ratio)
+            : $ratio;
+        $troughPrice = $troughRatio === $ratio ? $currentPrice : (float) ($state->buy_trough_price ?? $currentPrice);
+        $rebound = $ratio - $troughRatio;
+
+        $state->update(['buy_armed' => true, 'buy_trough_ratio' => $troughRatio, 'buy_trough_price' => $troughPrice]);
+
+        return ['ratio' => $ratio, 'boundary' => $boundary, 'armed' => true, 'trough_ratio' => $troughRatio, 'trough_price' => $troughPrice, 'rebound' => $rebound];
+    }
+
+    /**
+     * Shared eligibility->observe->reversal-watch tracking for a SELL
+     * anchored on a rise from a reference (lot buy) price (spec §21-22:
+     * "do not exit simply because the minimum threshold was reached" — track
+     * the high, wait for a confirmed pullback). Used identically by normal
+     * Stage 1-3 sells and the Stage 4 Recovery sell. Positive-ratio
+     * convention (price above anchor = profit direction), matching the
+     * existing stage_reverse_lot_sell ratio formula. Mutates
+     * sell_armed/sell_peak_* on $state as a side effect.
+     *
+     * @return array{ratio: float, armed: bool, peak_ratio: ?float, peak_price: ?float, pullback: ?float}
+     */
+    private function updateSellReversalTracking(RatioBotState $state, float $currentPrice, float $anchor, float $riseRatio): array
+    {
+        $ratio = ($currentPrice / $anchor) - 1;
+
+        if ($ratio < $riseRatio) {
+            if ((bool) ($state->sell_armed ?? false)) {
+                $state->update(['sell_armed' => false, 'sell_peak_ratio' => null, 'sell_peak_price' => null]);
+            }
+            return ['ratio' => $ratio, 'armed' => false, 'peak_ratio' => null, 'peak_price' => null, 'pullback' => null];
+        }
+
+        $peakRatio = (bool) ($state->sell_armed ?? false) && $state->sell_peak_ratio !== null
+            ? max((float) $state->sell_peak_ratio, $ratio)
+            : $ratio;
+        $peakPrice = $peakRatio === $ratio ? $currentPrice : (float) ($state->sell_peak_price ?? $currentPrice);
+        $pullback = $peakRatio - $ratio;
+
+        $state->update(['sell_armed' => true, 'sell_peak_ratio' => $peakRatio, 'sell_peak_price' => $peakPrice]);
+
+        return ['ratio' => $ratio, 'armed' => true, 'peak_ratio' => $peakRatio, 'peak_price' => $peakPrice, 'pullback' => $pullback];
+    }
+
+    /**
+     * Stage 4 Recovery Reserve — BUY side ("position stuck"). Only reached
+     * once all normal Stage 1-3 buy allocations are consumed AND at least one
+     * normal lot is still open (price kept falling, no profitable sell
+     * appeared). Reuses the exact eligibility → observe → reversal-watch →
+     * confirm → execute shape as a normal stage buy (see finalizeTradeSignal/
+     * confirmTrigger), just anchored on the lowest open-lot price and sized
+     * from strategy_reserve_pct instead of a stage_buy_allocations entry.
+     * Returns null (no-op, caller falls through to the existing
+     * buy_range_exhausted HOLD) whenever recovery isn't applicable or has
+     * already fired once for this exhaustion cycle — recovery_used_at is only
+     * cleared by a fresh BUY→FLAT cycle (see RatioBotStateService::onSellFilled).
+     */
+    private function evaluateStagePlanBuyRecovery(
+        RatioBotConfig $config,
+        RatioBotState $state,
+        float $currentPrice,
+        array $health,
+        Collection $openLots,
+        string $correlationId,
+        ?string $priceSource,
+        ?DateTimeInterface $priceTimestamp,
+    ): ?array {
+        if (! $config->recoveryEnabled() || $openLots->isEmpty() || $config->recoveryReservePct() <= 0) {
+            return null;
+        }
+
+        if ($state->recovery_used_at !== null) {
+            return null;
+        }
+
+        $timeoutMinutes = max(1, (int) $config->recovery_timeout_minutes);
+        $reviewAt = $this->recoveryReviewWindow(
+            $config,
+            $state,
+            'position_stuck',
+            "normal buy stages exhausted for over {$timeoutMinutes} minutes with no profitable sell",
+        );
+
+        if ($reviewAt === null || $reviewAt->isFuture()) {
+            return $this->record(
+                $config,
+                $state,
+                RatioBotDecision::DECISION_HOLD,
+                $currentPrice,
+                (float) $openLots->min('buy_price') ?: null,
+                0,
+                0,
+                $correlationId,
+                'recovery reserve: waiting for the recovery review window before observing a recovery entry',
+                [
+                    'trigger' => 'recovery_wait',
+                    'recovery' => true,
+                    'recovery_review_at' => optional($reviewAt)->toIso8601String(),
+                    'strategy_health' => $health,
+                ],
+                $priceSource,
+                $priceTimestamp,
+            );
+        }
+
+        $recoveryAnchor = (float) $openLots->min('buy_price');
+        if ($recoveryAnchor <= 0) {
+            return null;
+        }
+
+        $dropRatio = $config->recoveryBuyDropRatio();
+        $costRatio = $this->executionCostRatio($config);
+        $tracking = $this->updateBuyReversalTracking($state, $currentPrice, $recoveryAnchor, $dropRatio, $costRatio);
+
+        if (! $tracking['armed']) {
+            return $this->record(
+                $config,
+                $state,
+                RatioBotDecision::DECISION_HOLD,
+                $currentPrice,
+                $recoveryAnchor,
+                $tracking['ratio'],
+                $tracking['boundary'],
+                $correlationId,
+                "recovery eligible: tracking low, drop {$tracking['ratio']} has not yet reached required {$tracking['boundary']}",
+                ['trigger' => 'recovery_eligible_tracking', 'recovery' => true, 'strategy_health' => $health],
+                $priceSource,
+                $priceTimestamp,
+            );
+        }
+
+        $metadata = [
+            'trigger' => 'recovery_reversal_watch',
+            'recovery' => true,
+            'buy_trough_ratio' => $tracking['trough_ratio'],
+            'buy_trough_price' => $tracking['trough_price'],
+            'rebound_from_trough_ratio' => $tracking['rebound'],
+            'strategy_health' => $health,
+        ];
+
+        $reversalConfirm = $this->ratioFromConfigPct($config->buying_loss_ratio);
+        if ($reversalConfirm <= 0) {
+            return $this->record(
+                $config,
+                $state,
+                RatioBotDecision::DECISION_HOLD,
+                $currentPrice,
+                $recoveryAnchor,
+                $tracking['ratio'],
+                $tracking['boundary'],
+                $correlationId,
+                'recovery reversal is being tracked but buying_loss_ratio is not configured to confirm it',
+                $metadata,
+                $priceSource,
+                $priceTimestamp,
+            );
+        }
+
+        if ($tracking['rebound'] >= $reversalConfirm && $tracking['ratio'] <= $tracking['boundary']) {
+            $reservePct = $config->recoveryReservePct();
+            $quote = ((float) ($config->base_quote_amount ?? 0)) * ($reservePct / 100);
+
+            return $this->finalizeTradeSignal(
+                $config,
+                $state,
+                RatioBotDecision::DECISION_BUY,
+                $currentPrice,
+                $recoveryAnchor,
+                $tracking['ratio'],
+                $tracking['boundary'],
+                $correlationId,
+                "recovery buy triggered: trough {$tracking['trough_ratio']}, rebound {$tracking['rebound']} >= required {$reversalConfirm}",
+                array_merge($metadata, [
+                    'trigger' => 'recovery_buy',
+                    'stage' => ['side' => 'BUY', 'type' => RatioBotLot::TYPE_RECOVERY, 'allocation_pct' => $reservePct],
+                    'stage_quote_amount' => $quote,
+                ]),
+                $priceSource,
+                $priceTimestamp,
+            );
+        }
+
+        return $this->record(
+            $config,
+            $state,
+            RatioBotDecision::DECISION_HOLD,
+            $currentPrice,
+            $recoveryAnchor,
+            $tracking['ratio'],
+            $tracking['boundary'],
+            $correlationId,
+            "recovery armed: trough {$tracking['trough_ratio']}, rebound {$tracking['rebound']} < required {$reversalConfirm}",
+            $metadata,
+            $priceSource,
+            $priceTimestamp,
+        );
+    }
+
+    /**
+     * Stage 4 Recovery Reserve — SELL side. Only reached once every NORMAL
+     * lot is already sold and the only remaining inventory is the Recovery
+     * lot itself (see the caller in evaluateStagePlan). Dedicated
+     * eligibility/track-high/reversal watch using recovery_sell_rise_pct
+     * instead of the normal per-stage rise%, reusing sell_armed/sell_peak_*
+     * (otherwise unused by stage-plan bots, which sell immediately on
+     * eligibility with no reversal watch — see the normal sell branch above).
+     */
+    private function evaluateRecoveryLotSell(
+        RatioBotConfig $config,
+        RatioBotState $state,
+        float $currentPrice,
+        Collection $recoveryOpenLots,
+        float $costRatio,
+        string $correlationId,
+        ?string $priceSource,
+        ?DateTimeInterface $priceTimestamp,
+        array $health,
+    ): ?array {
+        $recoveryBuyPrice = (float) $recoveryOpenLots->min('buy_price');
+        if ($recoveryBuyPrice <= 0) {
+            return null;
+        }
+
+        $risePct = $config->recoverySellRiseRatio();
+        $tracking = $this->updateSellReversalTracking($state, $currentPrice, $recoveryBuyPrice, $risePct);
+
+        if (! $tracking['armed']) {
+            return $this->record(
+                $config,
+                $state,
+                RatioBotDecision::DECISION_HOLD,
+                $currentPrice,
+                $recoveryBuyPrice,
+                $tracking['ratio'],
+                $risePct,
+                $correlationId,
+                "recovery sell waiting: ratio {$tracking['ratio']} < eligible {$risePct}",
+                ['trigger' => 'recovery_sell_wait', 'recovery' => true, 'strategy_health' => $health],
+                $priceSource,
+                $priceTimestamp,
+            );
+        }
+
+        $minimumNet = max((float) ($config->min_net_profit_bps ?? 0) / 10000, $risePct + $costRatio);
+        $metadata = [
+            'trigger' => 'recovery_sell_watch',
+            'recovery' => true,
+            'sell_peak_ratio' => $tracking['peak_ratio'],
+            'sell_peak_price' => $tracking['peak_price'],
+            'pullback_from_peak_ratio' => $tracking['pullback'],
+            'cost_ratio' => $costRatio,
+            'minimum_net_profit_ratio' => $minimumNet,
+            'strategy_health' => $health,
+        ];
+
+        $reversalConfirm = $this->ratioFromConfigPct($config->selling_loss_ratio);
+        if ($reversalConfirm <= 0) {
+            return $this->record(
+                $config,
+                $state,
+                RatioBotDecision::DECISION_HOLD,
+                $currentPrice,
+                $recoveryBuyPrice,
+                $tracking['ratio'],
+                $risePct,
+                $correlationId,
+                'recovery sell armed but selling_loss_ratio is not configured to confirm the reversal',
+                $metadata,
+                $priceSource,
+                $priceTimestamp,
+            );
+        }
+
+        if ($tracking['pullback'] >= $reversalConfirm && $tracking['ratio'] >= $risePct) {
+            return $this->finalizeTradeSignal(
+                $config,
+                $state,
+                RatioBotDecision::DECISION_SELL,
+                $currentPrice,
+                $recoveryBuyPrice,
+                $tracking['ratio'],
+                $risePct,
+                $correlationId,
+                "recovery sell triggered: peak {$tracking['peak_ratio']}, pullback {$tracking['pullback']} >= required {$reversalConfirm}",
+                array_merge($metadata, [
+                    'trigger' => 'recovery_sell',
+                    'sell_quantity' => (float) $recoveryOpenLots->sum('remaining_qty'),
+                    'sell_lot_ids' => $recoveryOpenLots->pluck('id')->map(fn ($id) => (string) $id)->all(),
+                ]),
+                $priceSource,
+                $priceTimestamp,
+            );
+        }
+
+        return $this->record(
+            $config,
+            $state,
+            RatioBotDecision::DECISION_HOLD,
+            $currentPrice,
+            $recoveryBuyPrice,
+            $tracking['ratio'],
+            $risePct,
+            $correlationId,
+            "recovery sell armed: peak {$tracking['peak_ratio']}, pullback {$tracking['pullback']} < required {$reversalConfirm}",
+            $metadata,
+            $priceSource,
+            $priceTimestamp,
+        );
+    }
+
+    private function stageBuyAnchor(RatioBotConfig $config, RatioBotState $state, int $buyFilled): float
+    {
+        if ($buyFilled <= 0) {
+            return (float) ($state->last_sell_price ?: $state->active_anchor_price ?: 0);
+        }
+
+        $lastLot = app(RatioBotLotService::class)->openLots($config)
+            ->sortByDesc('buy_stage_index')
+            ->first();
+
+        return $lastLot ? (float) $lastLot->buy_price : (float) ($state->last_buy_price ?? 0);
     }
 
     public function block(

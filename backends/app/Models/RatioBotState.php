@@ -15,6 +15,12 @@ class RatioBotState extends BaseModel
         'last_seen_price'       => 'decimal:8',
         'current_ratio'         => 'decimal:6',
         'consecutive_order_failures' => 'integer',
+        'current_stage_index' => 'integer',
+        'used_buy_allocation_pct' => 'decimal:4',
+        'used_sell_allocation_pct' => 'decimal:4',
+        'observed_low_price' => 'decimal:8',
+        'observed_high_price' => 'decimal:8',
+        'review_alerted_at' => 'datetime',
         'last_trade_time'       => 'datetime',
         'paused_at'             => 'datetime',
         'cooldown_until'        => 'datetime',
@@ -50,6 +56,8 @@ class RatioBotState extends BaseModel
         'realized_pnl'          => 'decimal:8',
         'recovery_started_at'   => 'datetime',
         'recovery_review_at'    => 'datetime',
+        'recovery_used_at'      => 'datetime',
+        'current_cycle_number'  => 'integer',
     ];
 
     // Valid position states
@@ -67,6 +75,8 @@ class RatioBotState extends BaseModel
     public const STATE_PARTIAL_SOLD             = 'partial_sold';
     public const STATE_RECOVERY_MONITORING      = 'recovery_monitoring';
     public const STATE_CASH_RECOVERY_MONITORING = 'cash_recovery_monitoring';
+    public const STATE_STRATEGY_RANGE_EXHAUSTED_DOWN = 'strategy_range_exhausted_down';
+    public const STATE_STRATEGY_RANGE_EXHAUSTED_UP = 'strategy_range_exhausted_up';
 
     public function config(): BelongsTo
     {
@@ -82,6 +92,8 @@ class RatioBotState extends BaseModel
             self::STATE_FLAT,
             self::STATE_RECOVERY_MONITORING,
             self::STATE_CASH_RECOVERY_MONITORING,
+            self::STATE_STRATEGY_RANGE_EXHAUSTED_DOWN,
+            self::STATE_STRATEGY_RANGE_EXHAUSTED_UP,
         ], true);
     }
 
