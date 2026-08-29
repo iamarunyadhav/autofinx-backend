@@ -186,26 +186,27 @@ class RealtimeMarketFeedService
                 'event_type' => $eventType,
                 'event_lag_ms' => $eventLagMs,
             ]);
-            $this->marketState->putQuote(
-                NormalizedQuote::fromLastPrice(
-                    $provider,
-                    $instrument,
-                    $symbol,
-                    $marketCategory,
-                    $price,
-                    $eventTimestampMs,
-                    $receivedAtMs,
-                    null,
-                    'websocket',
-                    [
-                        'legacy_exchange' => $exchangeKey,
-                        'legacy_market_type' => strtolower($marketType),
-                        'stream' => $stream,
-                        'event_type' => $eventType,
-                    ],
-                ),
-                $streamType,
+            $quote = NormalizedQuote::fromLastPrice(
+                $provider,
+                $instrument,
+                $symbol,
+                $marketCategory,
+                $price,
+                $eventTimestampMs,
+                $receivedAtMs,
+                null,
+                'websocket',
+                [
+                    'legacy_exchange' => $exchangeKey,
+                    'legacy_market_type' => strtolower($marketType),
+                    'stream' => $stream,
+                    'event_type' => $eventType,
+                ],
             );
+            $this->marketState->putQuote($quote, $streamType);
+            if ($streamType !== StreamType::QUOTE) {
+                $this->marketState->putQuote($quote, StreamType::QUOTE);
+            }
         }
 
         if ($eventType === 'kline' && is_array($data['k'] ?? null)) {
@@ -249,28 +250,27 @@ class RealtimeMarketFeedService
                     'event_type' => $eventType,
                     'event_lag_ms' => $eventLagMs,
                 ]);
-                $this->marketState->putQuote(
-                    NormalizedQuote::fromLastPrice(
-                        $provider,
-                        $instrument,
-                        $symbol,
-                        $marketCategory,
-                        $price,
-                        (int) ($kline['T'] ?? $eventTimestampMs),
-                        $receivedAtMs,
-                        null,
-                        'websocket',
-                        [
-                            'legacy_exchange' => $exchangeKey,
-                            'legacy_market_type' => strtolower($marketType),
-                            'stream' => $stream,
-                            'event_type' => $eventType,
-                            'timeframe' => $timeframe,
-                            'closed_kline' => $closedKline,
-                        ],
-                    ),
-                    StreamType::CANDLE,
+                $quote = NormalizedQuote::fromLastPrice(
+                    $provider,
+                    $instrument,
+                    $symbol,
+                    $marketCategory,
+                    $price,
+                    (int) ($kline['T'] ?? $eventTimestampMs),
+                    $receivedAtMs,
+                    null,
+                    'websocket',
+                    [
+                        'legacy_exchange' => $exchangeKey,
+                        'legacy_market_type' => strtolower($marketType),
+                        'stream' => $stream,
+                        'event_type' => $eventType,
+                        'timeframe' => $timeframe,
+                        'closed_kline' => $closedKline,
+                    ],
                 );
+                $this->marketState->putQuote($quote, StreamType::CANDLE);
+                $this->marketState->putQuote($quote, StreamType::QUOTE);
             }
         }
 
