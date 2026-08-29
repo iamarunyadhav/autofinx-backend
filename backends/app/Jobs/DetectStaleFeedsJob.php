@@ -3,6 +3,10 @@
 namespace App\Jobs;
 
 use App\Domain\Ops\OperationalBreakerService;
+use App\Domain\MarketData\Enums\FeedState;
+use App\Domain\MarketData\Enums\StreamType;
+use App\Domain\MarketData\MarketFreshnessService;
+use App\Domain\MarketData\MarketRecoveryManager;
 use App\Models\FutureTradeBotConfig;
 use App\Models\MarketTick;
 use App\Models\MarketFeedStatus;
@@ -30,7 +34,7 @@ class DetectStaleFeedsJob implements ShouldQueue, ShouldBeUnique
         $this->thresholdSeconds = $thresholdSeconds;
     }
 
-    public function handle(OperationalBreakerService $breakers): void
+    public function handle(OperationalBreakerService $breakers, MarketFreshnessService $freshness, MarketRecoveryManager $recovery): void
     {
         $now = now();
         $activeWorkspaceSymbols = $this->activeWorkspaceSymbols();
@@ -87,6 +91,28 @@ class DetectStaleFeedsJob implements ShouldQueue, ShouldBeUnique
             $isWorkspaceFeedStale = $latestRelevantFeed->last_tick_at->lt($now->copy()->subSeconds($this->thresholdSeconds));
 
             if ($isWorkspaceFeedStale) {
+                $provider = str_replace('_futures', '', strtolower((string) ($latestRelevantFeed->exchange ?: 'binance')));
+                $instrument = strtoupper((string) ($latestRelevantFeed->symbol ?: ''));
+                if ($instrument !== '') {
+                    $scopedHealth = $freshness->evaluate($provider, $instrument, StreamType::QUOTE);
+                    if (($scopedHealth['state'] ?? null) === FeedState::MARKET_CLOSED->value) {
+                        $breakers->clearStaleFeedBreaker((string) $workspaceId, [
+                            'symbol' => $instrument,
+                            'reason' => 'market_closed_not_stale',
+                            'health' => $scopedHealth,
+                        ]);
+
+                        continue;
+                    }
+
+                    $recovery->requestRecovery($provider, $instrument, StreamType::QUOTE, 'scheduled_stale_feed_check', [
+                        'workspace_id' => (string) $workspaceId,
+                        'last_tick_at' => optional($latestRelevantFeed->last_tick_at)?->toIso8601String(),
+                        'threshold_seconds' => $this->thresholdSeconds,
+                        'health' => $scopedHealth,
+                    ]);
+                }
+
                 $breakers->activateStaleFeedBreaker((string) $workspaceId, [
                     'symbol' => $latestRelevantFeed->symbol,
                     'symbol_id' => $latestRelevantFeed->symbol_id,
@@ -94,19 +120,7 @@ class DetectStaleFeedsJob implements ShouldQueue, ShouldBeUnique
                     'threshold_seconds' => $this->thresholdSeconds,
                 ]);
 
-                RiskEvent::create([
-                    'id' => (string) Str::uuid(),
-                    'workspace_id' => $workspaceId,
-                    'type' => 'feed_stale',
-                    'severity' => 'warning',
-                    'reason_json' => [
-                        'symbol' => $latestRelevantFeed->symbol,
-                        'symbol_id' => $latestRelevantFeed->symbol_id,
-                        'last_tick_at' => $latestRelevantFeed->last_tick_at,
-                        'threshold_seconds' => $this->thresholdSeconds,
-                    ],
-                    'triggered_at' => $now,
-                ]);
+                $this->recordStaleRiskEvent((string) $workspaceId, $latestRelevantFeed, $now);
             } else {
                 $breakers->clearStaleFeedBreaker((string) $workspaceId, [
                     'symbol' => $latestRelevantFeed->symbol,
@@ -174,5 +188,34 @@ class DetectStaleFeedsJob implements ShouldQueue, ShouldBeUnique
             ->map(fn (array $symbols) => array_values(array_unique(array_filter($symbols))))
             ->filter(fn (array $symbols) => $symbols !== [])
             ->all();
+    }
+
+    private function recordStaleRiskEvent(string $workspaceId, MarketFeedStatus $feed, \Illuminate\Support\Carbon $now): void
+    {
+        $recentDuplicate = RiskEvent::query()
+            ->where('workspace_id', $workspaceId)
+            ->where('type', 'feed_stale')
+            ->where('triggered_at', '>=', $now->copy()->subSeconds(max($this->thresholdSeconds * 2, 120)))
+            ->where('reason_json->symbol', $feed->symbol)
+            ->exists();
+
+        if ($recentDuplicate) {
+            return;
+        }
+
+        RiskEvent::create([
+            'id' => (string) Str::uuid(),
+            'workspace_id' => $workspaceId,
+            'type' => 'feed_stale',
+            'severity' => 'warning',
+            'reason_json' => [
+                'symbol' => $feed->symbol,
+                'symbol_id' => $feed->symbol_id,
+                'last_tick_at' => $feed->last_tick_at,
+                'threshold_seconds' => $this->thresholdSeconds,
+                'incident_lifecycle' => 'opened',
+            ],
+            'triggered_at' => $now,
+        ]);
     }
 }

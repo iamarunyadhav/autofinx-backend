@@ -3,6 +3,13 @@
 namespace App\Domain\Market;
 
 use App\Domain\Ops\OperationalBreakerService;
+use App\Domain\MarketData\Data\NormalizedQuote;
+use App\Domain\MarketData\Enums\FeedState;
+use App\Domain\MarketData\Enums\StreamType;
+use App\Domain\MarketData\MarketFreshnessService;
+use App\Domain\MarketData\MarketRecoveryManager;
+use App\Domain\MarketData\MarketStateStore;
+use App\Domain\MarketData\Support\InstrumentMapper;
 use App\Domain\RatioBot\RatioBotStateService;
 use App\Jobs\RunRatioBotEvaluationJob;
 use App\Models\FutureTradeBotConfig;
@@ -37,9 +44,19 @@ class RealtimeMarketFeedService
 
     public function __construct(
         private readonly MarketPriceCacheService $prices,
-        private readonly RatioBotStateService $ratioBotState,
-        private readonly OperationalBreakerService $breakers,
+        private ?RatioBotStateService $ratioBotState = null,
+        private ?OperationalBreakerService $breakers = null,
+        private ?MarketStateStore $marketState = null,
+        private ?MarketFreshnessService $freshness = null,
+        private ?MarketRecoveryManager $recovery = null,
+        private ?InstrumentMapper $instruments = null,
     ) {
+        $this->ratioBotState ??= app(RatioBotStateService::class);
+        $this->breakers ??= app(OperationalBreakerService::class);
+        $this->marketState ??= app(MarketStateStore::class);
+        $this->freshness ??= app(MarketFreshnessService::class);
+        $this->recovery ??= app(MarketRecoveryManager::class);
+        $this->instruments ??= app(InstrumentMapper::class);
     }
 
     /**
@@ -150,12 +167,17 @@ class RealtimeMarketFeedService
             return;
         }
 
+        $provider = 'binance';
+        $instrument = $this->instruments->canonical($provider, $symbol);
+        $marketCategory = $this->instruments->marketType($instrument, 'CRYPTO');
+        $receivedAtMs = (int) floor(microtime(true) * 1000);
         $exchangeKey = $this->exchangeKey($marketType);
         $eventTimestampMs = (int) ($data['E'] ?? $data['T'] ?? $data['t'] ?? floor(microtime(true) * 1000));
-        $eventLagMs = max(0, (int) floor(microtime(true) * 1000) - $eventTimestampMs);
+        $eventLagMs = max(0, $receivedAtMs - $eventTimestampMs);
         $price = $this->extractPrice($eventType, $data);
         $closedKline = false;
         $timeframe = '1m';
+        $streamType = $this->streamType($eventType, $stream);
 
         if ($price !== null && $price > 0) {
             $this->prices->setLatestPrice($exchangeKey, $symbol, $price, $eventTimestampMs, [
@@ -164,6 +186,26 @@ class RealtimeMarketFeedService
                 'event_type' => $eventType,
                 'event_lag_ms' => $eventLagMs,
             ]);
+            $this->marketState->putQuote(
+                NormalizedQuote::fromLastPrice(
+                    $provider,
+                    $instrument,
+                    $symbol,
+                    $marketCategory,
+                    $price,
+                    $eventTimestampMs,
+                    $receivedAtMs,
+                    null,
+                    'websocket',
+                    [
+                        'legacy_exchange' => $exchangeKey,
+                        'legacy_market_type' => strtolower($marketType),
+                        'stream' => $stream,
+                        'event_type' => $eventType,
+                    ],
+                ),
+                $streamType,
+            );
         }
 
         if ($eventType === 'kline' && is_array($data['k'] ?? null)) {
@@ -207,6 +249,28 @@ class RealtimeMarketFeedService
                     'event_type' => $eventType,
                     'event_lag_ms' => $eventLagMs,
                 ]);
+                $this->marketState->putQuote(
+                    NormalizedQuote::fromLastPrice(
+                        $provider,
+                        $instrument,
+                        $symbol,
+                        $marketCategory,
+                        $price,
+                        (int) ($kline['T'] ?? $eventTimestampMs),
+                        $receivedAtMs,
+                        null,
+                        'websocket',
+                        [
+                            'legacy_exchange' => $exchangeKey,
+                            'legacy_market_type' => strtolower($marketType),
+                            'stream' => $stream,
+                            'event_type' => $eventType,
+                            'timeframe' => $timeframe,
+                            'closed_kline' => $closedKline,
+                        ],
+                    ),
+                    StreamType::CANDLE,
+                );
             }
         }
 
@@ -452,6 +516,15 @@ class RealtimeMarketFeedService
             $this->touchFeedStatus($config, null, null, 'websocket', 'degraded', ['reason' => $reason]);
         }
 
+        foreach ($symbolList as $symbol) {
+            $provider = 'binance';
+            $instrument = $this->instruments->canonical($provider, $symbol);
+            $this->marketState->transition($provider, $instrument, StreamType::QUOTE, FeedState::DEGRADED, 'websocket_disconnected', [
+                'reason' => $reason,
+                'legacy_market_type' => $marketType,
+            ]);
+        }
+
         $futureConfigs = FutureTradeBotConfig::query()
             ->with('state')
             ->where('enabled', true)
@@ -637,6 +710,21 @@ class RealtimeMarketFeedService
             'kline' => isset($data['k']['c']) ? (float) $data['k']['c'] : null,
             default => isset($data['price']) ? (float) $data['price'] : null,
         };
+    }
+
+    private function streamType(string $eventType, string $stream): StreamType
+    {
+        $stream = strtolower($stream);
+
+        if ($eventType === 'kline' || str_contains($stream, 'kline')) {
+            return StreamType::CANDLE;
+        }
+
+        if (in_array($eventType, ['trade', 'aggtrade'], true) || str_contains($stream, 'trade')) {
+            return StreamType::TRADE;
+        }
+
+        return StreamType::QUOTE;
     }
 
     private function isPlausibleKline(array $kline, string $timeframe): bool

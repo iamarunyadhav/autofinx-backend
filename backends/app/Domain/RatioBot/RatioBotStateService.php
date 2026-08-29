@@ -971,6 +971,57 @@ class RatioBotStateService
         Log::warning('[RatioBot] Blocked', ['config_id' => $config->id, 'reason' => $reasonCode]);
     }
 
+    public function markTransientFeedBlock(RatioBotConfig $config, string $reasonCode, string $detail, array $context = []): void
+    {
+        $state = $this->getOrCreate($config);
+        $state->update([
+            'feed_status' => 'recovering',
+            'feed_status_updated_at' => now(),
+            'block_reason_code' => $reasonCode,
+            'block_reason_detail' => $detail,
+            'recovery_action_required' => true,
+            'last_runtime_error' => $detail,
+            'runtime_meta' => array_merge((array) ($state->runtime_meta ?? []), [
+                'transient_feed_block' => [
+                    'code' => $reasonCode,
+                    'detail' => $detail,
+                    'context' => $context,
+                    'at' => now()->toIso8601String(),
+                ],
+            ]),
+        ]);
+
+        $this->emitEvent($config, RatioBotEvent::EVENT_BLOCKED, ['code' => $reasonCode, 'detail' => $detail, 'transient' => true] + $context);
+        Log::warning('[RatioBot] Transient feed block recorded without disabling bot', ['config_id' => $config->id, 'reason' => $reasonCode]);
+    }
+
+    public function clearTransientFeedBlock(RatioBotConfig $config, array $context = []): void
+    {
+        $state = $this->getOrCreate($config);
+        $code = strtolower((string) ($state->block_reason_code ?? ''));
+
+        if (! in_array($code, ['feed_stale', 'stale_feed', 'websocket_unhealthy'], true)) {
+            return;
+        }
+
+        $state->update([
+            'feed_status' => 'healthy',
+            'feed_status_updated_at' => now(),
+            'block_reason_code' => null,
+            'block_reason_detail' => null,
+            'recovery_action_required' => false,
+            'last_runtime_error' => null,
+            'runtime_meta' => array_merge((array) ($state->runtime_meta ?? []), [
+                'transient_feed_recovered' => [
+                    'context' => $context,
+                    'at' => now()->toIso8601String(),
+                ],
+            ]),
+        ]);
+
+        $this->emitEvent($config, RatioBotEvent::EVENT_FEED_HEALTH_CHANGED, ['status' => 'healthy', 'transient_recovered' => true] + $context);
+    }
+
     public function enterCooldown(RatioBotConfig $config, int $seconds): void
     {
         $state = $this->getOrCreate($config);

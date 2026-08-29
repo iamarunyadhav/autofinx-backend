@@ -5,6 +5,9 @@ namespace App\Jobs;
 use App\Domain\Exchange\BinanceSpotHealthService;
 use App\Domain\Exchange\ExchangeClientFactory;
 use App\Domain\Market\MarketPriceCacheService;
+use App\Domain\MarketData\CanonicalQuoteService;
+use App\Domain\MarketData\Enums\StreamType;
+use App\Domain\MarketData\MarketRecoveryManager;
 use App\Domain\Ops\OperationalBreakerService;
 use App\Domain\RatioBot\RatioBotAlertService;
 use App\Domain\RatioBot\RatioBotDecisionService;
@@ -61,6 +64,8 @@ class RunRatioBotEvaluationJob implements ShouldQueue, ShouldBeUnique
         RatioBotRealtimeEngine $engine,
         RatioBotStateService $stateService,
         MarketPriceCacheService $priceCache,
+        CanonicalQuoteService $quotes,
+        MarketRecoveryManager $recovery,
         ExchangeClientFactory $clients,
         OperationalBreakerService $breakers,
         BinanceSpotHealthService $health,
@@ -93,7 +98,7 @@ class RunRatioBotEvaluationJob implements ShouldQueue, ShouldBeUnique
             $stateService->exitCooldownIfExpired($config);
             $config = $config->fresh('state');
 
-            $pricePayload = $this->fetchPricePayload($config, $priceCache, $clients, $stateService, $health);
+            $pricePayload = $this->fetchPricePayload($config, $priceCache, $quotes, $recovery, $clients, $stateService, $health);
             if ($pricePayload === null) {
                 Log::warning('[RatioBotJob] Could not fetch usable price', ['config_id' => $config->id, 'symbol' => $config->symbol]);
                 return;
@@ -107,6 +112,11 @@ class RunRatioBotEvaluationJob implements ShouldQueue, ShouldBeUnique
                 'manual' => $this->manualTrigger,
             ]);
 
+            $stateService->clearTransientFeedBlock($config, [
+                'price_source' => $pricePayload['source'],
+                'price_age_seconds' => $pricePayload['price_age_seconds'] ?? null,
+            ]);
+
             $healthBlock = $this->healthBlockReason($config, $breakers, $health, $pricePayload);
             if ($healthBlock !== null) {
                 $decisionService->block(
@@ -118,7 +128,9 @@ class RunRatioBotEvaluationJob implements ShouldQueue, ShouldBeUnique
                     $pricePayload['timestamp'],
                 );
 
-                if ((bool) $healthBlock['pause']) {
+                if (strtoupper((string) $healthBlock['code']) === 'STALE_FEED') {
+                    $stateService->markTransientFeedBlock($config, 'feed_stale', $healthBlock['detail'], $healthBlock['metadata']);
+                } elseif ((bool) $healthBlock['pause']) {
                     $stateService->block($config, strtolower($healthBlock['code']), $healthBlock['detail']);
                 }
 
@@ -146,6 +158,8 @@ class RunRatioBotEvaluationJob implements ShouldQueue, ShouldBeUnique
     private function fetchPricePayload(
         RatioBotConfig $config,
         MarketPriceCacheService $priceCache,
+        CanonicalQuoteService $quotes,
+        MarketRecoveryManager $recovery,
         ExchangeClientFactory $clients,
         RatioBotStateService $stateService,
         BinanceSpotHealthService $health,
@@ -153,6 +167,11 @@ class RunRatioBotEvaluationJob implements ShouldQueue, ShouldBeUnique
         $exchange = $config->exchangeKey();
         $symbol = $config->normalizedSymbol();
         $maxAgeSeconds = $config->staleFeedWindowSeconds();
+
+        $canonical = $quotes->forRatioBot($config);
+        if ($canonical !== null) {
+            return $canonical;
+        }
 
         $cached = $priceCache->getLatestPrice($exchange, $symbol);
         if ($cached && (float) $cached['price'] > 0) {
@@ -170,11 +189,11 @@ class RunRatioBotEvaluationJob implements ShouldQueue, ShouldBeUnique
             }
 
             if (in_array($config->evaluationModeKey(), ['websocket', 'tick', 'candle_close'], true)) {
-                $this->handleStaleFeed($config, $stateService, $ageSeconds, $maxAgeSeconds);
+                $this->handleStaleFeed($config, $stateService, $recovery, $ageSeconds, $maxAgeSeconds);
                 return null;
             }
         } elseif (in_array($config->evaluationModeKey(), ['websocket', 'tick', 'candle_close'], true)) {
-            $this->handleStaleFeed($config, $stateService, null, $maxAgeSeconds);
+            $this->handleStaleFeed($config, $stateService, $recovery, null, $maxAgeSeconds);
             return null;
         }
 
@@ -412,6 +431,7 @@ class RunRatioBotEvaluationJob implements ShouldQueue, ShouldBeUnique
     private function handleStaleFeed(
         RatioBotConfig $config,
         RatioBotStateService $stateService,
+        MarketRecoveryManager $recovery,
         ?int $ageSeconds,
         int $maxAgeSeconds,
     ): void {
@@ -419,9 +439,21 @@ class RunRatioBotEvaluationJob implements ShouldQueue, ShouldBeUnique
             ? "No cached websocket price is available for {$config->normalizedSymbol()}."
             : "Cached websocket price is {$ageSeconds}s old; max allowed age is {$maxAgeSeconds}s.";
 
-        if ((bool) $config->pause_on_stale_feed) {
-            $stateService->block($config, 'feed_stale', $detail);
-        }
+        $stateService->markTransientFeedBlock($config, 'feed_stale', $detail, [
+            'age_seconds' => $ageSeconds,
+            'max_age_seconds' => $maxAgeSeconds,
+        ]);
+        $recovery->requestRecovery(
+            strtolower((string) ($config->exchange ?: 'binance')),
+            $config->normalizedSymbol(),
+            StreamType::QUOTE,
+            'ratio_bot_stale_feed',
+            [
+                'config_id' => (string) $config->id,
+                'age_seconds' => $ageSeconds,
+                'max_age_seconds' => $maxAgeSeconds,
+            ],
+        );
 
         Log::warning('[RatioBotJob] Stale feed blocked evaluation', [
             'config_id' => $config->id,

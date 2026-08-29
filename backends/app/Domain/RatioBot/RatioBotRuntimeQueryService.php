@@ -5,6 +5,7 @@ namespace App\Domain\RatioBot;
 use App\Domain\Exchange\BinanceSpotClient;
 use App\Domain\Exchange\ExchangeClientFactory;
 use App\Domain\Ops\OperationalBreakerService;
+use App\Domain\MarketData\CanonicalQuoteService;
 use App\Domain\Trading\Providers\LiveTradeProviderRegistry;
 use App\Domain\Trading\TradingIntegrationResolver;
 use App\Domain\Trading\TradingModuleSettingsService;
@@ -28,6 +29,7 @@ class RatioBotRuntimeQueryService
         private readonly LiveTradeProviderRegistry $providers,
         private readonly OperationalBreakerService $breakers,
         private readonly ExchangeClientFactory $exchangeClients,
+        private readonly CanonicalQuoteService $quotes,
     ) {
     }
 
@@ -342,6 +344,7 @@ class RatioBotRuntimeQueryService
         $state = $config->state;
         $workspaceId = (string) $config->workspace_id;
         $maxAge = $config->staleFeedWindowSeconds();
+        $canonical = $this->quotes->forRatioBot($config);
 
         $staleFeedState = $this->breakers->staleFeedState($workspaceId);
         if ((bool) ($staleFeedState['active'] ?? false)) {
@@ -365,6 +368,20 @@ class RatioBotRuntimeQueryService
                     return $this->feedStatusResult('WEBSOCKET_UNHEALTHY', "websocket_stream_{$streamStatus}", $state, $maxAge, ['stream_state' => $streamState]);
                 }
             }
+        }
+
+        if ($canonical !== null) {
+            return $this->feedStatusResult(
+                'FRESH',
+                'canonical_market_state_ok',
+                $state,
+                $maxAge,
+                [
+                    'age_seconds' => $canonical['price_age_seconds'] ?? null,
+                    'canonical_quote' => $canonical['quality']['quote'] ?? null,
+                    'canonical_health' => $canonical['quality']['health'] ?? null,
+                ]
+            );
         }
 
         $ageSeconds = $state?->last_price_timestamp ? $state->last_price_timestamp->diffInSeconds(now()) : null;

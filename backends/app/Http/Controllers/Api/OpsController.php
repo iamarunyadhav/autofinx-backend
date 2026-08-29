@@ -13,6 +13,9 @@ use App\Domain\Ops\OperationalHealthService;
 use App\Domain\Ops\OperationalTrendService;
 use App\Domain\Ops\OperationalReadinessChecklistService;
 use App\Domain\Ops\OperationalBreakerService;
+use App\Domain\MarketData\Enums\StreamType;
+use App\Domain\MarketData\MarketFreshnessService;
+use App\Domain\MarketData\MarketStateStore;
 use App\Domain\Ops\RecoveryDrillService;
 use App\Domain\Ops\ReleaseGovernanceService;
 use App\Domain\Ops\RunbookService;
@@ -29,6 +32,7 @@ use App\Models\SchedulerRun;
 use App\Support\OrderStatusPoller;
 use App\Models\WebhookInbox;
 use App\Models\MarketTick;
+use App\Models\MarketFeedStatus;
 use App\Models\WithdrawalRequest;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Http\Request;
@@ -78,7 +82,7 @@ class OpsController extends Controller
         return response()->json($summary);
     }
 
-    public function providerHealth(OperationalBreakerService $breakers)
+    public function providerHealth(OperationalBreakerService $breakers, MarketFreshnessService $freshness, MarketStateStore $marketState)
     {
         $webhooks = WebhookInbox::query()
             ->select('source')
@@ -103,6 +107,52 @@ class OpsController extends Controller
                 'provider_breaker' => $breakers->providerState((string) $connection->workspace_id, 'binance'),
             ]);
 
+        $configuredInstruments = collect(config('market_data.instruments', []))
+            ->keys()
+            ->merge(MarketFeedStatus::query()->whereNotNull('symbol')->pluck('symbol'))
+            ->map(fn ($symbol) => strtoupper((string) $symbol))
+            ->filter()
+            ->unique()
+            ->values();
+
+        $providers = collect(config('market_data.providers', []))
+            ->map(function (array $definition, string $provider) use ($configuredInstruments, $freshness, $marketState) {
+                $instruments = $configuredInstruments
+                    ->filter(function (string $instrument) use ($definition): bool {
+                        $marketType = (string) data_get(config('market_data.instruments', []), "{$instrument}.market_type", 'CRYPTO');
+
+                        return in_array($marketType, (array) ($definition['market_types'] ?? []), true);
+                    })
+                    ->map(function (string $instrument) use ($provider, $freshness, $marketState) {
+                        $health = $freshness->evaluate($provider, $instrument, StreamType::QUOTE);
+                        $quote = $marketState->quote($provider, $instrument);
+
+                        return [
+                            'instrument' => $instrument,
+                            'market_type' => (string) data_get(config('market_data.instruments', []), "{$instrument}.market_type", 'CRYPTO'),
+                            'quote' => [
+                                'state' => $health['state'] ?? 'CONNECTING',
+                                'age_ms' => $health['data_age_ms'] ?? $health['received_age_ms'] ?? null,
+                                'bid' => $quote['bid'] ?? null,
+                                'ask' => $quote['ask'] ?? null,
+                                'mid' => $quote['mid'] ?? null,
+                                'last' => $quote['last'] ?? null,
+                            ],
+                            'health' => $health,
+                        ];
+                    })
+                    ->values()
+                    ->all();
+
+                return [
+                    'provider' => $provider,
+                    'capabilities' => (array) ($definition['capabilities'] ?? []),
+                    'instruments' => $instruments,
+                ];
+            })
+            ->values()
+            ->all();
+
         return response()->json([
             'webhooks' => $webhooks,
             'ticks' => [
@@ -114,6 +164,7 @@ class OpsController extends Controller
                 'stale_feed' => $breakers->staleFeedState(null),
             ],
             'binance_connections' => $connections,
+            'providers' => $providers,
         ]);
     }
 

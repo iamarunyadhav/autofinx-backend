@@ -59,8 +59,10 @@ class MarketPriceCacheService
                 return;
             }
 
-            Redis::set($priceKey, (string) $price);
-            Redis::set($tsKey, (string) $tsMs);
+            Redis::transaction(function ($redis) use ($priceKey, $tsKey, $price, $tsMs): void {
+                $redis->setex($priceKey, self::LIVE_FEED_TTL_S, (string) $price);
+                $redis->setex($tsKey, self::LIVE_FEED_TTL_S, (string) $tsMs);
+            });
             $this->writeLiveFeedSnapshot($exchange, $symbol, $price, $tsMs, $meta);
             $redisOk = true;
         } catch (\Throwable) {
