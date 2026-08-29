@@ -26,6 +26,11 @@ class MarketFreshnessService
         $health = $this->store->health($provider, $instrument, $stream, $timeframe);
         $lastReceivedMs = (int) ($health['last_received_at_ms'] ?? 0);
         $lastProviderEventMs = (int) ($health['last_provider_event_at_ms'] ?? 0);
+        $quote = $stream === StreamType::QUOTE ? $this->store->quote($provider, $instrument) : null;
+        if ($quote) {
+            $lastReceivedMs = max($lastReceivedMs, (int) ($quote['received_at_ms'] ?? 0));
+            $lastProviderEventMs = max($lastProviderEventMs, (int) ($quote['provider_event_at_ms'] ?? 0));
+        }
         $referenceMs = $lastReceivedMs > 0 ? $lastReceivedMs : $lastProviderEventMs;
 
         if ($referenceMs <= 0) {
@@ -45,6 +50,14 @@ class MarketFreshnessService
 
         if ($ageMs >= $rules['degraded_after_ms']) {
             return $this->store->transition($provider, $instrument, $stream, FeedState::DEGRADED, 'freshness_degraded_after_ms_exceeded', ['age_ms' => $ageMs, 'degraded_after_ms' => $rules['degraded_after_ms']], $timeframe);
+        }
+
+        if (($health['state'] ?? null) !== FeedState::LIVE->value) {
+            return $this->store->transition($provider, $instrument, $stream, FeedState::LIVE, 'fresh_quote_observed', [
+                'data_age_ms' => max(0, ((int) floor(microtime(true) * 1000)) - $lastProviderEventMs),
+                'received_age_ms' => $ageMs,
+                'market_type' => $marketType,
+            ], $timeframe);
         }
 
         return array_merge($health, ['state' => FeedState::LIVE->value, 'reason' => 'freshness_ok', 'data_age_ms' => max(0, ((int) floor(microtime(true) * 1000)) - $lastProviderEventMs), 'received_age_ms' => $ageMs, 'market_type' => $marketType]);
