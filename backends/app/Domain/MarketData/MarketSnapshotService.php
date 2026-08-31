@@ -41,30 +41,28 @@ class MarketSnapshotService
         $legacy = $this->legacyPrices->getLiveFeedSnapshot($legacyExchange, $symbol, $maxAgeSeconds);
 
         $selected = null;
-        if (is_array($quote) && (float) ($quote['last'] ?? $quote['mid'] ?? $quote['bid'] ?? $quote['ask'] ?? 0) > 0) {
+        if (is_array($legacy) && (float) ($legacy['price'] ?? 0) > 0) {
+            $legacyReceivedAtMs = (int) ($legacy['received_at_ms'] ?? 0);
+            $selected = [
+                'price' => (float) $legacy['price'],
+                'event_time_ms' => (int) ($legacy['event_timestamp_ms'] ?: $legacyReceivedAtMs),
+                'received_at_ms' => $legacyReceivedAtMs,
+                'source' => 'canonical_market_live_redis',
+                'update_id' => $legacy['update_id'] ?? null,
+                'raw' => $legacy,
+            ];
+        }
+
+        if ($selected === null && is_array($quote) && (float) ($quote['last'] ?? $quote['mid'] ?? $quote['bid'] ?? $quote['ask'] ?? 0) > 0) {
             $receivedAtMs = (int) ($quote['received_at_ms'] ?? 0);
             $selected = [
                 'price' => (float) ($quote['last'] ?? $quote['mid'] ?? $quote['bid'] ?? $quote['ask']),
                 'event_time_ms' => (int) ($quote['provider_event_at_ms'] ?? $receivedAtMs),
                 'received_at_ms' => $receivedAtMs,
-                'source' => 'websocket_redis',
+                'source' => 'normalized_market_state_redis',
                 'update_id' => $quote['sequence'] ?? $quote['update_id'] ?? null,
                 'raw' => $quote,
             ];
-        }
-
-        if (is_array($legacy) && (float) ($legacy['price'] ?? 0) > 0) {
-            $legacyReceivedAtMs = (int) ($legacy['received_at_ms'] ?? 0);
-            if ($selected === null || $legacyReceivedAtMs > (int) ($selected['received_at_ms'] ?? 0)) {
-                $selected = [
-                    'price' => (float) $legacy['price'],
-                    'event_time_ms' => (int) ($legacy['event_timestamp_ms'] ?: $legacyReceivedAtMs),
-                    'received_at_ms' => $legacyReceivedAtMs,
-                    'source' => 'websocket_redis',
-                    'update_id' => $legacy['update_id'] ?? null,
-                    'raw' => $legacy,
-                ];
-            }
         }
 
         $nowMs = (int) floor(microtime(true) * 1000);

@@ -7,6 +7,7 @@ use App\Models\RatioBotState;
 use App\Models\User;
 use App\Models\Workspace;
 use App\Domain\Market\RealtimeMarketFeedService;
+use App\Domain\MarketData\MarketSnapshotService;
 use App\Domain\Ops\OperationalBreakerService;
 use App\Jobs\DetectStaleFeedsJob;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -168,6 +169,61 @@ class RatioBotStartupChecklistTest extends TestCase
         $item = collect($response->json('items'))->firstWhere('key', 'market_feed');
         $this->assertSame('fail', $item['status']);
         $this->assertStringContainsString('STALE_FEED', $item['detail']);
+    }
+
+    /** @test */
+    public function scheduled_detector_does_not_clear_stale_breaker_without_new_ingest_tick(): void
+    {
+        $this->createConfig(['enabled' => true, 'stale_feed_timeout_seconds' => 30]);
+        app(RealtimeMarketFeedService::class)->ingest([
+            'stream' => 'btcusdt@trade',
+            'data' => [
+                'e' => 'trade',
+                's' => 'BTCUSDT',
+                'p' => '65000.50',
+                'E' => now()->getTimestampMs(),
+            ],
+        ], 'spot', false);
+
+        app(OperationalBreakerService::class)->activateStaleFeedBreaker((string) $this->workspace->id, [
+            'symbol' => 'BTCUSDT',
+            'reason' => 'must_wait_for_ingest_owner',
+        ]);
+
+        (new DetectStaleFeedsJob(30))->handle(
+            app(OperationalBreakerService::class),
+            app(\App\Domain\MarketData\MarketFreshnessService::class),
+            app(\App\Domain\MarketData\MarketRecoveryManager::class),
+            app(\App\Domain\MarketData\MarketSnapshotService::class),
+        );
+
+        $this->assertTrue(app(OperationalBreakerService::class)->isStaleFeedBreakerActive((string) $this->workspace->id));
+    }
+
+    /** @test */
+    public function market_snapshot_prefers_canonical_market_live_key_for_execution_freshness(): void
+    {
+        $nowMs = now()->getTimestampMs();
+        Redis::setex('market:live:BTCUSDT', 120, json_encode([
+            'exchange' => 'binance',
+            'symbol' => 'BTCUSDT',
+            'price' => 65123.45,
+            'event_timestamp_ms' => $nowMs,
+            'received_at_ms' => $nowMs,
+            'received_at' => now()->toIso8601String(),
+            'source' => 'binance_websocket',
+            'stream' => 'btcusdt@trade',
+            'event_type' => 'trade',
+            'market_type' => 'spot',
+            'worker_id' => 'worker-a',
+            'connection_id' => 'connection-a',
+        ]));
+
+        $snapshot = app(MarketSnapshotService::class)->getLiveSnapshot('binance', 'BTCUSDT', 'binance', 30);
+
+        $this->assertSame('canonical_market_live_redis', $snapshot['source']);
+        $this->assertSame(65123.45, $snapshot['price']);
+        $this->assertTrue($snapshot['is_fresh']);
     }
 
     private function createConfig(array $overrides = []): RatioBotConfig

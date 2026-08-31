@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+candidates=(
+  "${AUTOFINX_PHP_BIN:-}"
+  "/opt/cpanel/ea-php84/root/usr/bin/php"
+  "/opt/cpanel/ea-php83/root/usr/bin/php"
+  "/opt/cpanel/ea-php82/root/usr/bin/php"
+  "$(command -v php 2>/dev/null || true)"
+)
+
+for bin in "${candidates[@]}"; do
+  [ -n "$bin" ] || continue
+  [ -x "$bin" ] || continue
+  if "$bin" -r 'exit(version_compare(PHP_VERSION, "8.2.0", ">=") ? 0 : 1);' >/dev/null 2>&1; then
+    exec "$bin" "$ROOT/artisan" "$@"
+  fi
+done
+
+echo "FAIL: no PHP CLI binary >= 8.2 found. Set AUTOFINX_PHP_BIN." >&2
+exit 2

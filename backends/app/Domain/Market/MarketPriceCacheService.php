@@ -134,7 +134,7 @@ class MarketPriceCacheService
         $symbol = strtoupper($symbol);
 
         try {
-            $raw = Redis::get($this->feedKey($exchange, $symbol)) ?: Redis::get($this->canonicalLiveKey($symbol));
+            $raw = Redis::get($this->canonicalLiveKey($symbol)) ?: Redis::get($this->feedKey($exchange, $symbol));
         } catch (\Throwable) {
             return null;
         }
@@ -209,6 +209,9 @@ class MarketPriceCacheService
             'market_type' => (string) ($meta['market_type'] ?? ''),
             'event_lag_ms' => (int) ($meta['event_lag_ms'] ?? max(0, $nowMs - $tsMs)),
             'update_id' => $meta['update_id'] ?? null,
+            'worker_id' => $meta['worker_id'] ?? null,
+            'connection_id' => $meta['connection_id'] ?? null,
+            'state' => 'LIVE',
         ];
 
         Redis::setex($this->feedKey($exchange, $symbol), self::LIVE_FEED_TTL_S, json_encode($payload, JSON_UNESCAPED_SLASHES));

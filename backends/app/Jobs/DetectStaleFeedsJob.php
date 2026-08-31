@@ -86,12 +86,10 @@ class DetectStaleFeedsJob implements ShouldQueue, ShouldBeUnique
                 continue;
             }
 
-            $breakers->clearStaleFeedBreaker((string) $workspaceId, [
-                'symbols' => $symbols,
-                'fresh_symbols' => $fresh,
-                'threshold_seconds' => $this->thresholdSeconds,
-                'reason' => 'all_selected_symbol_snapshots_fresh',
-            ]);
+            // Breaker clearing is intentionally owned by websocket ingest after
+            // a genuinely new canonical tick is written for the selected
+            // symbols. The scheduled detector is read-only on recovery so a
+            // process restart or stale compatibility key cannot unlatch trading.
         }
     }
 

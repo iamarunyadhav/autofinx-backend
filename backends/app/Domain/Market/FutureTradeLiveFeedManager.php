@@ -142,6 +142,12 @@ class FutureTradeLiveFeedManager
 
             return $this->status();
         }
+        if (app()->environment('production')) {
+            $status['message'] = 'Supervisor live-feed program was not detected. Production start is manual-only to prevent orphan duplicate websocket workers.';
+            $status['manualRequired'] = true;
+
+            return $status;
+        }
         if (! $this->canSpawnDaemon()) {
             $status['message'] = 'shell_exec is disabled on this server. Start the daemon manually using the provided command.';
             $status['manualRequired'] = true;

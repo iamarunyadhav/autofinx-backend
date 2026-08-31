@@ -17,6 +17,10 @@ class MarketStateStore
             $this->incrementMetric('out_of_order_events_total', $quote->provider, $quote->instrument, $stream);
             return false;
         }
+        if ($current && (int) ($current['received_at_ms'] ?? 0) > ($quote->receivedAtMs + 1000)) {
+            $this->incrementMetric('obsolete_generation_events_total', $quote->provider, $quote->instrument, $stream);
+            return false;
+        }
 
         try {
             Redis::transaction(function ($redis) use ($quote, $stream): void {

@@ -159,7 +159,7 @@ class RealtimeMarketFeedService
         return rtrim($baseUrl, '/') . '/stream?streams=' . implode('/', $streamParts);
     }
 
-    public function ingest(array $payload, string $marketType = 'spot', bool $dispatchEvaluations = true): void
+    public function ingest(array $payload, string $marketType = 'spot', bool $dispatchEvaluations = true, array $workerContext = []): void
     {
         $data = is_array($payload['data'] ?? null) ? (array) $payload['data'] : $payload;
         $eventType = strtolower((string) ($data['e'] ?? ''));
@@ -188,6 +188,8 @@ class RealtimeMarketFeedService
                 'stream' => $stream,
                 'event_type' => $eventType,
                 'event_lag_ms' => $eventLagMs,
+                'worker_id' => $workerContext['worker_id'] ?? null,
+                'connection_id' => $workerContext['connection_id'] ?? null,
             ]);
             $quote = NormalizedQuote::fromLastPrice(
                 $provider,
@@ -204,6 +206,10 @@ class RealtimeMarketFeedService
                     'legacy_market_type' => strtolower($marketType),
                     'stream' => $stream,
                     'event_type' => $eventType,
+                    'worker_id' => $workerContext['worker_id'] ?? null,
+                    'connection_id' => $workerContext['connection_id'] ?? null,
+                    'pid' => $workerContext['pid'] ?? null,
+                    'hostname' => $workerContext['hostname'] ?? null,
                 ],
             );
             $this->marketState->putQuote($quote, $streamType);
@@ -252,6 +258,8 @@ class RealtimeMarketFeedService
                     'stream' => $stream,
                     'event_type' => $eventType,
                     'event_lag_ms' => $eventLagMs,
+                    'worker_id' => $workerContext['worker_id'] ?? null,
+                    'connection_id' => $workerContext['connection_id'] ?? null,
                 ]);
                 $quote = NormalizedQuote::fromLastPrice(
                     $provider,
@@ -270,6 +278,10 @@ class RealtimeMarketFeedService
                         'event_type' => $eventType,
                         'timeframe' => $timeframe,
                         'closed_kline' => $closedKline,
+                        'worker_id' => $workerContext['worker_id'] ?? null,
+                        'connection_id' => $workerContext['connection_id'] ?? null,
+                        'pid' => $workerContext['pid'] ?? null,
+                        'hostname' => $workerContext['hostname'] ?? null,
                     ],
                 );
                 $this->marketState->putQuote($quote, StreamType::CANDLE);

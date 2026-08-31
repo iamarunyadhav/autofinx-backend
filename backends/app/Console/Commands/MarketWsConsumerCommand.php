@@ -9,6 +9,9 @@ use Illuminate\Console\Command;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Redis;
+use Illuminate\Support\Str;
 use RuntimeException;
 
 class MarketWsConsumerCommand extends Command
@@ -53,6 +56,9 @@ class MarketWsConsumerCommand extends Command
         )));
         $maxRuntime = max(0, (int) $this->option('max-runtime'));
         $dispatchEvaluations = ! (bool) $this->option('no-dispatch');
+        $provider = strtolower((string) $this->option('exchange') ?: 'binance');
+        $workerId = (string) Str::uuid();
+        $hostname = gethostname() ?: php_uname('n');
         // Own heartbeat file, separate per market type — this must NOT share
         // autofinx-live-feed-heartbeat.json with future-trade:live-feed. That
         // daemon runs 24/7 and keeps its file permanently "fresh", so sharing
@@ -60,32 +66,28 @@ class MarketWsConsumerCommand extends Command
         // consumer is active" forever and never take over the lock.
         $heartbeatPath = storage_path("framework/autofinx-market-ws-heartbeat-{$marketType}.json");
         $startedAt = time();
-        $lockKey = sprintf(
-            'autofinx:runtime:market-ws-consume:%s:%s:%s',
-            $marketType,
-            md5(implode(',', $symbols)),
-            md5(implode(',', $streams))
-        );
+        $lockKey = sprintf('autofinx:lock:market-feed:%s:%s', $provider, $marketType);
         $lockTtl = (bool) $this->option('once')
             ? 120
             : ($maxRuntime > 0 ? $maxRuntime + 60 : 86400);
         $lock = Cache::lock($lockKey, $lockTtl);
 
         if (! $lock->get()) {
-            if (! (bool) $this->option('once') && $this->heartbeatFresh($heartbeatPath)) {
-                $this->warn('Another fresh market ws consumer is active; standing by until its heartbeat goes stale.');
-                $this->waitUntilHeartbeatStale($heartbeatPath, $startedAt, $maxRuntime);
-                $this->warn('Market ws heartbeat is stale; force releasing stale lock and taking over.');
-                Cache::lock($lockKey, 1)->forceRelease();
-                $lock = Cache::lock($lockKey, $lockTtl);
-            } elseif (! $this->heartbeatFresh($heartbeatPath)) {
+            if (! $this->heartbeatFresh($heartbeatPath)) {
                 $this->warn('Stale market ws lock detected without a fresh heartbeat; force releasing lock and retrying.');
                 Cache::lock($lockKey, 1)->forceRelease();
                 $lock = Cache::lock($lockKey, $lockTtl);
             }
 
             if (! $lock->get()) {
-                $this->warn('Another market ws consumer is already running for this market/symbol/stream scope.');
+                $this->warn('market_feed_singleton_already_owned');
+                Log::warning('[MarketData] Singleton lock rejected', [
+                    'event' => 'singleton_lock_rejected',
+                    'provider' => $provider,
+                    'market_type' => $marketType,
+                    'worker_id' => $workerId,
+                    'lock_key' => $lockKey,
+                ]);
 
                 return self::SUCCESS;
             }
@@ -95,6 +97,17 @@ class MarketWsConsumerCommand extends Command
             if ((bool) $this->option('once')) {
                 return $this->pollOnce($feeds, $symbols, $marketType, $dispatchEvaluations);
             }
+
+            $this->writeWorkerMetadata($provider, $marketType, $workerId, null, $hostname, $startedAt, $symbols, 'STARTING', 0);
+            Log::info('[MarketData] Worker started', [
+                'event' => 'worker_started',
+                'provider' => $provider,
+                'market_type' => $marketType,
+                'worker_id' => $workerId,
+                'pid' => getmypid(),
+                'hostname' => $hostname,
+                'subscriptions' => $symbols,
+            ]);
 
             $reconnectSleepBase = max(1, (int) $this->option('reconnect-sleep'));
             $testnet = (bool) $this->option('testnet');
@@ -130,10 +143,21 @@ class MarketWsConsumerCommand extends Command
                             implode(',', $symbols),
                             implode(',', $streams)
                         ));
+                        $connectionId = (string) Str::uuid();
+                        $this->writeWorkerMetadata($provider, $marketType, $workerId, $connectionId, $hostname, $startedAt, $symbols, 'CONNECTING', $reconnectCount);
+                        Log::info('[MarketData] Socket connecting', [
+                            'event' => 'socket_connecting',
+                            'provider' => $provider,
+                            'market_type' => $marketType,
+                            'worker_id' => $workerId,
+                            'connection_id' => $connectionId,
+                            'subscriptions' => $symbols,
+                        ]);
                         $client->connect($wsUrl);
                         $connectedAt = time();
                         $stableConnectedSince = time();
                         $lastPingAt = time();
+                        $this->writeWorkerMetadata($provider, $marketType, $workerId, $connectionId, $hostname, $startedAt, $symbols, 'CONNECTED_AWAITING_TICK', $reconnectCount);
                         $this->line(sprintf(
                             '[WS] Connected to Binance market websocket. reconnect_count=%d',
                             $reconnectCount
@@ -175,7 +199,12 @@ class MarketWsConsumerCommand extends Command
                                 continue;
                             }
 
-                            $feeds->ingest($payload, $marketType, $dispatchEvaluations);
+                            $feeds->ingest($payload, $marketType, $dispatchEvaluations, [
+                                'worker_id' => $workerId,
+                                'connection_id' => $connectionId,
+                                'pid' => getmypid(),
+                                'hostname' => $hostname,
+                            ]);
                             $msgCount++;
 
                             // Reset backoff counter after 60 s of stable messages.
@@ -213,12 +242,17 @@ class MarketWsConsumerCommand extends Command
                                     'message_count' => $msgCount,
                                     'connected_at' => $connectedAt ? date('c', $connectedAt) : null,
                                     'market_type' => $marketType,
+                                    'worker_id' => $workerId,
+                                    'connection_id' => $connectionId,
+                                    'pid' => getmypid(),
+                                    'hostname' => $hostname,
                                     'symbols' => $symbols,
                                     'per_symbol' => $perSymbolHeartbeat,
                                     'last_exchange_event_time' => $eventTimeMs > 0 ? date('c', (int) floor($eventTimeMs / 1000)) : null,
                                     'exchange_to_backend_latency_ms' => $eventTimeMs > 0 ? max(0, (int) round((microtime(true) * 1000) - $eventTimeMs)) : null,
                                     'webhook_signal_latency_ms' => null,
                                 ], JSON_UNESCAPED_SLASHES));
+                                $this->writeWorkerMetadata($provider, $marketType, $workerId, $connectionId, $hostname, $startedAt, $symbols, 'LIVE', $reconnectCount, $symbolName);
                             }
                         }
                     } catch (\Throwable $e) {
@@ -235,6 +269,7 @@ class MarketWsConsumerCommand extends Command
                             $e->getMessage()
                         ));
                     } finally {
+                        $this->writeWorkerMetadata($provider, $marketType, $workerId, $connectionId ?? null, $hostname, $startedAt, $symbols, 'RECOVERING', $reconnectCount);
                         $client->close();
                         $connectedAt = null;
                     }
@@ -268,6 +303,7 @@ class MarketWsConsumerCommand extends Command
 
             return self::SUCCESS;
         } finally {
+            $this->writeWorkerMetadata($provider, $marketType, $workerId, null, $hostname, $startedAt, $symbols, 'STOPPING', 0);
             optional($lock)->release();
         }
     }
@@ -465,6 +501,39 @@ class MarketWsConsumerCommand extends Command
             }
 
             sleep(5);
+        }
+    }
+
+    /**
+     * @param string[] $symbols
+     */
+    private function writeWorkerMetadata(
+        string $provider,
+        string $marketType,
+        string $workerId,
+        ?string $connectionId,
+        string $hostname,
+        int $startedAt,
+        array $symbols,
+        string $status,
+        int $reconnectCount,
+        ?string $lastSymbol = null,
+    ): void {
+        try {
+            Redis::setex(sprintf('autofinx:market-feed:%s:%s:worker', $provider, $marketType), 90, json_encode([
+                'worker_id' => $workerId,
+                'connection_id' => $connectionId,
+                'pid' => getmypid(),
+                'hostname' => $hostname,
+                'started_at' => date('c', $startedAt),
+                'last_heartbeat_at' => now()->toIso8601String(),
+                'last_message_at' => $lastSymbol ? now()->toIso8601String() : null,
+                'last_symbol' => $lastSymbol,
+                'reconnect_count' => $reconnectCount,
+                'subscriptions' => array_values($symbols),
+                'status' => $status,
+            ], JSON_UNESCAPED_SLASHES));
+        } catch (\Throwable) {
         }
     }
 }
