@@ -135,12 +135,12 @@ class MarketPriceCacheService
 
         try {
             $canonicalRaw = Redis::get($this->canonicalLiveKey($symbol));
-            $sourceKey = $this->canonicalLiveKey($symbol);
-            $raw = $canonicalRaw;
-            if (! $this->snapshotMatchesExchange($canonicalRaw, $exchange)) {
-                $sourceKey = $this->feedKey($exchange, $symbol);
-                $raw = Redis::get($sourceKey);
-            }
+            $feedKey = $this->feedKey($exchange, $symbol);
+            $feedRaw = Redis::get($feedKey);
+            [$raw, $sourceKey] = $this->freshestMatchingSnapshot($exchange, [
+                $this->canonicalLiveKey($symbol) => $canonicalRaw,
+                $feedKey => $feedRaw,
+            ]);
         } catch (\Throwable) {
             return null;
         }
@@ -264,6 +264,33 @@ class MarketPriceCacheService
             'binance_futures' => $marketType === 'futures',
             default => false,
         };
+    }
+
+    /**
+     * @param array<string, mixed> $snapshots
+     * @return array{0: mixed, 1: string}
+     */
+    private function freshestMatchingSnapshot(string $exchange, array $snapshots): array
+    {
+        $selectedRaw = null;
+        $selectedKey = '';
+        $selectedReceivedAtMs = 0;
+
+        foreach ($snapshots as $key => $raw) {
+            if (! $this->snapshotMatchesExchange($raw, $exchange)) {
+                continue;
+            }
+
+            $data = json_decode((string) $raw, true);
+            $receivedAtMs = is_array($data) ? (int) ($data['received_at_ms'] ?? 0) : 0;
+            if ($receivedAtMs >= $selectedReceivedAtMs) {
+                $selectedRaw = $raw;
+                $selectedKey = (string) $key;
+                $selectedReceivedAtMs = $receivedAtMs;
+            }
+        }
+
+        return [$selectedRaw, $selectedKey];
     }
 
     private function canonicalLiveKey(string $symbol): string
