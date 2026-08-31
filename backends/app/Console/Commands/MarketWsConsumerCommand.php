@@ -55,6 +55,9 @@ class MarketWsConsumerCommand extends Command
             explode(',', (string) $this->option('streams'))
         )));
         $maxRuntime = max(0, (int) $this->option('max-runtime'));
+        if (! (bool) $this->option('once')) {
+            $streams = $this->ensureRealtimeHeartbeatStream($streams);
+        }
         $dispatchEvaluations = ! (bool) $this->option('no-dispatch');
         $provider = strtolower((string) $this->option('exchange') ?: 'binance');
         $workerId = (string) Str::uuid();
@@ -471,6 +474,32 @@ class MarketWsConsumerCommand extends Command
         }
 
         return (int) ($response->json('code') ?? 0) === -1003;
+    }
+
+    /**
+     * Trade streams can be quiet for individual symbols; miniTicker gives each
+     * subscribed symbol a steady quote heartbeat so execution freshness does
+     * not flap STALE while the websocket itself is healthy.
+     *
+     * @param string[] $streams
+     * @return string[]
+     */
+    private function ensureRealtimeHeartbeatStream(array $streams): array
+    {
+        $normalized = array_values(array_filter(array_map(
+            static fn (string $stream) => trim($stream),
+            $streams
+        )));
+
+        foreach ($normalized as $stream) {
+            if (strtolower($stream) === 'miniticker') {
+                return $normalized;
+            }
+        }
+
+        $normalized[] = 'miniTicker';
+
+        return $normalized;
     }
 
     private function klinePath(string $marketType): string
