@@ -500,6 +500,9 @@ class MarketWsConsumerCommand extends Command
         if (! in_array('bookticker', $lower, true)) {
             $normalized[] = 'bookTicker';
         }
+        if (! in_array('ticker', $lower, true)) {
+            $normalized[] = 'ticker';
+        }
 
         return $normalized;
     }

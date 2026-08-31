@@ -59,7 +59,10 @@ class AutoFinxRuntimeHealthCommand extends Command
             $this->newLine();
             $this->line($symbol);
             $this->line('  Canonical key................. '.($this->redisJson("market:live:{$symbol}") ? 'FOUND' : 'MISSING'));
+            $this->line('  Source key.................... '.(data_get($snapshot, 'legacy.source_key') ?: 'n/a'));
             $this->line('  Source........................ '.($snapshot['source'] ?? 'n/a'));
+            $this->line('  Stream........................ '.(data_get($snapshot, 'legacy.stream') ?: 'n/a'));
+            $this->line('  Event type.................... '.(data_get($snapshot, 'legacy.event_type') ?: 'n/a'));
             $this->line('  Age........................... '.($snapshot['age_ms'] ?? 'n/a').' ms');
             $this->line('  State......................... '.$state);
             $this->line('  Breaker....................... '.((bool) ($breaker['active'] ?? false) ? 'ACTIVE' : 'CLEAR'));
