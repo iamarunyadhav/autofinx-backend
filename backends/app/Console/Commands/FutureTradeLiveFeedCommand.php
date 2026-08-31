@@ -11,7 +11,7 @@ class FutureTradeLiveFeedCommand extends Command
 {
     protected $signature = 'future-trade:live-feed
         {--symbols= : Comma-separated futures symbols. Defaults to all configured Future Trade symbols}
-        {--streams=trade,kline_1m,kline_5m,kline_15m,kline_1h,kline_4h : Binance streams to subscribe to}
+        {--streams=trade,bookTicker,miniTicker,kline_1m,kline_5m,kline_15m,kline_1h,kline_4h : Binance streams to subscribe to}
         {--reconnect-sleep=2 : Reconnect delay in seconds}
         {--max-runtime=0 : Max runtime in seconds (0 = infinite)}
         {--testnet : Use Binance futures testnet websocket}';

@@ -170,14 +170,14 @@ class RealtimeMarketFeedService
             return;
         }
 
-        $provider = 'binance';
+        $provider = $this->exchangeKey($marketType);
         $instrument = $this->instruments->canonical($provider, $symbol);
         $marketCategory = $this->instruments->marketType($instrument, 'CRYPTO');
         $receivedAtMs = (int) floor(microtime(true) * 1000);
         $exchangeKey = $this->exchangeKey($marketType);
         $eventTimestampMs = (int) ($data['E'] ?? $data['T'] ?? $data['t'] ?? floor(microtime(true) * 1000));
         $eventLagMs = max(0, $receivedAtMs - $eventTimestampMs);
-        $price = $this->extractPrice($eventType, $data);
+        $price = $this->extractPrice($eventType, $data, $stream);
         $closedKline = false;
         $timeframe = '1m';
         $streamType = $this->streamType($eventType, $stream);
@@ -767,8 +767,16 @@ class RealtimeMarketFeedService
         );
     }
 
-    private function extractPrice(string $eventType, array $data): ?float
+    private function extractPrice(string $eventType, array $data, string $stream = ''): ?float
     {
+        if ($eventType === 'bookticker' || str_contains(strtolower($stream), 'bookticker')) {
+            $bid = isset($data['b']) ? (float) $data['b'] : 0.0;
+            $ask = isset($data['a']) ? (float) $data['a'] : 0.0;
+            if ($bid > 0 && $ask > 0) {
+                return ($bid + $ask) / 2;
+            }
+        }
+
         return match ($eventType) {
             'trade', 'aggtrade' => isset($data['p']) ? (float) $data['p'] : null,
             '24hrminiticker' => isset($data['c']) ? (float) $data['c'] : null,
@@ -783,6 +791,10 @@ class RealtimeMarketFeedService
 
         if ($eventType === 'kline' || str_contains($stream, 'kline')) {
             return StreamType::CANDLE;
+        }
+
+        if ($eventType === 'bookticker' || str_contains($stream, 'bookticker') || $eventType === '24hrminiticker' || str_contains($stream, 'miniticker')) {
+            return StreamType::QUOTE;
         }
 
         if (in_array($eventType, ['trade', 'aggtrade'], true) || str_contains($stream, 'trade')) {

@@ -101,7 +101,7 @@ class MarketWsConsumerCommand extends Command
                 return $this->pollOnce($feeds, $symbols, $marketType, $dispatchEvaluations);
             }
 
-            $this->writeWorkerMetadata($provider, $marketType, $workerId, null, $hostname, $startedAt, $symbols, 'STARTING', 0);
+            $this->writeWorkerMetadata($provider, $marketType, $workerId, null, $hostname, $startedAt, $symbols, $streams, 'STARTING', 0);
             Log::info('[MarketData] Worker started', [
                 'event' => 'worker_started',
                 'provider' => $provider,
@@ -110,6 +110,7 @@ class MarketWsConsumerCommand extends Command
                 'pid' => getmypid(),
                 'hostname' => $hostname,
                 'subscriptions' => $symbols,
+                'streams' => $streams,
             ]);
 
             $reconnectSleepBase = max(1, (int) $this->option('reconnect-sleep'));
@@ -147,7 +148,7 @@ class MarketWsConsumerCommand extends Command
                             implode(',', $streams)
                         ));
                         $connectionId = (string) Str::uuid();
-                        $this->writeWorkerMetadata($provider, $marketType, $workerId, $connectionId, $hostname, $startedAt, $symbols, 'CONNECTING', $reconnectCount);
+                        $this->writeWorkerMetadata($provider, $marketType, $workerId, $connectionId, $hostname, $startedAt, $symbols, $streams, 'CONNECTING', $reconnectCount);
                         Log::info('[MarketData] Socket connecting', [
                             'event' => 'socket_connecting',
                             'provider' => $provider,
@@ -155,12 +156,13 @@ class MarketWsConsumerCommand extends Command
                             'worker_id' => $workerId,
                             'connection_id' => $connectionId,
                             'subscriptions' => $symbols,
+                            'streams' => $streams,
                         ]);
                         $client->connect($wsUrl);
                         $connectedAt = time();
                         $stableConnectedSince = time();
                         $lastPingAt = time();
-                        $this->writeWorkerMetadata($provider, $marketType, $workerId, $connectionId, $hostname, $startedAt, $symbols, 'CONNECTED_AWAITING_TICK', $reconnectCount);
+                        $this->writeWorkerMetadata($provider, $marketType, $workerId, $connectionId, $hostname, $startedAt, $symbols, $streams, 'CONNECTED_AWAITING_TICK', $reconnectCount);
                         $this->line(sprintf(
                             '[WS] Connected to Binance market websocket. reconnect_count=%d',
                             $reconnectCount
@@ -255,7 +257,7 @@ class MarketWsConsumerCommand extends Command
                                     'exchange_to_backend_latency_ms' => $eventTimeMs > 0 ? max(0, (int) round((microtime(true) * 1000) - $eventTimeMs)) : null,
                                     'webhook_signal_latency_ms' => null,
                                 ], JSON_UNESCAPED_SLASHES));
-                                $this->writeWorkerMetadata($provider, $marketType, $workerId, $connectionId, $hostname, $startedAt, $symbols, 'LIVE', $reconnectCount, $symbolName);
+                                $this->writeWorkerMetadata($provider, $marketType, $workerId, $connectionId, $hostname, $startedAt, $symbols, $streams, 'LIVE', $reconnectCount, $symbolName);
                             }
                         }
                     } catch (\Throwable $e) {
@@ -272,7 +274,7 @@ class MarketWsConsumerCommand extends Command
                             $e->getMessage()
                         ));
                     } finally {
-                        $this->writeWorkerMetadata($provider, $marketType, $workerId, $connectionId ?? null, $hostname, $startedAt, $symbols, 'RECOVERING', $reconnectCount);
+                        $this->writeWorkerMetadata($provider, $marketType, $workerId, $connectionId ?? null, $hostname, $startedAt, $symbols, $streams, 'RECOVERING', $reconnectCount);
                         $client->close();
                         $connectedAt = null;
                     }
@@ -306,7 +308,7 @@ class MarketWsConsumerCommand extends Command
 
             return self::SUCCESS;
         } finally {
-            $this->writeWorkerMetadata($provider, $marketType, $workerId, null, $hostname, $startedAt, $symbols, 'STOPPING', 0);
+            $this->writeWorkerMetadata($provider, $marketType, $workerId, null, $hostname, $startedAt, $symbols, $streams, 'STOPPING', 0);
             optional($lock)->release();
         }
     }
@@ -491,13 +493,13 @@ class MarketWsConsumerCommand extends Command
             $streams
         )));
 
-        foreach ($normalized as $stream) {
-            if (strtolower($stream) === 'miniticker') {
-                return $normalized;
-            }
+        $lower = array_map(static fn (string $stream) => strtolower($stream), $normalized);
+        if (! in_array('miniticker', $lower, true)) {
+            $normalized[] = 'miniTicker';
         }
-
-        $normalized[] = 'miniTicker';
+        if (! in_array('bookticker', $lower, true)) {
+            $normalized[] = 'bookTicker';
+        }
 
         return $normalized;
     }
@@ -544,6 +546,7 @@ class MarketWsConsumerCommand extends Command
         string $hostname,
         int $startedAt,
         array $symbols,
+        array $streams,
         string $status,
         int $reconnectCount,
         ?string $lastSymbol = null,
@@ -560,6 +563,7 @@ class MarketWsConsumerCommand extends Command
                 'last_symbol' => $lastSymbol,
                 'reconnect_count' => $reconnectCount,
                 'subscriptions' => array_values($symbols),
+                'streams' => array_values($streams),
                 'status' => $status,
             ], JSON_UNESCAPED_SLASHES));
         } catch (\Throwable) {

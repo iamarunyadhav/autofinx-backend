@@ -47,7 +47,9 @@ class MarketSnapshotService
                 'price' => (float) $legacy['price'],
                 'event_time_ms' => (int) ($legacy['event_timestamp_ms'] ?: $legacyReceivedAtMs),
                 'received_at_ms' => $legacyReceivedAtMs,
-                'source' => 'canonical_market_live_redis',
+                'source' => str_starts_with((string) ($legacy['source_key'] ?? ''), 'market:live:')
+                    ? 'canonical_market_live_redis'
+                    : 'exchange_market_live_redis',
                 'update_id' => $legacy['update_id'] ?? null,
                 'raw' => $legacy,
             ];

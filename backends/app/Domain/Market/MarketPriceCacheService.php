@@ -135,9 +135,12 @@ class MarketPriceCacheService
 
         try {
             $canonicalRaw = Redis::get($this->canonicalLiveKey($symbol));
-            $raw = $this->snapshotMatchesExchange($canonicalRaw, $exchange)
-                ? $canonicalRaw
-                : Redis::get($this->feedKey($exchange, $symbol));
+            $sourceKey = $this->canonicalLiveKey($symbol);
+            $raw = $canonicalRaw;
+            if (! $this->snapshotMatchesExchange($canonicalRaw, $exchange)) {
+                $sourceKey = $this->feedKey($exchange, $symbol);
+                $raw = Redis::get($sourceKey);
+            }
         } catch (\Throwable) {
             return null;
         }
@@ -167,6 +170,7 @@ class MarketPriceCacheService
             'fresh' => $ageSeconds !== null && $ageSeconds <= $maxAgeSeconds,
             'max_age_seconds' => $maxAgeSeconds,
             'source' => 'redis_live_feed',
+            'source_key' => $sourceKey,
             'stream' => (string) ($data['stream'] ?? ''),
             'event_type' => (string) ($data['event_type'] ?? ''),
             'market_type' => (string) ($data['market_type'] ?? ''),
