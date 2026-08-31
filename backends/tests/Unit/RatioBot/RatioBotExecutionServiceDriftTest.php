@@ -102,6 +102,7 @@ class RatioBotExecutionServiceDriftTest extends TestCase
             new RatioBotRiskService(),
             app(\App\Domain\RatioBot\StrategyManagerService::class),
             app(\App\Domain\Exchange\ExchangeClientFactory::class),
+            app(\App\Domain\MarketData\MarketSnapshotService::class),
         );
     }
 

@@ -6,6 +6,10 @@ use App\Domain\Exchange\BinanceSpotClient;
 use App\Domain\Exchange\ExchangeClientFactory;
 use App\Domain\Ops\OperationalBreakerService;
 use App\Domain\MarketData\CanonicalQuoteService;
+use App\Domain\MarketData\Enums\FeedState;
+use App\Domain\MarketData\Enums\StreamType;
+use App\Domain\MarketData\MarketRecoveryManager;
+use App\Domain\MarketData\MarketSnapshotService;
 use App\Domain\Trading\Providers\LiveTradeProviderRegistry;
 use App\Domain\Trading\TradingIntegrationResolver;
 use App\Domain\Trading\TradingModuleSettingsService;
@@ -30,6 +34,8 @@ class RatioBotRuntimeQueryService
         private readonly OperationalBreakerService $breakers,
         private readonly ExchangeClientFactory $exchangeClients,
         private readonly CanonicalQuoteService $quotes,
+        private readonly MarketSnapshotService $snapshots,
+        private readonly MarketRecoveryManager $recovery,
     ) {
     }
 
@@ -344,11 +350,47 @@ class RatioBotRuntimeQueryService
         $state = $config->state;
         $workspaceId = (string) $config->workspace_id;
         $maxAge = $config->staleFeedWindowSeconds();
-        $canonical = $this->quotes->forRatioBot($config);
+        $snapshot = $this->snapshots->forRatioBot($config);
+
+        if ((bool) ($snapshot['is_fresh'] ?? false)) {
+            $staleFeedState = $this->breakers->staleFeedState($workspaceId);
+            if ((bool) ($staleFeedState['active'] ?? false)) {
+                $this->breakers->clearStaleFeedBreaker($workspaceId, [
+                    'symbol' => $config->normalizedSymbol(),
+                    'received_at' => $snapshot['received_at'] ?? null,
+                    'age_ms' => $snapshot['age_ms'] ?? null,
+                    'reason' => 'selected_symbol_snapshot_fresh',
+                ], 'market_snapshot');
+            }
+
+            return $this->feedStatusResult(
+                'FRESH',
+                'selected_symbol_market_snapshot_ok',
+                $state,
+                $maxAge,
+                [
+                    'snapshot' => $snapshot,
+                    'age_seconds' => $snapshot['age_seconds'] ?? null,
+                    'connection_state' => $snapshot['connection_state'] ?? null,
+                    'source' => $snapshot['source'] ?? null,
+                ]
+            );
+        }
+
+        $provider = strtolower((string) ($config->exchange ?: 'binance'));
+        $this->recovery->requestRecovery($provider, $config->normalizedSymbol(), StreamType::QUOTE, 'ratio_bot_readiness_stale_feed', [
+            'config_id' => (string) $config->id,
+            'workspace_id' => $workspaceId,
+            'snapshot' => [
+                'age_ms' => $snapshot['age_ms'] ?? null,
+                'connection_state' => $snapshot['connection_state'] ?? null,
+                'stale_reason' => $snapshot['stale_reason'] ?? null,
+            ],
+        ]);
 
         $staleFeedState = $this->breakers->staleFeedState($workspaceId);
         if ((bool) ($staleFeedState['active'] ?? false)) {
-            return $this->feedStatusResult('STALE_FEED', 'stale_feed_breaker_active', $state, $maxAge, ['breaker' => $staleFeedState]);
+            return $this->feedStatusResult('STALE_FEED', 'stale_feed_breaker_active', $state, $maxAge, ['breaker' => $staleFeedState, 'snapshot' => $snapshot]);
         }
 
         $exchange = strtolower((string) ($config->exchange ?: 'binance'));
@@ -370,29 +412,21 @@ class RatioBotRuntimeQueryService
             }
         }
 
-        if ($canonical !== null) {
-            return $this->feedStatusResult(
-                'FRESH',
-                'canonical_market_state_ok',
-                $state,
-                $maxAge,
-                [
-                    'age_seconds' => $canonical['price_age_seconds'] ?? null,
-                    'canonical_quote' => $canonical['quality']['quote'] ?? null,
-                    'canonical_health' => $canonical['quality']['health'] ?? null,
-                ]
-            );
-        }
-
-        $ageSeconds = $state?->last_price_timestamp ? $state->last_price_timestamp->diffInSeconds(now()) : null;
-        $fresh = $ageSeconds !== null && $ageSeconds <= $maxAge;
+        $this->breakers->activateStaleFeedBreaker($workspaceId, [
+            'symbol' => $config->normalizedSymbol(),
+            'received_at' => $snapshot['received_at'] ?? null,
+            'age_ms' => $snapshot['age_ms'] ?? null,
+            'max_age_seconds' => $maxAge,
+            'connection_state' => $snapshot['connection_state'] ?? FeedState::STALE->value,
+            'reason' => $snapshot['stale_reason'] ?? 'selected_symbol_snapshot_not_fresh',
+        ], 'market_snapshot');
 
         return $this->feedStatusResult(
-            $fresh ? 'FRESH' : 'STALE_FEED',
-            $fresh ? 'ok' : ($ageSeconds === null ? 'no_price_observed_yet' : 'price_age_exceeds_window'),
+            'STALE_FEED',
+            (string) ($snapshot['stale_reason'] ?? 'selected_symbol_snapshot_not_fresh'),
             $state,
             $maxAge,
-            ['age_seconds' => $ageSeconds]
+            ['age_seconds' => $snapshot['age_seconds'] ?? null, 'snapshot' => $snapshot]
         );
     }
 
@@ -617,12 +651,18 @@ class RatioBotRuntimeQueryService
     {
         $label = 'Market Feed';
         $feed = $this->effectiveFeedStatus($config);
+        $snapshot = (array) ($feed['snapshot'] ?? []);
+        $state = (string) ($snapshot['connection_state'] ?? $feed['status'] ?? 'unknown');
+        $ageMs = $snapshot['age_ms'] ?? null;
+        $age = is_numeric($ageMs) ? sprintf('%.2fs', ((float) $ageMs) / 1000) : 'unknown';
+        $source = (string) ($snapshot['source'] ?? $feed['source'] ?? 'none');
+        $symbol = (string) ($snapshot['symbol'] ?? $config->normalizedSymbol());
 
         return $this->checklistItem(
             'market_feed',
             $label,
             ($feed['fresh'] ?? false) ? 'pass' : 'fail',
-            sprintf('%s (%s)', (string) ($feed['status'] ?? 'unknown'), (string) ($feed['reason'] ?? 'n/a')),
+            sprintf('%s: %s %s via %s, age %s (%s)', (string) ($feed['status'] ?? 'unknown'), $symbol, $state, $source, $age, (string) ($feed['reason'] ?? 'n/a')),
         );
     }
 

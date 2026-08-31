@@ -8,6 +8,7 @@ use App\Domain\MarketData\Enums\FeedState;
 use App\Domain\MarketData\Enums\StreamType;
 use App\Domain\MarketData\MarketFreshnessService;
 use App\Domain\MarketData\MarketRecoveryManager;
+use App\Domain\MarketData\MarketSnapshotService;
 use App\Domain\MarketData\MarketStateStore;
 use App\Domain\MarketData\Support\InstrumentMapper;
 use App\Domain\RatioBot\RatioBotStateService;
@@ -50,6 +51,7 @@ class RealtimeMarketFeedService
         private ?MarketFreshnessService $freshness = null,
         private ?MarketRecoveryManager $recovery = null,
         private ?InstrumentMapper $instruments = null,
+        private ?MarketSnapshotService $snapshots = null,
     ) {
         $this->ratioBotState ??= app(RatioBotStateService::class);
         $this->breakers ??= app(OperationalBreakerService::class);
@@ -57,6 +59,7 @@ class RealtimeMarketFeedService
         $this->freshness ??= app(MarketFreshnessService::class);
         $this->recovery ??= app(MarketRecoveryManager::class);
         $this->instruments ??= app(InstrumentMapper::class);
+        $this->snapshots ??= app(MarketSnapshotService::class);
     }
 
     /**
@@ -275,6 +278,7 @@ class RealtimeMarketFeedService
         }
 
         $this->touchWorkspaceFeedStatuses($symbol, $marketType, $price, $eventTimestampMs, $stream, $eventType, $closedKline, $eventLagMs);
+        $this->clearRecoveredWorkspaceBreakers($symbol, $marketType);
 
         $botConfigs = RatioBotConfig::query()
             ->with('state')
@@ -425,6 +429,55 @@ class RealtimeMarketFeedService
                     'event_lag_ms' => $eventLagMs,
                 ]
             );
+        }
+    }
+
+    private function clearRecoveredWorkspaceBreakers(string $symbol, string $marketType): void
+    {
+        $workspaceIds = RatioBotConfig::query()
+            ->where('symbol', strtoupper($symbol))
+            ->where('market_type', strtolower($marketType))
+            ->pluck('workspace_id')
+            ->merge(
+                RobotSession::query()
+                    ->where('symbol', strtoupper($symbol))
+                    ->whereIn('status', ['RUNNING', 'OPEN'])
+                    ->where('provider_key', 'binance')
+                    ->pluck('workspace_id')
+            )
+            ->filter()
+            ->unique()
+            ->values();
+
+        foreach ($workspaceIds as $workspaceId) {
+            if (! $this->breakers->isStaleFeedBreakerActive((string) $workspaceId)) {
+                continue;
+            }
+
+            $symbols = $this->selectedSymbols($marketType, (string) $workspaceId);
+            $allFresh = $symbols !== [];
+            $snapshots = [];
+            foreach ($symbols as $selectedSymbol) {
+                $snapshot = $this->snapshots->getLiveSnapshot('binance', $selectedSymbol, $this->exchangeKey($marketType), 15);
+                $snapshots[$selectedSymbol] = [
+                    'is_fresh' => (bool) ($snapshot['is_fresh'] ?? false),
+                    'age_ms' => $snapshot['age_ms'] ?? null,
+                    'received_at' => $snapshot['received_at'] ?? null,
+                    'reason' => $snapshot['stale_reason'] ?? null,
+                ];
+                if (! (bool) ($snapshot['is_fresh'] ?? false)) {
+                    $allFresh = false;
+                }
+            }
+
+            if ($allFresh) {
+                $this->breakers->clearStaleFeedBreaker((string) $workspaceId, [
+                    'symbol' => strtoupper($symbol),
+                    'symbols' => $symbols,
+                    'snapshots' => $snapshots,
+                    'reason' => 'fresh_websocket_event_recovered_selected_symbols',
+                ], 'market_feed_ingest');
+            }
         }
     }
 

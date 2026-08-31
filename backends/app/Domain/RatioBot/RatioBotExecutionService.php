@@ -3,6 +3,7 @@
 namespace App\Domain\RatioBot;
 
 use App\Domain\Exchange\ExchangeClientFactory;
+use App\Domain\MarketData\MarketSnapshotService;
 use App\Domain\Trading\LiveOrderIntentService;
 use App\Domain\Trading\FuturesConfigService;
 use App\Domain\Trading\FuturesOrderIntentService;
@@ -32,6 +33,7 @@ class RatioBotExecutionService
         private readonly RatioBotRiskService $risk,
         private readonly StrategyManagerService $strategyManager,
         private readonly ExchangeClientFactory $exchangeClients,
+        private readonly MarketSnapshotService $snapshots,
     ) {
     }
 
@@ -108,6 +110,10 @@ class RatioBotExecutionService
 
         if ($config->isSandbox()) {
             $this->simulateSandboxExecution($config, $decision, $side, (float) $decision->evaluated_price, $qty, $clientOrderId);
+            return;
+        }
+
+        if ($this->staleSnapshotBlock($config, $decision)) {
             return;
         }
 
@@ -202,6 +208,31 @@ class RatioBotExecutionService
             'detail' => "Market shock detected (regime={$regime}: " . (string) ($analysis['regime_reason'] ?? 'n/a') . '). Order frozen — will re-evaluate next cycle.',
             'pause' => false,
             'meta' => ['regime' => $regime, 'analysis' => $analysis],
+        ]);
+
+        return true;
+    }
+
+    private function staleSnapshotBlock(RatioBotConfig $config, RatioBotDecision $decision): bool
+    {
+        if (! $config->usesRealtimeFeed()) {
+            return false;
+        }
+
+        $snapshot = $this->snapshots->forRatioBot($config);
+        if ((bool) ($snapshot['is_fresh'] ?? false) && (float) ($snapshot['price'] ?? 0) > 0) {
+            return false;
+        }
+
+        $this->applyEntryBlock($config, $decision, [
+            'code' => 'stale_feed',
+            'detail' => sprintf(
+                'Selected-symbol market snapshot is not fresh for %s: %s.',
+                $config->normalizedSymbol(),
+                (string) ($snapshot['stale_reason'] ?? 'unknown')
+            ),
+            'pause' => false,
+            'meta' => ['snapshot' => $snapshot],
         ]);
 
         return true;

@@ -7,9 +7,8 @@ use App\Domain\MarketData\Enums\FeedState;
 use App\Domain\MarketData\Enums\StreamType;
 use App\Domain\MarketData\MarketFreshnessService;
 use App\Domain\MarketData\MarketRecoveryManager;
+use App\Domain\MarketData\MarketSnapshotService;
 use App\Models\FutureTradeBotConfig;
-use App\Models\MarketTick;
-use App\Models\MarketFeedStatus;
 use App\Models\RatioBotConfig;
 use App\Models\RiskEvent;
 use Illuminate\Bus\Queueable;
@@ -18,7 +17,6 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
-use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 
 class DetectStaleFeedsJob implements ShouldQueue, ShouldBeUnique
@@ -34,101 +32,66 @@ class DetectStaleFeedsJob implements ShouldQueue, ShouldBeUnique
         $this->thresholdSeconds = $thresholdSeconds;
     }
 
-    public function handle(OperationalBreakerService $breakers, MarketFreshnessService $freshness, MarketRecoveryManager $recovery): void
+    public function handle(OperationalBreakerService $breakers, MarketFreshnessService $freshness, MarketRecoveryManager $recovery, MarketSnapshotService $snapshots): void
     {
         $now = now();
         $activeWorkspaceSymbols = $this->activeWorkspaceSymbols();
-        $latestTick = MarketTick::orderByDesc('occurred_at')->first();
-        $latestFeedStatus = Schema::hasTable('market_feed_status')
-            ? MarketFeedStatus::whereNotNull('last_tick_at')->orderByDesc('last_tick_at')->first()
-            : null;
-
-        $latestTickAt = collect([
-            $latestTick?->occurred_at,
-            $latestFeedStatus?->last_tick_at,
-        ])->filter()->sortDesc()->first();
-
-        $globalFeedIsStale = $latestTickAt !== null
-            && $latestTickAt->lt($now->copy()->subSeconds($this->thresholdSeconds));
-
-        if ($globalFeedIsStale) {
-            $breakers->activateStaleFeedBreaker(null, [
-                'last_tick_at' => $latestTickAt?->toIso8601String(),
-                'latest_workspace_id' => $latestFeedStatus?->workspace_id,
-                'latest_symbol_id' => $latestFeedStatus?->symbol_id,
-                'threshold_seconds' => $this->thresholdSeconds,
-            ]);
-        } else {
-            $breakers->clearStaleFeedBreaker(null, [
-                'last_tick_at' => $latestTickAt?->toIso8601String(),
-                'latest_workspace_id' => $latestFeedStatus?->workspace_id,
-                'latest_symbol_id' => $latestFeedStatus?->symbol_id,
-                'threshold_seconds' => $this->thresholdSeconds,
-            ]);
-        }
-
-        if (! Schema::hasTable('market_feed_status')) {
-            return;
-        }
 
         foreach ($activeWorkspaceSymbols as $workspaceId => $symbols) {
-            $latestRelevantFeed = MarketFeedStatus::where('workspace_id', $workspaceId)
-                ->whereIn('symbol', $symbols)
-                ->whereNotNull('last_tick_at')
-                ->orderByDesc('last_tick_at')
-                ->first();
+            $stale = [];
+            $fresh = [];
 
-            if (! $latestRelevantFeed) {
+            foreach ($symbols as $symbol) {
+                $snapshot = $snapshots->getLiveSnapshot('binance', $symbol, 'binance', $this->thresholdSeconds);
+                $health = (array) ($snapshot['health'] ?? []);
+                if (($health['state'] ?? null) === FeedState::MARKET_CLOSED->value) {
+                    $fresh[] = ['symbol' => $symbol, 'reason' => 'market_closed_not_stale'];
+                    continue;
+                }
+
+                if ((bool) ($snapshot['is_fresh'] ?? false)) {
+                    $fresh[] = [
+                        'symbol' => $symbol,
+                        'received_at' => $snapshot['received_at'] ?? null,
+                        'age_ms' => $snapshot['age_ms'] ?? null,
+                    ];
+                    continue;
+                }
+
+                $stale[] = [
+                    'symbol' => $symbol,
+                    'received_at' => $snapshot['received_at'] ?? null,
+                    'age_ms' => $snapshot['age_ms'] ?? null,
+                    'connection_state' => $snapshot['connection_state'] ?? null,
+                    'reason' => $snapshot['stale_reason'] ?? 'selected_symbol_snapshot_not_fresh',
+                ];
+
+                $recovery->requestRecovery('binance', $symbol, StreamType::QUOTE, 'scheduled_stale_feed_check', [
+                    'workspace_id' => (string) $workspaceId,
+                    'threshold_seconds' => $this->thresholdSeconds,
+                    'snapshot' => $snapshot,
+                ]);
+            }
+
+            if ($stale !== []) {
                 $breakers->activateStaleFeedBreaker((string) $workspaceId, [
                     'symbols' => $symbols,
-                    'reason' => 'no_feed_status_for_active_symbols',
+                    'stale_symbols' => $stale,
+                    'fresh_symbols' => $fresh,
                     'threshold_seconds' => $this->thresholdSeconds,
+                    'reason' => 'one_or_more_selected_symbols_stale',
                 ]);
 
+                $this->recordStaleRiskEvent((string) $workspaceId, (string) ($stale[0]['symbol'] ?? ''), $now, $stale[0]);
                 continue;
             }
 
-            $isWorkspaceFeedStale = $latestRelevantFeed->last_tick_at->lt($now->copy()->subSeconds($this->thresholdSeconds));
-
-            if ($isWorkspaceFeedStale) {
-                $provider = str_replace('_futures', '', strtolower((string) ($latestRelevantFeed->exchange ?: 'binance')));
-                $instrument = strtoupper((string) ($latestRelevantFeed->symbol ?: ''));
-                if ($instrument !== '') {
-                    $scopedHealth = $freshness->evaluate($provider, $instrument, StreamType::QUOTE);
-                    if (($scopedHealth['state'] ?? null) === FeedState::MARKET_CLOSED->value) {
-                        $breakers->clearStaleFeedBreaker((string) $workspaceId, [
-                            'symbol' => $instrument,
-                            'reason' => 'market_closed_not_stale',
-                            'health' => $scopedHealth,
-                        ]);
-
-                        continue;
-                    }
-
-                    $recovery->requestRecovery($provider, $instrument, StreamType::QUOTE, 'scheduled_stale_feed_check', [
-                        'workspace_id' => (string) $workspaceId,
-                        'last_tick_at' => optional($latestRelevantFeed->last_tick_at)?->toIso8601String(),
-                        'threshold_seconds' => $this->thresholdSeconds,
-                        'health' => $scopedHealth,
-                    ]);
-                }
-
-                $breakers->activateStaleFeedBreaker((string) $workspaceId, [
-                    'symbol' => $latestRelevantFeed->symbol,
-                    'symbol_id' => $latestRelevantFeed->symbol_id,
-                    'last_tick_at' => optional($latestRelevantFeed->last_tick_at)?->toIso8601String(),
-                    'threshold_seconds' => $this->thresholdSeconds,
-                ]);
-
-                $this->recordStaleRiskEvent((string) $workspaceId, $latestRelevantFeed, $now);
-            } else {
-                $breakers->clearStaleFeedBreaker((string) $workspaceId, [
-                    'symbol' => $latestRelevantFeed->symbol,
-                    'symbol_id' => $latestRelevantFeed->symbol_id,
-                    'last_tick_at' => optional($latestRelevantFeed->last_tick_at)?->toIso8601String(),
-                    'threshold_seconds' => $this->thresholdSeconds,
-                ]);
-            }
+            $breakers->clearStaleFeedBreaker((string) $workspaceId, [
+                'symbols' => $symbols,
+                'fresh_symbols' => $fresh,
+                'threshold_seconds' => $this->thresholdSeconds,
+                'reason' => 'all_selected_symbol_snapshots_fresh',
+            ]);
         }
     }
 
@@ -190,13 +153,17 @@ class DetectStaleFeedsJob implements ShouldQueue, ShouldBeUnique
             ->all();
     }
 
-    private function recordStaleRiskEvent(string $workspaceId, MarketFeedStatus $feed, \Illuminate\Support\Carbon $now): void
+    private function recordStaleRiskEvent(string $workspaceId, string $symbol, \Illuminate\Support\Carbon $now, array $snapshot): void
     {
+        if ($symbol === '') {
+            return;
+        }
+
         $recentDuplicate = RiskEvent::query()
             ->where('workspace_id', $workspaceId)
             ->where('type', 'feed_stale')
             ->where('triggered_at', '>=', $now->copy()->subSeconds(max($this->thresholdSeconds * 2, 120)))
-            ->where('reason_json->symbol', $feed->symbol)
+            ->where('reason_json->symbol', $symbol)
             ->exists();
 
         if ($recentDuplicate) {
@@ -209,9 +176,9 @@ class DetectStaleFeedsJob implements ShouldQueue, ShouldBeUnique
             'type' => 'feed_stale',
             'severity' => 'warning',
             'reason_json' => [
-                'symbol' => $feed->symbol,
-                'symbol_id' => $feed->symbol_id,
-                'last_tick_at' => $feed->last_tick_at,
+                'symbol' => $symbol,
+                'received_at' => $snapshot['received_at'] ?? null,
+                'age_ms' => $snapshot['age_ms'] ?? null,
                 'threshold_seconds' => $this->thresholdSeconds,
                 'incident_lifecycle' => 'opened',
             ],

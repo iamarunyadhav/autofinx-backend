@@ -134,7 +134,7 @@ class MarketPriceCacheService
         $symbol = strtoupper($symbol);
 
         try {
-            $raw = Redis::get($this->feedKey($exchange, $symbol));
+            $raw = Redis::get($this->feedKey($exchange, $symbol)) ?: Redis::get($this->canonicalLiveKey($symbol));
         } catch (\Throwable) {
             return null;
         }
@@ -168,6 +168,7 @@ class MarketPriceCacheService
             'event_type' => (string) ($data['event_type'] ?? ''),
             'market_type' => (string) ($data['market_type'] ?? ''),
             'event_lag_ms' => (int) ($data['event_lag_ms'] ?? 0),
+            'update_id' => $data['update_id'] ?? null,
         ];
     }
 
@@ -202,14 +203,17 @@ class MarketPriceCacheService
             'event_timestamp_ms' => $tsMs,
             'received_at_ms' => $nowMs,
             'received_at' => now()->toIso8601String(),
+            'source' => 'binance_websocket',
             'stream' => (string) ($meta['stream'] ?? ''),
             'event_type' => (string) ($meta['event_type'] ?? ''),
             'market_type' => (string) ($meta['market_type'] ?? ''),
             'event_lag_ms' => (int) ($meta['event_lag_ms'] ?? max(0, $nowMs - $tsMs)),
+            'update_id' => $meta['update_id'] ?? null,
         ];
 
         Redis::setex($this->feedKey($exchange, $symbol), self::LIVE_FEED_TTL_S, json_encode($payload, JSON_UNESCAPED_SLASHES));
         Redis::setex($this->feedKey($exchange, '*'), self::LIVE_FEED_TTL_S, json_encode($payload, JSON_UNESCAPED_SLASHES));
+        Redis::setex($this->canonicalLiveKey($symbol), self::LIVE_FEED_TTL_S, json_encode($payload, JSON_UNESCAPED_SLASHES));
     }
 
     private function priceKey(string $exchange, string $symbol): string
@@ -225,5 +229,10 @@ class MarketPriceCacheService
     private function feedKey(string $exchange, string $symbol): string
     {
         return "live-feed:{$exchange}:".strtoupper($symbol);
+    }
+
+    private function canonicalLiveKey(string $symbol): string
+    {
+        return 'market:live:'.strtoupper($symbol);
     }
 }

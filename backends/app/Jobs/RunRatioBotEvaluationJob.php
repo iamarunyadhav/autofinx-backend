@@ -302,10 +302,30 @@ class RunRatioBotEvaluationJob implements ShouldQueue, ShouldBeUnique
 
         $staleFeedState = $breakers->staleFeedState($workspaceId);
         if ((bool) ($staleFeedState['active'] ?? false)) {
+            $snapshot = (array) data_get($pricePayload, 'quality.snapshot', []);
+            if ((bool) ($snapshot['is_fresh'] ?? false)) {
+                $breakers->clearStaleFeedBreaker($workspaceId, [
+                    'symbol' => $symbol,
+                    'received_at' => $snapshot['received_at'] ?? null,
+                    'age_ms' => $snapshot['age_ms'] ?? null,
+                    'reason' => 'selected_symbol_snapshot_fresh_before_evaluation',
+                ], 'ratio_bot_evaluation');
+            } else {
+                return $this->healthBlock(
+                    'STALE_FEED',
+                    'Market-data stale-feed breaker is active.',
+                    ['breaker' => $staleFeedState, 'snapshot' => $snapshot],
+                    (bool) $config->pause_on_stale_feed,
+                );
+            }
+        }
+
+        $snapshot = (array) data_get($pricePayload, 'quality.snapshot', []);
+        if ($snapshot !== [] && ! (bool) ($snapshot['is_fresh'] ?? false)) {
             return $this->healthBlock(
                 'STALE_FEED',
-                'Market-data stale-feed breaker is active.',
-                ['breaker' => $staleFeedState],
+                'Selected-symbol market snapshot is stale.',
+                ['snapshot' => $snapshot],
                 (bool) $config->pause_on_stale_feed,
             );
         }

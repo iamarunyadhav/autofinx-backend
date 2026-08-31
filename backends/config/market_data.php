@@ -30,13 +30,13 @@ return [
     ],
     'freshness' => [
         'default' => [
-            'QUOTE' => ['expected_interval_ms' => 1000, 'degraded_after_ms' => 5000, 'stale_after_ms' => 15000, 'ttl_seconds' => 120],
-            'TRADE' => ['expected_interval_ms' => 1000, 'degraded_after_ms' => 5000, 'stale_after_ms' => 15000, 'ttl_seconds' => 120],
+            'QUOTE' => ['expected_interval_ms' => 1000, 'degraded_after_ms' => 2000, 'stale_after_ms' => 5000, 'ttl_seconds' => 120],
+            'TRADE' => ['expected_interval_ms' => 1000, 'degraded_after_ms' => 2000, 'stale_after_ms' => 5000, 'ttl_seconds' => 120],
             'CANDLE' => ['expected_interval_ms' => 60000, 'degraded_after_ms' => 90000, 'stale_after_ms' => 180000, 'ttl_seconds' => 600],
         ],
         'CRYPTO' => [
-            'QUOTE' => ['expected_interval_ms' => 1000, 'degraded_after_ms' => 5000, 'stale_after_ms' => 15000, 'ttl_seconds' => 120],
-            'TRADE' => ['expected_interval_ms' => 1000, 'degraded_after_ms' => 5000, 'stale_after_ms' => 15000, 'ttl_seconds' => 120],
+            'QUOTE' => ['expected_interval_ms' => 1000, 'degraded_after_ms' => 2000, 'stale_after_ms' => 5000, 'ttl_seconds' => 120],
+            'TRADE' => ['expected_interval_ms' => 1000, 'degraded_after_ms' => 2000, 'stale_after_ms' => 5000, 'ttl_seconds' => 120],
             'CANDLE' => ['expected_interval_ms' => 60000, 'degraded_after_ms' => 90000, 'stale_after_ms' => 180000, 'ttl_seconds' => 600],
         ],
         'FOREX' => ['QUOTE' => ['expected_interval_ms' => 1000, 'degraded_after_ms' => 10000, 'stale_after_ms' => 30000, 'ttl_seconds' => 120]],
