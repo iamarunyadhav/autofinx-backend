@@ -779,6 +779,7 @@ class RealtimeMarketFeedService
 
         return match ($eventType) {
             'trade', 'aggtrade' => isset($data['p']) ? (float) $data['p'] : null,
+            'markpriceupdate' => isset($data['p']) ? (float) $data['p'] : null,
             '24hrticker' => isset($data['c']) ? (float) $data['c'] : null,
             '24hrminiticker' => isset($data['c']) ? (float) $data['c'] : null,
             'kline' => isset($data['k']['c']) ? (float) $data['k']['c'] : null,
@@ -794,7 +795,7 @@ class RealtimeMarketFeedService
             return StreamType::CANDLE;
         }
 
-        if ($eventType === 'bookticker' || str_contains($stream, 'bookticker') || in_array($eventType, ['24hrminiticker', '24hrticker'], true) || str_contains($stream, 'miniticker') || str_contains($stream, 'ticker')) {
+        if ($eventType === 'bookticker' || str_contains($stream, 'bookticker') || in_array($eventType, ['24hrminiticker', '24hrticker', 'markpriceupdate'], true) || str_contains($stream, 'miniticker') || str_contains($stream, 'ticker') || str_contains($stream, 'markprice')) {
             return StreamType::QUOTE;
         }
 

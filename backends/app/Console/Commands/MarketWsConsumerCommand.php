@@ -503,6 +503,9 @@ class MarketWsConsumerCommand extends Command
         if (! in_array('ticker', $lower, true)) {
             $normalized[] = 'ticker';
         }
+        if (! in_array('markprice@1s', $lower, true)) {
+            $normalized[] = 'markPrice@1s';
+        }
 
         return $normalized;
     }
