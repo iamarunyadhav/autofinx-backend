@@ -56,7 +56,7 @@ class MarketWsConsumerCommand extends Command
         )));
         $maxRuntime = max(0, (int) $this->option('max-runtime'));
         if (! (bool) $this->option('once')) {
-            $streams = $this->ensureRealtimeHeartbeatStream($streams);
+            $streams = $this->ensureRealtimeHeartbeatStream($streams, $marketType);
         }
         $dispatchEvaluations = ! (bool) $this->option('no-dispatch');
         $provider = strtolower((string) $this->option('exchange') ?: 'binance');
@@ -209,6 +209,7 @@ class MarketWsConsumerCommand extends Command
                                 'connection_id' => $connectionId,
                                 'pid' => getmypid(),
                                 'hostname' => $hostname,
+                                'subscriptions' => $symbols,
                             ]);
                             $msgCount++;
 
@@ -486,7 +487,7 @@ class MarketWsConsumerCommand extends Command
      * @param string[] $streams
      * @return string[]
      */
-    private function ensureRealtimeHeartbeatStream(array $streams): array
+    private function ensureRealtimeHeartbeatStream(array $streams, string $marketType): array
     {
         $normalized = array_values(array_filter(array_map(
             static fn (string $stream) => trim($stream),
@@ -503,8 +504,11 @@ class MarketWsConsumerCommand extends Command
         if (! in_array('ticker', $lower, true)) {
             $normalized[] = 'ticker';
         }
-        if (! in_array('markprice@1s', $lower, true)) {
+        if (strtolower($marketType) === 'futures' && ! in_array('markprice@1s', $lower, true)) {
             $normalized[] = 'markPrice@1s';
+        }
+        if (strtolower($marketType) === 'futures' && ! in_array('!markprice@arr@1s', $lower, true)) {
+            $normalized[] = '!markPrice@arr@1s';
         }
 
         return $normalized;

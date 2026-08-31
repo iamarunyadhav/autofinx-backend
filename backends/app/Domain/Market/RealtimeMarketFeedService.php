@@ -148,8 +148,13 @@ class RealtimeMarketFeedService
         )));
 
         $streamParts = [];
-        foreach ($symbols as $symbol) {
-            foreach ($normalizedStreams as $stream) {
+        foreach ($normalizedStreams as $stream) {
+            if (str_starts_with($stream, '!')) {
+                $streamParts[] = $stream;
+                continue;
+            }
+
+            foreach ($symbols as $symbol) {
                 $streamParts[] = "{$symbol}@{$stream}";
             }
         }
@@ -161,6 +166,29 @@ class RealtimeMarketFeedService
 
     public function ingest(array $payload, string $marketType = 'spot', bool $dispatchEvaluations = true, array $workerContext = []): void
     {
+        if (isset($payload['data']) && is_array($payload['data']) && array_is_list($payload['data'])) {
+            $allowedSymbols = array_values(array_filter(array_map(
+                static fn ($symbol) => strtoupper(trim((string) $symbol)),
+                (array) ($workerContext['subscriptions'] ?? [])
+            )));
+            foreach ($payload['data'] as $row) {
+                if (! is_array($row)) {
+                    continue;
+                }
+
+                $symbol = strtoupper((string) ($row['s'] ?? ''));
+                if ($allowedSymbols !== [] && ! in_array($symbol, $allowedSymbols, true)) {
+                    continue;
+                }
+                $stream = $symbol !== ''
+                    ? strtolower($symbol).'@markPrice@1s'
+                    : (string) ($payload['stream'] ?? '');
+                $this->ingest(['stream' => $stream, 'data' => $row], $marketType, $dispatchEvaluations, $workerContext);
+            }
+
+            return;
+        }
+
         $data = is_array($payload['data'] ?? null) ? (array) $payload['data'] : $payload;
         $eventType = strtolower((string) ($data['e'] ?? ''));
         $stream = strtolower((string) ($payload['stream'] ?? ''));
