@@ -134,7 +134,10 @@ class MarketPriceCacheService
         $symbol = strtoupper($symbol);
 
         try {
-            $raw = Redis::get($this->canonicalLiveKey($symbol)) ?: Redis::get($this->feedKey($exchange, $symbol));
+            $canonicalRaw = Redis::get($this->canonicalLiveKey($symbol));
+            $raw = $this->snapshotMatchesExchange($canonicalRaw, $exchange)
+                ? $canonicalRaw
+                : Redis::get($this->feedKey($exchange, $symbol));
         } catch (\Throwable) {
             return null;
         }
@@ -232,6 +235,31 @@ class MarketPriceCacheService
     private function feedKey(string $exchange, string $symbol): string
     {
         return "live-feed:{$exchange}:".strtoupper($symbol);
+    }
+
+    private function snapshotMatchesExchange(mixed $raw, string $exchange): bool
+    {
+        if (! is_string($raw) || $raw === '') {
+            return false;
+        }
+
+        $data = json_decode($raw, true);
+        if (! is_array($data)) {
+            return false;
+        }
+
+        $snapshotExchange = strtolower((string) ($data['exchange'] ?? ''));
+        $marketType = strtolower((string) ($data['market_type'] ?? ''));
+
+        if ($snapshotExchange === $exchange) {
+            return true;
+        }
+
+        return match ($exchange) {
+            'binance' => $marketType === '' || $marketType === 'spot',
+            'binance_futures' => $marketType === 'futures',
+            default => false,
+        };
     }
 
     private function canonicalLiveKey(string $symbol): string
