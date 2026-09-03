@@ -123,7 +123,13 @@ class MarketWsConsumerCommand extends Command
             $connectedAt = null;
             $lastHeartbeatWrite = 0;
             $lastPingAt = 0;
+            $lastSymbolResolutionAt = time();
             $perSymbolHeartbeat = [];
+            // Symbols are only an option override (--symbols=) when explicitly
+            // set; otherwise they come from active ratio bot discovery and can
+            // change while this daemon keeps running (a new bot on a new
+            // symbol). Re-resolving is only meaningful in the discovery case.
+            $symbolsPinned = trim((string) $this->option('symbols')) !== '';
 
             $this->info(sprintf(
                 'Starting realtime market feed consumer market_type=%s symbols=%s streams=%s',
@@ -137,6 +143,19 @@ class MarketWsConsumerCommand extends Command
                     if ($maxRuntime > 0 && (time() - $startedAt) >= $maxRuntime) {
                         $this->info('Max runtime reached, stopping market feed consumer.');
                         break;
+                    }
+
+                    if (! $symbolsPinned) {
+                        $freshSymbols = $this->resolveSymbols($feeds, $marketType);
+                        if ($freshSymbols !== [] && $this->symbolsDiffer($symbols, $freshSymbols)) {
+                            $this->line(sprintf(
+                                '[WS] Active bot symbol set changed before reconnect: %s -> %s',
+                                implode(',', $symbols),
+                                implode(',', $freshSymbols)
+                            ));
+                            $symbols = $freshSymbols;
+                        }
+                        $lastSymbolResolutionAt = time();
                     }
 
                     try {
@@ -174,10 +193,40 @@ class MarketWsConsumerCommand extends Command
                                 break 2;
                             }
 
+                            // A new ratio bot on a new symbol otherwise gets no live
+                            // data until this daemon happens to reconnect (or is
+                            // restarted by an operator) — resolveSymbols() only ran
+                            // once, before this connection was opened. Re-check the
+                            // active-bot symbol set periodically and force a clean
+                            // reconnect (picking up the fresh set at the top of the
+                            // outer loop) when it has actually changed.
+                            $now = time();
+                            if (! $symbolsPinned && ($now - $lastSymbolResolutionAt) >= 60) {
+                                $lastSymbolResolutionAt = $now;
+                                $freshSymbols = $this->resolveSymbols($feeds, $marketType);
+                                if ($freshSymbols !== [] && $this->symbolsDiffer($symbols, $freshSymbols)) {
+                                    $this->line(sprintf(
+                                        '[WS] Active bot symbol set changed mid-connection: %s -> %s; reconnecting to subscribe.',
+                                        implode(',', $symbols),
+                                        implode(',', $freshSymbols)
+                                    ));
+                                    Log::info('[MarketData] Resubscribing after active symbol set change', [
+                                        'event' => 'symbol_set_changed',
+                                        'market_type' => $marketType,
+                                        'worker_id' => $workerId,
+                                        'previous_symbols' => $symbols,
+                                        'new_symbols' => $freshSymbols,
+                                    ]);
+                                    $symbols = $freshSymbols;
+                                    $client->close();
+                                    $connectedAt = null;
+                                    break;
+                                }
+                            }
+
                             // Proactive client→server ping every 30 s.
                             // Binance closes connections that go silent; sending a ping
                             // prevents the server from treating the stream as idle/dead.
-                            $now = time();
                             if ($now - $lastPingAt >= 30) {
                                 try {
                                     $client->sendPing();
@@ -452,6 +501,22 @@ class MarketWsConsumerCommand extends Command
         }
 
         return $marketType === 'futures' ? ['BTCUSDT'] : ['BTCUSDT', 'ETHUSDT'];
+    }
+
+    /**
+     * @param string[] $current
+     * @param string[] $fresh
+     */
+    private function symbolsDiffer(array $current, array $fresh): bool
+    {
+        $normalize = static fn (array $symbols): array => collect($symbols)
+            ->map(static fn (string $symbol) => strtoupper(trim($symbol)))
+            ->unique()
+            ->sort()
+            ->values()
+            ->all();
+
+        return $normalize($current) !== $normalize($fresh);
     }
 
     private function apiBaseUrl(string $marketType): string

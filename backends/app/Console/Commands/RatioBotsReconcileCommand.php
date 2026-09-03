@@ -29,15 +29,23 @@ class RatioBotsReconcileCommand extends Command
         $limit = max(1, min(500, (int) $this->option('limit')));
 
         $configs = RatioBotConfig::query()
+            // Only reconcile bots that are actually running — a disabled
+            // bot places no new orders, so reconciling it every 5 minutes
+            // was pure wasted Binance API calls and log noise. --bot=
+            // still lets an operator reconcile one specific bot by id
+            // regardless of enabled state, for manual troubleshooting.
+            ->when($botId === '', fn ($query) => $query->where('enabled', true))
             ->when($botId !== '', fn ($query) => $query->whereKey($botId))
             ->orderByDesc('updated_at')
             ->limit($limit)
             ->get();
 
+        $futuresIntegrations = $this->prefetchFuturesIntegrations($configs);
+
         foreach ($configs as $config) {
             try {
                 $snapshot = $config->marketType() === 'futures'
-                    ? $this->reconcileFutures($config, $futuresSync, $futuresConfigs)
+                    ? $this->reconcileFutures($config, $futuresSync, $futuresConfigs, $futuresIntegrations)
                     : $this->reconcileSpot($config, $spotSync);
 
                 RatioBotReconciliationLog::create([
@@ -89,17 +97,13 @@ class RatioBotsReconcileCommand extends Command
         RatioBotConfig $config,
         FuturesPositionSyncService $futuresSync,
         FuturesConfigService $futuresConfigs,
+        array $prefetchedIntegrations,
     ): array {
-        $query = Integration::query()
-            ->where('workspace_id', $config->workspace_id)
-            ->where('provider_key', 'binance')
-            ->where('status', 'active');
-
-        if ($config->integration_id) {
-            $query->whereKey($config->integration_id);
+        $integration = $prefetchedIntegrations[(string) $config->id] ?? null;
+        if (! $integration) {
+            throw new \RuntimeException('No active Binance integration found for workspace.');
         }
 
-        $integration = $query->latest('updated_at')->firstOrFail();
         $result = $futuresSync->sync((string) $config->workspace_id, $integration, $futuresConfigs->effective((string) $config->workspace_id));
 
         return [
@@ -107,5 +111,43 @@ class RatioBotsReconcileCommand extends Command
             'market_type' => 'futures',
             'sync' => $result,
         ];
+    }
+
+    /**
+     * Resolves the same "active binance integration" every futures config
+     * would otherwise look up individually (up to 500 configs x 1 query
+     * each, every 5 minutes) into a handful of batched queries — one per
+     * distinct workspace among this run's futures configs, instead of one
+     * per config.
+     *
+     * @param  \Illuminate\Support\Collection<int, RatioBotConfig>  $configs
+     * @return array<string, Integration|null> keyed by ratio_bot_config_id
+     */
+    private function prefetchFuturesIntegrations($configs): array
+    {
+        $futuresConfigs = $configs->filter(fn (RatioBotConfig $c) => $c->marketType() === 'futures');
+        if ($futuresConfigs->isEmpty()) {
+            return [];
+        }
+
+        $byWorkspace = Integration::query()
+            ->whereIn('workspace_id', $futuresConfigs->pluck('workspace_id')->unique()->values())
+            ->where('provider_key', 'binance')
+            ->where('status', 'active')
+            ->orderByDesc('updated_at')
+            ->get()
+            ->groupBy(fn (Integration $integration) => (string) $integration->workspace_id);
+
+        $resolved = [];
+        foreach ($futuresConfigs as $config) {
+            $candidates = $byWorkspace->get((string) $config->workspace_id, collect());
+            $integration = $config->integration_id
+                ? $candidates->firstWhere('id', $config->integration_id)
+                : $candidates->first();
+
+            $resolved[(string) $config->id] = $integration;
+        }
+
+        return $resolved;
     }
 }

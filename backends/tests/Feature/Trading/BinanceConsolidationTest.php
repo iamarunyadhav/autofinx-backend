@@ -118,7 +118,7 @@ it('routes manual live orders through the shared trading venue factory', functio
     $guard = Mockery::mock(LiveExecutionGuard::class);
     $guard->shouldReceive('assertWorkspaceCanSubmit')
         ->once()
-        ->with($workspace->id, 'BTCUSDT', 300.0, 'binance', 'buy', 'manual-1')
+        ->with($workspace->id, 'BTCUSDT', 300.0, 'binance', 'buy', 'manual-1', null)
         ->andReturn([]);
 
     $reconciliation = Mockery::mock(ReconciliationService::class);

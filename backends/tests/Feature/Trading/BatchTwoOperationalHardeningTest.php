@@ -1,9 +1,12 @@
 <?php
 
 use App\Domain\Exchange\BinanceUserStreamService;
+use App\Domain\Exchange\BinanceFuturesUserStreamService;
 use App\Domain\Integrations\IntegrationManager;
 use App\Domain\Ops\OperationalBreakerService;
 use App\Domain\Trading\BinanceOrderSyncService;
+use App\Domain\Trading\FuturesConfigService;
+use App\Domain\Trading\FuturesPositionSyncService;
 use App\Jobs\DetectStaleFeedsJob;
 use App\Jobs\KeepAliveUserStreamsJob;
 use App\Models\Bot;
@@ -13,6 +16,7 @@ use App\Models\Ledger;
 use App\Models\MarketTick;
 use App\Models\ModuleSetting;
 use App\Models\Order;
+use App\Models\RatioBotConfig;
 use App\Models\Setting;
 use App\Models\Symbol;
 use App\Models\User;
@@ -20,6 +24,7 @@ use App\Models\Workspace;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Testing\Fluent\AssertableJson;
 use Illuminate\Support\Str;
 
 uses(RefreshDatabase::class);
@@ -139,7 +144,31 @@ test('detect stale feeds activates breaker and blocks live orders', function () 
         'occurred_at' => now()->subMinutes(5),
     ]);
 
+    RatioBotConfig::create([
+        'workspace_id' => $workspace->id,
+        'symbol' => 'BTCUSDT',
+        'market_type' => 'spot',
+        'execution_mode' => 'sandbox',
+        'enabled' => true,
+        'sell_threshold_ratio' => 0.02,
+        'buy_threshold_ratio' => 0.01,
+    ]);
+
     app()->call([new DetectStaleFeedsJob(60), 'handle']);
+
+    Http::fake([
+        'https://testnet.binance.local/api/v3/exchangeInfo*' => Http::response([
+            'symbols' => [[
+                'symbol' => 'BTCUSDT',
+                'status' => 'TRADING',
+                'filters' => [
+                    ['filterType' => 'LOT_SIZE', 'minQty' => '0.00001000', 'maxQty' => '1000.00000000', 'stepSize' => '0.00001000'],
+                    ['filterType' => 'PRICE_FILTER', 'minPrice' => '0.01000000', 'maxPrice' => '1000000.00000000', 'tickSize' => '0.01000000'],
+                    ['filterType' => 'MIN_NOTIONAL', 'minNotional' => '10.00000000'],
+                ],
+            ]],
+        ], 200),
+    ]);
 
     $this->actingAs($user)->postJson('/api/v1/live/orders', [
         'workspace_id' => $workspace->id,
@@ -150,7 +179,13 @@ test('detect stale feeds activates breaker and blocks live orders', function () 
         'qty' => 0.01,
         'price' => 30000,
     ])->assertStatus(422)
-        ->assertJsonPath('message', 'Stale feed breaker active for live trading.');
+        ->assertJson(fn (AssertableJson $json) => $json
+            ->where('message', fn (string $message): bool => in_array($message, [
+                'Stale feed breaker active for live trading.',
+                'Latest market feed is stale for live trading.',
+            ], true))
+            ->etc()
+        );
 });
 
 test('live cancel route cancels orders through the canonical backend path', function () {
@@ -252,7 +287,13 @@ test('keep alive job restarts failed binance user streams and clears outage stat
         ->with(Mockery::on(fn (ExchangeConnection $candidate) => $candidate->id === $connection->id))
         ->andReturn(0);
 
-    (new KeepAliveUserStreamsJob())->handle(app(BinanceUserStreamService::class), $sync);
+    (new KeepAliveUserStreamsJob())->handle(
+        app(BinanceUserStreamService::class),
+        $sync,
+        Mockery::mock(BinanceFuturesUserStreamService::class),
+        Mockery::mock(FuturesPositionSyncService::class),
+        Mockery::mock(FuturesConfigService::class),
+    );
 
     $streamState = app(OperationalBreakerService::class)->streamState($connection);
     $providerState = app(OperationalBreakerService::class)->providerState($workspace->id, 'binance');

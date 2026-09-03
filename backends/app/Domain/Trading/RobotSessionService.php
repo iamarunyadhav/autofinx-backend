@@ -8,6 +8,7 @@ use App\Domain\FutureTrade\FutureTradeAuditService;
 use App\Models\QuickTrade;
 use App\Models\RobotSession;
 use App\Models\MarketFeedStatus;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 use RuntimeException;
@@ -403,16 +404,50 @@ class RobotSessionService
             return ['session_id' => $session->id, 'status' => 'paused', 'action' => 'skipped'];
         }
 
-        $session = $this->syncExecutionContext($this->refreshPerformance($session));
-
-        if ($session->status !== 'RUNNING') {
-            return ['session_id' => $session->id, 'status' => $session->status, 'action' => 'skipped'];
+        // Serialize evaluation per session: the scheduler (schedule:run/schedule:work)
+        // and the Supervisor autofinx-robot-evaluator daemon can both dispatch
+        // evaluateSession() for the same session in the same window, and this method
+        // ends in a real order placement — without this lock two concurrent callers
+        // can both pass the cooldown/active-trade checks below and both place a trade
+        // for one signal.
+        $lockKey = 'robot-session-eval:' . $session->id;
+        $lock = Cache::lock($lockKey, 30);
+        if (! $lock->get()) {
+            return ['session_id' => $session->id, 'status' => 'locked', 'action' => 'skipped'];
         }
 
-        if (($session->bot_mode ?? 'timed_expiry') === 'candle_direction') {
-            return $this->evaluateCandleDirectionSession($session);
-        }
+        try {
+            $session = $this->syncExecutionContext($this->refreshPerformance($session));
 
+            if ($session->status !== 'RUNNING') {
+                return ['session_id' => $session->id, 'status' => $session->status, 'action' => 'skipped'];
+            }
+
+            if (($session->bot_mode ?? 'timed_expiry') === 'candle_direction') {
+                return $this->evaluateCandleDirectionSession($session);
+            }
+
+            return $this->evaluateTimedExpirySession($session);
+        } finally {
+            $lock->release();
+        }
+    }
+
+    /**
+     * Second layer of duplicate-order defense beneath the per-session lock in
+     * evaluateSession(): ties QuickTradeService's own idempotency guard to the
+     * same signal/window so a lock-TTL edge case (evaluation runs longer than
+     * the lock) still can't place two trades for one signal.
+     */
+    private function robotSessionIdempotencyKey(string $sessionId, string $direction, int $windowSeconds): string
+    {
+        $bucket = intdiv((int) floor(microtime(true)), max(1, $windowSeconds));
+
+        return $sessionId . ':' . strtolower($direction) . ':' . $bucket;
+    }
+
+    private function evaluateTimedExpirySession(RobotSession $session): array
+    {
         $cooldownSeconds = (int) ($this->settings->robotConfig($session->workspace_id)['cooldown_seconds'] ?? 15);
         if ($session->last_trade_at && now()->diffInSeconds($session->last_trade_at) < $cooldownSeconds) {
             return ['session_id' => $session->id, 'status' => 'cooldown', 'action' => 'skipped'];
@@ -517,6 +552,7 @@ class RobotSessionService
             'signal_payload' => $signal,
             'provider' => $session->provider_key,
             'integration_id' => $session->integration_id,
+            'idempotency_key' => $this->robotSessionIdempotencyKey($session->id, $direction, $cooldownSeconds),
         ], $session->user_id);
 
         $session->last_trade_at = now();
@@ -754,6 +790,7 @@ class RobotSessionService
                 'signal_payload' => $decision['signal'] ?? $decision,
                 'provider' => $session->provider_key,
                 'integration_id' => $session->integration_id,
+                'idempotency_key' => $this->robotSessionIdempotencyKey($session->id, $openDirection, 30),
             ], $session->user_id);
 
             $session->active_side = $action;

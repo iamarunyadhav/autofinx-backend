@@ -9,14 +9,14 @@ class BinanceAdapter implements ExchangeAdapterInterface
 {
     private function ensureEnabled(): void
     {
-        if (!env('LIVE_TRADING_ENABLED', false) || !env('BINANCE_ENABLED', false)) {
+        if (!config('services.live_trading_enabled', false) || !config('services.binance_enabled', false)) {
             throw new RuntimeException('Binance live trading disabled');
         }
     }
 
     public function testConnection(array $credentials): array
     {
-        $base = $credentials['base_url'] ?? env('BINANCE_BASE_URL', 'https://api.binance.com');
+        $base = $credentials['base_url'] ?? config('services.binance.base_url', 'https://api.binance.com');
         $response = Http::get("{$base}/api/v3/time");
         return [
             'ok' => $response->successful(),
@@ -26,7 +26,7 @@ class BinanceAdapter implements ExchangeAdapterInterface
 
     public function fetchTicker(string $symbol): array
     {
-        $base = env('BINANCE_BASE_URL', 'https://api.binance.com');
+        $base = config('services.binance.base_url', 'https://api.binance.com');
         $response = Http::get("{$base}/api/v3/ticker/price", ['symbol' => $symbol]);
         if (!$response->successful()) {
             return ['symbol' => $symbol, 'price' => null];

@@ -24,6 +24,12 @@ use Throwable;
  * - The daily call cap limits AI SPEND only — when exhausted, the signal
  *   executes deterministically (SKIPPED_CAP); the cap never blocks trading.
  * - Every evaluation persists a FutureTradeAiDecision row (the accuracy dataset).
+ *
+ * NOT the same system as App\Domain\Intelligence\AiDecisionCycleService
+ * (model AiDecision, queue `intelligence`) — that is a separate, unrelated
+ * recommendation-cycle system with no connection to the Future Trade order
+ * path. The similar naming is coincidental; neither service supervises or
+ * calls the other (AUTOFINX_PHASE1B_ARCHITECTURE_AUDIT_2026-09-02.md §10).
  */
 class FutureTradeAiGateService
 {

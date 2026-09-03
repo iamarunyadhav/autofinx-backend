@@ -44,7 +44,7 @@ return [
     ],
     'recovery' => [
         'lock_seconds' => 30,
-        'healthy_events_required' => (int) env('MARKET_DATA_RECOVERY_HEALTHY_EVENTS', 3),
+        'healthy_events_required' => max(1, (int) env('MARKET_DATA_RECOVERY_HEALTHY_EVENTS', 2)),
         'backoff_ms' => [500, 1000, 2000, 3000, 5000],
     ],
 ];

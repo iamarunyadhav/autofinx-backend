@@ -112,10 +112,63 @@ class AuthController extends Controller
         return response()->json(['status' => 'verified']);
     }
 
+    public function updateProfile(Request $request)
+    {
+        $data = $request->validate([
+            'full_name' => 'sometimes|nullable|string|max:255',
+            'phone' => 'sometimes|nullable|string|max:32',
+            'timezone' => 'sometimes|nullable|string|max:64',
+            'preferred_language' => 'sometimes|nullable|string|max:10',
+        ]);
+
+        $user = $request->user();
+        if (array_key_exists('full_name', $data)) {
+            $user->name = $data['full_name'] ?: $user->name;
+            unset($data['full_name']);
+        }
+        $user->fill($data);
+        $user->save();
+
+        $this->logAudit($request, $user, 'user.profile_updated');
+
+        return response()->json(['user' => $user->fresh()]);
+    }
+
+    public function changePassword(Request $request)
+    {
+        $data = $request->validate([
+            'current_password' => 'required|string',
+            'password' => 'required|string|min:8|confirmed',
+        ]);
+
+        $user = $request->user();
+
+        if (! Hash::check($data['current_password'], $user->password)) {
+            throw ValidationException::withMessages([
+                'current_password' => ['The current password is incorrect.'],
+            ]);
+        }
+
+        $user->update(['password' => Hash::make($data['password'])]);
+
+        // Revoke every other active session; keep the token used for this request.
+        $user->tokens()->where('id', '!=', $user->currentAccessToken()?->id)->delete();
+
+        $this->logAudit($request, $user, 'user.password_changed');
+
+        return response()->json(['message' => 'Password updated']);
+    }
+
     public function logout(Request $request)
     {
-        $request->user()->currentAccessToken()?->delete();
-        $this->logAudit($request, $request->user(), 'user.logout');
+        $user = $request->user();
+        if ($request->boolean('all')) {
+            $user->tokens()->delete();
+            $this->logAudit($request, $user, 'user.logout_all_devices');
+        } else {
+            $user->currentAccessToken()?->delete();
+            $this->logAudit($request, $user, 'user.logout');
+        }
         return response()->json(['message' => 'Logged out']);
     }
 

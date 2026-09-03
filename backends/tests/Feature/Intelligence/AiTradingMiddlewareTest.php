@@ -307,8 +307,9 @@ it('approval can trigger the canonical safe live execution path', function () {
     expect(Order::count())->toBe(1)
         ->and(Order::first()->idempotency_key)->toBe("ai-decision-{$decisionId}");
 
-    Http::assertSent(fn ($request) => str_starts_with($request->url(), 'https://testnet.binance.local/api/v3/order')
-        && strtoupper((string) $request['type']) === 'MARKET');
+    Http::assertSent(fn ($request) => $request->method() === 'POST'
+        && str_starts_with($request->url(), 'https://testnet.binance.local/api/v3/order')
+        && strtoupper((string) data_get($request->data(), 'type')) === 'MARKET');
 });
 
 it('workspace approval endpoints expose the pending queue and support deferred approval', function () {

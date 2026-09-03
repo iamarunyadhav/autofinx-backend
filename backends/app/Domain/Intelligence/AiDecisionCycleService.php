@@ -11,6 +11,17 @@ use App\Models\AiTradingState;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
+/**
+ * Standalone AI recommendation-cycle system (model AiDecision, queue
+ * `intelligence`, dispatched via DispatchAiDecisionCycleJob).
+ *
+ * NOT the same system as App\Domain\FutureTrade\FutureTradeAiGateService
+ * (model FutureTradeAiDecision) — that is the real pre-order AI confirmation
+ * gate wired into the Future Trade execution path. The similar naming is
+ * coincidental; this service has no connection to Future Trade's order path
+ * and neither service supervises or calls the other
+ * (AUTOFINX_PHASE1B_ARCHITECTURE_AUDIT_2026-09-02.md §10).
+ */
 class AiDecisionCycleService
 {
     public function __construct(

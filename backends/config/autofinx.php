@@ -14,11 +14,24 @@ return [
 
     'scheduler' => [
         'enabled' => filter_var(env('AUTOFINX_SCHEDULER_ENABLED', true), FILTER_VALIDATE_BOOL),
-        'market_consumers' => filter_var(env('AUTOFINX_SCHEDULER_MARKET_CONSUMERS', true), FILTER_VALIDATE_BOOL),
+        // Default false, matching binance_rest/metals below: this must stay
+        // off whenever a Supervisor daemon owns market feed consumption
+        // (AUTOFINX_SUPERVISOR_RUNTIME=true), and .env.example already
+        // documents false as the intended value — but an environment that
+        // never sets this key explicitly used to silently get `true` here,
+        // conflicting with the Supervisor-owned feed
+        // (AUTOFINX_PHASE1B_ARCHITECTURE_AUDIT_2026-09-02.md §6, P3).
+        'market_consumers' => filter_var(env('AUTOFINX_SCHEDULER_MARKET_CONSUMERS', false), FILTER_VALIDATE_BOOL),
         'binance_rest' => filter_var(env('AUTOFINX_SCHEDULER_BINANCE_REST', false), FILTER_VALIDATE_BOOL),
         'metals' => filter_var(env('AUTOFINX_SCHEDULER_METALS', false), FILTER_VALIDATE_BOOL),
         'robot_sessions' => filter_var(env('AUTOFINX_SCHEDULER_ROBOT_SESSIONS', true), FILTER_VALIDATE_BOOL),
         'quick_settler' => filter_var(env('AUTOFINX_SCHEDULER_QUICK_SETTLER', true), FILTER_VALIDATE_BOOL),
         'runtime_auto_repair' => filter_var(env('AUTOFINX_SCHEDULER_RUNTIME_AUTO_REPAIR', true), FILTER_VALIDATE_BOOL),
+        // AUTOFINX_PHASE1B_ARCHITECTURE_AUDIT_2026-09-02.md §19: routes/console.php
+        // already reads config('autofinx.scheduler.ratio_bots', true) to guard
+        // ratio-bots:evaluate/reconcile, but this key was never defined here, so
+        // it silently always fell back to the hardcoded default with no env var
+        // able to override it — inconsistent with every sibling scheduler toggle.
+        'ratio_bots' => filter_var(env('AUTOFINX_SCHEDULER_RATIO_BOTS', true), FILTER_VALIDATE_BOOL),
     ],
 ];

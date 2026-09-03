@@ -350,17 +350,46 @@ class RatioBotRuntimeQueryService
         $state = $config->state;
         $workspaceId = (string) $config->workspace_id;
         $maxAge = $config->staleFeedWindowSeconds();
+
+        if (! $config->usesRealtimeFeed() && $state?->last_price_timestamp) {
+            $ageSeconds = max(0, $state->last_price_timestamp->diffInSeconds(now(), true));
+
+            if ($ageSeconds <= $maxAge) {
+                return $this->feedStatusResult(
+                    'FRESH',
+                    'persisted_state_price_timestamp_ok',
+                    $state,
+                    $maxAge,
+                    [
+                        'age_seconds' => $ageSeconds,
+                        'source' => $state->last_price_source,
+                    ]
+                );
+            }
+
+            return $this->feedStatusResult(
+                'STALE_FEED',
+                'persisted_state_price_timestamp_stale',
+                $state,
+                $maxAge,
+                [
+                    'age_seconds' => $ageSeconds,
+                    'source' => $state->last_price_source,
+                ]
+            );
+        }
+
         $snapshot = $this->snapshots->forRatioBot($config);
 
         if ((bool) ($snapshot['is_fresh'] ?? false)) {
-            $staleFeedState = $this->breakers->staleFeedState($workspaceId);
+            $staleFeedState = $this->breakers->staleFeedState($workspaceId, $config->normalizedSymbol());
             if ((bool) ($staleFeedState['active'] ?? false)) {
                 $this->breakers->clearStaleFeedBreaker($workspaceId, [
                     'symbol' => $config->normalizedSymbol(),
                     'received_at' => $snapshot['received_at'] ?? null,
                     'age_ms' => $snapshot['age_ms'] ?? null,
                     'reason' => 'selected_symbol_snapshot_fresh',
-                ], 'market_snapshot');
+                ], 'market_snapshot', $config->normalizedSymbol());
             }
 
             return $this->feedStatusResult(
@@ -388,7 +417,7 @@ class RatioBotRuntimeQueryService
             ],
         ]);
 
-        $staleFeedState = $this->breakers->staleFeedState($workspaceId);
+        $staleFeedState = $this->breakers->staleFeedState($workspaceId, $config->normalizedSymbol());
         if ((bool) ($staleFeedState['active'] ?? false)) {
             return $this->feedStatusResult('STALE_FEED', 'stale_feed_breaker_active', $state, $maxAge, ['breaker' => $staleFeedState, 'snapshot' => $snapshot]);
         }
@@ -419,7 +448,7 @@ class RatioBotRuntimeQueryService
             'max_age_seconds' => $maxAge,
             'connection_state' => $snapshot['connection_state'] ?? FeedState::STALE->value,
             'reason' => $snapshot['stale_reason'] ?? 'selected_symbol_snapshot_not_fresh',
-        ], 'market_snapshot');
+        ], 'market_snapshot', $config->normalizedSymbol());
 
         return $this->feedStatusResult(
             'STALE_FEED',

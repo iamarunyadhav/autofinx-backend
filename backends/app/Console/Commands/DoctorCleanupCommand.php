@@ -39,10 +39,7 @@ class DoctorCleanupCommand extends Command
             $this->artisanStep('migrate', 'Run migrations', 'migrate', ['--force' => true]);
         }
 
-        $this->processStep('remove_runtime_repair_cron', 'Remove runtime:repair cron entries', implode(' && ', [
-            'crontab -l > /tmp/autofinx-cron-backup-$(date +%Y%m%d-%H%M%S).txt 2>/dev/null || true',
-            '(crontab -l 2>/dev/null | grep -v "runtime:repair" | crontab -) || true',
-        ]));
+        $this->removeDuplicateSchedulerCronEntries();
 
         $this->processStep('stop_supervisor_runtime', 'Stop supervisor runtime services', $this->supervisorCommand('stop'));
 
@@ -75,7 +72,15 @@ class DoctorCleanupCommand extends Command
         sleep($sleep);
 
         $this->processStep('supervisor_status', 'Supervisor status', 'supervisorctl status 2>&1 || true');
-        $this->artisanStep('horizon_status', 'Horizon status', 'horizon:status');
+        // laravel/horizon is not installed in this app (no config/horizon.php,
+        // not in composer.json) — calling horizon:status unconditionally always
+        // failed here, which dragged overallOk() to false even when every real
+        // check passed (AUTOFINX_PHASE1B_ARCHITECTURE_AUDIT_2026-09-02.md §5).
+        if (class_exists(\Laravel\Horizon\Horizon::class)) {
+            $this->artisanStep('horizon_status', 'Horizon status', 'horizon:status');
+        } else {
+            $this->record('horizon_status', 'Horizon status', 'ok', [], 'Horizon package not installed — skipped, not applicable');
+        }
         $this->feedAgeCheck();
         $this->runtimeStatusCheck();
         $this->processStep('process_check', 'Process duplicate check', 'ps -eo pid,cmd | grep -E "future-trade:live-feed|market:ws-consume|runtime:repair|schedule:work|artisan schedule:run|horizon" | grep -v grep || true');
@@ -101,6 +106,56 @@ class DoctorCleanupCommand extends Command
         }
 
         return $ok ? self::SUCCESS : self::FAILURE;
+    }
+
+    /**
+     * The scheduler must have exactly one owner. Historically this step only
+     * stripped a stray `runtime:repair` cron line; a live 2026-09-02 server
+     * snapshot showed both Supervisor's `autofinx-scheduler` (schedule:work)
+     * AND a crontab `php artisan schedule:run` entry running simultaneously
+     * at the same time — the crontab line sat directly under a comment
+     * falsely claiming it was "temporarily disabled", so every scheduled job
+     * (health checks, stale-feed detection, reconciliation, etc.) was firing
+     * roughly twice as often as intended.
+     *
+     * Only strip the `schedule:run` cron line when Supervisor's own
+     * schedule:work daemon is confirmed running — if it isn't, cron is the
+     * only thing actually driving the scheduler, and removing it would leave
+     * nothing running the scheduler at all.
+     */
+    private function removeDuplicateSchedulerCronEntries(): void
+    {
+        $supervisorOwnsScheduler = $this->supervisorScheduleWorkActive();
+
+        $filters = ['grep -v "runtime:repair"'];
+        if ($supervisorOwnsScheduler) {
+            $filters[] = 'grep -v "artisan schedule:run"';
+        }
+
+        $command = implode(' && ', [
+            'crontab -l > /tmp/autofinx-cron-backup-$(date +%Y%m%d-%H%M%S).txt 2>/dev/null || true',
+            '(crontab -l 2>/dev/null | '.implode(' | ', $filters).' | crontab -) || true',
+        ]);
+
+        $this->processStep(
+            'remove_duplicate_scheduler_cron',
+            $supervisorOwnsScheduler
+                ? 'Remove runtime:repair and duplicate schedule:run cron entries'
+                : 'Remove runtime:repair cron entries (schedule:run left in place — Supervisor scheduler not confirmed running)',
+            $command,
+        );
+    }
+
+    private function supervisorScheduleWorkActive(): bool
+    {
+        try {
+            $process = Process::fromShellCommandline('supervisorctl status autofinx-scheduler 2>&1', base_path(), null, null, 15);
+            $process->run();
+
+            return $process->isSuccessful() && str_contains(strtoupper($process->getOutput()), 'RUNNING');
+        } catch (Throwable) {
+            return false;
+        }
     }
 
     private function supervisorCommand(string $action): string

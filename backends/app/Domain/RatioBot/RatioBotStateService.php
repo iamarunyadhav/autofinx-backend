@@ -910,9 +910,16 @@ class RatioBotStateService
     {
         $state = $this->getOrCreate($config);
 
-        // Only resume from paused, not from hard blocked
-        if ($state->position_state !== RatioBotState::STATE_PAUSED) {
-            Log::warning('[RatioBot] Resume called on non-paused bot', ['config_id' => $config->id, 'state' => $state->position_state]);
+        // Resume from either a manual pause or a hard block. Previously this
+        // only accepted STATE_PAUSED, so an operator hitting "Resume" on a
+        // block() 'd bot (order-failure streak, exchange-unhealthy, etc.)
+        // silently did nothing — the only way out was some other endpoint
+        // the UI may not have even exposed. resumableTradingState() already
+        // derives the correct state to return to (idle/flat/holding/...)
+        // from the position's own last-trade data regardless of which of
+        // the two states we're leaving.
+        if (! in_array($state->position_state, [RatioBotState::STATE_PAUSED, RatioBotState::STATE_BLOCKED], true)) {
+            Log::warning('[RatioBot] Resume called on non-paused, non-blocked bot', ['config_id' => $config->id, 'state' => $state->position_state]);
             return;
         }
 
@@ -921,6 +928,7 @@ class RatioBotStateService
             'block_reason_code'   => null,
             'block_reason_detail' => null,
             'paused_at'           => null,
+            'recovery_action_required' => false,
         ]);
         $config->update(['enabled' => true]);
         $this->emitEvent($config, RatioBotEvent::EVENT_RESUMED, [], $userId);
@@ -974,18 +982,37 @@ class RatioBotStateService
     public function markTransientFeedBlock(RatioBotConfig $config, string $reasonCode, string $detail, array $context = []): void
     {
         $state = $this->getOrCreate($config);
+        $meta = (array) ($state->runtime_meta ?? []);
+        $previousSafeState = $meta['previous_safe_position_state'] ?? null;
+        if ($previousSafeState === null && $state->isTrading()) {
+            $previousSafeState = $state->position_state;
+        }
+        $attempts = (int) ($state->reconnect_attempts ?? data_get($meta, 'transient_feed_block.reconnect_attempts', 0));
+
         $state->update([
             'feed_status' => 'recovering',
             'feed_status_updated_at' => now(),
+            'last_feed_event_at' => now(),
+            'feed_age_seconds' => $context['age_seconds'] ?? null,
+            'degradation_started_at' => $state->degradation_started_at ?? now(),
+            'reconnect_attempts' => $attempts + 1,
+            'consecutive_healthy_events' => 0,
+            'blocker_class' => 'transient',
             'block_reason_code' => $reasonCode,
             'block_reason_detail' => $detail,
-            'recovery_action_required' => true,
+            'operator_action_required' => false,
+            'recovery_action_required' => false,
             'last_runtime_error' => $detail,
-            'runtime_meta' => array_merge((array) ($state->runtime_meta ?? []), [
+            'runtime_meta' => array_merge($meta, [
+                'runtime_state' => 'recovering',
+                'previous_safe_position_state' => $previousSafeState,
                 'transient_feed_block' => [
                     'code' => $reasonCode,
+                    'class' => 'transient',
                     'detail' => $detail,
                     'context' => $context,
+                    'reconnect_attempts' => $attempts + 1,
+                    'operator_action_required' => false,
                     'at' => now()->toIso8601String(),
                 ],
             ]),
@@ -1004,22 +1031,39 @@ class RatioBotStateService
             return;
         }
 
+        $healthyEvents = (int) ($state->consecutive_healthy_events ?? 0) + 1;
+        $requiredHealthyEvents = max(1, (int) config('market_data.recovery.healthy_events_required', 2));
+        $shouldRecover = $healthyEvents >= $requiredHealthyEvents;
+        $meta = (array) ($state->runtime_meta ?? []);
+
         $state->update([
-            'feed_status' => 'healthy',
+            'feed_status' => $shouldRecover ? 'healthy' : 'recovering',
             'feed_status_updated_at' => now(),
-            'block_reason_code' => null,
-            'block_reason_detail' => null,
+            'last_feed_event_at' => now(),
+            'last_feed_healthy_at' => now(),
+            'feed_age_seconds' => $context['price_age_seconds'] ?? null,
+            'consecutive_healthy_events' => $healthyEvents,
+            'recovered_at' => $shouldRecover ? now() : $state->recovered_at,
+            'degradation_started_at' => $shouldRecover ? null : $state->degradation_started_at,
+            'blocker_class' => $shouldRecover ? null : 'transient',
+            'block_reason_code' => $shouldRecover ? null : $state->block_reason_code,
+            'block_reason_detail' => $shouldRecover ? null : $state->block_reason_detail,
+            'operator_action_required' => false,
             'recovery_action_required' => false,
-            'last_runtime_error' => null,
-            'runtime_meta' => array_merge((array) ($state->runtime_meta ?? []), [
+            'last_runtime_error' => $shouldRecover ? null : $state->last_runtime_error,
+            'runtime_meta' => array_merge($meta, [
+                'runtime_state' => $shouldRecover ? 'running' : 'recovering',
                 'transient_feed_recovered' => [
                     'context' => $context,
+                    'healthy_events' => $healthyEvents,
+                    'required_healthy_events' => $requiredHealthyEvents,
+                    'recovered' => $shouldRecover,
                     'at' => now()->toIso8601String(),
                 ],
             ]),
         ]);
 
-        $this->emitEvent($config, RatioBotEvent::EVENT_FEED_HEALTH_CHANGED, ['status' => 'healthy', 'transient_recovered' => true] + $context);
+        $this->emitEvent($config, RatioBotEvent::EVENT_FEED_HEALTH_CHANGED, ['status' => $shouldRecover ? 'healthy' : 'recovering', 'transient_recovered' => $shouldRecover] + $context);
     }
 
     public function enterCooldown(RatioBotConfig $config, int $seconds): void

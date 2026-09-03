@@ -108,11 +108,22 @@ class RatioBotStartupChecklistTest extends TestCase
     /** @test */
     public function fresh_selected_symbol_snapshot_clears_stale_breaker_and_passes_market_feed(): void
     {
-        $config = $this->createConfig(['stale_feed_timeout_seconds' => 30]);
+        // evaluation_mode must be a realtime mode here: a polling-mode bot's
+        // market_feed checklist item is judged purely from its own
+        // last_price_timestamp (see effectiveFeedStatus's early return for
+        // !usesRealtimeFeed()) and never touches the stale-feed breaker at
+        // all — that's correct for polling mode, but it would make this
+        // specific test (which is about the breaker-clearing path) exercise
+        // the wrong branch and pass for the wrong reason.
+        $config = $this->createConfig(['stale_feed_timeout_seconds' => 30, 'evaluation_mode' => 'websocket']);
+        // Activated on the symbol-scoped key, matching how DetectStaleFeedsJob
+        // and the evaluation/readiness paths actually key this breaker post-fix
+        // (workspace_id + symbol, not workspace_id alone) — see
+        // AUTOFINX_PHASE1B_ARCHITECTURE_AUDIT_2026-09-02.md §4/§16 item 3.
         app(OperationalBreakerService::class)->activateStaleFeedBreaker((string) $this->workspace->id, [
             'symbol' => 'BTCUSDT',
             'reason' => 'old_stale_state',
-        ]);
+        ], 'monitoring', 'BTCUSDT');
 
         app(RealtimeMarketFeedService::class)->ingest([
             'stream' => 'btcusdt@trade',
@@ -129,7 +140,7 @@ class RatioBotStartupChecklistTest extends TestCase
         $response->assertOk();
         $item = collect($response->json('items'))->firstWhere('key', 'market_feed');
         $this->assertSame('pass', $item['status']);
-        $this->assertFalse(app(OperationalBreakerService::class)->isStaleFeedBreakerActive((string) $this->workspace->id));
+        $this->assertFalse(app(OperationalBreakerService::class)->isStaleFeedBreakerActive((string) $this->workspace->id, 'BTCUSDT'));
     }
 
     /** @test */

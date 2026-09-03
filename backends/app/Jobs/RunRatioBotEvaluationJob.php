@@ -12,6 +12,7 @@ use App\Domain\Ops\OperationalBreakerService;
 use App\Domain\RatioBot\RatioBotAlertService;
 use App\Domain\RatioBot\RatioBotDecisionService;
 use App\Domain\RatioBot\RatioBotRealtimeEngine;
+use App\Domain\RatioBot\RatioBotRuntimeQueryService;
 use App\Domain\RatioBot\RatioBotStateService;
 use App\Models\ExchangeConnection;
 use App\Models\Order;
@@ -38,7 +39,7 @@ class RunRatioBotEvaluationJob implements ShouldQueue, ShouldBeUnique
 
     public int $tries = 1;
     public int $timeout = 60;
-    public int $uniqueFor = 75;
+    public int $uniqueFor = 5;
 
     public function __construct(
         public readonly string $ratioBotConfigId,
@@ -50,7 +51,7 @@ class RunRatioBotEvaluationJob implements ShouldQueue, ShouldBeUnique
     public function middleware(): array
     {
         return [
-            (new WithoutOverlapping('ratio-bot-eval:' . $this->ratioBotConfigId))->expireAfter(55),
+            (new WithoutOverlapping('ratio-bot-eval:' . $this->ratioBotConfigId))->expireAfter(10),
         ];
     }
 
@@ -70,6 +71,7 @@ class RunRatioBotEvaluationJob implements ShouldQueue, ShouldBeUnique
         OperationalBreakerService $breakers,
         BinanceSpotHealthService $health,
         RatioBotAlertService $alerts,
+        RatioBotRuntimeQueryService $wallet,
     ): void {
         $config = RatioBotConfig::with('state')->find($this->ratioBotConfigId);
 
@@ -83,10 +85,10 @@ class RunRatioBotEvaluationJob implements ShouldQueue, ShouldBeUnique
             return;
         }
 
-        $lockKey = 'ratio-bot-eval-symbol:' . $config->workspace_id . ':' . $config->normalizedSymbol();
-        $lock = Cache::lock($lockKey, 55);
+        $lockKey = 'ratio-bot-eval-bot:' . $config->id;
+        $lock = Cache::lock($lockKey, 10);
         if (! $lock->get()) {
-            Log::warning('[RatioBotJob] Duplicate evaluation blocked by workspace/symbol lock', [
+            Log::debug('[RatioBotJob] Duplicate evaluation blocked by per-bot lock', [
                 'config_id' => $config->id,
                 'symbol' => $config->normalizedSymbol(),
                 'lock_key' => $lockKey,
@@ -142,6 +144,11 @@ class RunRatioBotEvaluationJob implements ShouldQueue, ShouldBeUnique
                 return;
             }
 
+            if ($config->state?->isIdle()) {
+                $this->maybeAutoAnchor($config, (float) $pricePayload['price'], $wallet, $stateService);
+                $config = $config->fresh('state');
+            }
+
             $result = $engine->evaluate($config, (float) $pricePayload['price'], [
                 'price_source' => $pricePayload['source'],
                 'price_timestamp' => $pricePayload['timestamp'],
@@ -153,6 +160,151 @@ class RunRatioBotEvaluationJob implements ShouldQueue, ShouldBeUnique
         } finally {
             $lock->release();
         }
+    }
+
+    /**
+     * A bot that has never been anchored sits idle forever waiting for an
+     * operator to call /anchor-buy or /anchor-sell — Ratio Bot is meant to be
+     * fully automatic. When idle, look at what the account actually holds and
+     * anchor automatically:
+     *   - base asset funded, quote asset not  -> anchor as if just bought
+     *     (HOLDING, watches for a SELL trigger).
+     *   - quote asset funded, base asset not  -> anchor as if just sold
+     *     (FLAT, watches for a BUY trigger).
+     *   - both funded                         -> initialize from whichever
+     *     side is worth more at the current price (converted to the same
+     *     quote-currency unit so they're comparable): the dominant side sets
+     *     the anchor, exactly as if the smaller side were rounding/dust. This
+     *     is a deterministic balance-based rule, not a guess — it never
+     *     invents a position, it only picks which of the two REAL balances
+     *     the bot starts watching from.
+     *   - neither funded                      -> stays idle; nothing to
+     *     anchor from yet (WAITING FOR FUNDS). Still requires a manual
+     *     /anchor-* call once funded, same as before.
+     * Live mode reads the real exchange balance; sandbox mode has no real
+     * wallet, so it treats the bot's configured starting capital
+     * (base_quote_amount) as the quote-asset side, unless starting_entry is
+     * explicitly SELL — that path declares a fictional starting coin
+     * position the operator must state themselves via
+     * /anchor-starting-inventory, since there is nothing to auto-detect it
+     * from.
+     */
+    private const MIN_AUTO_ANCHOR_NOTIONAL_USDT = 10.0;
+
+    private function maybeAutoAnchor(
+        RatioBotConfig $config,
+        float $currentPrice,
+        RatioBotRuntimeQueryService $wallet,
+        RatioBotStateService $stateService,
+    ): void {
+        if ($currentPrice <= 0) {
+            return;
+        }
+
+        if ($config->isSandbox()) {
+            $this->maybeAutoAnchorSandbox($config, $currentPrice, $stateService);
+            return;
+        }
+
+        if (! $config->isLiveMode()) {
+            return;
+        }
+
+        $balances = $wallet->walletBalances($config);
+        $baseAvailable = (float) data_get($balances, 'base.available', data_get($balances, 'base.balance', 0));
+        $quoteAvailable = (float) data_get($balances, 'quote.available', data_get($balances, 'quote.balance', 0));
+
+        // Multiple live bots on the same symbol share one real exchange
+        // balance. Order execution already re-checks the live balance and
+        // caps quantity at fill time (capBuyQuoteToLiveBalance/
+        // capSellQtyToLiveBalance), so this can never double-spend — but
+        // without this, every sibling bot would independently auto-anchor
+        // against the FULL shared balance, each behaving as if it alone owns
+        // it, which is confusing and generates avoidable
+        // resolved_order_quantity_is_zero noise when they all try to act on
+        // the same trigger. Give each sibling an equal, non-overlapping
+        // share of the balance to anchor from instead.
+        $siblingCount = $this->liveSiblingBotCount($config);
+        if ($siblingCount > 1) {
+            $baseAvailable /= $siblingCount;
+            $quoteAvailable /= $siblingCount;
+        }
+
+        $baseNotional = $baseAvailable * $currentPrice;
+        $hasBase = $baseNotional >= self::MIN_AUTO_ANCHOR_NOTIONAL_USDT;
+        $hasQuote = $quoteAvailable >= self::MIN_AUTO_ANCHOR_NOTIONAL_USDT;
+
+        if (! $hasBase && ! $hasQuote) {
+            return;
+        }
+
+        // Both funded: the larger side (compared in the same quote-currency
+        // unit) wins. A tie is resolved toward the quote side (BUY WATCH),
+        // the lower-immediate-risk starting posture since it doesn't commit
+        // an existing coin balance to a directional bet.
+        if ($hasBase && (! $hasQuote || $baseNotional > $quoteAvailable)) {
+            $stateService->anchorManualBuy(config: $config, buyPrice: $currentPrice, quantity: $baseAvailable, orderId: 'auto-anchor');
+            Log::info('[RatioBotJob] Auto-anchored from live base-asset balance (now watching for SELL)', [
+                'config_id' => $config->id,
+                'base_available' => $baseAvailable,
+                'base_notional' => $baseNotional,
+                'quote_available' => $quoteAvailable,
+                'price' => $currentPrice,
+            ]);
+            return;
+        }
+
+        $impliedQty = max(round($quoteAvailable / $currentPrice, 8), 0.00000001);
+        $stateService->anchorManualSell(config: $config, sellPrice: $currentPrice, quantity: $impliedQty, orderId: 'auto-anchor');
+        Log::info('[RatioBotJob] Auto-anchored from live quote-asset balance (now watching for BUY)', [
+            'config_id' => $config->id,
+            'quote_available' => $quoteAvailable,
+            'base_available' => $baseAvailable,
+            'base_notional' => $baseNotional,
+            'price' => $currentPrice,
+        ]);
+    }
+
+    /**
+     * How many enabled LIVE bots (this one included) target the same
+     * workspace + symbol, and therefore share the same real exchange
+     * balance. Sandbox bots never call this — each has its own independent
+     * configured base_quote_amount, no shared wallet, no conflict.
+     */
+    private function liveSiblingBotCount(RatioBotConfig $config): int
+    {
+        $symbol = $config->normalizedSymbol();
+
+        return max(1, RatioBotConfig::query()
+            ->where('workspace_id', $config->workspace_id)
+            ->where('execution_mode', 'live')
+            ->where('enabled', true)
+            ->get(['id', 'symbol'])
+            ->filter(fn (RatioBotConfig $sibling) => $sibling->normalizedSymbol() === $symbol)
+            ->count());
+    }
+
+    private function maybeAutoAnchorSandbox(
+        RatioBotConfig $config,
+        float $currentPrice,
+        RatioBotStateService $stateService,
+    ): void {
+        if ($config->startingEntry() === 'SELL') {
+            return;
+        }
+
+        $quoteAmount = (float) ($config->base_quote_amount ?? 0);
+        if ($quoteAmount < self::MIN_AUTO_ANCHOR_NOTIONAL_USDT) {
+            return;
+        }
+
+        $impliedQty = max(round($quoteAmount / $currentPrice, 8), 0.00000001);
+        $stateService->anchorManualSell(config: $config, sellPrice: $currentPrice, quantity: $impliedQty, orderId: 'auto-anchor');
+        Log::info('[RatioBotJob] Auto-anchored sandbox bot from configured starting capital (now watching for BUY)', [
+            'config_id' => $config->id,
+            'base_quote_amount' => $quoteAmount,
+            'price' => $currentPrice,
+        ]);
     }
 
     private function fetchPricePayload(
@@ -300,7 +452,12 @@ class RunRatioBotEvaluationJob implements ShouldQueue, ShouldBeUnique
             );
         }
 
-        $staleFeedState = $breakers->staleFeedState($workspaceId);
+        // Symbol-scoped, not workspace-scoped: a stale SOLUSDT bot in this
+        // workspace must never gate a healthy BTCUSDT bot (or a sibling
+        // BTCUSDT bot) in the same workspace. Every bot on the same symbol
+        // correctly shares this same breaker, since they all consume the
+        // same underlying price feed for that symbol.
+        $staleFeedState = $breakers->staleFeedState($workspaceId, $symbol);
         if ((bool) ($staleFeedState['active'] ?? false)) {
             $snapshot = (array) data_get($pricePayload, 'quality.snapshot', []);
             if ((bool) ($snapshot['is_fresh'] ?? false)) {
@@ -309,7 +466,7 @@ class RunRatioBotEvaluationJob implements ShouldQueue, ShouldBeUnique
                     'received_at' => $snapshot['received_at'] ?? null,
                     'age_ms' => $snapshot['age_ms'] ?? null,
                     'reason' => 'selected_symbol_snapshot_fresh_before_evaluation',
-                ], 'ratio_bot_evaluation');
+                ], 'ratio_bot_evaluation', $symbol);
             } else {
                 return $this->healthBlock(
                     'STALE_FEED',

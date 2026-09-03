@@ -9,14 +9,14 @@ class CoinbaseAdapter implements ExchangeAdapterInterface
 {
     private function ensureEnabled(): void
     {
-        if (!env('LIVE_TRADING_ENABLED', false) || !env('COINBASE_ENABLED', false)) {
+        if (!config('services.live_trading_enabled', false) || !config('services.coinbase_enabled', false)) {
             throw new RuntimeException('Coinbase live trading disabled');
         }
     }
 
     public function testConnection(array $credentials): array
     {
-        $base = $credentials['base_url'] ?? env('COINBASE_BASE_URL', 'https://api.coinbase.com');
+        $base = $credentials['base_url'] ?? config('services.coinbase.base_url', 'https://api.coinbase.com');
         $response = Http::get("{$base}/v2/time");
         return [
             'ok' => $response->successful(),
@@ -26,7 +26,7 @@ class CoinbaseAdapter implements ExchangeAdapterInterface
 
     public function fetchTicker(string $symbol): array
     {
-        $base = env('COINBASE_BASE_URL', 'https://api.coinbase.com');
+        $base = config('services.coinbase.base_url', 'https://api.coinbase.com');
         $response = Http::get("{$base}/v2/prices/{$symbol}/spot");
         if (!$response->successful()) {
             return ['symbol' => $symbol, 'price' => null];

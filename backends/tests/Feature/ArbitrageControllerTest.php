@@ -1,12 +1,14 @@
 <?php
 
 use App\Models\ExchangeConnection;
+use App\Models\User;
 use App\Models\Workspace;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 
 uses(RefreshDatabase::class);
 
 it('returns arbitrage opportunities when multiple connections exist', function () {
+    $user = User::factory()->create();
     $workspace = Workspace::factory()->create();
     ExchangeConnection::factory()->create([
         'workspace_id' => $workspace->id,
@@ -23,7 +25,7 @@ it('returns arbitrage opportunities when multiple connections exist', function (
         'is_enabled' => true,
     ]);
 
-    $res = $this->getJson("/api/v1/workspaces/{$workspace->id}/arbitrage?symbols[]=BTCUSDT")
+    $res = $this->actingAs($user)->getJson("/api/v1/workspaces/{$workspace->id}/arbitrage?symbols[]=BTCUSDT")
         ->assertOk()
         ->json();
 

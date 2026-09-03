@@ -108,6 +108,118 @@ test('robot session evaluates in live mode and opens a live quick trade', functi
         ->and(RobotSession::findOrFail($session->id)->mode)->toBe('live');
 });
 
+test('robot session evaluation is locked against concurrent duplicate execution', function () {
+    // Reproduces the production condition where the Supervisor
+    // autofinx-robot-evaluator daemon and Laravel's scheduler (schedule:work +
+    // schedule:run both active) can call evaluateSession() for the same
+    // session at nearly the same instant. Without a per-session lock, both
+    // callers could pass the cooldown/active-trade checks and each place a
+    // live order for one signal.
+    $user = User::factory()->create();
+    $workspace = Workspace::factory()->create();
+    $integration = robotLiveIntegration($workspace->id);
+
+    robotSeedLiveTradingSettings($workspace->id, $integration->id);
+
+    Http::fake(function (\Illuminate\Http\Client\Request $request) {
+        $url = $request->url();
+
+        if (str_contains($url, '/fapi/v2/balance')) {
+            return Http::response([
+                ['asset' => 'USDT', 'balance' => '1000.00', 'availableBalance' => '1000.00'],
+            ], 200);
+        }
+
+        if (str_contains($url, '/fapi/v1/ticker/price')) {
+            return Http::response(['symbol' => 'ETHUSDT', 'price' => '2000.00'], 200);
+        }
+
+        if (str_contains($url, '/fapi/v1/exchangeInfo')) {
+            return Http::response([
+                'symbols' => [[
+                    'filters' => [[
+                        'filterType' => 'MARKET_LOT_SIZE',
+                        'stepSize' => '0.001',
+                        'minQty' => '0.001',
+                    ], [
+                        'filterType' => 'MIN_NOTIONAL',
+                        'notional' => '20.00000000',
+                    ]],
+                ]],
+            ], 200);
+        }
+
+        if (str_contains($url, '/fapi/v1/klines')) {
+            $rows = [];
+            for ($i = 0; $i < 100; $i++) {
+                $open = 1701 + ($i * 3);
+                $close = $open + 2;
+                $rows[] = [
+                    1700000000000 + ($i * 60000),
+                    (string) $open,
+                    (string) ($close + 20),
+                    (string) ($open - 20),
+                    (string) $close,
+                    '100',
+                ];
+            }
+
+            return Http::response($rows, 200);
+        }
+
+        if (str_contains($url, '/fapi/v1/order') && $request->method() === 'POST') {
+            return Http::response([
+                'orderId' => '7771',
+                'avgPrice' => '2000.00',
+                'executedQty' => '0.010',
+            ], 200);
+        }
+
+        return Http::response([], 200);
+    });
+
+    $session = app(RobotSessionService::class)->create($workspace->id, [
+        'name' => 'ETH live robot',
+        'symbol' => 'ETHUSDT',
+        'timeframe' => '1m',
+        'expiry_seconds' => 60,
+        'indicator_set' => ['MACD'],
+        'strategy_profile' => 'balanced',
+        'base_stake' => 20,
+        'confidence_threshold' => 50,
+        'provider' => 'binance',
+        'integration_id' => $integration->id,
+    ], $user->id);
+
+    $session = app(RobotSessionService::class)->start($session);
+    seedRobotFeedStatus($workspace->id, 'ETHUSDT', 2000.00);
+    seedRobotLiveFeed('ETHUSDT', 2000.00);
+
+    // Get the session past the signal-confirmation streak so it would place a
+    // trade on the very next call if nothing else blocked it.
+    app(RobotSessionService::class)->evaluateSession($session);
+
+    // Simulate a second, concurrent evaluator already holding the per-session
+    // lock (e.g. the Supervisor daemon mid-evaluation) when this call arrives.
+    $lock = \Illuminate\Support\Facades\Cache::lock('robot-session-eval:' . $session->id, 30);
+    expect($lock->get())->toBeTrue();
+
+    $result = app(RobotSessionService::class)->evaluateSession($session->fresh());
+
+    expect($result['status'])->toBe('locked')
+        ->and($result['action'])->toBe('skipped')
+        ->and(QuickTrade::where('robot_session_id', $session->id)->count())->toBe(0);
+
+    $lock->release();
+
+    // Once the lock is free, evaluation proceeds normally and places the trade
+    // — proving the lock blocks concurrent duplicates without wedging the bot.
+    $result = app(RobotSessionService::class)->evaluateSession($session->fresh());
+
+    expect($result['status'])->toBe('placed')
+        ->and(QuickTrade::where('robot_session_id', $session->id)->count())->toBe(1);
+});
+
 test('robot session blocks live entry when expected move cannot beat fees and slippage', function () {
     $user = User::factory()->create();
     $workspace = Workspace::factory()->create();
@@ -346,8 +458,16 @@ function seedRobotLiveFeed(string $symbol, float $price): void
 
 function clearRobotLiveFeed(string $symbol): void
 {
+    $symbol = strtoupper($symbol);
+
     try {
-        Redis::del('live-feed:binance_futures:'.strtoupper($symbol));
+        Redis::del(
+            'live-feed:binance_futures:'.$symbol,
+            'live-feed:binance_futures:*',
+            'market:live:'.$symbol,
+            'price:binance_futures:'.$symbol,
+            'ts:binance_futures:'.$symbol,
+        );
     } catch (Throwable) {
     }
 }

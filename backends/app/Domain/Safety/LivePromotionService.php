@@ -11,7 +11,7 @@ class LivePromotionService
 {
     public function request(string $workspaceId, string $userId, array $payload): PromotionRequest
     {
-        if (!env('LIVE_TRADING_ENABLED', false)) {
+        if (!config('services.live_trading_enabled', false)) {
             throw new RuntimeException('Live trading disabled');
         }
 

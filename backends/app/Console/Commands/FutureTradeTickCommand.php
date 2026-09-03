@@ -61,8 +61,11 @@ class FutureTradeTickCommand extends Command
                     : FutureTradeBotConfig::query()->with('state')->orderBy('slot_index')->get();
 
                 foreach ($configs as $config) {
-                    $config = $config->fresh('state');
-                    if (! $config || ! $config->enabled) {
+                    // $configs was just queried fresh this loop iteration
+                    // with('state') already eager-loaded — re-fetching here
+                    // was a pure duplicate query (2 extra DB round-trips per
+                    // config per loop pass, at up to a 500ms cadence).
+                    if (! $config->enabled) {
                         Log::info('[FT TICK WORKSPACE DISABLED]', [
                             'workspace_id' => $config?->workspace_id ?? $workspaceId ?: null,
                             'enabled' => (bool) ($config?->enabled ?? false),

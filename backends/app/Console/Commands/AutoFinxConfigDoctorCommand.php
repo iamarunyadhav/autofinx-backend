@@ -3,6 +3,7 @@
 namespace App\Console\Commands;
 
 use Illuminate\Console\Command;
+use Illuminate\Support\Facades\File;
 
 class AutoFinxConfigDoctorCommand extends Command
 {
@@ -35,9 +36,36 @@ class AutoFinxConfigDoctorCommand extends Command
         $supervisorRuntime = (bool) config('autofinx.runtime.supervisor', false);
         $scheduledRuntime = (bool) config('future_trade.schedule.runtime_commands', false);
         $marketConsumers = (bool) config('autofinx.scheduler.market_consumers', false);
-        $schedulerConflict = $supervisorRuntime && $scheduledRuntime;
+        $schedulerConflict = $supervisorRuntime && ($scheduledRuntime || $marketConsumers);
         if (! $this->check('No scheduler/supervisor market-feed conflict', ! $schedulerConflict, 'supervisor='.($supervisorRuntime ? 'yes' : 'no').', scheduled_runtime='.($scheduledRuntime ? 'yes' : 'no').', market_consumers='.($marketConsumers ? 'yes' : 'no'))) {
             $fail = true;
+        }
+
+        $horizonEnabled = (bool) config('queue_control.horizon_enabled', false);
+        $horizonInstalled = class_exists(\Laravel\Horizon\Horizon::class) || File::exists(config_path('horizon.php'));
+        if (! $this->check('Horizon flag matches installed package', ! $horizonEnabled || $horizonInstalled, 'enabled='.($horizonEnabled ? 'yes' : 'no').', installed='.($horizonInstalled ? 'yes' : 'no'))) {
+            $fail = true;
+        }
+
+        $catalogQueues = array_keys((array) config('queue_control.queues', []));
+        $profileQueues = collect((array) config('queue_control.worker_profiles', []))
+            ->flatMap(fn (array $profile) => (array) ($profile['queues'] ?? []))
+            ->unique()
+            ->values()
+            ->all();
+        $missingQueues = array_values(array_diff($catalogQueues, $profileQueues));
+        if (! $this->check('Every configured queue has worker profile', $missingQueues === [], $missingQueues === [] ? 'covered' : implode(',', $missingQueues))) {
+            $fail = true;
+        }
+
+        $globalTradingMode = strtolower((string) env('TRADING_MODE', ''));
+        $futureLive = (bool) config('future_trade.enable_live_trading', false);
+        $futurePaper = (bool) config('future_trade.paper_trading', true);
+        if (! $this->check('Future Trade paper/live flags are not mixed', ! ($futureLive && $futurePaper), 'future_live='.($futureLive ? 'true' : 'false').', future_paper='.($futurePaper ? 'true' : 'false'))) {
+            $fail = true;
+        }
+        if (! $this->check('Global trading mode agrees with Future Trade live', ! ($globalTradingMode === 'paper' && $futureLive), 'TRADING_MODE='.($globalTradingMode ?: 'unset').', future_live='.($futureLive ? 'true' : 'false'))) {
+            $warn = true;
         }
 
         if (! $this->check('Future Trade live trading disabled by default', ! (bool) config('future_trade.enable_live_trading'), 'live='.((bool) config('future_trade.enable_live_trading') ? 'true' : 'false'))) {

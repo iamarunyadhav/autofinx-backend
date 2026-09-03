@@ -40,8 +40,8 @@ class RealtimeMarketFeedService
     private const FEED_STATUS_WRITE_INTERVAL_S = 12;
     private const RATIO_STATE_WRITE_INTERVAL_S  = 30;
 
-    /** Block reasons a sandbox bot may recover from on its own once the underlying condition clears. */
-    private const AUTO_RECOVERABLE_SANDBOX_CODES = ['feed_stale', 'stale_feed', 'exchange_unhealthy', 'websocket_unhealthy'];
+    /** Block reasons a bot (sandbox or live) may recover from on its own once the underlying condition clears. */
+    private const AUTO_RECOVERABLE_BLOCK_CODES = ['feed_stale', 'stale_feed', 'exchange_unhealthy', 'websocket_unhealthy'];
 
     public function __construct(
         private readonly MarketPriceCacheService $prices,
@@ -340,9 +340,9 @@ class RealtimeMarketFeedService
                 $config->state?->update(['last_candle_close_at' => Carbon::createFromTimestampMs($eventTimestampMs)]);
             }
 
-            if (! $config->enabled && $config->execution_mode === 'sandbox'
-                && in_array(strtolower((string) $config->state?->block_reason_code), self::AUTO_RECOVERABLE_SANDBOX_CODES, true)) {
-                $this->maybeAutoRecoverStaleSandboxBot($config, $exchangeKey, $symbol);
+            if (! $config->enabled
+                && in_array(strtolower((string) $config->state?->block_reason_code), self::AUTO_RECOVERABLE_BLOCK_CODES, true)) {
+                $this->maybeAutoRecoverBlockedBot($config, $exchangeKey, $symbol);
             }
 
             if (! $dispatchEvaluations || ! $config->enabled) {
@@ -369,18 +369,20 @@ class RealtimeMarketFeedService
     }
 
     /**
-     * Sandbox bots that got auto-disabled by RunRatioBotEvaluationJob's
-     * health guards (stale feed / exchange or websocket breaker) never come
-     * back on their own — the operator has to notice and click Start again.
-     * Since sandbox mode risks no real money, self-heal them the moment the
-     * underlying condition clears. Deliberately NOT covered here:
-     * ORDER_FAILURE_STREAK — that means real (simulated) order submissions
-     * kept failing, which points at a config/API bug rather than a transient
-     * blip, so it always needs a human to look before resuming. Live-mode
-     * bots are untouched everywhere in this method — those guards stay a
-     * manual, operator-confirmed restart regardless of execution mode.
+     * Bots (sandbox or live) that got auto-disabled by
+     * RunRatioBotEvaluationJob's health guards (stale feed / exchange or
+     * websocket breaker) never come back on their own — the operator has to
+     * notice and click Start again. Self-heal them the moment the underlying
+     * condition actually clears (breaker no longer active and a fresh price
+     * is available) rather than on a blind timer: if the condition hasn't
+     * really cleared, the very next evaluation just re-blocks the bot, so
+     * this is bounded, not a way to bypass a still-broken connection.
+     * Deliberately NOT covered here: ORDER_FAILURE_STREAK — that means real
+     * order submissions kept failing, which points at a config/API bug
+     * rather than a transient blip, so it always needs a human to look
+     * before resuming.
      */
-    private function maybeAutoRecoverStaleSandboxBot(RatioBotConfig $config, string $exchangeKey, string $symbol): void
+    private function maybeAutoRecoverBlockedBot(RatioBotConfig $config, string $exchangeKey, string $symbol): void
     {
         $code = strtolower((string) $config->state?->block_reason_code);
 
@@ -404,9 +406,10 @@ class RealtimeMarketFeedService
         }
 
         $this->ratioBotState->start($config);
-        Log::info('[RatioBot] Auto-recovered sandbox bot after health guard cleared', [
+        Log::info('[RatioBot] Auto-recovered blocked bot after health guard cleared', [
             'config_id' => $config->id,
             'symbol' => $symbol,
+            'execution_mode' => $config->execution_mode,
             'code' => $code,
             'age_seconds' => $ageSeconds,
         ]);
@@ -490,7 +493,12 @@ class RealtimeMarketFeedService
             ->values();
 
         foreach ($workspaceIds as $workspaceId) {
-            if (! $this->breakers->isStaleFeedBreakerActive((string) $workspaceId)) {
+            // Cheap pre-check before the selectedSymbols()+snapshot work
+            // below (this runs on every matching tick): skip entirely unless
+            // either this symbol's own breaker or the workspace-wide one is
+            // actually active for this workspace.
+            if (! $this->breakers->isStaleFeedBreakerActive((string) $workspaceId, $symbol)
+                && ! $this->breakers->isStaleFeedBreakerActive((string) $workspaceId)) {
                 continue;
             }
 
@@ -499,18 +507,36 @@ class RealtimeMarketFeedService
             $snapshots = [];
             foreach ($symbols as $selectedSymbol) {
                 $snapshot = $this->snapshots->getLiveSnapshot('binance', $selectedSymbol, $this->exchangeKey($marketType), 15);
+                $isFresh = (bool) ($snapshot['is_fresh'] ?? false);
                 $snapshots[$selectedSymbol] = [
-                    'is_fresh' => (bool) ($snapshot['is_fresh'] ?? false),
+                    'is_fresh' => $isFresh,
                     'age_ms' => $snapshot['age_ms'] ?? null,
                     'received_at' => $snapshot['received_at'] ?? null,
                     'reason' => $snapshot['stale_reason'] ?? null,
                 ];
-                if (! (bool) ($snapshot['is_fresh'] ?? false)) {
+                if (! $isFresh) {
                     $allFresh = false;
+                    continue;
+                }
+
+                // Clear this symbol's own breaker independently of its
+                // siblings — a still-stale SOLUSDT bot in this workspace must
+                // never keep a healthy BTCUSDT bot's breaker stuck active.
+                if ($this->breakers->isStaleFeedBreakerActive((string) $workspaceId, $selectedSymbol)) {
+                    $this->breakers->clearStaleFeedBreaker((string) $workspaceId, [
+                        'symbol' => $selectedSymbol,
+                        'snapshot' => $snapshots[$selectedSymbol],
+                        'reason' => 'fresh_websocket_event_recovered_this_symbol',
+                    ], 'market_feed_ingest', $selectedSymbol);
                 }
             }
 
-            if ($allFresh) {
+            // Workspace-wide breaker: kept for the handful of consumers that
+            // intentionally still read it as a whole-workspace advisory
+            // signal (e.g. FuturesReadinessService's generic readiness
+            // display) — only cleared once every selected symbol in the
+            // workspace is fresh, same requirement as before.
+            if ($allFresh && $this->breakers->isStaleFeedBreakerActive((string) $workspaceId)) {
                 $this->breakers->clearStaleFeedBreaker((string) $workspaceId, [
                     'symbol' => strtoupper($symbol),
                     'symbols' => $symbols,

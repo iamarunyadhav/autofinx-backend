@@ -3,6 +3,7 @@
 namespace App\Domain\Trading;
 
 use App\Models\Setting;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 
 class RuntimeSafetySettingsService
@@ -80,6 +81,10 @@ class RuntimeSafetySettingsService
 
     private function value(string $key, ?string $workspaceId): mixed
     {
+        if (! Schema::hasTable('settings')) {
+            return null;
+        }
+
         if ($workspaceId) {
             $workspace = Setting::query()
                 ->where('workspace_id', $workspaceId)

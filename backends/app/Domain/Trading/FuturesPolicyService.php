@@ -41,7 +41,7 @@ class FuturesPolicyService
         if ($this->breakers->isProviderOutageActive($workspaceId, 'binance')) {
             $reasons[] = 'exchange_unhealthy';
         }
-        if ($this->breakers->isStaleFeedBreakerActive($workspaceId)) {
+        if ($this->breakers->isStaleFeedBreakerActive($workspaceId, $symbol !== '' ? $symbol : null)) {
             $reasons[] = 'stale_data_breaker_active';
         }
 

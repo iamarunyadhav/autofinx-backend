@@ -51,21 +51,30 @@ class OperationalBreakerService
         return $state;
     }
 
-    public function staleFeedState(?string $workspaceId): array
+    /**
+     * $symbol is optional and defaults to the original workspace-wide
+     * breaker (unchanged behavior for every existing caller). Pass a symbol
+     * to check/mutate a breaker scoped to just that symbol, so one stale
+     * symbol in a workspace doesn't gate every other symbol trading in the
+     * same workspace.
+     */
+    public function staleFeedState(?string $workspaceId, ?string $symbol = null): array
     {
-        return $this->loadState($workspaceId, 'stale_feed_breaker')
-            ?? $this->loadState(null, 'stale_feed_breaker')
+        $key = $this->staleFeedKey($symbol);
+
+        return $this->loadState($workspaceId, $key)
+            ?? $this->loadState(null, $key)
             ?? $this->defaultStaleFeedState();
     }
 
-    public function isStaleFeedBreakerActive(?string $workspaceId): bool
+    public function isStaleFeedBreakerActive(?string $workspaceId, ?string $symbol = null): bool
     {
-        return (bool) ($this->staleFeedState($workspaceId)['active'] ?? false);
+        return (bool) ($this->staleFeedState($workspaceId, $symbol)['active'] ?? false);
     }
 
-    public function activateStaleFeedBreaker(?string $workspaceId, array $context = [], string $source = 'monitoring'): array
+    public function activateStaleFeedBreaker(?string $workspaceId, array $context = [], string $source = 'monitoring', ?string $symbol = null): array
     {
-        $state = array_merge($this->staleFeedState($workspaceId), [
+        $state = array_merge($this->staleFeedState($workspaceId, $symbol), [
             'active' => true,
             'source' => $source,
             'activated_at' => now()->toIso8601String(),
@@ -73,23 +82,30 @@ class OperationalBreakerService
             'cleared_at' => null,
         ]);
 
-        $this->persistState($workspaceId, 'stale_feed_breaker', $state);
+        $this->persistState($workspaceId, $this->staleFeedKey($symbol), $state);
 
         return $state;
     }
 
-    public function clearStaleFeedBreaker(?string $workspaceId, array $context = [], string $source = 'monitoring'): array
+    public function clearStaleFeedBreaker(?string $workspaceId, array $context = [], string $source = 'monitoring', ?string $symbol = null): array
     {
-        $state = array_merge($this->staleFeedState($workspaceId), [
+        $state = array_merge($this->staleFeedState($workspaceId, $symbol), [
             'active' => false,
             'source' => $source,
             'cleared_at' => now()->toIso8601String(),
             'context' => $context,
         ]);
 
-        $this->persistState($workspaceId, 'stale_feed_breaker', $state);
+        $this->persistState($workspaceId, $this->staleFeedKey($symbol), $state);
 
         return $state;
+    }
+
+    private function staleFeedKey(?string $symbol): string
+    {
+        $symbol = $symbol !== null ? strtoupper(trim($symbol)) : '';
+
+        return $symbol !== '' ? 'stale_feed_breaker:' . $symbol : 'stale_feed_breaker';
     }
 
     public function streamState(ExchangeConnection $connection): array

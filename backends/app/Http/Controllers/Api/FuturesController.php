@@ -74,12 +74,14 @@ class FuturesController extends Controller
     public function positions(Request $request, string $workspaceId)
     {
         $this->assertWorkspaceAccess($workspaceId, $request->user()?->id);
+        $limit = max(1, min(200, (int) $request->integer('limit', 100)));
 
         return response()->json(
             Position::query()
                 ->where('workspace_id', $workspaceId)
                 ->where('market_type', 'futures')
                 ->orderByDesc('updated_at')
+                ->limit($limit)
                 ->get()
         );
     }
@@ -87,12 +89,14 @@ class FuturesController extends Controller
     public function orders(Request $request, string $workspaceId)
     {
         $this->assertWorkspaceAccess($workspaceId, $request->user()?->id);
+        $limit = max(1, min(200, (int) $request->integer('limit', 100)));
 
         return response()->json(
             Order::query()
                 ->where('workspace_id', $workspaceId)
                 ->where('meta->market_type', 'futures')
                 ->orderByDesc('created_at')
+                ->limit($limit)
                 ->get()
         );
     }

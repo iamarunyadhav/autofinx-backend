@@ -58,13 +58,26 @@ class DetectStaleFeedsJob implements ShouldQueue, ShouldBeUnique
                     continue;
                 }
 
-                $stale[] = [
+                $staleEntry = [
                     'symbol' => $symbol,
                     'received_at' => $snapshot['received_at'] ?? null,
                     'age_ms' => $snapshot['age_ms'] ?? null,
                     'connection_state' => $snapshot['connection_state'] ?? null,
                     'reason' => $snapshot['stale_reason'] ?? 'selected_symbol_snapshot_not_fresh',
                 ];
+                $stale[] = $staleEntry;
+
+                // Symbol-scoped breaker: only bots trading THIS symbol are
+                // gated. Kept alongside the workspace-wide breaker below
+                // (still activated for every other consumer of
+                // isStaleFeedBreakerActive()/staleFeedState() that isn't
+                // symbol-aware yet) so a stale SOLUSDT feed can no longer
+                // block a healthy BTCUSDT bot in the same workspace.
+                $breakers->activateStaleFeedBreaker((string) $workspaceId, [
+                    'symbol' => $symbol,
+                    'threshold_seconds' => $this->thresholdSeconds,
+                    'reason' => 'selected_symbol_stale',
+                ] + $staleEntry, 'monitoring', $symbol);
 
                 $recovery->requestRecovery('binance', $symbol, StreamType::QUOTE, 'scheduled_stale_feed_check', [
                     'workspace_id' => (string) $workspaceId,

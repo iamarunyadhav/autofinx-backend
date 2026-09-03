@@ -43,6 +43,7 @@ use App\Http\Controllers\Api\AssistantActionController;
 use App\Http\Controllers\Api\ArbitrageOpportunityController;
 use App\Http\Controllers\Api\BinanceUserStreamController;
 use App\Http\Controllers\Api\FutureTradeUserStreamController;
+use App\Http\Controllers\Api\PodiumWebhookController;
 use App\Http\Controllers\Api\BotController;
 use App\Http\Controllers\Api\ExitAutomationController;
 use App\Http\Controllers\Api\LiveWalletController;
@@ -75,6 +76,8 @@ Route::prefix('v1')->group(function () {
     Route::post('auth/2fa/verify', [TwoFactorController::class, 'confirm']); // backward compatible path
     Route::post('auth/logout', [AuthController::class, 'logout'])->middleware('auth:sanctum');
     Route::get('auth/me', [AuthController::class, 'me'])->middleware('auth:sanctum');
+    Route::put('auth/profile', [AuthController::class, 'updateProfile'])->middleware('auth:sanctum');
+    Route::put('auth/password', [AuthController::class, 'changePassword'])->middleware(['auth:sanctum', 'throttle:10,1']);
     Route::get('auth', function () {
         return response()->json(['message' => 'Auth endpoints are POST only: /auth/register, /auth/login']);
     });
@@ -102,6 +105,7 @@ Route::prefix('v1')->group(function () {
     Route::post('future-trade/user-stream/ingest', [FutureTradeUserStreamController::class, 'ingest'])->middleware('throttle:240,1');
     Route::post('future-trade/webhook/tradingview', [FutureTradeBotController::class, 'tradingViewWebhook'])->middleware('throttle:120,1');
     Route::post('future-trade/pine-webhook/{workspace}', [FutureTradeBotController::class, 'pineWebhook'])->middleware('throttle:120,1');
+    Route::post('podium/webhook', [PodiumWebhookController::class, 'handle'])->middleware('throttle:120,1');
 
     Route::middleware('auth:sanctum')->group(function () {
         Route::get('workspaces', [WorkspaceController::class, 'index']);
@@ -132,6 +136,7 @@ Route::prefix('v1')->group(function () {
             Route::put('connections/{connection}', [ConnectionController::class, 'update'])->middleware('throttle:20,1');
             Route::delete('connections/{connection}', [ConnectionController::class, 'destroy'])->middleware('throttle:20,1');
             Route::post('connections/{connection}/test', [ConnectionController::class, 'test'])->middleware('throttle:20,1');
+            Route::post('connections/{connection}/sync', [ConnectionController::class, 'sync'])->middleware('throttle:20,1');
             Route::post('connections/{connection}/toggle', [ConnectionController::class, 'toggle'])->middleware('throttle:20,1');
             Route::post('connections/{connection}/rotate', [ConnectionController::class, 'rotate'])->middleware('throttle:20,1');
         });

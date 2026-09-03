@@ -415,6 +415,17 @@ class FutureTradeBotController extends Controller
             ], 401);
         }
 
+        if (! $primary->enabled) {
+            return response()->json([
+                'accepted' => false,
+                'executed' => false,
+                'eligible' => false,
+                'source' => 'pine_webhook',
+                'execution' => 'rejected',
+                'reason' => 'bot_disabled',
+            ], 422);
+        }
+
         try {
             // Slot routing: find the slot that owns the incoming symbol, or
             // assign the first FLAT slot. If every slot is busy with a
@@ -533,6 +544,31 @@ class FutureTradeBotController extends Controller
                     'latency' => ['totalMs' => (int) round((microtime(true) - $startedAt) * 1000)],
                 ], 200);
             }
+
+            if (! $liveRequested) {
+                $result = $this->bot->ingestPineWebhook($resolvedConfig, $payload);
+                $status = in_array((string) ($result['reason'] ?? ''), [
+                    'bot_disabled',
+                    'payload_profile_not_prime_v617',
+                    'symbol_not_allowed',
+                    'timeframe_must_be_15m',
+                    'bar_not_confirmed',
+                    'candle_close_in_future',
+                    'candle_close_not_15m_aligned',
+                    'price_required',
+                    'unsupported_signal',
+                ], true) ? 422 : 200;
+
+                $latency = (array) ($result['latency'] ?? []);
+                $latency['totalMs'] = $latency['totalMs'] ?? (int) round((microtime(true) - $startedAt) * 1000);
+
+                return response()->json(array_merge($result, [
+                    'source' => 'pine_webhook',
+                    'slotIndex' => $targetConfig !== null ? (int) $targetConfig->slot_index : 0,
+                    'latency' => $latency,
+                ]), $status);
+            }
+
             ProcessPineWebhookSignalJob::dispatch(
                 (string) $resolvedConfig->id,
                 $payload,
@@ -545,6 +581,11 @@ class FutureTradeBotController extends Controller
                 'executed' => false,
                 'execution' => 'queued',
                 'source' => 'pine_webhook',
+                'decision' => match ($rawSignal) {
+                    'LONG' => 'BUY',
+                    'SHORT' => 'SELL',
+                    default => $rawSignal,
+                },
                 'symbol' => $symbol ?: null,
                 'slotIndex' => $targetConfig !== null ? (int) $targetConfig->slot_index : 0,
                 'queuedAt' => now()->toIso8601String(),
@@ -795,6 +836,36 @@ class FutureTradeBotController extends Controller
         return $allowed;
     }
 
+    /**
+     * env-config controls whether the workspace can place LIVE-fund orders
+     * at all — a strictly higher-stakes action than the operational recovery
+     * actions authorizeRecovery() covers. Every other admin-gated action in
+     * this codebase (see DeploymentReadinessService::ownerTwoFactorReady())
+     * restricts to ['owner', 'admin'] only; this previously reused
+     * authorizeRecovery()'s broader ['owner','admin','trader','member']
+     * list, so any authenticated, 2FA'd workspace member — not just an
+     * admin — could flip their own workspace to live trading.
+     */
+    private function authorizeEnvConfigChange(Request $request, string $workspace): bool
+    {
+        $user = $request->user();
+        $role = $user
+            ? WorkspaceMember::query()
+                ->where('workspace_id', $workspace)
+                ->where('user_id', $user->id)
+                ->value('role')
+            : null;
+        $allowed = in_array((string) $role, ['owner', 'admin'], true);
+
+        Log::info($allowed ? '[FUTURE TRADE ENV CONFIG AUTHORIZED]' : '[FUTURE TRADE ENV CONFIG DENIED]', [
+            'workspace_id' => $workspace,
+            'user_id' => $user?->id,
+            'role' => $role,
+        ]);
+
+        return $allowed;
+    }
+
     public function config(string $workspace): JsonResponse
     {
         return response()->json($this->bot->configPayload($this->bot->getOrCreateConfig($workspace)));
@@ -822,6 +893,16 @@ class FutureTradeBotController extends Controller
 
     public function updateEnvConfig(Request $request, string $workspace): JsonResponse
     {
+        // This is the switch that ultimately enables live-fund trading for
+        // the workspace (envLiveEnabled) — previously gated only by
+        // auth:sanctum + require.2fa, with no check that the caller actually
+        // belongs to this workspace at all, and later only by the broader
+        // authorizeRecovery() list (owner/admin/trader/member). Restricted
+        // here to owner/admin only, matching every other admin-gated action.
+        if (! $this->authorizeEnvConfigChange($request, $workspace)) {
+            return response()->json(['message' => 'Forbidden'], 403);
+        }
+
         $data = $request->validate([
             'mode' => 'required|string|in:paper,testnet,live',
             'testnet_enabled' => 'required|boolean',

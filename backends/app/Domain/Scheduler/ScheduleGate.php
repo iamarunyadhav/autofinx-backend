@@ -33,11 +33,14 @@ class ScheduleGate
 
         $this->resetBucketsIfNeeded($runtime, $now, $this->timezoneFor($schedule));
 
-        $lastEvaluated = $runtime->last_evaluated_at ? $runtime->last_evaluated_at->toImmutable() : null;
-        $lastTrade = $runtime->last_trade_at ? $runtime->last_trade_at->toImmutable() : null;
+        $tz = $this->timezoneFor($schedule);
+        $lastEvaluated = $this->runtimeTimestamp($runtime, 'last_evaluated_at', $tz);
+        $lastTrade = $this->runtimeTimestamp($runtime, 'last_trade_at', $tz);
 
         if ($lastEvaluated) {
-            $diffMs = $lastEvaluated->diffInMilliseconds($now);
+            $diffMs = $lastEvaluated->lessThanOrEqualTo($now)
+                ? $lastEvaluated->diffInMilliseconds($now, true)
+                : 0;
             if ($diffMs < ($schedule->interval_ms ?? 60000)) {
                 $next = $lastEvaluated->addMilliseconds($schedule->interval_ms ?? 60000);
                 return new GateResult(false, 'interval_throttle', $next);
@@ -45,7 +48,9 @@ class ScheduleGate
         }
 
         if ($lastTrade && ($schedule->cooldown_s ?? 0) > 0) {
-            $diff = $lastTrade->diffInSeconds($now);
+            $diff = $lastTrade->lessThanOrEqualTo($now)
+                ? $lastTrade->diffInSeconds($now, true)
+                : 0;
             if ($diff < ($schedule->cooldown_s ?? 0)) {
                 $next = $lastTrade->addSeconds($schedule->cooldown_s ?? 0);
                 return new GateResult(false, 'cooldown', $next);
@@ -176,5 +181,17 @@ class ScheduleGate
         if ($dirty) {
             $runtime->save();
         }
+    }
+
+    private function runtimeTimestamp(StrategyInstanceRuntime $runtime, string $field, string $tz): ?CarbonImmutable
+    {
+        $raw = $runtime->getRawOriginal($field);
+        if (is_string($raw) && trim($raw) !== '') {
+            return CarbonImmutable::parse($raw, $tz);
+        }
+
+        $value = $runtime->{$field};
+
+        return $value ? $value->toImmutable()->setTimezone($tz) : null;
     }
 }

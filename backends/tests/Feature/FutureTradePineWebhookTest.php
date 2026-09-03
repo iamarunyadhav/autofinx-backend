@@ -862,10 +862,10 @@ test('pine webhook close_short signal is mapped and accepted', function () {
         'signal' => 'CLOSE_SHORT',
     ]))->assertOk();
 
-    // No open position → CLOSE_SHORT is accepted (not 422) but logged-only.
+    // No open position -> CLOSE_SHORT is accepted (not 422) but logged-only.
     expect($response->json('accepted'))->toBeTrue()
-        ->and($response->json('execution'))->toBe('queued');
-    Queue::assertPushed(ProcessPineWebhookSignalJob::class, fn (ProcessPineWebhookSignalJob $job): bool => ($job->payload['signal'] ?? null) === 'CLOSE_SHORT');
+        ->and($response->json('execution'))->toBe('blocked_close_signal_no_open_position');
+    Queue::assertNotPushed(ProcessPineWebhookSignalJob::class);
 });
 
 test('findSlotForSymbol returns first FLAT slot when no slot owns the symbol', function () {

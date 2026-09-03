@@ -105,7 +105,7 @@ class FutureTradeBotService
         $usedRestFallback = false;
         $userStreamWarning = false;
 
-        if (! ($feed['feedFresh'] ?? false) && (! $isPineWebhook || $liveRequested)) {
+        if (! ($feed['feedFresh'] ?? false) && ! $isPineWebhook) {
             $blockers[] = 'stale_feed';
             $freshnessGateSource = 'blocked';
         }
@@ -10760,11 +10760,26 @@ class FutureTradeBotService
         return $incomingSide !== null && $incomingSide !== $lastClosed;
     }
 
+    /**
+     * Requires BOTH the per-workspace toggle (envLiveEnabled/envTestnetEnabled,
+     * settable via PUT /future-trade/env-config) AND the server-level config
+     * (FUTURE_TRADE_ENABLE_LIVE_TRADING/FUTURE_TRADE_ENABLE_TESTNET_TRADING).
+     * Previously only the workspace flag was checked, so the server-level env
+     * var was purely decorative — any workspace user could enable live
+     * trading for themselves regardless of what ops had configured at the
+     * server level.
+     */
     private function environmentTradingEnabled(bool $forceTestnet, array $settings): bool
     {
-        return $forceTestnet
+        $workspaceEnabled = $forceTestnet
             ? (bool) ($settings['envTestnetEnabled'] ?? false)
             : (bool) ($settings['envLiveEnabled'] ?? false);
+
+        $serverEnabled = $forceTestnet
+            ? (bool) config('future_trade.enable_testnet_trading', false)
+            : (bool) config('future_trade.enable_live_trading', false);
+
+        return $workspaceEnabled && $serverEnabled;
     }
 
     private function environmentTradingReady(bool $forceTestnet, array $settings): bool
@@ -11356,7 +11371,11 @@ class FutureTradeBotService
             return true;
         }
 
-        if (! (bool) ($postCloseExchange['position_snapshot_available'] ?? false)) {
+        $positionSnapshotAvailable = array_key_exists('position_snapshot_available', $postCloseExchange)
+            ? (bool) $postCloseExchange['position_snapshot_available']
+            : ! (bool) ($postCloseExchange['snapshot_partial'] ?? true);
+
+        if (! $positionSnapshotAvailable) {
             return false;
         }
 

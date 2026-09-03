@@ -201,6 +201,35 @@ class RatioBotApiTest extends TestCase
     }
 
     /** @test */
+    public function can_resume_bot_from_blocked(): void
+    {
+        // Previously resume() only accepted STATE_PAUSED — a bot hard-blocked
+        // by block() (order-failure streak, exchange-unhealthy, etc.) could
+        // never be brought back via this endpoint.
+        $config = $this->createConfig();
+        $this->actingAs($this->user)->postJson("/api/v1/ratio-bots/{$config->id}/start");
+        // start() enabled the config via its own HTTP-request-scoped model
+        // instance — refresh this test's local $config so it reflects that
+        // before block() computes its dirty-attribute diff against it.
+        $config = $config->fresh();
+        app(\App\Domain\RatioBot\RatioBotStateService::class)->block($config, 'order_failure_streak', 'manual review required');
+
+        $blockedState = RatioBotState::where('ratio_bot_config_id', $config->id)->first();
+        $this->assertSame('blocked', $blockedState->position_state);
+        $this->assertFalse($config->fresh()->enabled);
+
+        $response = $this->actingAs($this->user)
+            ->postJson("/api/v1/ratio-bots/{$config->id}/resume");
+
+        $response->assertOk();
+        $state = RatioBotState::where('ratio_bot_config_id', $config->id)->first();
+        $this->assertNotSame('blocked', $state->position_state);
+        $this->assertNull($state->block_reason_code);
+        $this->assertFalse((bool) $state->recovery_action_required);
+        $this->assertTrue($config->fresh()->enabled);
+    }
+
+    /** @test */
     public function can_recalculate_and_resume_from_paused_without_rewriting_strategy_history(): void
     {
         $config = $this->createConfig([

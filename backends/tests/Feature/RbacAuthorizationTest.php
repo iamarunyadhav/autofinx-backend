@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Models\User;
+use App\Models\Workspace;
 use Illuminate\Support\Str;
 use Tests\TestCase;
 
@@ -18,7 +19,7 @@ class RbacAuthorizationTest extends TestCase
         $user = User::factory()->create();
         $token = $user->createToken('auth')->plainTextToken;
 
-        $workspaceId = (string) Str::uuid();
+        $workspaceId = Workspace::factory()->create()->id;
         $this->withToken($token)
             ->postJson("/api/v1/workspaces/{$workspaceId}/connections", [
                 'name' => 'Binance',

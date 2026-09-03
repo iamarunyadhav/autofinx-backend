@@ -35,8 +35,25 @@ return [
         ],
     ],
 
+    // AUTOFINX_PHASE1B_ARCHITECTURE_AUDIT_2026-09-02.md §11: these three used
+    // to be read via raw env() inside domain classes (TradingEnvironmentGuard,
+    // SafeLiveGate, LivePromotionService, BinanceAdapter, CoinbaseAdapter) —
+    // after `php artisan config:cache`, Laravel's env() no longer reliably
+    // reflects .env changes, so an operator flipping LIVE_TRADING_ENABLED in
+    // .env post-cache would silently NOT take effect in those files. Routing
+    // through config() here fixes that; config/fast2x.php's own env() call is
+    // unaffected (config files are the one place env() is meant to be read).
+    'live_trading_enabled' => filter_var(env('LIVE_TRADING_ENABLED', false), FILTER_VALIDATE_BOOL),
+    'binance_enabled' => filter_var(env('BINANCE_ENABLED', false), FILTER_VALIDATE_BOOL),
+    'coinbase_enabled' => filter_var(env('COINBASE_ENABLED', false), FILTER_VALIDATE_BOOL),
+
+    'coinbase' => [
+        'base_url' => env('COINBASE_BASE_URL', 'https://api.coinbase.com'),
+    ],
+
     'binance' => [
         'api_url' => env('BINANCE_API_URL', 'https://api.binance.com'),
+        'base_url' => env('BINANCE_API_URL', 'https://api.binance.com'),
         'ws_url' => env('BINANCE_WS_URL', 'wss://stream.binance.com:9443'),
         'testnet_api_url' => env('BINANCE_TESTNET_API_URL', 'https://testnet.binance.vision'),
         'testnet_ws_url' => env('BINANCE_TESTNET_WS_URL', 'wss://testnet.binance.vision'),

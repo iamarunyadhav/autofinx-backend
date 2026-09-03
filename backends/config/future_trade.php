@@ -1,15 +1,27 @@
 <?php
 
+// AUTOFINX_PHASE1B_ARCHITECTURE_AUDIT_2026-09-02.md §11: 'schedule_runtime_commands'
+// (flat) and 'schedule.runtime_commands' (nested) used to each read the env var
+// independently. They always agreed today (same env(), same default), but a
+// future runtime config() override to only one of them would silently desync
+// the two — some consumers read the flat key, others read the nested one.
+// Compute the value once so both keys are provably the same, always.
+$futureTradeScheduleRuntimeCommands = filter_var(env('FUTURE_TRADE_SCHEDULE_RUNTIME_COMMANDS', false), FILTER_VALIDATE_BOOL);
+
 return [
     'default_signal_profile' => env('FUTURE_TRADE_DEFAULT_SIGNAL_PROFILE', 'autofinx_prime_v6_1_7_crypto'),
-    'paper_trading' => env('FUTURE_TRADE_PAPER_TRADING', true),
-    'enable_testnet_trading' => env('FUTURE_TRADE_ENABLE_TESTNET_TRADING', false),
-    'enable_live_trading' => env('FUTURE_TRADE_ENABLE_LIVE_TRADING', false),
-    'force_testnet' => env('FUTURE_TRADE_FORCE_TESTNET', true),
-    'shared_hosting_mode' => env('AUTOFINX_SHARED_HOSTING_MODE', false),
-    'schedule_runtime_commands' => env('FUTURE_TRADE_SCHEDULE_RUNTIME_COMMANDS', false),
+    'paper_trading' => filter_var(env('FUTURE_TRADE_PAPER_TRADING', true), FILTER_VALIDATE_BOOL),
+    'enable_testnet_trading' => filter_var(env('FUTURE_TRADE_ENABLE_TESTNET_TRADING', false), FILTER_VALIDATE_BOOL),
+    'enable_live_trading' => filter_var(env('FUTURE_TRADE_ENABLE_LIVE_TRADING', false), FILTER_VALIDATE_BOOL),
+    'force_testnet' => filter_var(env('FUTURE_TRADE_FORCE_TESTNET', true), FILTER_VALIDATE_BOOL),
+    'shared_hosting_mode' => filter_var(env('AUTOFINX_SHARED_HOSTING_MODE', false), FILTER_VALIDATE_BOOL),
+    // Kept for backward compatibility with consumers still reading the flat
+    // key (FutureTradeLiveFeedManager.php, FutureTradeBotService.php) —
+    // always derived from the same value as 'schedule.runtime_commands'
+    // below, never read from env() separately.
+    'schedule_runtime_commands' => $futureTradeScheduleRuntimeCommands,
     'schedule' => [
-        'runtime_commands' => filter_var(env('FUTURE_TRADE_SCHEDULE_RUNTIME_COMMANDS', false), FILTER_VALIDATE_BOOL),
+        'runtime_commands' => $futureTradeScheduleRuntimeCommands,
         'reconcile' => filter_var(env('FUTURE_TRADE_SCHEDULE_RECONCILE', true), FILTER_VALIDATE_BOOL),
         'diagnostics' => filter_var(env('FUTURE_TRADE_SCHEDULE_DIAGNOSTICS', false), FILTER_VALIDATE_BOOL),
         'audit_missed_signals' => filter_var(env('FUTURE_TRADE_SCHEDULE_AUDIT_MISSED_SIGNALS', false), FILTER_VALIDATE_BOOL),
@@ -62,10 +74,10 @@ return [
         ],
     ],
     'live_max_open_positions' => max(1, min(5, (int) env('FUTURE_TRADE_LIVE_MAX_OPEN_POSITIONS', 1))),
-    'webhook_fallback_enabled' => env('FUTURE_TRADE_WEBHOOK_FALLBACK_ENABLED', false),
-    'webhook_risk_overrides' => env('FUTURE_TRADE_WEBHOOK_RISK_OVERRIDES', false),
-    'atr_dynamic_risk_targets' => env('FUTURE_TRADE_ATR_DYNAMIC_RISK_TARGETS', false),
-    'confirmed_candle_only' => env('FUTURE_TRADE_CONFIRMED_CANDLE_ONLY', true),
+    'webhook_fallback_enabled' => filter_var(env('FUTURE_TRADE_WEBHOOK_FALLBACK_ENABLED', false), FILTER_VALIDATE_BOOL),
+    'webhook_risk_overrides' => filter_var(env('FUTURE_TRADE_WEBHOOK_RISK_OVERRIDES', false), FILTER_VALIDATE_BOOL),
+    'atr_dynamic_risk_targets' => filter_var(env('FUTURE_TRADE_ATR_DYNAMIC_RISK_TARGETS', false), FILTER_VALIDATE_BOOL),
+    'confirmed_candle_only' => filter_var(env('FUTURE_TRADE_CONFIRMED_CANDLE_ONLY', true), FILTER_VALIDATE_BOOL),
     'robot' => [
         'allow_reverse' => filter_var(env('ROBOT_ALLOW_REVERSE', true), FILTER_VALIDATE_BOOL),
         'reverse_min_confidence' => (float) env('ROBOT_REVERSE_MIN_CONFIDENCE', 0.70),

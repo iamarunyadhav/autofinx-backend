@@ -13,11 +13,14 @@ use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class RobotSessionController extends Controller
 {
-    public function index(string $workspaceId)
+    public function index(string $workspaceId, Request $request)
     {
+        $limit = max(1, min(200, (int) $request->integer('limit', 100)));
+
         return response()->json(
             RobotSession::where('workspace_id', $workspaceId)
                 ->orderByDesc('updated_at')
+                ->limit($limit)
                 ->get()
         );
     }

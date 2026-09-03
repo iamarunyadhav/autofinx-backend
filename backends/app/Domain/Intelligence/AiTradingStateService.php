@@ -36,7 +36,7 @@ class AiTradingStateService
             $reasons[] = AiTradingState::REASON_EXCHANGE_UNHEALTHY;
         }
 
-        if ($status === AiTradingState::STATUS_ACTIVE && ($this->breakers->isStaleFeedBreakerActive($workspaceId) || (bool) data_get($context, 'ops.stale_feed_breaker.active', false))) {
+        if ($status === AiTradingState::STATUS_ACTIVE && ($this->breakers->isStaleFeedBreakerActive($workspaceId, $symbol) || (bool) data_get($context, 'ops.stale_feed_breaker.active', false))) {
             $status = AiTradingState::STATUS_BLOCKED_BY_BREAKER;
             $reasons[] = AiTradingState::REASON_STALE_FEED;
         }

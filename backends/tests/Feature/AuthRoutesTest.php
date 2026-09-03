@@ -84,4 +84,111 @@ class AuthRoutesTest extends TestCase
             'code' => $google2fa->getCurrentOtp($secret),
         ])->assertOk()->assertJsonStructure(['token', 'user']);
     }
+
+    public function test_user_can_update_and_fetch_their_profile(): void
+    {
+        $user = User::factory()->create(['name' => 'Original Name']);
+        $token = $user->createToken('auth')->plainTextToken;
+
+        $this->withToken($token)
+            ->putJson('/api/v1/auth/profile', [
+                'full_name' => 'Updated Name',
+                'phone' => '+1 555 0100',
+                'timezone' => 'America/New_York',
+                'preferred_language' => 'es',
+            ])->assertOk()
+                ->assertJsonPath('user.name', 'Updated Name')
+                ->assertJsonPath('user.phone', '+1 555 0100')
+                ->assertJsonPath('user.timezone', 'America/New_York')
+                ->assertJsonPath('user.preferred_language', 'es');
+
+        $this->withToken($token)
+            ->getJson('/api/v1/auth/me')
+            ->assertOk()
+            ->assertJsonPath('user.name', 'Updated Name')
+            ->assertJsonPath('user.phone', '+1 555 0100');
+    }
+
+    public function test_profile_update_ignores_a_blank_name_instead_of_clearing_it(): void
+    {
+        $user = User::factory()->create(['name' => 'Keep Me']);
+        $token = $user->createToken('auth')->plainTextToken;
+
+        $this->withToken($token)
+            ->putJson('/api/v1/auth/profile', ['full_name' => '', 'phone' => '555'])
+            ->assertOk()
+            ->assertJsonPath('user.name', 'Keep Me')
+            ->assertJsonPath('user.phone', '555');
+    }
+
+    public function test_user_can_change_password_with_correct_current_password(): void
+    {
+        $user = User::factory()->create(['password' => Hash::make('old-password-123')]);
+        $token = $user->createToken('auth')->plainTextToken;
+
+        $this->withToken($token)
+            ->putJson('/api/v1/auth/password', [
+                'current_password' => 'old-password-123',
+                'password' => 'new-password-456',
+                'password_confirmation' => 'new-password-456',
+            ])->assertOk();
+
+        $this->assertTrue(Hash::check('new-password-456', $user->fresh()->password));
+
+        $this->postJson('/api/v1/auth/login', [
+            'email' => $user->email,
+            'password' => 'new-password-456',
+        ])->assertOk();
+    }
+
+    public function test_change_password_rejects_wrong_current_password(): void
+    {
+        $user = User::factory()->create(['password' => Hash::make('old-password-123')]);
+        $token = $user->createToken('auth')->plainTextToken;
+
+        $this->withToken($token)
+            ->putJson('/api/v1/auth/password', [
+                'current_password' => 'totally-wrong',
+                'password' => 'new-password-456',
+                'password_confirmation' => 'new-password-456',
+            ])->assertStatus(422)
+                ->assertJsonValidationErrors(['current_password']);
+
+        $this->assertTrue(Hash::check('old-password-123', $user->fresh()->password));
+    }
+
+    public function test_change_password_revokes_other_sessions_but_keeps_current_one(): void
+    {
+        $user = User::factory()->create(['password' => Hash::make('old-password-123')]);
+        $currentToken = $user->createToken('auth');
+        $otherToken = $user->createToken('auth');
+
+        $this->assertSame(2, $user->tokens()->count());
+
+        $this->withToken($currentToken->plainTextToken)
+            ->putJson('/api/v1/auth/password', [
+                'current_password' => 'old-password-123',
+                'password' => 'new-password-456',
+                'password_confirmation' => 'new-password-456',
+            ])->assertOk();
+
+        $this->assertSame(1, $user->tokens()->count());
+        $this->assertNotNull($user->tokens()->find($currentToken->accessToken->id));
+        $this->assertNull($user->tokens()->find($otherToken->accessToken->id));
+    }
+
+    public function test_logout_with_all_flag_revokes_every_token(): void
+    {
+        $user = User::factory()->create();
+        $tokenA = $user->createToken('auth')->plainTextToken;
+        $user->createToken('auth');
+
+        $this->assertSame(2, $user->tokens()->count());
+
+        $this->withToken($tokenA)
+            ->postJson('/api/v1/auth/logout', ['all' => true])
+            ->assertOk();
+
+        $this->assertSame(0, $user->tokens()->count());
+    }
 }

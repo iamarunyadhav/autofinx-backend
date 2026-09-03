@@ -7,7 +7,7 @@ use Illuminate\Support\Str;
 
 class ConfigVersioning
 {
-    public static function record(string $workspaceId, string $configKey, array $newValue = null, array $previousValue = null, ?string $actorId = null): ConfigVersion
+    public static function record(string $workspaceId, string $configKey, ?array $newValue = null, ?array $previousValue = null, ?string $actorId = null): ConfigVersion
     {
         return ConfigVersion::create([
             'id' => (string) Str::uuid(),

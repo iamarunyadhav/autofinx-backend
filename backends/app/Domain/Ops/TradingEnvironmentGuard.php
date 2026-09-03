@@ -38,7 +38,7 @@ class TradingEnvironmentGuard
     public function resolveState(?string $workspaceId): array
     {
         $envTradingMode = $this->normalizeMode((string) env('TRADING_MODE', 'paper'));
-        $envLiveEnabled = $this->toBool(env('LIVE_TRADING_ENABLED', false));
+        $envLiveEnabled = $this->toBool(config('services.live_trading_enabled', false));
 
         $settings = $this->loadTradingSettings($workspaceId);
         $settingsMode = $this->normalizeMode((string) ($settings['trading_mode'] ?? ''));

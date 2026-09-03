@@ -165,10 +165,22 @@ try_artisan queue:prune-failed --hours=168
 try_artisan queue:restart
 
 section "5. Supervisor and runtime master"
+# Belt-and-suspenders: install-runtime-master.sh (invoked below) also chmods
+# autofinx-runtime-master.sh, but it requires root and may not run in every
+# deploy context. Set the executable bits directly here too so a non-root
+# deploy run still leaves the daemon runnable instead of silently FATAL.
+chmod +x "$APP_DIR"/*.sh 2>/dev/null || true
+chmod +x "$APP_DIR"/database/scripts/*.sh 2>/dev/null || true
 if has_supervisor; then
   supervisorctl reread || true
   supervisorctl update || true
-  if [ -x "$APP_DIR/database/scripts/install-runtime-master.sh" ]; then
+  # A fresh git checkout/pull never preserves the executable bit, so gating
+  # this on "$APP_DIR/database/scripts/install-runtime-master.sh" already
+  # being executable was a deadlock: that script is exactly what chmods
+  # autofinx-runtime-master.sh (line 40 of install-runtime-master.sh), but it
+  # could never run to do so. `bash script.sh` does not require the script's
+  # own +x bit — only `./script.sh` does — so just run it unconditionally.
+  if [ -f "$APP_DIR/database/scripts/install-runtime-master.sh" ]; then
     APP_DIR="$APP_DIR" PHP_BIN="$PHP" RUN_USER="${RUN_USER:-zcadmin}" bash "$APP_DIR/database/scripts/install-runtime-master.sh" || true
   fi
   supervisorctl restart autofinx-runtime-master || supervisorctl start autofinx-runtime-master || true

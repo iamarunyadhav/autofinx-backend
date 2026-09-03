@@ -141,7 +141,7 @@ it('rejects payload missing field: :field', function (string $field) {
 it('orchestrator returns ok=false when provider throws RuntimeException', function () {
     $throwingProvider = new class implements AiDecisionProvider {
         public function name(): string { return 'test_failing'; }
-        public function model(array $config): string { return 'test-model'; }
+        public function model(array $config = []): string { return 'test-model'; }
         public function generateProposal(array $context, array $config): array|string
         {
             throw new RuntimeException('Simulated provider timeout / API failure.');
@@ -163,7 +163,7 @@ it('orchestrator returns ok=false when provider throws RuntimeException', functi
 it('orchestrator returns ok=false when provider returns invalid JSON', function () {
     $badProvider = new class implements AiDecisionProvider {
         public function name(): string { return 'test_bad_json'; }
-        public function model(array $config): string { return 'test-model'; }
+        public function model(array $config = []): string { return 'test-model'; }
         public function generateProposal(array $context, array $config): array|string
         {
             return '{invalid_json: true,';

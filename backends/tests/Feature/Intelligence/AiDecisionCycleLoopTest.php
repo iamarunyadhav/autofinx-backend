@@ -247,6 +247,23 @@ function phaseTwoConfig(string $workspaceId, array $overrides = []): AiTradingCo
     );
 }
 
+function phaseTwoFakeBinanceSpotExchangeInfo(): array
+{
+    return [
+        'symbols' => [[
+            'symbol' => 'BTCUSDT',
+            'status' => 'TRADING',
+            'baseAsset' => 'BTC',
+            'quoteAsset' => 'USDT',
+            'filters' => [
+                ['filterType' => 'LOT_SIZE', 'minQty' => '0.00001000', 'maxQty' => '1000.00000000', 'stepSize' => '0.00001000'],
+                ['filterType' => 'PRICE_FILTER', 'minPrice' => '0.01000000', 'maxPrice' => '1000000.00000000', 'tickSize' => '0.01000000'],
+                ['filterType' => 'MIN_NOTIONAL', 'minNotional' => '10.00000000'],
+            ],
+        ]],
+    ];
+}
+
 it('creates an auditable scheduled decision cycle', function () {
     [$user, $workspace] = phaseTwoAiWorkspace();
     phaseTwoEnableLiveMode($workspace->id);
@@ -315,6 +332,7 @@ it('restricted auto mode dispatches only when all constraints pass', function ()
     ]);
 
     Http::fake([
+        'https://testnet.binance.local/api/v3/exchangeInfo*' => Http::response(phaseTwoFakeBinanceSpotExchangeInfo(), 200),
         'https://testnet.binance.local/api/v3/order*' => Http::response([
             'orderId' => 'ai-cycle-order-1',
             'status' => 'NEW',
@@ -545,6 +563,7 @@ it('queue retries do not duplicate live execution for the same cycle correlation
     ]);
 
     Http::fake([
+        'https://testnet.binance.local/api/v3/exchangeInfo*' => Http::response(phaseTwoFakeBinanceSpotExchangeInfo(), 200),
         'https://testnet.binance.local/api/v3/order*' => Http::response([
             'orderId' => 'ai-cycle-order-2',
             'status' => 'NEW',

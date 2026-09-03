@@ -339,13 +339,28 @@ class TradingRuntimeHealthService
     {
         $maxAge = app(RuntimeSafetySettingsService::class)->liveFeedMaxAgeSeconds($workspaceId);
         $symbols = $this->monitoredMarketSymbols($workspaceId);
-        $redisFeeds = array_values(array_filter([
-            $this->prices->freshestLiveFeedSnapshot('binance', $symbols['spot'], $maxAge),
-            $this->prices->freshestLiveFeedSnapshot('binance_futures', $symbols['futures'], $maxAge),
-        ]));
-        $redisFeed = $this->freshestSnapshot($redisFeeds);
+        $requiredFeeds = $this->requiredFeedSnapshots($symbols, $maxAge);
 
-        if (($redisFeed['fresh'] ?? false) === true) {
+        if ($requiredFeeds === []) {
+            return [
+                'state' => 'green',
+                'reason' => 'no_enabled_feed_dependent_bots',
+                'age_seconds' => null,
+                'max_age_seconds' => $maxAge,
+                'symbols' => $symbols,
+                'truth_source' => 'not_required',
+            ];
+        }
+
+        $missingOrStale = array_values(array_filter(
+            $requiredFeeds,
+            static fn (array $snapshot): bool => ($snapshot['fresh'] ?? false) !== true
+        ));
+        $redisFeed = $this->freshestSnapshot(array_values(array_filter(
+            array_map(static fn (array $snapshot): ?array => $snapshot['snapshot'] ?? null, $requiredFeeds)
+        )));
+
+        if ($missingOrStale === [] && ($redisFeed['fresh'] ?? false) === true) {
             return [
                 'state' => 'green',
                 'reason' => 'ok_redis_live_feed',
@@ -360,6 +375,7 @@ class TradingRuntimeHealthService
                 'event_lag_ms' => (int) ($redisFeed['event_lag_ms'] ?? 0),
                 'truth_source' => 'websocket_redis',
                 'db_is_snapshot_only' => true,
+                'required_feeds' => $requiredFeeds,
             ];
         }
 
@@ -397,10 +413,13 @@ class TradingRuntimeHealthService
         }
 
         $state = $age <= $maxAge ? 'green' : ($age <= ($maxAge * 3) ? 'yellow' : 'red');
+        if ($missingOrStale !== [] && $state === 'green') {
+            $state = 'red';
+        }
 
         return [
             'state' => $state,
-            'reason' => $state === 'green' ? 'ok' : 'market_feed_stale',
+            'reason' => $state === 'green' ? 'ok' : 'market_feed_stale_or_missing_required_symbol',
             'last_tick_at' => $row->last_tick_at->toIso8601String(),
             'age_seconds' => $age,
             'max_age_seconds' => $maxAge,
@@ -408,7 +427,35 @@ class TradingRuntimeHealthService
             'price' => (float) ($row->last_price ?? 0),
             'source' => (string) ($row->source ?? ''),
             'truth_source' => 'db_snapshot_fallback',
+            'required_feeds' => $requiredFeeds,
+            'missing_or_stale_feeds' => $missingOrStale,
         ];
+    }
+
+    /**
+     * @param array{spot: string[], futures: string[]} $symbols
+     * @return array<int, array<string, mixed>>
+     */
+    private function requiredFeedSnapshots(array $symbols, int $maxAge): array
+    {
+        $feeds = [];
+        foreach (['binance' => $symbols['spot'], 'binance_futures' => $symbols['futures']] as $exchange => $marketSymbols) {
+            foreach ($marketSymbols as $symbol) {
+                $snapshot = $this->prices->getLiveFeedSnapshot($exchange, (string) $symbol, $maxAge);
+                $feeds[] = [
+                    'exchange' => $exchange,
+                    'market_type' => $exchange === 'binance_futures' ? 'futures' : 'spot',
+                    'symbol' => strtoupper((string) $symbol),
+                    'fresh' => (bool) ($snapshot['fresh'] ?? false),
+                    'age_seconds' => $snapshot['age_seconds'] ?? null,
+                    'received_at' => $snapshot['received_at'] ?? null,
+                    'source_key' => $snapshot['source_key'] ?? null,
+                    'snapshot' => $snapshot,
+                ];
+            }
+        }
+
+        return $feeds;
     }
 
     private function heartbeatFeed(?array $redisFeed = null): array
@@ -513,11 +560,9 @@ class TradingRuntimeHealthService
             $spot = [...$spot, ...$robotSymbols];
         }
 
-        $defaults = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT'];
-
         return [
-            'spot' => collect($spot ?: $defaults)->filter()->unique()->values()->all(),
-            'futures' => collect($futures ?: $defaults)->filter()->unique()->values()->all(),
+            'spot' => collect($spot)->filter()->unique()->values()->all(),
+            'futures' => collect($futures)->filter()->unique()->values()->all(),
         ];
     }
 

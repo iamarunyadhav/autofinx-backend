@@ -318,6 +318,67 @@ class ConnectionController extends Controller
         }
     }
 
+    /**
+     * Pull real balances from the exchange for this connection. Previously
+     * the frontend's useSyncConnection() called a hand-written mock in
+     * client.ts that always returned fixed fake numbers (0.5 BTC, 2.3 ETH,
+     * 10000 USDT) regardless of the connection's actual holdings — on a
+     * real-money platform, silently showing fabricated balances as if they
+     * were synced from the exchange is dangerous. This is read-only: it
+     * reports what the exchange says, it does not credit any internal
+     * ledger.
+     */
+    public function sync(ExchangeConnection $connection, ExchangeClientFactory $clients)
+    {
+        $provider = strtolower((string) ($connection->exchange ?: $connection->provider));
+
+        if ($provider !== 'binance') {
+            return response()->json([
+                'success' => false,
+                'message' => "Balance sync is not yet supported for {$provider} connections.",
+            ], 422);
+        }
+
+        try {
+            $raw = $clients->makeFromConnection($connection)->fetchBalances();
+            $balances = array_map(static function (array $b): array {
+                $available = (float) ($b['free'] ?? 0);
+                $locked = (float) ($b['locked'] ?? 0);
+                return [
+                    'currency' => (string) ($b['asset'] ?? ''),
+                    'available' => $available,
+                    'locked' => $locked,
+                    'total' => $available + $locked,
+                ];
+            }, $raw);
+
+            $connection->update(['last_synced_at' => now()]);
+
+            $this->logAudit(request(), 'connection.sync', $connection->workspace_id, [
+                'connection_id' => $connection->id,
+                'result' => 'ok',
+                'balance_count' => count($balances),
+            ]);
+
+            return response()->json([
+                'success' => true,
+                'balances' => $balances,
+                'syncedAt' => now()->toIso8601String(),
+            ]);
+        } catch (\Throwable $e) {
+            $this->logAudit(request(), 'connection.sync', $connection->workspace_id, [
+                'connection_id' => $connection->id,
+                'result' => 'failed',
+                'error' => $e->getMessage(),
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'message' => $e->getMessage(),
+            ], 422);
+        }
+    }
+
     public function toggle(ExchangeConnection $connection, Request $request)
     {
         $connection->update(['is_enabled' => $request->boolean('enabled', true)]);

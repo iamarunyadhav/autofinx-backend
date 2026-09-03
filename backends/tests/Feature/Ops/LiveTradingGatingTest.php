@@ -14,7 +14,11 @@ test('live trading blocked when disabled', function () {
     $workspace = Workspace::create(['id' => (string) Str::uuid(), 'name' => 'WS']);
     Ledger::create(['id' => (string) Str::uuid(), 'workspace_id' => $workspace->id, 'balance' => 1000]);
     config()->set('app.env', 'testing');
-    putenv('LIVE_TRADING_ENABLED=false');
+    // ensureLiveAllowed() now reads config('services.live_trading_enabled')
+    // (resolved once at bootstrap from LIVE_TRADING_ENABLED) instead of a
+    // raw env() call, so a runtime putenv() no longer has any effect here —
+    // config()->set() is the correct way to override it for this test.
+    config()->set('services.live_trading_enabled', false);
     expect(fn() => $gate->ensureLiveAllowed($workspace->id, 'BTCUSDT', 100))->toThrow(RuntimeException::class);
 });
 

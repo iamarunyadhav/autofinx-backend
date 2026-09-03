@@ -421,6 +421,7 @@ test('live signal execution is cancelled when kill switch is active', function (
         Mockery::mock(\App\Domain\Intelligence\SignalAdvisorService::class),
         Mockery::mock(ReconciliationService::class),
         app(BotLogService::class),
+        app(\App\Domain\Trading\TradingModuleSettingsService::class),
     );
 
     $result = $service->executeSignal($signal);

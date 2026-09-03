@@ -21,7 +21,7 @@ class TradingController extends Controller
 {
     public function orders(Request $request, string $workspaceId)
     {
-        return Order::where('workspace_id', $workspaceId)->latest()->get();
+        return Order::where('workspace_id', $workspaceId)->with('symbol')->latest()->get();
     }
 
     public function trades(Request $request, string $workspaceId)
