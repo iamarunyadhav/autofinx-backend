@@ -152,7 +152,7 @@ class RatioBotRuntimeQueryService
             'enabled' => (bool) $config->brain_enabled,
             'evaluated_at' => optional($row->created_at)->toIso8601String(),
             'signal' => [
-                'direction' => $row->direction,
+                'direction' => $row->normalizedDirection(),
                 'confidence' => (int) $row->confidence,
                 'bullish_score' => (float) $row->bullish_score,
                 'bearish_score' => (float) $row->bearish_score,
@@ -166,7 +166,7 @@ class RatioBotRuntimeQueryService
             'forecast' => [
                 'available' => true,
                 'horizon_seconds' => $row->horizon_seconds,
-                'bias' => $row->forecast_bias,
+                'bias' => $this->normalizeForecastBias($row->forecast_bias),
                 'confidence' => (float) $row->forecast_confidence,
                 'current_price' => (float) $row->price_at_evaluation,
                 'expected_mid_price' => (float) $row->expected_mid_price,
@@ -175,6 +175,15 @@ class RatioBotRuntimeQueryService
                 'atr_pct' => (float) $row->atr_pct,
             ],
         ];
+    }
+
+    private function normalizeForecastBias(mixed $bias): string
+    {
+        return match (strtolower((string) $bias)) {
+            'buy', 'bullish' => 'bullish',
+            'sell', 'bearish' => 'bearish',
+            default => 'neutral',
+        };
     }
 
     public function pnlSummary(RatioBotConfig $config): array

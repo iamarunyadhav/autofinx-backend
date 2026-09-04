@@ -29,14 +29,36 @@ class RatioBotBrainSnapshot extends BaseModel
 
     public function conflictsWith(string $side, int $minConfidence): bool
     {
-        $direction = strtolower((string) $this->direction);
+        $direction = $this->normalizedDirection();
         $confidence = (int) $this->confidence;
 
         if ($confidence < $minConfidence) {
             return false;
         }
 
-        return ($side === 'BUY' && $direction === 'sell')
-            || ($side === 'SELL' && $direction === 'buy');
+        return ($side === 'BUY' && $direction === 'bullish')
+            || ($side === 'SELL' && $direction === 'bearish');
+    }
+
+    public function supportsSide(string $side, int $minConfidence): bool
+    {
+        $direction = $this->normalizedDirection();
+        $confidence = (int) $this->confidence;
+
+        if ($confidence < $minConfidence) {
+            return false;
+        }
+
+        return ($side === 'BUY' && $direction === 'bearish')
+            || ($side === 'SELL' && $direction === 'bullish');
+    }
+
+    public function normalizedDirection(): string
+    {
+        return match (strtolower((string) $this->direction)) {
+            'buy', 'bullish' => 'bullish',
+            'sell', 'bearish' => 'bearish',
+            default => 'neutral',
+        };
     }
 }

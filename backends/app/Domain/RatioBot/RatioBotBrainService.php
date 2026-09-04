@@ -98,13 +98,13 @@ class RatioBotBrainService
             'timeframe' => $config->timeFrame(),
             'horizon_seconds' => $horizonSeconds,
             'price_at_evaluation' => $currentPrice,
-            'direction' => $signal['direction'] ?? 'neutral',
+            'direction' => $this->normalizeDirection($signal['direction'] ?? null),
             'confidence' => (int) ($signal['confidence'] ?? 0),
             'bullish_score' => $signal['bullish_score'] ?? 0,
             'neutral_score' => $signal['neutral_score'] ?? 0,
             'bearish_score' => $signal['bearish_score'] ?? 0,
             'reasons' => $signal['reasons'] ?? [],
-            'forecast_bias' => $forecast['bias'] ?? 'NEUTRAL',
+            'forecast_bias' => $this->normalizeForecastBias($forecast['bias'] ?? null),
             'forecast_confidence' => $forecast['confidence'] ?? null,
             'expected_mid_price' => $forecast['expected_mid_price'] ?? null,
             'expected_low' => $forecast['expected_low'] ?? null,
@@ -136,5 +136,23 @@ class RatioBotBrainService
                 'volume' => (float) $candle->volume,
             ])
             ->all();
+    }
+
+    private function normalizeDirection(mixed $direction): string
+    {
+        return match (strtolower((string) $direction)) {
+            'buy', 'bullish' => 'bullish',
+            'sell', 'bearish' => 'bearish',
+            default => 'neutral',
+        };
+    }
+
+    private function normalizeForecastBias(mixed $bias): string
+    {
+        return match (strtolower((string) $bias)) {
+            'buy', 'bullish' => 'bullish',
+            'sell', 'bearish' => 'bearish',
+            default => 'neutral',
+        };
     }
 }

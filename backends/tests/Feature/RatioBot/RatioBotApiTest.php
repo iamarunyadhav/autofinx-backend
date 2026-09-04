@@ -450,9 +450,9 @@ class RatioBotApiTest extends TestCase
             'symbol' => 'BTCUSDT',
             'timeframe' => '1h',
             'horizon_seconds' => 3600,
-            'direction' => 'buy',
+            'direction' => 'bullish',
             'confidence' => 72,
-            'forecast_bias' => 'BUY',
+            'forecast_bias' => 'bullish',
             'forecast_confidence' => 60,
         ]);
 
@@ -461,10 +461,10 @@ class RatioBotApiTest extends TestCase
 
         $response->assertOk()
             ->assertJsonPath('enabled', true)
-            ->assertJsonPath('signal.direction', 'buy')
+            ->assertJsonPath('signal.direction', 'bullish')
             ->assertJsonPath('signal.confidence', 72)
             ->assertJsonPath('forecast.horizon_seconds', 3600)
-            ->assertJsonPath('forecast.bias', 'BUY');
+            ->assertJsonPath('forecast.bias', 'bullish');
     }
 
     /** @test */

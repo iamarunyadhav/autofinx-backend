@@ -63,7 +63,7 @@ class RatioBotBrainServiceTest extends TestCase
             'symbol' => 'BTCUSDT',
             'timeframe' => '1h',
             'horizon_seconds' => 3600,
-            'direction' => 'buy',
+            'direction' => 'bullish',
             'confidence' => 70,
         ]);
 
@@ -84,7 +84,7 @@ class RatioBotBrainServiceTest extends TestCase
 
         $this->assertNotNull($result);
         $this->assertSame(3600, $result->horizon_seconds);
-        $this->assertContains($result->direction, ['buy', 'sell', 'neutral']);
+        $this->assertContains($result->direction, ['bullish', 'bearish', 'neutral']);
         $this->assertDatabaseCount('ratio_bot_brain_snapshots', 1);
     }
 

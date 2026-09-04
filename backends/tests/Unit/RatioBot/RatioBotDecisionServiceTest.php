@@ -442,7 +442,7 @@ class RatioBotDecisionServiceTest extends TestCase
     }
 
     /** @test */
-    public function conflicting_brain_signal_adds_one_confirmation_tick_but_still_fires(): void
+    public function bearish_brain_direction_delays_ratio_sell_by_one_confirmation_tick(): void
     {
         [$config] = $this->makeHoldingConfig(buyPrice: 60_000, sellThreshold: 0.50);
         $config->update(['brain_enabled' => true, 'brain_min_confidence' => 65]);
@@ -453,7 +453,7 @@ class RatioBotDecisionServiceTest extends TestCase
             'symbol' => 'BTCUSDT',
             'timeframe' => '1h',
             'horizon_seconds' => 3600,
-            'direction' => 'buy', // conflicts with the SELL side about to trigger
+            'direction' => 'bearish', // price-down direction conflicts with a profit-taking SELL
             'confidence' => 80,
         ]);
 
@@ -467,7 +467,7 @@ class RatioBotDecisionServiceTest extends TestCase
     }
 
     /** @test */
-    public function agreeing_brain_signal_does_not_delay_trade(): void
+    public function bullish_brain_direction_supports_ratio_sell_and_does_not_delay_trade(): void
     {
         [$config] = $this->makeHoldingConfig(buyPrice: 60_000, sellThreshold: 0.50);
         $config->update(['brain_enabled' => true, 'brain_min_confidence' => 65]);
@@ -478,7 +478,7 @@ class RatioBotDecisionServiceTest extends TestCase
             'symbol' => 'BTCUSDT',
             'timeframe' => '1h',
             'horizon_seconds' => 3600,
-            'direction' => 'sell', // agrees with the SELL side about to trigger
+            'direction' => 'bullish', // price-up direction supports the SELL-side opportunity
             'confidence' => 90,
         ]);
 
@@ -499,7 +499,7 @@ class RatioBotDecisionServiceTest extends TestCase
             'symbol' => 'BTCUSDT',
             'timeframe' => '1h',
             'horizon_seconds' => 3600,
-            'direction' => 'buy',
+            'direction' => 'bearish',
             'confidence' => 90,
         ]);
         $snapshot->timestamps = false;
@@ -523,7 +523,7 @@ class RatioBotDecisionServiceTest extends TestCase
             'symbol' => 'BTCUSDT',
             'timeframe' => '1h',
             'horizon_seconds' => 3600,
-            'direction' => 'buy', // conflicting direction, but confidence is below threshold
+            'direction' => 'bearish', // conflicting direction, but confidence is below threshold
             'confidence' => 40,
         ]);
 
@@ -579,7 +579,7 @@ class RatioBotDecisionServiceTest extends TestCase
     }
 
     /** @test */
-    public function reserve_tranche_buy_delayed_one_tick_by_conflicting_brain_but_still_fires(): void
+    public function reserve_tranche_buy_is_not_delayed_by_bearish_brain_direction(): void
     {
         [$config] = $this->makePartialHoldingConfig(avgEntry: 900.0, sellThreshold: 0.5, buyThreshold: 0.25, tranchesRemaining: 2);
         $config->update(['brain_enabled' => true, 'brain_min_confidence' => 65]);
@@ -590,17 +590,14 @@ class RatioBotDecisionServiceTest extends TestCase
             'symbol' => 'BTCUSDT',
             'timeframe' => '1h',
             'horizon_seconds' => 3600,
-            'direction' => 'sell', // conflicts with the reserve tranche BUY
+            'direction' => 'bearish', // price-down direction supports a cheaper reserve BUY
             'confidence' => 80,
         ]);
 
         $first = $this->service->evaluate($config->fresh('state'), 675.0);
-        $this->assertSame(RatioBotDecision::DECISION_HOLD, $first['decision']);
-        $this->assertTrue((bool) $first['decision_record']->metadata['confirmation_pending']);
-
-        $second = $this->service->evaluate($config->fresh('state'), 675.0);
-        $this->assertSame(RatioBotDecision::DECISION_BUY, $second['decision']);
-        $this->assertSame('reserve_tranche_buy', $second['decision_record']->metadata['trigger']);
+        $this->assertSame(RatioBotDecision::DECISION_BUY, $first['decision']);
+        $this->assertSame(0, (int) $first['decision_record']->metadata['brain_confirm_bump']);
+        $this->assertSame('reserve_tranche_buy', $first['decision_record']->metadata['trigger']);
     }
 
     // -----------------------------------------------------------------------

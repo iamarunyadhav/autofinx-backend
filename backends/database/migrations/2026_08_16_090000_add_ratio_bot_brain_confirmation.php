@@ -32,7 +32,7 @@ return new class extends Migration
             $table->decimal('price_at_evaluation', 20, 8)->nullable();
 
             // SignalPreviewService output ("Robot Signal")
-            $table->string('direction', 8)->nullable(); // buy | sell | neutral
+            $table->string('direction', 8)->nullable(); // bullish | bearish | neutral
             $table->unsignedTinyInteger('confidence')->nullable();
             $table->decimal('bullish_score', 8, 2)->nullable();
             $table->decimal('neutral_score', 8, 2)->nullable();
@@ -40,7 +40,7 @@ return new class extends Migration
             $table->json('reasons')->nullable();
 
             // TradeForecastService output ("Near-term Forecast")
-            $table->string('forecast_bias', 8)->nullable(); // BUY | SELL | NEUTRAL
+            $table->string('forecast_bias', 8)->nullable(); // bullish | bearish | neutral
             $table->decimal('forecast_confidence', 6, 2)->nullable();
             $table->decimal('expected_mid_price', 20, 8)->nullable();
             $table->decimal('expected_low', 20, 8)->nullable();
