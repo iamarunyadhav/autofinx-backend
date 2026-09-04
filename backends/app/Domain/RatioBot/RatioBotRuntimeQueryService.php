@@ -277,10 +277,39 @@ class RatioBotRuntimeQueryService
         }
 
         try {
+            if ($config->marketType() !== 'futures') {
+                if (! $config->connection_id) {
+                    throw new \RuntimeException('Spot ratio bot does not have a selected exchange connection.');
+                }
+
+                $connection = ExchangeConnection::query()
+                    ->where('workspace_id', $config->workspace_id)
+                    ->whereKey($config->connection_id)
+                    ->first();
+
+                if (! $connection) {
+                    throw new \RuntimeException('Selected spot exchange connection was not found.');
+                }
+                if (! $connection->is_active) {
+                    throw new \RuntimeException('Selected spot exchange connection is not active.');
+                }
+
+                $balances = $this->exchangeClients->makeFromConnection($connection)->fetchBalances();
+                $result['environment'] = $connection->is_testnet ? 'testnet' : 'live';
+                $result['connection_id'] = (string) $connection->id;
+                $result['connection_name'] = $connection->name;
+                $result['quote'] = $this->balanceForAsset($balances, $quote);
+                $result['base'] = $this->balanceForAsset($balances, $base);
+
+                return $result;
+            }
+
             $provider = (string) ($state['preferred_provider'] ?? 'binance');
             $integration = $this->integrations->resolve((string) $config->workspace_id, $provider, $state['preferred_integration_id'] ?? null);
             $client = $this->providers->for($provider);
             $result['environment'] = $state['exchange_environment'] ?? ($integration->environment ?? 'live');
+            $result['integration_id'] = (string) $integration->id;
+            $result['integration_name'] = $integration->display_name;
             $result['quote'] = $client->availableBalance($integration, $quote);
             $result['base'] = $client->availableBalance($integration, $base);
         } catch (\Throwable $e) {
@@ -592,6 +621,33 @@ class RatioBotRuntimeQueryService
     private function checklistItem(string $key, string $label, string $status, string $detail): array
     {
         return ['key' => $key, 'label' => $label, 'status' => $status, 'detail' => $detail];
+    }
+
+    private function balanceForAsset(array $balances, string $asset): array
+    {
+        $asset = strtoupper($asset);
+        foreach ($balances as $balance) {
+            if (strtoupper((string) ($balance['asset'] ?? '')) === $asset) {
+                $free = (float) ($balance['free'] ?? 0);
+                $locked = (float) ($balance['locked'] ?? 0);
+
+                return [
+                    'asset' => $asset,
+                    'balance' => $free + $locked,
+                    'available' => $free,
+                    'free' => $free,
+                    'locked' => $locked,
+                ];
+            }
+        }
+
+        return [
+            'asset' => $asset,
+            'balance' => 0.0,
+            'available' => 0.0,
+            'free' => 0.0,
+            'locked' => 0.0,
+        ];
     }
 
     private function checklistExchangeConnection(RatioBotConfig $config): array
