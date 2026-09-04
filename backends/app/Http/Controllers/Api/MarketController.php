@@ -52,7 +52,20 @@ class MarketController extends Controller
 
         $payload = $cache->getLatestPrice($provider, $assetCode);
         if (! $payload) {
-            return response()->json(['message' => 'Price not available in cache'], 404);
+            // No live feed is tracking this symbol yet (no bot/session uses
+            // it, so the WS consumer never subscribed) — this is a normal,
+            // expected state for a symbol nobody is trading, not an error.
+            // Respond 200 with a null price so frontend pollers (e.g. the
+            // always-visible MarketSnapshotBar watchlist) render "no data
+            // yet" instead of treating every poll as a failed request.
+            return response()->json([
+                'price' => null,
+                'asset_class' => $assetClass,
+                'asset_code' => $assetCode,
+                'provider' => $provider,
+                'quote' => strtoupper((string) ($data['quote'] ?? $data['quote_currency'] ?? 'USD')),
+                'available' => false,
+            ]);
         }
 
         return response()->json([
@@ -61,6 +74,7 @@ class MarketController extends Controller
             'asset_code' => $assetCode,
             'provider' => $provider,
             'quote' => strtoupper((string) ($data['quote'] ?? $data['quote_currency'] ?? 'USD')),
+            'available' => true,
         ]);
     }
 
