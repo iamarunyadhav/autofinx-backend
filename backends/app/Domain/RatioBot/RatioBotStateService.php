@@ -103,6 +103,8 @@ class RatioBotStateService
             'order_id'  => $orderId,
         ], $userId);
 
+        app(RatioBotLotService::class)->ensureStartingLotFromState($config->fresh('state'));
+
         Log::info('[RatioBot] Manual buy anchored', ['config_id' => $config->id, 'price' => $buyPrice]);
 
         return $state->refresh();
@@ -456,7 +458,7 @@ class RatioBotStateService
         $remainingQty = round(max(0.0, $priorQty - $executedQty), 8);
         $selectedLotIds = (array) data_get($decision->metadata, 'sell_lot_ids', []);
         $realizedPnlFromLots = [];
-        if (app(RatioBotStagePlanService::class)->enabled($config) && $selectedLotIds !== []) {
+        if ($selectedLotIds !== []) {
             $realizedPnlFromLots = [
                 'value' => app(RatioBotLotService::class)->applySellFill($config, $selectedLotIds, $executedPrice, $executedQty, $decision, $orderId),
             ];
@@ -475,7 +477,9 @@ class RatioBotStateService
                 ? max(0, (int) ($state->sell_tranches_remaining ?? 0) - 1)
                 : max(0, (int) $config->sell_tranche_count - 1);
         }
-        $continuesPartialExit = $stagedExit && $remainingQty > self::SELL_DUST_EPSILON && $tranchesRemaining > 0;
+        $continuesLotScopedExit = $selectedLotIds !== [] && $remainingQty > self::SELL_DUST_EPSILON;
+        $continuesPartialExit = ($stagedExit && $remainingQty > self::SELL_DUST_EPSILON && $tranchesRemaining > 0)
+            || $continuesLotScopedExit;
 
         if ($continuesPartialExit) {
             $state->update([

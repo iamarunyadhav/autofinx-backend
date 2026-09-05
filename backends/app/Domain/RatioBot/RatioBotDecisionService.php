@@ -553,15 +553,15 @@ class RatioBotDecisionService
     }
 
     /**
-     * Normal Stage 1-3 SELL — eligibility (rise% from the LIFO top lot's
-     * fill price) -> observe the high -> reversal-watch -> confirm ->
+     * Normal Stage 1-3 SELL — eligibility (rise% from the most recent open
+     * lot's fill price) -> observe the high -> reversal-watch -> confirm ->
      * execute (spec §21-22: "do not exit simply because the minimum
      * threshold was reached"). Once a reversal is confirmed,
-     * RatioBotLotService::reverseSellPlan() still determines the actual
-     * lots/quantity to sell (it may include more than just the top lot, if
-     * several consecutive LIFO lots are all individually profitable at the
-     * confirmed price) — the reversal watch only decides WHEN, the lot
-     * selection logic (unchanged) still decides WHAT.
+     * RatioBotLotService::profitableFifoSellPlan() determines the actual
+     * lots/quantity to sell: oldest open lot first, skipping (not stopping
+     * at) any individual lot that doesn't clear its own buy price plus the
+     * required profit buffer — the reversal watch only decides WHEN, the
+     * lot selection logic still decides WHAT.
      */
     private function evaluateNormalStageSell(
         RatioBotConfig $config,
@@ -618,20 +618,23 @@ class RatioBotDecisionService
 
         if ($tracking['pullback'] >= $reversalConfirm && $tracking['ratio'] >= $sellRise) {
             $lotService = app(RatioBotLotService::class);
-            $sellPlan = $lotService->reverseSellPlan($config, $currentPrice, $minimumNet, $targetAllocation, RatioBotLot::TYPE_NORMAL);
+            $desiredQty = $normalOpenLots->sum(fn ($lot) => (float) $lot->remaining_qty)
+                * max(0.0, min(100.0, $targetAllocation)) / 100;
+            $sellPlan = $lotService->profitableFifoSellPlan($config, $currentPrice, $minimumNet, $desiredQty, RatioBotLot::TYPE_NORMAL);
 
             if ($sellPlan['qty'] > 0 && $sellPlan['min_buy_price'] !== null) {
                 $ratio = ($currentPrice / (float) $sellPlan['min_buy_price']) - 1;
 
                 return $this->finalizeTradeSignal(
                     $config, $state, RatioBotDecision::DECISION_SELL, $currentPrice, (float) $sellPlan['min_buy_price'], $ratio, $sellRise, $correlationId,
-                    "stage {$sellStage} reverse-lot sell triggered after confirmed reversal: peak {$tracking['peak_ratio']}, pullback {$tracking['pullback']} >= required {$reversalConfirm}",
+                    "stage {$sellStage} fifo-lot sell triggered after confirmed reversal: peak {$tracking['peak_ratio']}, pullback {$tracking['pullback']} >= required {$reversalConfirm}",
                     array_merge($metadata, [
-                        'trigger' => 'stage_reverse_lot_sell',
+                        'trigger' => 'stage_fifo_lot_sell',
                         'stage' => ['side' => 'SELL', 'index' => $sellStage, 'allocation_pct' => $targetAllocation, 'rise_pct' => $sellRise * 100],
                         'sell_quantity' => $sellPlan['qty'],
                         'sell_lot_ids' => $sellPlan['lot_ids'],
-                        'reverse_lot_selling' => true,
+                        'lot_accounting' => 'fifo_profit_guard',
+                        'skipped_unprofitable_qty' => $sellPlan['skipped_unprofitable_qty'] ?? 0.0,
                         'cost_ratio' => $costRatio,
                         'minimum_net_profit_ratio' => $minimumNet,
                     ]),
@@ -640,8 +643,8 @@ class RatioBotDecisionService
             }
 
             // Reversal confirmed off the top lot (pullback and ratio both
-            // cleared), but reverseSellPlan()'s own fresh-price profit
-            // re-check didn't clear (e.g. fees/slippage moved between
+            // cleared), but profitableFifoSellPlan()'s own fresh-price profit
+            // re-check didn't clear any lot (e.g. fees/slippage moved between
             // ticks) — HOLD with the actual cause. Falling through to the
             // generic "pullback < required" message below would be wrong
             // here: the pullback DID clear, that's not why this held.
@@ -2088,6 +2091,39 @@ class RatioBotDecisionService
             );
         }
 
+        if ($decision === RatioBotDecision::DECISION_SELL && ! $protectiveExit) {
+            $lotPlan = $this->profitableFifoSellPlan($config, $state, $price, $minimumNetRatio, $metadata);
+            if ($lotPlan !== null && (float) $lotPlan['qty'] <= 0) {
+                return $this->record(
+                    $config,
+                    $state,
+                    RatioBotDecision::DECISION_HOLD,
+                    $price,
+                    $anchor,
+                    $ratio,
+                    $threshold,
+                    $correlationId,
+                    'sell blocked by lot profit guard: no managed lot clears its own buy price plus required profit buffer',
+                    array_merge($metadata, ['guard' => 'lot_profit_floor', 'sell_plan' => $lotPlan]),
+                    $priceSource,
+                    $priceTimestamp,
+                );
+            }
+
+            if ($lotPlan !== null) {
+                $metadata = array_merge($metadata, [
+                    'sell_quantity' => $lotPlan['qty'],
+                    'sell_lot_ids' => $lotPlan['lot_ids'],
+                    'sell_plan' => $lotPlan,
+                    'lot_accounting' => 'fifo_profit_guard',
+                ]);
+                if (($lotPlan['max_buy_price'] ?? null) !== null) {
+                    $anchor = (float) $lotPlan['max_buy_price'];
+                    $ratio = ($price / $anchor) - 1;
+                }
+            }
+        }
+
         if ($this->hasUnresolvedTrade($config)) {
             return $this->record(
                 $config,
@@ -2162,6 +2198,33 @@ class RatioBotDecisionService
             array_merge($metadata, $confirmation['metadata']),
             $priceSource,
             $priceTimestamp,
+        );
+    }
+
+    private function profitableFifoSellPlan(RatioBotConfig $config, RatioBotState $state, float $price, float $minimumNetRatio, array $metadata): ?array
+    {
+        if ((array) ($metadata['sell_lot_ids'] ?? []) !== []) {
+            return null;
+        }
+
+        $desiredQty = (float) ($metadata['sell_quantity'] ?? 0);
+        if ($desiredQty <= 0) {
+            $desiredQty = (float) ($state->last_buy_quantity ?? 0);
+            if ((bool) ($config->allow_partial_sell ?? false) && (float) ($config->partial_sell_pct ?? 0) > 0) {
+                $desiredQty *= min(1.0, max(0.0, (float) $config->partial_sell_pct));
+            }
+        }
+
+        if ($desiredQty <= 0) {
+            return null;
+        }
+
+        return app(RatioBotLotService::class)->profitableFifoSellPlan(
+            $config->fresh('state') ?? $config,
+            $price,
+            $minimumNetRatio,
+            $desiredQty,
+            RatioBotLot::TYPE_NORMAL,
         );
     }
 

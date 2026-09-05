@@ -111,6 +111,74 @@ class RatioBotLotService
         ]);
     }
 
+    public function ensureStartingLotFromState(RatioBotConfig $config): ?RatioBotLot
+    {
+        if ($this->openLots($config)->count() > 0) {
+            return null;
+        }
+
+        $state = $config->state;
+        $price = (float) ($state?->last_buy_price ?? 0);
+        $qty = (float) ($state?->last_buy_quantity ?? 0);
+        if ($price <= 0 || $qty <= 0) {
+            return null;
+        }
+
+        return $this->createStartingLot($config, RatioBotLot::TYPE_NORMAL, 1, 100, $price, $qty);
+    }
+
+    /**
+     * FIFO sell plan for normal accounting: oldest open lot sells first, but
+     * no non-protective sell may touch a lot below its own net-profit floor.
+     *
+     * @return array{qty: float, lot_ids: array<int, string>, min_buy_price: float|null, max_buy_price: float|null, skipped_unprofitable_qty: float}
+     */
+    public function profitableFifoSellPlan(RatioBotConfig $config, float $currentPrice, float $minNetProfitRatio, float $desiredQty, ?string $lotType = null): array
+    {
+        $this->ensureStartingLotFromState($config);
+
+        $selectedQty = 0.0;
+        $skippedQty = 0.0;
+        $selectedLotIds = [];
+        $minBuyPrice = null;
+        $maxBuyPrice = null;
+
+        foreach ($this->openLots($config, $lotType) as $lot) {
+            if ($desiredQty > 0 && $selectedQty >= $desiredQty) {
+                break;
+            }
+
+            $buyPrice = (float) $lot->buy_price;
+            $remaining = (float) $lot->remaining_qty;
+            if ($remaining <= 0) {
+                continue;
+            }
+
+            if ($buyPrice <= 0 || $currentPrice < ($buyPrice * (1 + $minNetProfitRatio))) {
+                $skippedQty += $remaining;
+                continue;
+            }
+
+            $take = $desiredQty > 0 ? min($remaining, max(0.0, $desiredQty - $selectedQty)) : $remaining;
+            if ($take <= 0) {
+                continue;
+            }
+
+            $selectedQty += $take;
+            $selectedLotIds[] = (string) $lot->id;
+            $minBuyPrice = $minBuyPrice === null ? $buyPrice : min($minBuyPrice, $buyPrice);
+            $maxBuyPrice = $maxBuyPrice === null ? $buyPrice : max($maxBuyPrice, $buyPrice);
+        }
+
+        return [
+            'qty' => round($selectedQty, 8),
+            'lot_ids' => $selectedLotIds,
+            'min_buy_price' => $minBuyPrice,
+            'max_buy_price' => $maxBuyPrice,
+            'skipped_unprofitable_qty' => round($skippedQty, 8),
+        ];
+    }
+
     /**
      * Strict reverse-purchase-order (LIFO) selling: the most recently bought
      * open lot (highest buy_stage_index) sells first — BUY3 -> SELL1,

@@ -141,11 +141,15 @@ class RatioBotPhase1StagePlanTest extends TestCase
     }
 
     /** @test */
-    public function reverse_lot_sell_uses_strict_reverse_purchase_order_lifo_after_a_confirmed_reversal(): void
+    public function fifo_lot_sell_skips_unprofitable_older_lots_after_a_confirmed_reversal(): void
     {
-        // Typical monotonic-decline accumulation: highest stage index (most
-        // recently bought) also happens to be the cheapest here, same as it
-        // usually is in practice — LIFO and price-order coincide.
+        // Monotonic-decline accumulation: each later stage was bought cheaper,
+        // so only the most recent (also cheapest) lot clears its own profit
+        // floor at this price — stages 1/2 (60000/52000) are skipped as
+        // unprofitable, stage 3 (45000) is the only one FIFO selects. Same
+        // outcome a naive "top lot only" LIFO pick would have reached here,
+        // but for a different reason: FIFO reached stage 3 by walking past
+        // (and skipping) the older unprofitable lots, not by starting there.
         [$config, $state] = $this->makeStageConfig();
         $config->update(['selling_loss_ratio' => 0.02]);
         $this->seedBuyLots($config, [[1, 60000, 0.002], [2, 52000, 0.001], [3, 45000, 0.001]]);
@@ -155,7 +159,7 @@ class RatioBotPhase1StagePlanTest extends TestCase
             'last_buy_quantity' => 0.004,
         ]);
 
-        // Stage 1 sell_rise = 5% off the LIFO top lot (stage 3 @ 45000) -> eligible at 47250.
+        // Stage 1 sell_rise = 5% off the most recent open lot (stage 3 @ 45000) -> eligible at 47250.
         // Arm at 50000 (well past eligible), never sells on the very first eligible tick.
         $armed = $this->decisions->evaluate($config->fresh('state'), 50000);
         $this->assertSame(RatioBotDecision::DECISION_HOLD, $armed['decision']);
@@ -165,10 +169,46 @@ class RatioBotPhase1StagePlanTest extends TestCase
         $result = $this->decisions->evaluate($config->fresh('state'), 48600);
 
         $this->assertSame(RatioBotDecision::DECISION_SELL, $result['decision']);
-        $this->assertSame('stage_reverse_lot_sell', $result['decision_record']->metadata['trigger']);
+        $this->assertSame('stage_fifo_lot_sell', $result['decision_record']->metadata['trigger']);
         $selected = RatioBotLot::find($result['decision_record']->metadata['sell_lot_ids'][0]);
-        // Stage 3 (buy_stage_index=3, the LAST one bought) sells first — BUY3 -> SELL1.
+        // Stage 1 (60000) and stage 2 (52000) don't clear 48600 net of the 5%
+        // floor and get skipped; stage 3 (45000) is the only lot that does.
         $this->assertEqualsWithDelta(45000, (float) $selected->buy_price, 0.01);
+    }
+
+    /** @test */
+    public function fifo_lot_sell_takes_the_oldest_profitable_lot_first_even_when_a_newer_lot_is_also_profitable(): void
+    {
+        // Both lots ARE profitable at the confirmed price, and only a 25%
+        // partial sell (stage 1's allocation) is requested — this is where
+        // FIFO and the old LIFO actually diverge in WHICH lot gets consumed,
+        // unlike the monotonic-decline test above where only one lot ever
+        // qualifies at all. Old LIFO would have taken the newer/top lot
+        // (65000) first; FIFO must take the OLDER lot (60000) first instead.
+        [$config, $state] = $this->makeStageConfig();
+        $config->update(['selling_loss_ratio' => 0.02]);
+        $this->seedBuyLots($config, [[1, 60000, 0.002], [2, 65000, 0.002]]);
+        $state->update([
+            'position_state' => RatioBotState::STATE_HOLDING,
+            'last_buy_price' => 62500,
+            'last_buy_quantity' => 0.004,
+        ]);
+
+        // Stage 1 sell_rise = 5% off the most recent open lot (stage 2 @ 65000) -> eligible at 68250.
+        // Arm at 70000 (peak ratio ~7.69%), never sells on the very first eligible tick.
+        $armed = $this->decisions->evaluate($config->fresh('state'), 70000);
+        $this->assertSame(RatioBotDecision::DECISION_HOLD, $armed['decision']);
+        $this->assertSame('stage_sell_reversal_watch', $armed['decision_record']->metadata['trigger']);
+
+        // Pulls back to 68600 (ratio ~5.54%, still >= 5% eligible; pullback ~2.15% >= 2% confirm).
+        // At 68600 BOTH lots individually clear their own 5% profit floor
+        // (60000*1.05=63000 and 65000*1.05=68250).
+        $result = $this->decisions->evaluate($config->fresh('state'), 68600);
+
+        $this->assertSame(RatioBotDecision::DECISION_SELL, $result['decision']);
+        $this->assertSame('stage_fifo_lot_sell', $result['decision_record']->metadata['trigger']);
+        $selected = RatioBotLot::find($result['decision_record']->metadata['sell_lot_ids'][0]);
+        $this->assertEqualsWithDelta(60000, (float) $selected->buy_price, 0.01);
     }
 
     /** @test */
@@ -267,6 +307,70 @@ class RatioBotPhase1StagePlanTest extends TestCase
 
         $this->assertEqualsWithDelta(45000, (float) $lot->buy_price, 0.01);
         $this->assertEqualsWithDelta(0.0005, (float) $lot->remaining_qty, 0.00000001);
+    }
+
+    /** @test */
+    public function fifo_sell_fill_splits_realized_profit_across_oldest_profitable_lots(): void
+    {
+        [$config, $state] = $this->makeStageConfig();
+        $config->update(['v2_enabled' => false, 'sell_threshold_ratio' => 0.01, 'min_net_profit_bps' => 0]);
+        $lots = $this->seedBuyLots($config, [
+            [1, 76000, 0.0025],
+            [2, 78000, 0.0045],
+        ]);
+        $state->update([
+            'position_state' => RatioBotState::STATE_HOLDING,
+            'last_buy_price' => 77285.71428571,
+            'last_buy_quantity' => 0.007,
+        ]);
+
+        $plan = app(\App\Domain\RatioBot\RatioBotLotService::class)
+            ->profitableFifoSellPlan($config->fresh('state'), 80000, 0, 0.004, RatioBotLot::TYPE_NORMAL);
+        $decision = RatioBotDecision::create([
+            'ratio_bot_config_id' => $config->id,
+            'decision' => RatioBotDecision::DECISION_SELL,
+            'execution_status' => RatioBotDecision::EXEC_PENDING,
+            'metadata' => ['sell_lot_ids' => $plan['lot_ids'], 'sell_quantity' => $plan['qty']],
+            'decided_at' => now(),
+        ]);
+
+        $this->states->onSellFilled($config->fresh('state'), $decision, 80000, 0.004, 'sell-1', 'client-1');
+
+        $lot1 = $lots[0]->fresh();
+        $lot2 = $lots[1]->fresh();
+        $this->assertSame(RatioBotLot::STATUS_CLOSED, $lot1->status);
+        $this->assertEqualsWithDelta(0, (float) $lot1->remaining_qty, 0.00000001);
+        $this->assertEqualsWithDelta(10.0, (float) $lot1->realized_pnl, 0.00000001);
+        $this->assertEqualsWithDelta(0.003, (float) $lot2->remaining_qty, 0.00000001);
+        $this->assertEqualsWithDelta(3.0, (float) $lot2->realized_pnl, 0.00000001);
+        $freshState = $config->fresh('state')->state;
+        $this->assertSame(RatioBotState::STATE_PARTIAL_SOLD, $freshState->position_state);
+        $this->assertEqualsWithDelta(0.003, (float) $freshState->last_buy_quantity, 0.00000001);
+        $this->assertEqualsWithDelta(13.0, (float) $freshState->realized_pnl, 0.00000001);
+    }
+
+    /** @test */
+    public function fifo_sell_plan_skips_lots_that_are_below_their_own_buy_price(): void
+    {
+        [$config, $state] = $this->makeStageConfig();
+        $this->seedBuyLots($config, [
+            [1, 76000, 0.0025],
+            [2, 78000, 0.0045],
+        ]);
+        $state->update([
+            'position_state' => RatioBotState::STATE_HOLDING,
+            'last_buy_price' => 77285.71428571,
+            'last_buy_quantity' => 0.007,
+        ]);
+
+        $plan = app(\App\Domain\RatioBot\RatioBotLotService::class)
+            ->profitableFifoSellPlan($config->fresh('state'), 77000, 0, 0.004, RatioBotLot::TYPE_NORMAL);
+
+        $this->assertEqualsWithDelta(0.0025, $plan['qty'], 0.00000001);
+        $this->assertCount(1, $plan['lot_ids']);
+        $this->assertEqualsWithDelta(0.0045, $plan['skipped_unprofitable_qty'], 0.00000001);
+        $this->assertEqualsWithDelta(76000, (float) $plan['min_buy_price'], 0.01);
+        $this->assertEqualsWithDelta(76000, (float) $plan['max_buy_price'], 0.01);
     }
 
     private function makeStageConfig(): array
