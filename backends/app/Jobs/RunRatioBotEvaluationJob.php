@@ -10,13 +10,16 @@ use App\Domain\MarketData\Enums\StreamType;
 use App\Domain\MarketData\MarketRecoveryManager;
 use App\Domain\Ops\OperationalBreakerService;
 use App\Domain\RatioBot\RatioBotAlertService;
+use App\Domain\RatioBot\RatioBotBrainService;
 use App\Domain\RatioBot\RatioBotDecisionService;
 use App\Domain\RatioBot\RatioBotRealtimeEngine;
 use App\Domain\RatioBot\RatioBotRuntimeQueryService;
 use App\Domain\RatioBot\RatioBotStateService;
 use App\Models\ExchangeConnection;
+use App\Models\MarketOhlc;
 use App\Models\Order;
 use App\Models\RatioBotConfig;
+use App\Models\RatioBotEvent;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -238,6 +241,36 @@ class RunRatioBotEvaluationJob implements ShouldQueue, ShouldBeUnique
             return;
         }
 
+        if ($this->autoStartDirectionMode($config) === 'auto') {
+            $direction = $this->resolveAutoStartDirection($config, $currentPrice, $hasBase, $hasQuote);
+            if ($direction === null) {
+                return;
+            }
+
+            if ($direction === 'SELL') {
+                $stateService->anchorManualBuy(config: $config, buyPrice: $currentPrice, quantity: $baseAvailable, orderId: 'auto-direction-anchor');
+                Log::info('[RatioBotJob] Auto-direction anchored from live base-asset balance (now watching for SELL)', [
+                    'config_id' => $config->id,
+                    'base_available' => $baseAvailable,
+                    'base_notional' => $baseNotional,
+                    'quote_available' => $quoteAvailable,
+                    'price' => $currentPrice,
+                ]);
+                return;
+            }
+
+            $impliedQty = max(round($quoteAvailable / $currentPrice, 8), 0.00000001);
+            $stateService->anchorManualSell(config: $config, sellPrice: $currentPrice, quantity: $impliedQty, orderId: 'auto-direction-anchor');
+            Log::info('[RatioBotJob] Auto-direction anchored from live quote-asset balance (now watching for BUY)', [
+                'config_id' => $config->id,
+                'quote_available' => $quoteAvailable,
+                'base_available' => $baseAvailable,
+                'base_notional' => $baseNotional,
+                'price' => $currentPrice,
+            ]);
+            return;
+        }
+
         // Both funded: the larger side (compared in the same quote-currency
         // unit) wins. A tie is resolved toward the quote side (BUY WATCH),
         // the lower-immediate-risk starting posture since it doesn't commit
@@ -289,6 +322,27 @@ class RunRatioBotEvaluationJob implements ShouldQueue, ShouldBeUnique
         float $currentPrice,
         RatioBotStateService $stateService,
     ): void {
+        if ($this->autoStartDirectionMode($config) === 'auto') {
+            $quoteAmount = (float) ($config->base_quote_amount ?? 0);
+            if ($quoteAmount < self::MIN_AUTO_ANCHOR_NOTIONAL_USDT) {
+                return;
+            }
+
+            $direction = $this->resolveAutoStartDirection($config, $currentPrice, false, true);
+            if ($direction !== 'BUY') {
+                return;
+            }
+
+            $impliedQty = max(round($quoteAmount / $currentPrice, 8), 0.00000001);
+            $stateService->anchorManualSell(config: $config, sellPrice: $currentPrice, quantity: $impliedQty, orderId: 'auto-direction-anchor');
+            Log::info('[RatioBotJob] Auto-direction anchored sandbox bot from configured starting capital (now watching for BUY)', [
+                'config_id' => $config->id,
+                'base_quote_amount' => $quoteAmount,
+                'price' => $currentPrice,
+            ]);
+            return;
+        }
+
         if ($config->startingEntry() === 'SELL') {
             return;
         }
@@ -305,6 +359,96 @@ class RunRatioBotEvaluationJob implements ShouldQueue, ShouldBeUnique
             'base_quote_amount' => $quoteAmount,
             'price' => $currentPrice,
         ]);
+    }
+
+    private function autoStartDirectionMode(RatioBotConfig $config): string
+    {
+        $mode = strtolower((string) data_get($config->strategy_params, 'auto_start_direction_mode', 'manual'));
+
+        return $mode === 'auto' ? 'auto' : 'manual';
+    }
+
+    /**
+     * Decides only the initial cycle posture. Once anchored, the existing
+     * stage/reversal/profit engine owns every subsequent BUY/SELL decision.
+     */
+    private function resolveAutoStartDirection(RatioBotConfig $config, float $currentPrice, bool $hasBase, bool $hasQuote): ?string
+    {
+        $brain = app(RatioBotBrainService::class)->resolve($config, $currentPrice);
+        $forecastDirection = strtolower((string) ($brain?->forecast_bias ?: $brain?->direction ?: 'neutral'));
+        $confidence = (float) ($brain?->forecast_confidence ?? $brain?->confidence ?? 0);
+        $minConfidence = max(0, min(100, (float) data_get($config->strategy_params, 'auto_start_min_confidence', $config->brain_min_confidence ?? 60)));
+        $trendDirection = $this->observedCandleDirection($config);
+
+        $reason = null;
+        $direction = null;
+        if ($confidence < $minConfidence) {
+            $reason = "confidence {$confidence} below required {$minConfidence}";
+        } elseif (! in_array($forecastDirection, ['bullish', 'bearish'], true)) {
+            $reason = "forecast direction is {$forecastDirection}";
+        } elseif ($trendDirection !== $forecastDirection) {
+            $reason = "graph trend {$trendDirection} does not match forecast {$forecastDirection}";
+        } elseif ($forecastDirection === 'bullish' && ! $hasBase) {
+            $reason = 'bullish auto-start needs base-asset balance for SELL-watch';
+        } elseif ($forecastDirection === 'bearish' && ! $hasQuote) {
+            $reason = 'bearish auto-start needs quote-asset balance for BUY-watch';
+        } else {
+            $direction = $forecastDirection === 'bullish' ? 'SELL' : 'BUY';
+        }
+
+        RatioBotEvent::create([
+            'ratio_bot_config_id' => $config->id,
+            'event_type' => $direction ? 'auto_start_direction_selected' : 'auto_start_direction_waiting',
+            'context' => [
+                'direction' => $direction,
+                'reason' => $reason,
+                'forecast_direction' => $forecastDirection,
+                'graph_direction' => $trendDirection,
+                'confidence' => $confidence,
+                'min_confidence' => $minConfidence,
+                'has_base' => $hasBase,
+                'has_quote' => $hasQuote,
+            ],
+            'occurred_at' => now(),
+        ]);
+
+        return $direction;
+    }
+
+    private function observedCandleDirection(RatioBotConfig $config): string
+    {
+        $limit = max(8, min(120, (int) data_get($config->strategy_params, 'auto_start_observation_candles', 24)));
+        $candles = MarketOhlc::query()
+            ->where('exchange', $config->exchangeKey())
+            ->where('symbol', $config->normalizedSymbol())
+            ->where('timeframe', $config->timeFrame())
+            ->orderByDesc('ts')
+            ->limit($limit)
+            ->get(['open', 'close'])
+            ->reverse()
+            ->values();
+
+        if ($candles->count() < 8) {
+            return 'neutral';
+        }
+
+        $first = (float) $candles->first()->open;
+        $last = (float) $candles->last()->close;
+        if ($first <= 0 || $last <= 0) {
+            return 'neutral';
+        }
+
+        $move = ($last / $first) - 1;
+        $minMove = max(0.0001, (float) data_get($config->strategy_params, 'auto_start_min_trend_ratio', 0.001));
+
+        if ($move >= $minMove) {
+            return 'bullish';
+        }
+        if ($move <= -$minMove) {
+            return 'bearish';
+        }
+
+        return 'neutral';
     }
 
     private function fetchPricePayload(

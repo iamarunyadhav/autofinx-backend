@@ -5,6 +5,8 @@ namespace Tests\Unit\RatioBot;
 use App\Domain\RatioBot\RatioBotRuntimeQueryService;
 use App\Domain\RatioBot\RatioBotStateService;
 use App\Jobs\RunRatioBotEvaluationJob;
+use App\Models\MarketOhlc;
+use App\Models\RatioBotBrainSnapshot;
 use App\Models\RatioBotConfig;
 use App\Models\RatioBotState;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -97,6 +99,90 @@ class RatioBotAutoAnchorTest extends TestCase
         $state = $config->fresh('state')->state;
         $this->assertSame(RatioBotState::STATE_FLAT, $state->position_state);
         $this->assertSame('sell_anchor', $state->active_anchor_type);
+    }
+
+    public function test_auto_direction_anchors_quote_only_bot_to_buy_watch_when_forecast_and_graph_are_bearish(): void
+    {
+        $config = $this->makeBot([
+            'execution_mode' => 'live',
+            'brain_enabled' => true,
+            'strategy_params' => [
+                'auto_start_direction_mode' => 'auto',
+                'auto_start_min_confidence' => 60,
+                'auto_start_observation_candles' => 12,
+            ],
+        ]);
+        $this->seedTrend($config, 2100.0, -5.0, 12);
+        $this->seedBrain($config, 'bearish', 72);
+
+        $this->mock(RatioBotRuntimeQueryService::class, function ($mock) {
+            $mock->shouldReceive('walletBalances')->once()->andReturn([
+                'base' => ['available' => 0.0, 'balance' => 0.0],
+                'quote' => ['available' => 1000.0, 'balance' => 1000.0],
+            ]);
+        });
+
+        $this->invokeAutoAnchor($config, 2000.0);
+
+        $state = $config->fresh('state')->state;
+        $this->assertSame(RatioBotState::STATE_FLAT, $state->position_state);
+        $this->assertSame('sell_anchor', $state->active_anchor_type);
+    }
+
+    public function test_auto_direction_anchors_base_only_bot_to_sell_watch_when_forecast_and_graph_are_bullish(): void
+    {
+        $config = $this->makeBot([
+            'execution_mode' => 'live',
+            'brain_enabled' => true,
+            'strategy_params' => [
+                'auto_start_direction_mode' => 'auto',
+                'auto_start_min_confidence' => 60,
+                'auto_start_observation_candles' => 12,
+            ],
+        ]);
+        $this->seedTrend($config, 1900.0, 5.0, 12);
+        $this->seedBrain($config, 'bullish', 72);
+
+        $this->mock(RatioBotRuntimeQueryService::class, function ($mock) {
+            $mock->shouldReceive('walletBalances')->once()->andReturn([
+                'base' => ['available' => 0.5, 'balance' => 0.5],
+                'quote' => ['available' => 0.0, 'balance' => 0.0],
+            ]);
+        });
+
+        $this->invokeAutoAnchor($config, 2000.0);
+
+        $state = $config->fresh('state')->state;
+        $this->assertSame(RatioBotState::STATE_HOLDING, $state->position_state);
+        $this->assertSame('buy_anchor', $state->active_anchor_type);
+        $this->assertEquals(0.5, (float) $state->last_buy_quantity);
+    }
+
+    public function test_auto_direction_waits_when_forecast_and_graph_disagree(): void
+    {
+        $config = $this->makeBot([
+            'execution_mode' => 'live',
+            'brain_enabled' => true,
+            'strategy_params' => [
+                'auto_start_direction_mode' => 'auto',
+                'auto_start_min_confidence' => 60,
+                'auto_start_observation_candles' => 12,
+            ],
+        ]);
+        $this->seedTrend($config, 2100.0, -5.0, 12);
+        $this->seedBrain($config, 'bullish', 72);
+
+        $this->mock(RatioBotRuntimeQueryService::class, function ($mock) {
+            $mock->shouldReceive('walletBalances')->once()->andReturn([
+                'base' => ['available' => 0.5, 'balance' => 0.5],
+                'quote' => ['available' => 1000.0, 'balance' => 1000.0],
+            ]);
+        });
+
+        $this->invokeAutoAnchor($config, 2000.0);
+
+        $state = $config->fresh('state')->state;
+        $this->assertSame(RatioBotState::STATE_IDLE, $state->position_state);
     }
 
     public function test_live_bot_with_both_assets_funded_anchors_to_the_larger_side_by_value(): void
@@ -240,6 +326,7 @@ class RatioBotAutoAnchorTest extends TestCase
             'workspace_id' => '00000000-0000-0000-0000-000000000001',
             'symbol' => 'BTCUSDT',
             'market_type' => 'spot',
+            'timeframe' => '1m',
             'execution_mode' => 'sandbox',
             'enabled' => true,
             'sell_threshold_ratio' => 0.02,
@@ -254,5 +341,49 @@ class RatioBotAutoAnchorTest extends TestCase
         $config->setRelation('state', $state);
 
         return $config;
+    }
+
+    private function seedBrain(RatioBotConfig $config, string $direction, int $confidence): void
+    {
+        RatioBotBrainSnapshot::create([
+            'ratio_bot_config_id' => $config->id,
+            'symbol' => $config->normalizedSymbol(),
+            'timeframe' => $config->timeFrame(),
+            'horizon_seconds' => 60,
+            'price_at_evaluation' => 2000,
+            'direction' => $direction,
+            'confidence' => $confidence,
+            'bullish_score' => $direction === 'bullish' ? 80 : 10,
+            'neutral_score' => 10,
+            'bearish_score' => $direction === 'bearish' ? 80 : 10,
+            'reasons' => [],
+            'forecast_bias' => $direction,
+            'forecast_confidence' => $confidence,
+            'expected_mid_price' => $direction === 'bullish' ? 2020 : 1980,
+            'expected_low' => 1975,
+            'expected_high' => 2025,
+            'atr_pct' => 0.01,
+            'raw_payload' => [],
+        ]);
+    }
+
+    private function seedTrend(RatioBotConfig $config, float $start, float $step, int $count): void
+    {
+        $time = now()->subMinutes($count);
+        for ($i = 0; $i < $count; $i++) {
+            $open = $start + ($step * $i);
+            $close = $open + $step;
+            MarketOhlc::create([
+                'exchange' => $config->exchangeKey(),
+                'symbol' => $config->normalizedSymbol(),
+                'timeframe' => $config->timeFrame(),
+                'open' => $open,
+                'high' => max($open, $close) + 1,
+                'low' => min($open, $close) - 1,
+                'close' => $close,
+                'volume' => 10,
+                'ts' => $time->copy()->addMinutes($i),
+            ]);
+        }
     }
 }
