@@ -723,6 +723,7 @@ class RatioBotController extends Controller
             'starting_entry'               => 'nullable|string|in:BUY,SELL',
             'mode'                         => $optional . '|string|in:advisor,manual_approval,restricted_auto',
             'execution_mode'               => $optional . '|string|in:sandbox,live',
+            'spot_execution_route'         => 'nullable|string|in:spot_market,convert',
             'base_quote_amount'            => $optional . '|numeric|min:0',
             'initial_entry_pct'            => 'nullable|numeric|min:0.01|max:1',
             'reserve_tranche_count'        => 'nullable|integer|min:0|max:10',

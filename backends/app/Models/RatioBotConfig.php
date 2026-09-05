@@ -87,6 +87,13 @@ class RatioBotConfig extends BaseModel
         'no_trade_alert_minutes'      => 'integer',
     ];
 
+    public function spotExecutionRoute(): string
+    {
+        $route = strtolower(trim((string) ($this->spot_execution_route ?: config('services.binance.ratio_bot_spot_execution_route', 'spot_market'))));
+
+        return $route === 'convert' ? 'convert' : 'spot_market';
+    }
+
     public function workspace(): BelongsTo
     {
         return $this->belongsTo(Workspace::class);
@@ -231,6 +238,11 @@ class RatioBotConfig extends BaseModel
     public function maxEntryPriceDriftBps(): float
     {
         return max(0.0, (float) ($this->max_entry_price_drift_bps ?? 50.0));
+    }
+
+    public function maxAllowedSlippageBps(): float
+    {
+        return max(0.0, (float) ($this->max_allowed_slippage_bps ?? $this->max_slippage_bps ?? 0.0));
     }
 
     /**

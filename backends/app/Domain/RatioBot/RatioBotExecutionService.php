@@ -137,15 +137,20 @@ class RatioBotExecutionService
                     return;
                 }
 
+                $route = $config->spotExecutionRoute();
                 $order = $this->orders->place([
                     'workspace_id' => (string) $config->workspace_id,
                     'connection_id' => (string) $config->connection_id,
                     'symbol' => $symbol,
                     'side' => strtolower($side),
-                    'type' => 'market',
+                    'type' => $route === 'convert' ? 'convert' : 'market',
                     'qty' => $qty,
+                    'price' => (float) ($decision->evaluated_price ?? 0),
+                    'max_quote_deviation_bps' => $route === 'convert' ? $config->maxAllowedSlippageBps() : null,
                     'idempotency_key' => $clientOrderId,
-                    'meta' => $this->orderMeta($config, $decision),
+                    'meta' => array_merge($this->orderMeta($config, $decision), [
+                        'spot_execution_route' => $route,
+                    ]),
                 ]);
 
                 $this->handleOrderResult($config, $decision, $order, $side, $clientOrderId);

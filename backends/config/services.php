@@ -68,6 +68,7 @@ return [
         'futures_testnet_api_key' => env('BINANCE_FUTURES_TESTNET_API_KEY', env('BINANCE_API_KEY')),
         'futures_testnet_api_secret' => env('BINANCE_FUTURES_TESTNET_API_SECRET', env('BINANCE_API_SECRET')),
         'spot_recv_window_ms' => (int) env('BINANCE_SPOT_RECV_WINDOW_MS', 5000),
+        'ratio_bot_spot_execution_route' => env('RATIO_BOT_SPOT_EXECUTION_ROUTE', 'spot_market'),
     ],
 
     'metal_broker' => [

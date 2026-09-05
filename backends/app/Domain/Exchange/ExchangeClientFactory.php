@@ -47,6 +47,19 @@ class ExchangeClientFactory
         );
     }
 
+    public function makeBinanceConvertFromConnection(ExchangeConnection $connection): BinanceConvertClient
+    {
+        if ($connection->is_testnet) {
+            throw new RuntimeException('Binance Convert is not available on Spot testnet connections.');
+        }
+
+        return new BinanceConvertClient(
+            apiKey: (string) $this->vault->decrypt($connection->api_key_encrypted),
+            apiSecret: (string) $this->vault->decrypt($connection->api_secret_encrypted),
+            baseUrl: (string) config('services.binance.api_url'),
+        );
+    }
+
     public function makeBinanceFromIntegration(Integration $integration): BinanceSpotClient
     {
         $config = (array) ($integration->config_json ?? []);

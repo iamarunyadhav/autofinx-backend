@@ -26,8 +26,10 @@ class TradingVenueClientFactory
             if (! $bot->connection) {
                 throw new RuntimeException('Binance bot requires active exchange connection');
             }
-            $client = $this->exchangeClients->makeFromConnection($bot->connection);
-            return new BinanceTradingVenueClient($client);
+            return new BinanceTradingVenueClient(
+                $this->exchangeClients->makeFromConnection($bot->connection),
+                $bot->connection->is_testnet ? null : $this->exchangeClients->makeBinanceConvertFromConnection($bot->connection),
+            );
         }
 
         if ($provider === 'metal_broker' || $provider === 'metals') {
@@ -44,7 +46,10 @@ class TradingVenueClientFactory
             if (! $connection) {
                 throw new RuntimeException('Connection is required for Binance provider');
             }
-            return new BinanceTradingVenueClient($this->exchangeClients->makeFromConnection($connection));
+            return new BinanceTradingVenueClient(
+                $this->exchangeClients->makeFromConnection($connection),
+                $connection->is_testnet ? null : $this->exchangeClients->makeBinanceConvertFromConnection($connection),
+            );
         }
 
         if ($provider === 'metal_broker' || $provider === 'metals') {

@@ -175,6 +175,7 @@ class LiveOrderIntentService
                 'qty' => $qty,
                 'price' => $price,
                 'client_order_id' => $idempotencyKey,
+                'max_quote_deviation_bps' => $payload['max_quote_deviation_bps'] ?? null,
             ]);
             $latencyMs = (int) round((microtime(true) - $startedAt) * 1000);
 
