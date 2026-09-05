@@ -375,7 +375,10 @@ class RunRatioBotEvaluationJob implements ShouldQueue, ShouldBeUnique
     private function resolveAutoStartDirection(RatioBotConfig $config, float $currentPrice, bool $hasBase, bool $hasQuote): ?string
     {
         $brain = app(RatioBotBrainService::class)->resolve($config, $currentPrice);
-        $forecastDirection = strtolower((string) ($brain?->forecast_bias ?: $brain?->direction ?: 'neutral'));
+        $forecastDirection = strtolower((string) ($brain?->forecast_bias ?: 'neutral'));
+        if (! in_array($forecastDirection, ['bullish', 'bearish'], true)) {
+            $forecastDirection = strtolower((string) ($brain?->direction ?: 'neutral'));
+        }
         $confidence = (float) ($brain?->forecast_confidence ?? $brain?->confidence ?? 0);
         $minConfidence = max(0, min(100, (float) data_get($config->strategy_params, 'auto_start_min_confidence', $config->brain_min_confidence ?? 60)));
         $trendDirection = $this->observedCandleDirection($config);
