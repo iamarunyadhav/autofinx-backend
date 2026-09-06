@@ -386,8 +386,13 @@ class RealtimeMarketFeedService
     {
         $code = strtolower((string) $config->state?->block_reason_code);
 
+        // Part A.3 (multi-asset): was hardcoded to 'binance' -- read the
+        // bot's own configured provider so an OANDA feed hiccup only ever
+        // affects OANDA bots' auto-recovery, never Binance's and vice versa.
+        // isProviderOutageActive() already took a $provider param; this was
+        // a call-site fix, not an interface change.
         if (in_array($code, ['exchange_unhealthy', 'websocket_unhealthy'], true)
-            && $this->breakers->isProviderOutageActive($config->workspace_id, 'binance')) {
+            && $this->breakers->isProviderOutageActive($config->workspace_id, strtolower(trim((string) ($config->exchange ?: 'binance'))))) {
             return;
         }
 

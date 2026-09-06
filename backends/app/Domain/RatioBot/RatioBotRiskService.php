@@ -30,6 +30,30 @@ class RatioBotRiskService
             return $this->reason('cooldown', 'Bot cooldown is active.', false);
         }
 
+        if (! $protectiveExit
+            && in_array($decision->decision, [RatioBotDecision::DECISION_LONG, RatioBotDecision::DECISION_SHORT], true)
+            && $config->liquidationGuardEnabled()
+        ) {
+            $guard = app(RatioBotLiquidationGuardService::class)->assess($config);
+            if ($guard['action'] === 'block_new_entries' || $guard['action'] === 'force_exit') {
+                return $this->reason('liquidation_guard_block_new_entries', $guard['reason'], false, ['liquidation_guard' => $guard]);
+            }
+        }
+
+        // Confirmed missing entirely before this: Ratio Bot had zero
+        // market-hours awareness (the only existing reader of market_hours
+        // config, BotRiskEngine::enforceMetalsSessionAndTradeRate(), belongs
+        // to a separate, older bot system). Only blocks NEW entries -- an
+        // already-open forex/metals position sits safely through a closure,
+        // it is never force-closed just because the window ended. Cheap,
+        // immediate no-op for crypto (assetClass() short-circuits internally).
+        if (! $protectiveExit && in_array($decision->decision, [RatioBotDecision::DECISION_BUY, RatioBotDecision::DECISION_SELL, RatioBotDecision::DECISION_LONG, RatioBotDecision::DECISION_SHORT], true)) {
+            $marketHours = app(RatioBotMarketHoursService::class)->status($config);
+            if ($marketHours['applicable'] && ! $marketHours['is_open']) {
+                return $this->reason('market_closed', $marketHours['reason'], false, ['market_hours' => $marketHours]);
+            }
+        }
+
         $priceTimestamp = $state->last_price_timestamp;
         if ($priceTimestamp && $priceTimestamp->diffInSeconds(now()) > $config->staleFeedWindowSeconds()) {
             return $this->reason('stale_feed', 'Latest market price is stale.', (bool) $config->pause_on_stale_feed);

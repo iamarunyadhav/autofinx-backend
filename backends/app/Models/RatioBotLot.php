@@ -17,6 +17,7 @@ class RatioBotLot extends BaseModel
         'bought_at' => 'datetime',
         'closed_at' => 'datetime',
         'cycle_number' => 'integer',
+        'is_recovery_average' => 'boolean',
     ];
 
     public const STATUS_OPEN = 'open';
@@ -24,6 +25,8 @@ class RatioBotLot extends BaseModel
 
     public const TYPE_NORMAL = 'NORMAL';
     public const TYPE_RECOVERY = 'RECOVERY';
+    public const TYPE_SLOT_FUNDED = 'SLOT_FUNDED';
+    public const TYPE_FUTURES_RECOVERY = 'FUTURES_RECOVERY';
 
     public function config(): BelongsTo
     {

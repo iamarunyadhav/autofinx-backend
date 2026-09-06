@@ -3,10 +3,13 @@
 namespace App\Domain\RatioBot;
 
 use App\Domain\RatioBot\Strategies\StrategyRegistry;
+use App\Domain\RatioBot\Strategies\StrategySignal;
 use App\Models\RatioBotConfig;
 use App\Models\RatioBotDecision;
 use App\Models\RatioBotEvent;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 
 class RatioBotRealtimeEngine
 {
@@ -20,11 +23,63 @@ class RatioBotRealtimeEngine
         private readonly DynamicThresholdService $dynamicThresholds,
         private readonly TrailingProfitService $trailingProfits,
         private readonly RatioBotBrainService $brain,
+        private readonly RatioBotLiquidationGuardService $liquidationGuard,
+        private readonly FuturesRecoveryReviewService $futuresRecovery,
     ) {
     }
 
     public function evaluate(RatioBotConfig $config, float $currentPrice, array $context = []): array
     {
+        // Checked first, every tick, independent of and overriding whatever
+        // the normal ladder/indicator strategy would otherwise decide --
+        // Ratio Bot's "wait as long as it takes for a profitable exit"
+        // philosophy is unsafe on its own under leverage, so this is the one
+        // case allowed to force a loss-taking exit. Bypasses the normal risk
+        // gate entirely (including kill_switch/cooldown) on purpose: an
+        // operator's kill switch stops new automated entries, it should
+        // never block an emergency close that prevents a worse exchange-
+        // forced liquidation.
+        $guard = null;
+        if ($config->marketType() === 'futures' && $config->liquidationGuardEnabled()) {
+            $guard = $this->liquidationGuard->assess($config);
+            if ($guard['action'] === 'force_exit') {
+                // Only the force-exit action is lock-protected (Part C.3) --
+                // two bots sharing the same underlying exchange position
+                // (see liquidation_guard's shared_position detection) could
+                // otherwise both submit a closing order on the same tick and
+                // race each other. Normal buys/sells on a shared symbol are
+                // deliberately NOT lock-protected in this pass -- that would
+                // need real cross-bot position-level accounting, a bigger
+                // separate project; only this safety-critical path is.
+                $lockKey = 'ratio-bot-force-exit:' . $config->workspace_id . ':' . $config->normalizedSymbol();
+                $lock = Cache::lock($lockKey, 10);
+                if (! $lock->get()) {
+                    RatioBotEvent::create([
+                        'ratio_bot_config_id' => $config->id,
+                        'event_type' => RatioBotEvent::EVENT_FORCE_EXIT_LOCK_CONTENDED,
+                        'context' => $guard + ['lock_key' => $lockKey],
+                        'occurred_at' => now(),
+                    ]);
+
+                    $decision = $this->recorder->record($config, StrategySignal::hold(
+                        'liquidation_guard_force_exit: another bot holds the shared-position force-exit lock, retrying next tick',
+                        ['trigger' => 'liquidation_guard', 'liquidation_guard' => $guard],
+                    ), $currentPrice, $context);
+
+                    return ['decision' => $decision->decision, 'decision_record' => $decision, 'reason' => $decision->reason];
+                }
+
+                try {
+                    $this->execution->cancelFuturesStopOrderSafely($config, 'liquidation_guard_force_exit');
+                    $decision = $this->forceExitDecision($config, $guard, $currentPrice, $context);
+                } finally {
+                    $lock->release();
+                }
+
+                return ['decision' => $decision->decision, 'decision_record' => $decision, 'reason' => $decision->reason];
+            }
+        }
+
         $indicatorSnapshot = $this->indicators->snapshot($config, $currentPrice);
         $dynamicThresholds = $this->dynamicThresholds->resolve($config, $currentPrice, $indicatorSnapshot);
         $trailingProfit = $this->trailingProfits->resolve($config, $config->state, $currentPrice, $dynamicThresholds);
@@ -95,6 +150,10 @@ class RatioBotRealtimeEngine
         }
 
         if (! $decision->isTrade()) {
+            if ($guard !== null && $config->futuresRecoveryEnabled()) {
+                $this->maybeReviewFuturesRecovery($config, $currentPrice, $guard);
+            }
+
             return ['decision' => $decision->decision, 'decision_record' => $decision, 'reason' => $decision->reason];
         }
 
@@ -158,6 +217,158 @@ class RatioBotRealtimeEngine
         ]);
 
         return ['decision' => $decision->decision, 'decision_record' => $decision, 'reason' => $decision->reason];
+    }
+
+    /**
+     * Mirrors StrategyDecisionRecorder::record()'s shape so this decision is
+     * indistinguishable in storage/reporting from a normal one, then routes
+     * through the exact same RatioBotExecutionService::execute() path a
+     * normal EXIT_LONG/EXIT_SHORT decision already uses (reduce-only close,
+     * duplicate-in-flight protection, sandbox simulation) -- nothing new to
+     * trust here, only a new reason a pre-existing decision type can fire.
+     */
+    private function forceExitDecision(RatioBotConfig $config, array $guard, float $currentPrice, array $context): RatioBotDecision
+    {
+        $side = $guard['position_side'] === 'short' ? RatioBotDecision::DECISION_EXIT_SHORT : RatioBotDecision::DECISION_EXIT_LONG;
+
+        $decision = RatioBotDecision::create([
+            'ratio_bot_config_id' => $config->id,
+            'correlation_id' => (string) Str::uuid(),
+            'decision' => $side,
+            'evaluated_price' => $currentPrice,
+            'price_source' => isset($context['price_source']) ? (string) $context['price_source'] : null,
+            'position_state_before' => $config->state?->position_state,
+            'position_state_after' => $config->state?->position_state,
+            'execution_status' => RatioBotDecision::EXEC_PENDING,
+            'reason' => 'liquidation_guard_force_exit: ' . $guard['reason'],
+            'metadata' => [
+                'trigger' => 'liquidation_guard',
+                'protective_exit' => true,
+                'liquidation_guard' => $guard,
+            ],
+            'decided_at' => now(),
+        ]);
+
+        RatioBotEvent::create([
+            'ratio_bot_config_id' => $config->id,
+            'event_type' => RatioBotEvent::EVENT_LIQUIDATION_GUARD_FORCE_EXIT,
+            'context' => $guard + ['decision_id' => (string) $decision->id],
+            'occurred_at' => now(),
+        ]);
+
+        Log::warning('[RatioBotEngine] Liquidation guard forcing protective exit', [
+            'config_id' => $config->id,
+            'symbol' => $config->normalizedSymbol(),
+            'buffer_pct' => $guard['buffer_pct'],
+            'reason' => $guard['reason'],
+        ]);
+
+        if ($config->isAutoMode()) {
+            $this->execution->execute($config, $decision);
+        }
+
+        return $decision->fresh();
+    }
+
+    /**
+     * Part B -- checks a stuck futures position for a single, bounded,
+     * one-time top-up. Deliberately does NOT call
+     * RatioBotStateService::block()/pause() for the PAUSE outcome the way
+     * spot's equivalent does: block() also sets enabled=false, which stops
+     * this bot from being evaluated at all -- including Part A's own
+     * force-exit check and any natural stop-loss/opposite-signal exit. That
+     * would freeze exactly the safety nets a stuck position needs most.
+     * PAUSE here means only "don't top up, re-check next window" -- the
+     * bot keeps running normally otherwise.
+     */
+    private function maybeReviewFuturesRecovery(RatioBotConfig $config, float $currentPrice, array $guard): void
+    {
+        $state = $config->state()->first();
+        if (! $state || (float) ($state->last_position_qty ?? 0) <= 0 || ! $state->futures_position_opened_at) {
+            return;
+        }
+
+        $timeoutMinutes = $config->futuresRecoveryTimeoutMinutes();
+        if (! $state->futures_position_opened_at->copy()->addMinutes($timeoutMinutes)->isPast()) {
+            return;
+        }
+
+        $entryPrice = (float) ($state->entry_price ?? 0);
+        $side = strtolower((string) ($state->last_position_side ?? ''));
+        if ($entryPrice <= 0 || ! in_array($side, ['long', 'short'], true)) {
+            return;
+        }
+
+        $atLoss = $side === 'short' ? $currentPrice > $entryPrice : $currentPrice < $entryPrice;
+        if (! $atLoss) {
+            return; // long-held winner, not a stuck/losing position -- nothing to recover
+        }
+
+        if ($state->futures_recovery_review_at !== null && $state->futures_recovery_review_at->isFuture()) {
+            return;
+        }
+
+        $review = $this->futuresRecovery->review($config, $state, $currentPrice, $guard);
+
+        if ($review['outcome'] === FuturesRecoveryReviewService::OUTCOME_TOP_UP_ONCE) {
+            $this->executeFuturesRecoveryTopup($config, $currentPrice, $review);
+
+            return;
+        }
+
+        $state->update(['futures_recovery_review_at' => now()->addMinutes($timeoutMinutes)]);
+
+        if ($review['outcome'] === FuturesRecoveryReviewService::OUTCOME_PAUSE) {
+            RatioBotEvent::create([
+                'ratio_bot_config_id' => $config->id,
+                'event_type' => RatioBotEvent::EVENT_FUTURES_RECOVERY_PAUSED,
+                'context' => $review,
+                'occurred_at' => now(),
+            ]);
+        }
+    }
+
+    private function executeFuturesRecoveryTopup(RatioBotConfig $config, float $currentPrice, array $review): void
+    {
+        $state = $config->state()->first();
+        $side = strtolower((string) ($state?->last_position_side ?? ''));
+        $decisionSide = $side === 'short' ? RatioBotDecision::DECISION_SHORT : RatioBotDecision::DECISION_LONG;
+
+        $decision = RatioBotDecision::create([
+            'ratio_bot_config_id' => $config->id,
+            'correlation_id' => (string) Str::uuid(),
+            'decision' => $decisionSide,
+            'evaluated_price' => $currentPrice,
+            'position_state_before' => $state?->position_state,
+            'position_state_after' => $state?->position_state,
+            'execution_status' => RatioBotDecision::EXEC_PENDING,
+            'reason' => 'futures_recovery_topup: ' . $review['reason'],
+            'metadata' => [
+                'trigger' => 'futures_recovery_topup',
+                'futures_recovery_topup_notional' => (float) ($review['topup_notional'] ?? 0),
+                'confidence' => ((float) ($review['confidence_pct'] ?? 0)) / 100,
+            ],
+            'decided_at' => now(),
+        ]);
+
+        // Same risk gate every other entry goes through (kill_switch,
+        // cooldown, stale_feed, indicator confirmation, this bot's own
+        // liquidation_guard_block_new_entries check) -- a recovery top-up is
+        // a real additional entry, it does not get to skip these.
+        $riskBlock = $this->risk->preTradeBlockReason($config, $decision);
+        if ($riskBlock !== null) {
+            $decision->update([
+                'execution_status' => RatioBotDecision::EXEC_SKIPPED,
+                'reason' => $riskBlock['detail'],
+                'metadata' => array_merge((array) $decision->metadata, ['risk_block' => $riskBlock]),
+            ]);
+
+            return;
+        }
+
+        if ($config->isAutoMode()) {
+            $this->execution->execute($config, $decision);
+        }
     }
 
     private function marketHealthSnapshot(RatioBotConfig $config, array $context, array $indicatorSnapshot, array $dynamicThresholds): array

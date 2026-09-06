@@ -2,10 +2,13 @@
 
 namespace App\Console\Commands;
 
+use App\Domain\RatioBot\RatioBotExchangeStopOrderService;
+use App\Domain\RatioBot\RatioBotFundingCostService;
 use App\Domain\Trading\BinanceOrderSyncService;
 use App\Domain\Trading\FuturesConfigService;
 use App\Domain\Trading\FuturesPositionSyncService;
 use App\Models\Integration;
+use App\Models\Order;
 use App\Models\RatioBotConfig;
 use App\Models\RatioBotEvent;
 use App\Models\RatioBotReconciliationLog;
@@ -24,6 +27,8 @@ class RatioBotsReconcileCommand extends Command
         BinanceOrderSyncService $spotSync,
         FuturesPositionSyncService $futuresSync,
         FuturesConfigService $futuresConfigs,
+        RatioBotFundingCostService $fundingCost,
+        RatioBotExchangeStopOrderService $stopOrders,
     ): int {
         $botId = trim((string) $this->option('bot'));
         $limit = max(1, min(500, (int) $this->option('limit')));
@@ -45,7 +50,7 @@ class RatioBotsReconcileCommand extends Command
         foreach ($configs as $config) {
             try {
                 $snapshot = $config->marketType() === 'futures'
-                    ? $this->reconcileFutures($config, $futuresSync, $futuresConfigs, $futuresIntegrations)
+                    ? $this->reconcileFutures($config, $futuresSync, $futuresConfigs, $futuresIntegrations, $fundingCost, $stopOrders)
                     : $this->reconcileSpot($config, $spotSync);
 
                 RatioBotReconciliationLog::create([
@@ -98,19 +103,89 @@ class RatioBotsReconcileCommand extends Command
         FuturesPositionSyncService $futuresSync,
         FuturesConfigService $futuresConfigs,
         array $prefetchedIntegrations,
+        RatioBotFundingCostService $fundingCost,
+        RatioBotExchangeStopOrderService $stopOrders,
     ): array {
         $integration = $prefetchedIntegrations[(string) $config->id] ?? null;
         if (! $integration) {
             throw new \RuntimeException('No active Binance integration found for workspace.');
         }
 
-        $result = $futuresSync->sync((string) $config->workspace_id, $integration, $futuresConfigs->effective((string) $config->workspace_id));
+        $workspaceConfig = $futuresConfigs->effective((string) $config->workspace_id);
+        $result = $futuresSync->sync((string) $config->workspace_id, $integration, $workspaceConfig);
+
+        // Part C.2/C.1 -- best-effort, never let a failure here break the
+        // position/order sync above, which is the reconcile's primary job.
+        try {
+            $fundingCost->accumulate($config, $integration, $workspaceConfig);
+        } catch (\Throwable $e) {
+            $this->warn(sprintf('Funding cost accumulation failed for %s: %s', $config->normalizedSymbol(), $e->getMessage()));
+        }
+
+        try {
+            $this->detectStopOrderSlippage($config);
+        } catch (\Throwable $e) {
+            $this->warn(sprintf('Stop-order slippage check failed for %s: %s', $config->normalizedSymbol(), $e->getMessage()));
+        }
 
         return [
             'symbol' => $config->normalizedSymbol(),
             'market_type' => 'futures',
             'sync' => $result,
         ];
+    }
+
+    /**
+     * Part C.1 flash-move honesty: a stop order can still fill worse than
+     * its stopPrice on real slippage. This does not prevent that -- it only
+     * measures and logs it, using the same open-orders sync
+     * FuturesPositionSyncService::sync() just wrote to the `orders` table,
+     * so this never issues its own extra exchange call.
+     */
+    private function detectStopOrderSlippage(RatioBotConfig $config): void
+    {
+        $state = $config->state;
+        $clientOrderId = $state?->futures_stop_client_order_id;
+        if (! $state || ! $clientOrderId) {
+            return;
+        }
+
+        $order = Order::query()->where('client_order_id', $clientOrderId)->first();
+        if (! $order || strtoupper((string) $order->status) !== 'FILLED') {
+            return;
+        }
+
+        $stopPrice = (float) ($state->futures_stop_price ?? 0);
+        $fillPrice = (float) ($order->avg_fill_price ?: $order->price ?: 0);
+        if ($stopPrice <= 0 || $fillPrice <= 0) {
+            return;
+        }
+
+        $slippagePct = abs($fillPrice - $stopPrice) / $stopPrice * 100;
+        if ($slippagePct > 0.25) {
+            RatioBotEvent::create([
+                'ratio_bot_config_id' => $config->id,
+                'event_type' => RatioBotEvent::EVENT_STOP_ORDER_SLIPPAGE_DETECTED,
+                'context' => [
+                    'stop_price' => $stopPrice,
+                    'fill_price' => $fillPrice,
+                    'slippage_pct' => round($slippagePct, 4),
+                    'client_order_id' => $clientOrderId,
+                ],
+                'occurred_at' => now(),
+            ]);
+        }
+
+        // The stop order is now filled (position closed via the exchange
+        // itself, not via our own app logic) -- clear the tracker so a
+        // future position doesn't inherit a stale reference.
+        $state->update([
+            'futures_stop_order_id' => null,
+            'futures_stop_client_order_id' => null,
+            'futures_stop_price' => null,
+            'futures_stop_basis_price' => null,
+            'futures_stop_basis_qty' => null,
+        ]);
     }
 
     /**

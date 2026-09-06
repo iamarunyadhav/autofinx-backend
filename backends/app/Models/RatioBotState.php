@@ -66,6 +66,16 @@ class RatioBotState extends BaseModel
         'recovery_review_at'    => 'datetime',
         'recovery_used_at'      => 'datetime',
         'current_cycle_number'  => 'integer',
+        'futures_stop_price'        => 'decimal:8',
+        'futures_stop_basis_price'  => 'decimal:8',
+        'futures_stop_basis_qty'    => 'decimal:8',
+        'estimated_funding_cost'    => 'decimal:8',
+        'last_funding_rate'         => 'decimal:8',
+        'last_funding_applied_at'   => 'datetime',
+        'futures_position_opened_at'   => 'datetime',
+        'futures_recovery_review_at'   => 'datetime',
+        'futures_recovery_used'        => 'boolean',
+        'futures_recovery_topup_notional' => 'decimal:8',
     ];
 
     // Valid position states

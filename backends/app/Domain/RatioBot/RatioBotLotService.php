@@ -25,7 +25,7 @@ class RatioBotLotService
     }
 
     /**
-     * @param string|null $lotType filter to RatioBotLot::TYPE_NORMAL/TYPE_RECOVERY; null returns both.
+     * @param string|null $lotType filter to RatioBotLot::TYPE_NORMAL/TYPE_RECOVERY/TYPE_SLOT_FUNDED; null returns all.
      * @return Collection<int, RatioBotLot>
      */
     public function openLots(RatioBotConfig $config, ?string $lotType = null): Collection
@@ -74,7 +74,7 @@ class RatioBotLotService
             'buy_decision_id' => $decision->id,
             'buy_order_id' => $orderId,
             'buy_stage_index' => $stageIndex,
-            'lot_type' => in_array($lotType, [RatioBotLot::TYPE_NORMAL, RatioBotLot::TYPE_RECOVERY], true) ? $lotType : RatioBotLot::TYPE_NORMAL,
+            'lot_type' => in_array($lotType, [RatioBotLot::TYPE_NORMAL, RatioBotLot::TYPE_RECOVERY, RatioBotLot::TYPE_SLOT_FUNDED], true) ? $lotType : RatioBotLot::TYPE_NORMAL,
             'allocation_pct' => $allocationPct,
             'buy_price' => $price,
             'original_qty' => $qty,
@@ -83,6 +83,52 @@ class RatioBotLotService
             'status' => RatioBotLot::STATUS_OPEN,
             'bought_at' => now(),
         ]);
+    }
+
+    /**
+     * Multi-asset spec Part B: once a position enters recovery, every
+     * recovery-driven buy for that stuck episode merges into ONE averaged
+     * lot rather than creating a separate row each time -- this is the only
+     * place that decides "merge vs. create", callers never branch on it.
+     * The merged lot gets its own, more lenient profit floor (see
+     * RatioBotConfig::recoveryLotMinProfitRatio() and how
+     * profitableFifoSellPlan()/reverseSellPlan() read it below) — a normal
+     * lot is entirely unaffected by this method existing.
+     */
+    public function recordRecoveryBuyFill(
+        RatioBotConfig $config,
+        RatioBotDecision $decision,
+        float $price,
+        float $qty,
+        string $orderId,
+    ): RatioBotLot {
+        $existing = RatioBotLot::query()
+            ->where('ratio_bot_config_id', $config->id)
+            ->where('cycle_number', $this->currentCycleNumber($config))
+            ->where('status', RatioBotLot::STATUS_OPEN)
+            ->where('is_recovery_average', true)
+            ->first();
+
+        if (! $existing) {
+            $lot = $this->createBuyLot($config, $decision, $price, $qty, $orderId);
+            $lot->update(['is_recovery_average' => true]);
+
+            return $lot->fresh();
+        }
+
+        $oldQty = (float) $existing->original_qty;
+        $oldPrice = (float) $existing->buy_price;
+        $newQty = $oldQty + $qty;
+        $newPrice = $newQty > 0 ? (($oldQty * $oldPrice) + ($qty * $price)) / $newQty : $price;
+
+        $existing->update([
+            'buy_price' => $newPrice,
+            'original_qty' => $newQty,
+            'remaining_qty' => (float) $existing->remaining_qty + $qty,
+            'spent_quote' => (float) $existing->spent_quote + ($price * $qty),
+        ]);
+
+        return $existing->fresh();
     }
 
     /**
@@ -100,7 +146,7 @@ class RatioBotLotService
             'buy_decision_id' => null,
             'buy_order_id' => null,
             'buy_stage_index' => max(1, $stageIndex),
-            'lot_type' => in_array($lotType, [RatioBotLot::TYPE_NORMAL, RatioBotLot::TYPE_RECOVERY], true) ? $lotType : RatioBotLot::TYPE_NORMAL,
+            'lot_type' => in_array($lotType, [RatioBotLot::TYPE_NORMAL, RatioBotLot::TYPE_RECOVERY, RatioBotLot::TYPE_SLOT_FUNDED], true) ? $lotType : RatioBotLot::TYPE_NORMAL,
             'allocation_pct' => $allocationPct,
             'buy_price' => $price,
             'original_qty' => $qty,
@@ -142,6 +188,7 @@ class RatioBotLotService
         $selectedLotIds = [];
         $minBuyPrice = null;
         $maxBuyPrice = null;
+        $recoveryFloor = null;
 
         foreach ($this->openLots($config, $lotType) as $lot) {
             if ($desiredQty > 0 && $selectedQty >= $desiredQty) {
@@ -154,7 +201,17 @@ class RatioBotLotService
                 continue;
             }
 
-            if ($buyPrice <= 0 || $currentPrice < ($buyPrice * (1 + $minNetProfitRatio))) {
+            // Part B: the merged recovery-average lot gets its own, more
+            // lenient (never below execution cost) floor — every other lot
+            // keeps the standard ladder-wide minNetProfitRatio unchanged.
+            if ((bool) $lot->is_recovery_average) {
+                $recoveryFloor ??= $config->recoveryLotMinProfitRatio();
+                $floorRatio = $recoveryFloor;
+            } else {
+                $floorRatio = $minNetProfitRatio;
+            }
+
+            if ($buyPrice <= 0 || $currentPrice < ($buyPrice * (1 + $floorRatio))) {
                 $skippedQty += $remaining;
                 continue;
             }
@@ -202,6 +259,7 @@ class RatioBotLotService
         $openLots = $this->openLots($config, $lotType)
             ->sortByDesc('buy_stage_index')
             ->values();
+        $recoveryFloor = null;
 
         foreach ($openLots as $lot) {
             $targetQty += (float) $lot->remaining_qty * max(0.0, min(100.0, $targetAllocationPct)) / 100;
@@ -213,7 +271,14 @@ class RatioBotLotService
             }
 
             $buyPrice = (float) $lot->buy_price;
-            if ($buyPrice <= 0 || $currentPrice < ($buyPrice * (1 + $minNetProfitRatio))) {
+            if ((bool) $lot->is_recovery_average) {
+                $recoveryFloor ??= $config->recoveryLotMinProfitRatio();
+                $floorRatio = $recoveryFloor;
+            } else {
+                $floorRatio = $minNetProfitRatio;
+            }
+
+            if ($buyPrice <= 0 || $currentPrice < ($buyPrice * (1 + $floorRatio))) {
                 break; // LIFO: the most recent open lot isn't profitable yet — stop, don't reach past it to an older lot
             }
 

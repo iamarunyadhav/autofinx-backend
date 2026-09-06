@@ -241,6 +241,44 @@ class RunRatioBotEvaluationJob implements ShouldQueue, ShouldBeUnique
             return;
         }
 
+        // An explicit manual starting_entry must win over the "both funded ->
+        // dominant side" auto-detect below — otherwise a bot with any
+        // lingering balance on both sides (near-universal after even one
+        // prior partial cycle) silently ignores the operator's own BUY/SELL
+        // choice, exactly the "silently switching sides" the starting_entry
+        // field's own description promises never happens. Auto-detect is
+        // reserved for auto_start_direction_mode=auto (handled below) and for
+        // manual mode with starting_entry left unset (falls through).
+        $manualStartingEntry = $config->startingEntry();
+        if ($this->autoStartDirectionMode($config) !== 'auto' && $manualStartingEntry !== null) {
+            if ($manualStartingEntry === 'SELL') {
+                if (! $hasBase) {
+                    return; // insufficient base-asset balance for an explicit SELL start — stay idle rather than fall back to BUY
+                }
+                $stateService->anchorManualBuy(config: $config, buyPrice: $currentPrice, quantity: $baseAvailable, orderId: 'manual-starting-entry-anchor');
+                Log::info('[RatioBotJob] Manual starting_entry=SELL anchored from live base-asset balance (now watching for SELL)', [
+                    'config_id' => $config->id,
+                    'base_available' => $baseAvailable,
+                    'quote_available' => $quoteAvailable,
+                    'price' => $currentPrice,
+                ]);
+                return;
+            }
+
+            if (! $hasQuote) {
+                return; // insufficient quote-asset balance for an explicit BUY start — stay idle rather than fall back to SELL
+            }
+            $impliedQty = max(round($quoteAvailable / $currentPrice, 8), 0.00000001);
+            $stateService->anchorManualSell(config: $config, sellPrice: $currentPrice, quantity: $impliedQty, orderId: 'manual-starting-entry-anchor');
+            Log::info('[RatioBotJob] Manual starting_entry=BUY anchored from live quote-asset balance (now watching for BUY)', [
+                'config_id' => $config->id,
+                'quote_available' => $quoteAvailable,
+                'base_available' => $baseAvailable,
+                'price' => $currentPrice,
+            ]);
+            return;
+        }
+
         if ($this->autoStartDirectionMode($config) === 'auto') {
             $direction = $this->resolveAutoStartDirection($config, $currentPrice, $hasBase, $hasQuote);
             if ($direction === null) {

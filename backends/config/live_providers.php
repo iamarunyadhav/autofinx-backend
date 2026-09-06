@@ -51,6 +51,33 @@ return [
         'mode_note' => 'sandbox — no real broker connected yet',
     ],
 
+    'oanda' => [
+        'key' => 'oanda',
+        'label' => 'OANDA',
+        'asset_class' => 'FOREX',
+        // No LiveTradeProviderInterface implementation yet (same status as
+        // metal_broker) -- TradingVenueClientFactory resolves this
+        // provider_key to OandaClient for connection-test/bot-execution
+        // paths, a separate interface. See OandaClient's own docblock: real,
+        // documented v20 API shape, built and tested in sandbox mode only
+        // (no live account available when this was written).
+        'provider_class' => null,
+        'live_supported' => false,
+        'default_market_type' => 'spot',
+        'supports_short' => true,
+        'requires_integration' => true,
+        'symbols' => [
+            ['symbol' => 'EURUSD', 'display' => 'EUR / USD', 'asset_class' => 'FOREX', 'payout_rate' => 0],
+            ['symbol' => 'GBPUSD', 'display' => 'GBP / USD', 'asset_class' => 'FOREX', 'payout_rate' => 0],
+            ['symbol' => 'USDJPY', 'display' => 'USD / JPY', 'asset_class' => 'FOREX', 'payout_rate' => 0],
+            ['symbol' => 'XAUUSD', 'display' => 'Gold / USD', 'asset_class' => 'METALS', 'payout_rate' => 0],
+            ['symbol' => 'XAGUSD', 'display' => 'Silver / USD', 'asset_class' => 'METALS', 'payout_rate' => 0],
+        ],
+        'timeframes' => ['1m', '5m', '15m', '1h'],
+        'durations' => [60, 300, 900],
+        'mode_note' => 'sandbox — real API shape, no live account connected yet',
+    ],
+
     'coinbase' => [
         'key' => 'coinbase',
         'label' => 'Coinbase',

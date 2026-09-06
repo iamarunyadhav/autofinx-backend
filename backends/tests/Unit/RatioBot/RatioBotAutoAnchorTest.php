@@ -243,6 +243,82 @@ class RatioBotAutoAnchorTest extends TestCase
         $this->assertSame('sell_anchor', $state->active_anchor_type);
     }
 
+    public function test_live_bot_with_explicit_sell_starting_entry_wins_over_larger_quote_side(): void
+    {
+        // Regression test: quote (26 USDT) is worth MORE than base (0.00025
+        // BTC @ 79732 =~ 19.93 USDT) here, so the "both funded -> dominant
+        // side" auto-detect would pick quote/BUY-watch if left unchecked —
+        // exactly the bug where an explicit manual starting_entry=SELL was
+        // being silently overridden. It must win regardless of which side is
+        // worth more.
+        $config = $this->makeBot([
+            'execution_mode' => 'live',
+            'starting_entry' => 'SELL',
+        ]);
+
+        $this->mock(RatioBotRuntimeQueryService::class, function ($mock) {
+            $mock->shouldReceive('walletBalances')->once()->andReturn([
+                'base' => ['available' => 0.00025, 'balance' => 0.00025],
+                'quote' => ['available' => 26.0, 'balance' => 26.0],
+            ]);
+        });
+
+        $this->invokeAutoAnchor($config, 79732.0);
+
+        $state = $config->fresh('state')->state;
+        $this->assertSame(RatioBotState::STATE_HOLDING, $state->position_state);
+        $this->assertSame('buy_anchor', $state->active_anchor_type);
+        $this->assertEqualsWithDelta(0.00025, (float) $state->last_buy_quantity, 0.0000001);
+    }
+
+    public function test_live_bot_with_explicit_buy_starting_entry_wins_over_larger_base_side(): void
+    {
+        // Mirror case: base (0.75 BTC @ 2000 = 1500) is worth more than quote
+        // (1000), so dominant-side auto-detect would pick SELL-watch if left
+        // unchecked. An explicit starting_entry=BUY must still win.
+        $config = $this->makeBot([
+            'execution_mode' => 'live',
+            'starting_entry' => 'BUY',
+        ]);
+
+        $this->mock(RatioBotRuntimeQueryService::class, function ($mock) {
+            $mock->shouldReceive('walletBalances')->once()->andReturn([
+                'base' => ['available' => 0.75, 'balance' => 0.75],
+                'quote' => ['available' => 1000.0, 'balance' => 1000.0],
+            ]);
+        });
+
+        $this->invokeAutoAnchor($config, 2000.0);
+
+        $state = $config->fresh('state')->state;
+        $this->assertSame(RatioBotState::STATE_FLAT, $state->position_state);
+        $this->assertSame('sell_anchor', $state->active_anchor_type);
+    }
+
+    public function test_live_bot_with_explicit_sell_starting_entry_and_no_base_balance_stays_idle(): void
+    {
+        // starting_entry=SELL with insufficient base-asset balance must stay
+        // idle (matches the field's own "blocked, never silently switches
+        // sides" description) rather than falling back to BUY-watch just
+        // because quote happens to be funded.
+        $config = $this->makeBot([
+            'execution_mode' => 'live',
+            'starting_entry' => 'SELL',
+        ]);
+
+        $this->mock(RatioBotRuntimeQueryService::class, function ($mock) {
+            $mock->shouldReceive('walletBalances')->once()->andReturn([
+                'base' => ['available' => 0.0, 'balance' => 0.0],
+                'quote' => ['available' => 1000.0, 'balance' => 1000.0],
+            ]);
+        });
+
+        $this->invokeAutoAnchor($config, 2000.0);
+
+        $state = $config->fresh('state')->state;
+        $this->assertSame(RatioBotState::STATE_IDLE, $state->position_state);
+    }
+
     public function test_live_bot_with_dust_balances_only_stays_idle(): void
     {
         $config = $this->makeBot(['execution_mode' => 'live']);

@@ -332,7 +332,15 @@ class RatioBotStateService
         }
 
         if (app(RatioBotStagePlanService::class)->enabled($config)) {
-            app(RatioBotLotService::class)->createBuyLot($config, $decision, $executedPrice, $executedQty, $orderId);
+            // Multi-asset spec Part B: a recovery fill merges into the one
+            // averaged recovery lot for this stuck episode instead of
+            // creating a new row each time — normal (non-recovery) fills
+            // are completely unaffected, still one createBuyLot() per fill.
+            if ($isRecoveryFill) {
+                app(RatioBotLotService::class)->recordRecoveryBuyFill($config, $decision, $executedPrice, $executedQty, $orderId);
+            } else {
+                app(RatioBotLotService::class)->createBuyLot($config, $decision, $executedPrice, $executedQty, $orderId);
+            }
         }
 
         $state->update([
@@ -465,6 +473,13 @@ class RatioBotStateService
         }
         $realizedPnlThisStage = $realizedPnlFromLots['value'] ?? ($costBasisPrice > 0 ? ($executedPrice - $costBasisPrice) * $executedQty : 0.0);
         $realizedPnlTotal = (float) ($state->realized_pnl ?? 0) + $realizedPnlThisStage;
+
+        if ($realizedPnlThisStage > 0 && $config->recoverySlotEnabled()) {
+            app(RatioBotRecoverySlotService::class)->skim($config, $realizedPnlThisStage, 'quote', [
+                'decision_id' => (string) $decision->id,
+                'order_id' => $orderId,
+            ]);
+        }
 
         $stagePlanExit = app(RatioBotStagePlanService::class)->enabled($config) && $selectedLotIds !== [];
         $stagedExit = $config->sellTranchesEnabled() || $stagePlanExit;
@@ -1144,6 +1159,7 @@ class RatioBotStateService
         $state = $this->getOrCreate($config);
         $normalizedSide = strtolower($positionSide);
         $positionState = $qty > 0 ? RatioBotState::STATE_HOLDING : RatioBotState::STATE_FLAT;
+        $wasFlat = (float) ($state->last_position_qty ?? 0) <= 0;
 
         $state->update([
             'position_state' => $positionState,
@@ -1151,6 +1167,15 @@ class RatioBotStateService
             'last_position_qty' => max(0, $qty),
             'entry_price' => $qty > 0 ? $entryPrice : null,
             'unrealized_pnl' => $unrealizedPnl,
+            // Tracks how long THIS position lifecycle has been open, for
+            // Part B's futures recovery "stuck" detection -- set once when a
+            // fresh position opens, left untouched by later top-ups (the
+            // position is still the same lifecycle), cleared along with the
+            // rest of the recovery tracker the moment it returns to flat.
+            'futures_position_opened_at' => $qty > 0 ? ($wasFlat ? now() : $state->futures_position_opened_at) : null,
+            'futures_recovery_review_at' => $qty > 0 ? $state->futures_recovery_review_at : null,
+            'futures_recovery_used' => $qty > 0 ? $state->futures_recovery_used : false,
+            'futures_recovery_topup_notional' => $qty > 0 ? $state->futures_recovery_topup_notional : null,
         ]);
     }
 

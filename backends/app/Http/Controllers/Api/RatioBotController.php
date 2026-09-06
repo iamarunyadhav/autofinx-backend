@@ -3,8 +3,11 @@
 namespace App\Http\Controllers\Api;
 
 use App\Domain\RatioBot\RatioBotDecisionService;
+use App\Domain\RatioBot\RatioBotDiagnosticsService;
+use App\Domain\RatioBot\RatioBotFixActionService;
 use App\Domain\RatioBot\RatioBotRuntimeQueryService;
 use App\Domain\RatioBot\RatioBotStateService;
+use App\Domain\Trading\FuturesConfigService;
 use App\Http\Controllers\Controller;
 use App\Jobs\BackfillMarketOhlcJob;
 use App\Jobs\RunRatioBotEvaluationJob;
@@ -15,6 +18,9 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Validation\ValidationException;
+use InvalidArgumentException;
+use RuntimeException;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 use Throwable;
 
@@ -24,7 +30,42 @@ class RatioBotController extends Controller
         private readonly RatioBotStateService    $stateService,
         private readonly RatioBotDecisionService $decisionService,
         private readonly RatioBotRuntimeQueryService $runtime,
+        private readonly RatioBotDiagnosticsService $diagnostics,
+        private readonly RatioBotFixActionService $fixActions,
+        private readonly FuturesConfigService $futuresConfigs,
     ) {
+    }
+
+    /**
+     * GET /ratio-bots/{config}/diagnostics — read-only, per-symbol health
+     * checks: startup checklist, market feed freshness, this symbol's
+     * stale-feed breaker, recent bot events, background daemon/queue
+     * health, and other enabled bots sharing this symbol.
+     */
+    public function diagnostics(RatioBotConfig $ratioBot): JsonResponse
+    {
+        return response()->json($this->diagnostics->diagnose($ratioBot));
+    }
+
+    /**
+     * POST /ratio-bots/{config}/diagnostics/fix — apply one whitelisted,
+     * symbol-scoped remediation (see RatioBotFixActionService) and return
+     * the fresh diagnose() result so the panel can show before/after
+     * without a full reload.
+     */
+    public function applyDiagnosticsFix(Request $request, RatioBotConfig $ratioBot): JsonResponse
+    {
+        $data = $request->validate(['fix_key' => 'required|string']);
+
+        try {
+            $result = $this->fixActions->apply($ratioBot, $data['fix_key'], $request->user());
+        } catch (InvalidArgumentException $e) {
+            return response()->json(['message' => $e->getMessage()], 422);
+        } catch (RuntimeException $e) {
+            return response()->json(['message' => $e->getMessage()], 409);
+        }
+
+        return response()->json($result);
     }
 
     // -----------------------------------------------------------------------
@@ -49,7 +90,7 @@ class RatioBotController extends Controller
      */
     public function store(Request $request, string $workspaceId): JsonResponse
     {
-        $data = $this->validatedPayload($request);
+        $data = $this->validatedPayload($request, false, $workspaceId);
 
         $config = RatioBotConfig::create(array_merge($this->normalizePayload($data), [
             'workspace_id' => $workspaceId,
@@ -80,7 +121,7 @@ class RatioBotController extends Controller
      */
     public function update(Request $request, RatioBotConfig $ratioBot): JsonResponse
     {
-        $data = $this->validatedPayload($request, true);
+        $data = $this->validatedPayload($request, true, (string) $ratioBot->workspace_id, $ratioBot);
 
         $ratioBot->update($this->normalizePayload($data));
         BackfillMarketOhlcJob::dispatch((string) $ratioBot->id);
@@ -187,6 +228,61 @@ class RatioBotController extends Controller
     public function dailyReport(RatioBotConfig $ratioBot): JsonResponse
     {
         return response()->json($this->runtime->dailyReport($ratioBot));
+    }
+
+    public function recoverySlot(RatioBotConfig $ratioBot): JsonResponse
+    {
+        return response()->json(app(\App\Domain\RatioBot\RatioBotRecoverySlotService::class)->payload($ratioBot));
+    }
+
+    /**
+     * GET /ratio-bots/{config}/liquidation-guard — current liquidation
+     * distance, danger level, and any shared-position siblings for a
+     * futures bot (see RatioBotLiquidationGuardService).
+     */
+    public function liquidationGuard(RatioBotConfig $ratioBot): JsonResponse
+    {
+        $guardService = app(\App\Domain\RatioBot\RatioBotLiquidationGuardService::class);
+        $guard = $guardService->assess($ratioBot);
+        $state = $ratioBot->state;
+
+        return response()->json($guard + [
+            'bot_id' => (string) $ratioBot->id,
+            'bot_name' => (string) $ratioBot->name,
+            'symbol' => $ratioBot->normalizedSymbol(),
+            'watch_buffer_pct' => $ratioBot->liquidationWatchBufferPct(),
+            'critical_buffer_pct' => $ratioBot->liquidationCriticalBufferPct(),
+            // Part C.1/C.2 -- the single most important trust signal on this
+            // card: can an operator see, at a glance, that Binance itself
+            // (not just this app) is watching the position.
+            'exchange_stop_order' => $state?->futures_stop_order_id ? [
+                'order_id' => $state->futures_stop_order_id,
+                'stop_price' => $state->futures_stop_price !== null ? (float) $state->futures_stop_price : null,
+            ] : null,
+            'estimated_funding_cost' => $state?->estimated_funding_cost !== null ? (float) $state->estimated_funding_cost : null,
+            'last_funding_rate' => $state?->last_funding_rate !== null ? (float) $state->last_funding_rate : null,
+            'shared_position' => $guardService->sharedPositionSiblings($ratioBot) !== [],
+            'sibling_bots' => $guardService->sharedPositionSiblings($ratioBot),
+            // Part B -- small status line only, no separate card (spec §7).
+            'futures_recovery' => [
+                'enabled' => $ratioBot->futuresRecoveryEnabled(),
+                'used' => (bool) ($state?->futures_recovery_used ?? false),
+                'review_due_at' => optional($state?->futures_recovery_review_at)->toIso8601String(),
+                'position_opened_at' => optional($state?->futures_position_opened_at)->toIso8601String(),
+            ],
+        ]);
+    }
+
+    /**
+     * GET /ratio-bots/{config}/market-hours — multi-asset expansion: current
+     * market-open/closed status for this bot's asset class, from the SAME
+     * RatioBotMarketHoursService the risk gate itself reads, so this display
+     * can never disagree with what actually blocks a trade. Always
+     * `applicable: false` for crypto bots.
+     */
+    public function marketHours(RatioBotConfig $ratioBot): JsonResponse
+    {
+        return response()->json(app(\App\Domain\RatioBot\RatioBotMarketHoursService::class)->status($ratioBot));
     }
 
     // -----------------------------------------------------------------------
@@ -705,12 +801,12 @@ class RatioBotController extends Controller
         return response()->json($this->runtime->brainSnapshot($ratioBot));
     }
 
-    private function validatedPayload(Request $request, bool $partial = false): array
+    private function validatedPayload(Request $request, bool $partial = false, ?string $workspaceId = null, ?RatioBotConfig $existing = null): array
     {
         $required = $partial ? 'sometimes' : 'required';
         $optional = $partial ? 'sometimes' : 'nullable';
 
-        return $request->validate([
+        $data = $request->validate([
             'name'                         => $optional . '|string|max:120',
             'symbol'                       => "{$required}|string|max:32",
             'exchange'                     => 'nullable|string|max:32',
@@ -806,11 +902,82 @@ class RatioBotController extends Controller
             'reserve_min_pct'              => 'nullable|numeric|min:0|max:1',
             'reserve_max_pct'              => 'nullable|numeric|min:0|max:1',
             'recovery_enabled'             => 'nullable|boolean',
+            'recovery_slot_enabled'        => 'nullable|boolean',
+            'recovery_slot_allocation_pct' => 'nullable|numeric|min:0|max:50',
+            'recovery_slot_target_pct'     => 'nullable|numeric|min:0|max:100',
             'recovery_timeout_minutes'     => 'nullable|integer|min:1|max:100000',
             'recovery_buy_drop_pct'        => 'nullable|numeric|min:0.0001|max:100',
             'recovery_sell_rise_pct'       => 'nullable|numeric|min:0.0001|max:100',
             'no_trade_alert_minutes'       => 'nullable|integer|min:1|max:100000',
+            'liquidation_guard_enabled'      => 'nullable|boolean',
+            'liquidation_watch_buffer_pct'   => 'nullable|numeric|min:0.5|max:90',
+            'liquidation_critical_buffer_pct' => 'nullable|numeric|min:0.1|max:89.99',
+            'futures_recovery_enabled'         => 'nullable|boolean',
+            'futures_recovery_topup_pct'       => 'nullable|numeric|min:0|max:30',
+            'futures_recovery_timeout_minutes' => 'nullable|integer|min:1|max:100000',
+            'futures_recovery_min_confidence'  => 'nullable|numeric|min:0|max:100',
+            'recovery_lot_min_profit_ratio'    => 'nullable|numeric|min:0|max:1',
         ]);
+
+        $this->assertFuturesConfigSanity($data, $workspaceId, $existing);
+
+        return $data;
+    }
+
+    /**
+     * Part C.4 -- config sanity guardrails, enforced at save time rather
+     * than only at trade time. Only applies when the effective config (this
+     * payload merged over any existing bot) is market_type=futures.
+     */
+    private function assertFuturesConfigSanity(array $data, ?string $workspaceId, ?RatioBotConfig $existing): void
+    {
+        $marketType = $data['market_type'] ?? $existing?->market_type ?? 'spot';
+        if ($marketType !== 'futures' || $workspaceId === null) {
+            return;
+        }
+
+        $leverage = array_key_exists('leverage', $data) ? (float) $data['leverage'] : (float) ($existing?->leverage ?? 0);
+        if ($leverage > 0) {
+            $maxLeverage = (float) ($this->futuresConfigs->effective($workspaceId)['max_leverage'] ?? 0);
+            if ($maxLeverage > 0 && $leverage > $maxLeverage) {
+                throw ValidationException::withMessages([
+                    'leverage' => "Leverage {$leverage}x exceeds this workspace's cap of {$maxLeverage}x.",
+                ]);
+            }
+        }
+
+        if (! (bool) ($data['liquidation_guard_enabled'] ?? $existing?->liquidation_guard_enabled ?? false)) {
+            return;
+        }
+
+        $watch = array_key_exists('liquidation_watch_buffer_pct', $data)
+            ? (float) $data['liquidation_watch_buffer_pct']
+            : (float) ($existing?->liquidation_watch_buffer_pct ?? 15.0);
+        $critical = array_key_exists('liquidation_critical_buffer_pct', $data)
+            ? (float) $data['liquidation_critical_buffer_pct']
+            : (float) ($existing?->liquidation_critical_buffer_pct ?? 5.0);
+
+        // Deterministic proxy for "is this gap survivable" rather than a
+        // synchronous live-volatility fetch during a config save: the
+        // minimum required gap scales with leverage, since the same %
+        // price move consumes buffer faster the more leveraged the
+        // position is. This is a heuristic, not a live estimate -- it
+        // deliberately avoids a network call inside a save-request.
+        $minimumSurvivableGapPct = $leverage > 0 ? max(1.0, $leverage * 0.3) : 1.0;
+        $gapPct = $watch - $critical;
+        if ($gapPct < $minimumSurvivableGapPct) {
+            throw ValidationException::withMessages([
+                'liquidation_watch_buffer_pct' => sprintf(
+                    'The gap between watch (%.2f%%) and critical (%.2f%%) buffers is only %.2f%% -- at %sx leverage this is too '
+                        . 'narrow to reliably react in before the exchange liquidates. Widen the gap to at least %.2f%%.',
+                    $watch,
+                    $critical,
+                    $gapPct,
+                    rtrim(rtrim(number_format($leverage, 2), '0'), '.'),
+                    $minimumSurvivableGapPct,
+                ),
+            ]);
+        }
     }
 
     private function normalizePayload(array $data): array
@@ -867,10 +1034,18 @@ class RatioBotController extends Controller
         'selling_loss_ratio', 'buying_loss_ratio',
         'max_spike_deviation_bps',
         'max_entry_price_drift_bps',
+        'recovery_slot_allocation_pct',
+        'recovery_slot_target_pct',
         'recovery_timeout_minutes',
         'starting_entry',
         'recovery_buy_drop_pct',
         'recovery_sell_rise_pct',
         'no_trade_alert_minutes',
+        'liquidation_watch_buffer_pct',
+        'liquidation_critical_buffer_pct',
+        'futures_recovery_topup_pct',
+        'futures_recovery_timeout_minutes',
+        'futures_recovery_min_confidence',
+        'recovery_lot_min_profit_ratio',
     ];
 }

@@ -295,6 +295,8 @@ class RatioBotLiveBalanceCapTest extends TestCase
             app(StrategyManagerService::class),
             $exchangeClients,
             app(\App\Domain\MarketData\MarketSnapshotService::class),
+            app(\App\Domain\RatioBot\RatioBotExchangeStopOrderService::class),
+            app(\App\Domain\RatioBot\RatioBotFundingCostService::class),
         );
     }
 

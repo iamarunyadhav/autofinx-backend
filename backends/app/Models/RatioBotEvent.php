@@ -37,6 +37,27 @@ class RatioBotEvent extends BaseModel
     public const EVENT_RECOVERY_REVIEW_COMPLETED    = 'recovery_review_completed';
     public const EVENT_STRATEGY_REANCHORED          = 'strategy_reanchored';
     public const EVENT_RECOVERY_TRADE_EXECUTED      = 'recovery_trade_executed';
+    public const EVENT_RECOVERY_SLOT_TOPPED_UP      = 'recovery_slot_topped_up';
+    public const EVENT_RECOVERY_SLOT_CAP_REACHED    = 'recovery_slot_cap_reached';
+    public const EVENT_RECOVERY_SLOT_USED           = 'recovery_slot_used';
+
+    // Diagnostics panel (operator-triggered, whitelisted remediation only)
+    public const EVENT_DIAGNOSTICS_FIX_APPLIED      = 'diagnostics_fix_applied';
+
+    // Futures Liquidation Guard
+    public const EVENT_LIQUIDATION_GUARD_WATCH_ENTERED = 'liquidation_guard_watch_entered';
+    public const EVENT_LIQUIDATION_GUARD_FORCE_EXIT    = 'liquidation_guard_force_exit';
+
+    // Futures Part C -- exchange-side safety net
+    public const EVENT_EXCHANGE_STOP_ORDER_PLACED     = 'exchange_stop_order_placed';
+    public const EVENT_EXCHANGE_STOP_ORDER_REPLACED   = 'exchange_stop_order_replaced';
+    public const EVENT_EXCHANGE_STOP_ORDER_CANCELLED  = 'exchange_stop_order_cancelled';
+    public const EVENT_STOP_ORDER_SLIPPAGE_DETECTED   = 'stop_order_slippage_detected';
+    public const EVENT_FORCE_EXIT_LOCK_CONTENDED      = 'force_exit_lock_contended';
+
+    // Futures Part B -- futures-adapted recovery (single bounded top-up)
+    public const EVENT_FUTURES_RECOVERY_TOPUP_EXECUTED = 'futures_recovery_topup_executed';
+    public const EVENT_FUTURES_RECOVERY_PAUSED         = 'futures_recovery_paused';
 
     public function config(): BelongsTo
     {

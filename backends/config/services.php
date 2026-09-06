@@ -84,6 +84,17 @@ return [
         'default_spread_pct' => (float) env('METAL_BROKER_DEFAULT_SPREAD_PCT', 0.4),
     ],
 
+    // OANDA v20 REST API -- real, documented endpoints (see OandaClient's
+    // docblock), built without a live account. 'sandbox' mode (the default)
+    // needs no credentials at all. api_url defaults to the practice-account
+    // host; set OANDA_API_URL to https://api-fxtrade.oanda.com for live.
+    'oanda' => [
+        'mode' => env('OANDA_MODE', 'sandbox'),
+        'api_url' => env('OANDA_API_URL', 'https://api-fxpractice.oanda.com'),
+        'api_key' => env('OANDA_API_KEY'),
+        'account_id' => env('OANDA_ACCOUNT_ID'),
+    ],
+
     'fx' => [
         'provider' => env('FX_RATE_PROVIDER', 'openexchangerates'),
         'api_url' => env('FX_RATE_API_URL'),

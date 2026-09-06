@@ -36,6 +36,10 @@ class TradingVenueClientFactory
             return $this->makeMetalBrokerClient($bot->connection);
         }
 
+        if ($provider === 'oanda') {
+            return $this->makeOandaClient($bot->connection);
+        }
+
         throw new RuntimeException("Unsupported trading provider: {$provider}");
     }
 
@@ -56,6 +60,10 @@ class TradingVenueClientFactory
             return $this->makeMetalBrokerClient($connection);
         }
 
+        if ($provider === 'oanda') {
+            return $this->makeOandaClient($connection);
+        }
+
         throw new RuntimeException("Unsupported provider: {$provider}");
     }
 
@@ -68,6 +76,10 @@ class TradingVenueClientFactory
 
         if ($provider === 'metal_broker' || $provider === 'metals') {
             return $this->makeMetalBrokerClientFromIntegration($integration);
+        }
+
+        if ($provider === 'oanda') {
+            return $this->makeOandaClientFromIntegration($integration);
         }
 
         throw new RuntimeException("Unsupported integration provider: {$provider}");
@@ -110,6 +122,40 @@ class TradingVenueClientFactory
             balancesPath: (string) config('services.metal_broker.balances_path', '/v1/account/balances'),
             pricePath: (string) config('services.metal_broker.price_path', '/v1/quotes/{asset_code}'),
             defaultSpreadPct: (float) config('services.metal_broker.default_spread_pct', 0.4),
+        );
+    }
+
+    private function makeOandaClientFromIntegration(Integration $integration): OandaClient
+    {
+        $secrets = $this->integrations->decryptSecrets($integration->secrets_encrypted);
+
+        return $this->makeOandaClient(null, [
+            'api_key' => (string) ($secrets['api_key'] ?? ''),
+            'account_id' => (string) ($secrets['account_id'] ?? ''),
+        ]);
+    }
+
+    private function makeOandaClient(?ExchangeConnection $connection = null, ?array $secretsOverride = null): OandaClient
+    {
+        $apiUrl = (string) config('services.oanda.api_url', 'https://api-fxpractice.oanda.com');
+        $apiKey = (string) config('services.oanda.api_key', '');
+        $accountId = (string) config('services.oanda.account_id', '');
+
+        if ($connection) {
+            $apiKey = (string) ($this->vault->decrypt($connection->api_key_encrypted) ?: $apiKey);
+            $accountId = (string) ($this->vault->decrypt($connection->api_secret_encrypted) ?: $accountId);
+        }
+
+        if ($secretsOverride) {
+            $apiKey = $secretsOverride['api_key'] !== '' ? $secretsOverride['api_key'] : $apiKey;
+            $accountId = $secretsOverride['account_id'] !== '' ? $secretsOverride['account_id'] : $accountId;
+        }
+
+        return new OandaClient(
+            apiUrl: $apiUrl,
+            apiKey: $apiKey,
+            accountId: $accountId,
+            mode: (string) config('services.oanda.mode', 'sandbox'),
         );
     }
 }

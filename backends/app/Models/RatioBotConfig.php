@@ -8,6 +8,11 @@ use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class RatioBotConfig extends BaseModel
 {
+    // Included in every serialization (index/show/create) automatically --
+    // Part G's frontend bot selector needs asset_class for every bot in a
+    // list, not only the currently-selected one.
+    protected $appends = ['asset_class'];
+
     protected $casts = [
         'enabled'                     => 'boolean',
         'kill_switch'                => 'boolean',
@@ -81,6 +86,9 @@ class RatioBotConfig extends BaseModel
         'reserve_min_pct'             => 'decimal:4',
         'reserve_max_pct'             => 'decimal:4',
         'recovery_enabled'            => 'boolean',
+        'recovery_slot_enabled'       => 'boolean',
+        'recovery_slot_allocation_pct' => 'decimal:4',
+        'recovery_slot_target_pct'    => 'decimal:4',
         'recovery_timeout_minutes'    => 'integer',
         'recovery_buy_drop_pct'       => 'decimal:4',
         'recovery_sell_rise_pct'      => 'decimal:4',
@@ -129,6 +137,11 @@ class RatioBotConfig extends BaseModel
         return $this->hasMany(RatioBotLot::class, 'ratio_bot_config_id');
     }
 
+    public function recoverySlot(): HasOne
+    {
+        return $this->hasOne(RatioBotRecoverySlot::class, 'ratio_bot_config_id');
+    }
+
     public function isLiveMode(): bool
     {
         return $this->execution_mode === 'live';
@@ -161,6 +174,39 @@ class RatioBotConfig extends BaseModel
     public function marketType(): string
     {
         return strtolower(trim((string) ($this->market_type ?: 'spot')));
+    }
+
+    /**
+     * Derived, never stored -- looks the symbol up in `config('assets.php')`
+     * (the single source of truth already used for fee_pct/market_hours/
+     * symbol precision) rather than duplicating classification logic or a
+     * column that could drift from that config. Falls back to CRYPTO (the
+     * existing, pre-multi-asset default) for any symbol not found in any
+     * bucket, so existing crypto bots on symbols not in the placeholder
+     * config list see zero behavior change.
+     */
+    public function assetClass(): string
+    {
+        $symbol = $this->normalizedSymbol();
+
+        foreach (['crypto', 'metals', 'forex'] as $class) {
+            $entry = config("assets.{$class}.symbols.{$symbol}");
+            if ($entry !== null) {
+                return strtoupper((string) ($entry['asset_class'] ?? $class));
+            }
+        }
+
+        return 'CRYPTO';
+    }
+
+    /**
+     * Backs the `asset_class` entry in $appends -- Eloquent's accessor
+     * naming convention, thin wrapper so assetClass() stays the plain,
+     * directly-callable method the rest of the backend already uses.
+     */
+    public function getAssetClassAttribute(): string
+    {
+        return $this->assetClass();
     }
 
     public function usesTrailingRatio(): bool
@@ -293,6 +339,151 @@ class RatioBotConfig extends BaseModel
     public function recoverySellRiseRatio(): float
     {
         return max(0.0001, (float) ($this->recovery_sell_rise_pct ?? 2.0)) / 100;
+    }
+
+    /**
+     * A separately configurable, more lenient profit floor for the single
+     * merged recovery-average lot only (see RatioBotLotService -- every
+     * other lot in the same sell plan keeps the standard minNetProfitRatio).
+     * "More lenient" means a smaller required margin, never a loss: this is
+     * clamped to never fall below the real execution-cost floor (same
+     * fee_bps/max_slippage_bps formula RatioBotDecisionService::executionCostRatio()
+     * and RatioBotRiskService::sellNetProfitBlock() already use) regardless
+     * of what's configured or passed in -- the "never sell at a loss"
+     * guarantee is not touched by this knob, only how much profit margin
+     * above cost is required before it exits.
+     */
+    public function recoveryLotMinProfitRatio(): float
+    {
+        $feeBps = max(0.0, (float) ($this->fee_bps ?? 0));
+        $slippageBps = max(0.0, (float) ($this->max_slippage_bps ?? 0));
+        $costFloor = (($feeBps * 2) + $slippageBps) / 10000;
+
+        if ($this->recovery_lot_min_profit_ratio !== null) {
+            return max($costFloor, (float) $this->recovery_lot_min_profit_ratio);
+        }
+
+        $normalRatio = max(0.0, (float) ($this->min_net_profit_bps ?? 0) / 10000);
+
+        return max($costFloor, $normalRatio / 2);
+    }
+
+    public function recoverySlotEnabled(): bool
+    {
+        return (bool) $this->recovery_slot_enabled;
+    }
+
+    public function recoverySlotAllocationPct(): float
+    {
+        $override = $this->recovery_slot_allocation_pct;
+        $value = $override !== null
+            ? (float) $override
+            : (float) config('autofinx.recovery_slot.default_allocation_pct', 10.0);
+
+        return max(0.0, min(50.0, $value));
+    }
+
+    public function recoverySlotTargetPct(): float
+    {
+        $override = $this->recovery_slot_target_pct;
+        $value = $override !== null
+            ? (float) $override
+            : (float) config('autofinx.recovery_slot.default_target_pct', 25.0);
+
+        return max(0.0, min(100.0, $value));
+    }
+
+    /**
+     * Futures Liquidation Guard — continuous monitoring of an open futures
+     * position's distance to liquidation (see RatioBotLiquidationGuardService).
+     * Only meaningful for market_type=futures; spot bots always read false.
+     */
+    public function liquidationGuardEnabled(): bool
+    {
+        return $this->marketType() === 'futures' && (bool) $this->liquidation_guard_enabled;
+    }
+
+    public function liquidationWatchBufferPct(): float
+    {
+        $value = $this->liquidation_watch_buffer_pct !== null ? (float) $this->liquidation_watch_buffer_pct : 15.0;
+
+        return max(0.5, min(90.0, $value));
+    }
+
+    /**
+     * Always kept strictly below the watch threshold, even if a stale/
+     * inconsistent value was somehow saved directly via the API — the guard
+     * classifies critical before watch, so this ordering is safety-critical,
+     * not cosmetic (see RatioBotLiquidationGuardService::assess()).
+     */
+    public function liquidationCriticalBufferPct(): float
+    {
+        $watch = $this->liquidationWatchBufferPct();
+        $value = $this->liquidation_critical_buffer_pct !== null ? (float) $this->liquidation_critical_buffer_pct : 5.0;
+
+        return max(0.1, min($watch - 0.01, $value));
+    }
+
+    /**
+     * Futures-Adapted Recovery gate (Part B) -- a single, bounded, one-time
+     * top-up to a stuck position's average entry, NOT a repeating ladder
+     * (futures decisions have no lots/stages to average down across the way
+     * spot does -- see FuturesRecoveryReviewService). Hard-requires the
+     * Liquidation Guard (Part A) to be enabled -- enforced here in the
+     * model itself, not just a UI warning, so it can never be bypassed by a
+     * stale config or a direct API call. Deliberately its own dedicated
+     * fields (futures_recovery_*), not a reuse of spot's v2_enabled/
+     * recovery_enabled -- this is a fully separate mechanism.
+     */
+    public function futuresRecoveryEnabled(): bool
+    {
+        return (bool) $this->futures_recovery_enabled
+            && (int) ($this->futures_recovery_timeout_minutes ?? 0) > 0
+            && $this->marketType() === 'futures'
+            && $this->liquidationGuardEnabled();
+    }
+
+    public function futuresRecoveryTimeoutMinutes(): int
+    {
+        return max(1, (int) ($this->futures_recovery_timeout_minutes ?? 60));
+    }
+
+    /**
+     * Not a strategy-reported confidence value -- no strategy in this
+     * codebase computes one (BaseIndicatorStrategy subclasses only expose a
+     * bull/bear bias string). See
+     * FuturesRecoveryReviewService::directionConfidencePct() for the real,
+     * deterministic EMA/ADX/RSI-based proxy this threshold is compared
+     * against.
+     */
+    public function futuresRecoveryMinConfidencePct(): float
+    {
+        $value = $this->futures_recovery_min_confidence !== null ? (float) $this->futures_recovery_min_confidence : 60.0;
+
+        return max(0.0, min(100.0, $value));
+    }
+
+    public function futuresRecoveryTopupPct(): float
+    {
+        return max(0.0, min(30.0, (float) ($this->futures_recovery_topup_pct ?? 10.0)));
+    }
+
+    /**
+     * One-time amount, sized off the ORIGINAL position's notional at the
+     * moment of the single allowed top-up -- not a repeating per-cycle
+     * carve-out (there is no cycle concept for a single-position futures
+     * bot). Leverage-dampened the same way spot's futures-adjacent sizing
+     * is: on spot, reserving X% of a buy is X% of real money; at leverage L
+     * that same X% controls L times the notional exposure.
+     */
+    public function futuresRecoveryTopupNotional(RatioBotState $state): float
+    {
+        $pct = $this->futuresRecoveryTopupPct();
+        $originalNotional = abs((float) ($state->last_position_qty ?? 0)) * (float) ($state->entry_price ?? 0);
+        $leverage = max(1.0, (float) ($this->leverage ?? 1));
+        $dampening = min(1.0, 2.0 / $leverage);
+
+        return $originalNotional * ($pct / 100) * $dampening;
     }
 
     public function startingEntry(): ?string

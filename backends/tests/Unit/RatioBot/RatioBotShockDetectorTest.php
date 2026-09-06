@@ -104,6 +104,8 @@ class RatioBotShockDetectorTest extends TestCase
             $strategyManager,
             app(\App\Domain\Exchange\ExchangeClientFactory::class),
             app(\App\Domain\MarketData\MarketSnapshotService::class),
+            app(\App\Domain\RatioBot\RatioBotExchangeStopOrderService::class),
+            app(\App\Domain\RatioBot\RatioBotFundingCostService::class),
         );
     }
 

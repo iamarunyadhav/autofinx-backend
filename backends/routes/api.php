@@ -458,7 +458,13 @@ Route::prefix('v1')->group(function () {
         Route::get('ratio-bots/{ratioBot}/readiness', [RatioBotController::class, 'readiness']);
         Route::get('ratio-bots/{ratioBot}/startup-checklist', [RatioBotController::class, 'startupChecklist']);
         Route::get('ratio-bots/{ratioBot}/daily-report', [RatioBotController::class, 'dailyReport']);
+        Route::get('ratio-bots/{ratioBot}/recovery-slot', [RatioBotController::class, 'recoverySlot']);
+        Route::get('ratio-bots/{ratioBot}/liquidation-guard', [RatioBotController::class, 'liquidationGuard']);
+        Route::get('ratio-bots/{ratioBot}/market-hours', [RatioBotController::class, 'marketHours']);
         Route::get('ratio-bots/{ratioBot}/effective-feed-status', [RatioBotController::class, 'effectiveFeedStatus']);
+Route::get('ratio-bots/{ratioBot}/diagnostics', [RatioBotController::class, 'diagnostics']);
+Route::post('ratio-bots/{ratioBot}/diagnostics/fix', [RatioBotController::class, 'applyDiagnosticsFix'])
+    ->middleware(['require.2fa', 'throttle:10,1']);
         Route::get('ratio-bots/{ratioBot}/pending-approval', [RatioBotController::class, 'pendingApproval']);
         Route::post('ratio-bots/{ratioBot}/decisions/{decision}/approve', [RatioBotController::class, 'approveDecision'])->middleware('require.2fa');
         Route::post('ratio-bots/{ratioBot}/decisions/{decision}/reject', [RatioBotController::class, 'rejectDecision'])->middleware('require.2fa');

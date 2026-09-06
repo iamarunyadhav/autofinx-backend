@@ -13,6 +13,7 @@ use App\Models\Integration;
 use App\Models\Order;
 use App\Models\RatioBotConfig;
 use App\Models\RatioBotDecision;
+use App\Models\RatioBotEvent;
 use App\Models\RatioBotState;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
@@ -34,6 +35,8 @@ class RatioBotExecutionService
         private readonly StrategyManagerService $strategyManager,
         private readonly ExchangeClientFactory $exchangeClients,
         private readonly MarketSnapshotService $snapshots,
+        private readonly RatioBotExchangeStopOrderService $stopOrders,
+        private readonly RatioBotFundingCostService $fundingCost,
     ) {
     }
 
@@ -357,7 +360,7 @@ class RatioBotExecutionService
         $status = strtoupper((string) $order->status);
         if (in_array($status, ['FILLED', 'PARTIAL'], true)) {
             $executedPrice = $this->avgFillPrice($order, (float) $decision->evaluated_price);
-            $executedQty = (float) ($order->filled_qty ?: $order->qty ?: $order->quantity);
+            $executedQty = $this->resolveExecutedQty($order, (float) $order->quantity);
             $orderId = (string) ($order->exchange_order_id ?: $order->id);
 
             if ($executedPrice <= 0 || $executedQty <= 0) {
@@ -422,7 +425,7 @@ class RatioBotExecutionService
     ): void {
         $status = strtoupper((string) $order->status);
         $executedPrice = $this->avgFillPrice($order, (float) $decision->evaluated_price);
-        $executedQty = (float) ($order->filled_qty ?: $order->qty ?: $qty);
+        $executedQty = $this->resolveExecutedQty($order, $qty);
         $orderId = (string) ($order->exchange_order_id ?: $order->id);
 
         $decision->update([
@@ -461,19 +464,97 @@ class RatioBotExecutionService
         if (in_array($decision->decision, [RatioBotDecision::DECISION_LONG, RatioBotDecision::DECISION_SHORT], true)
             && in_array($status, ['FILLED', 'PARTIAL'], true)
         ) {
-            $this->stateService->syncPositionSnapshot(
-                $config,
-                $decision->decision === RatioBotDecision::DECISION_SHORT ? 'short' : 'long',
-                $executedQty,
-                $executedPrice > 0 ? $executedPrice : (float) $decision->evaluated_price,
-                0
-            );
+            $fillPrice = $executedPrice > 0 ? $executedPrice : (float) $decision->evaluated_price;
+            $side = $decision->decision === RatioBotDecision::DECISION_SHORT ? 'short' : 'long';
+            $isRecoveryTopup = (string) data_get($decision->metadata, 'trigger', '') === 'futures_recovery_topup';
+
+            if ($isRecoveryTopup) {
+                // Part B: blend into the EXISTING position's average entry
+                // rather than overwrite it -- this is a top-up of the same
+                // stuck position, not a fresh entry.
+                $priorState = $config->state()->first();
+                $oldQty = abs((float) ($priorState?->last_position_qty ?? 0));
+                $oldEntry = (float) ($priorState?->entry_price ?? 0);
+                $newQty = $oldQty + $executedQty;
+                $newEntry = $newQty > 0 ? (($oldQty * $oldEntry) + ($executedQty * $fillPrice)) / $newQty : $fillPrice;
+
+                $this->stateService->syncPositionSnapshot($config, $side, $newQty, $newEntry, 0);
+                $config->state()->first()?->update([
+                    'futures_recovery_used' => true,
+                    'futures_recovery_topup_notional' => (float) data_get($decision->metadata, 'futures_recovery_topup_notional', 0),
+                ]);
+
+                RatioBotEvent::create([
+                    'ratio_bot_config_id' => $config->id,
+                    'event_type' => RatioBotEvent::EVENT_FUTURES_RECOVERY_TOPUP_EXECUTED,
+                    'context' => [
+                        'entry_price_before' => $oldEntry,
+                        'entry_price_after' => $newEntry,
+                        'qty_before' => $oldQty,
+                        'qty_after' => $newQty,
+                        'topup_notional' => (float) data_get($decision->metadata, 'futures_recovery_topup_notional', 0),
+                        'fill_price' => $fillPrice,
+                    ],
+                    'occurred_at' => now(),
+                ]);
+            } else {
+                $this->stateService->syncPositionSnapshot($config, $side, $executedQty, $fillPrice, 0);
+            }
+
+            // Required, not optional (Part B spec Â§5.3): a stale stop after a
+            // top-up is exactly the kind of gap Part C exists to prevent.
+            // syncFuturesStopOrderSafely() always recomputes from the
+            // freshest state, so this single call correctly covers both a
+            // fresh entry and a top-up's blended entry price.
+            $this->syncFuturesStopOrderSafely($config->fresh('state'));
         }
 
         if (in_array($decision->decision, [RatioBotDecision::DECISION_EXIT_LONG, RatioBotDecision::DECISION_EXIT_SHORT], true)
             && in_array($status, ['FILLED', 'PARTIAL'], true)
         ) {
+            $this->cancelFuturesStopOrderSafely($config, 'position_closed');
             $this->stateService->syncPositionSnapshot($config, 'flat', 0, null, 0);
+            $this->fundingCost->resetForClosedPosition($config);
+        }
+    }
+
+    /**
+     * Best-effort: the exchange-side stop is a secondary safety net, never
+     * the primary trade. A failure placing/replacing it must never surface
+     * as if the actual entry/exit failed -- log and move on, the next fill
+     * or reconcile tick gets another chance.
+     */
+    private function syncFuturesStopOrderSafely(RatioBotConfig $config): void
+    {
+        try {
+            $integration = $this->resolveFuturesIntegration($config);
+            $workspaceConfig = $this->futuresConfigs->effective((string) $config->workspace_id);
+            $this->stopOrders->syncStopOrder($config, $integration, $workspaceConfig);
+        } catch (Throwable $e) {
+            Log::warning('[RatioBotExec] Exchange-side stop order sync failed', [
+                'config_id' => $config->id,
+                'error' => $e->getMessage(),
+            ]);
+        }
+    }
+
+    /**
+     * Public: also called directly by RatioBotRealtimeEngine::forceExitDecision()
+     * so the Liquidation Guard's own force-close cancels the now-stale
+     * exchange-side stop as part of the same protective action, before it
+     * submits the closing order itself.
+     */
+    public function cancelFuturesStopOrderSafely(RatioBotConfig $config, string $reason): void
+    {
+        try {
+            $integration = $this->resolveFuturesIntegration($config);
+            $workspaceConfig = $this->futuresConfigs->effective((string) $config->workspace_id);
+            $this->stopOrders->cancelStopOrder($config, $integration, $workspaceConfig, $reason);
+        } catch (Throwable $e) {
+            Log::warning('[RatioBotExec] Exchange-side stop order cancel failed', [
+                'config_id' => $config->id,
+                'error' => $e->getMessage(),
+            ]);
         }
     }
 
@@ -835,6 +916,15 @@ class RatioBotExecutionService
             throw new RuntimeException('Cannot open futures position: invalid evaluated price');
         }
 
+        // Part B: a futures recovery top-up is sized off the ORIGINAL
+        // position's notional (see RatioBotConfig::futuresRecoveryTopupNotional()),
+        // never the bot's normal per-entry budget -- it's a bounded, one-time
+        // addition, not a fresh full-size entry.
+        $topupNotional = (float) data_get($decision->metadata, 'futures_recovery_topup_notional', 0);
+        if ($topupNotional > 0) {
+            return round($topupNotional / $price, 8);
+        }
+
         $quoteBudget = (float) ($config->quote_asset_budget ?? $config->base_quote_amount ?? 0);
         if ($quoteBudget <= 0) {
             throw new RuntimeException('Cannot open futures position: quote_asset_budget is zero');
@@ -848,6 +938,27 @@ class RatioBotExecutionService
         }
 
         return round($qty, 8);
+    }
+
+    /**
+     * `$order->filled_qty ?: $order->qty ?: ...` looks like a safe fallback
+     * chain but is a real bug: Eloquent's decimal cast returns filled_qty as
+     * a STRING (e.g. "0.00000000"), and PHP's `?:` only treats the exact
+     * strings "" and "0" as falsy -- "0.00000000" is truthy, so an unfilled
+     * quantity silently wins over the real requested qty instead of falling
+     * through, and callers proceed with executedQty=0 instead of catching
+     * it as invalid. Compare the actual numeric value instead.
+     */
+    private function resolveExecutedQty(Order $order, float $fallback): float
+    {
+        $filledQty = (float) ($order->filled_qty ?? 0);
+        if ($filledQty > 0) {
+            return $filledQty;
+        }
+
+        $qty = (float) ($order->qty ?? 0);
+
+        return $qty > 0 ? $qty : $fallback;
     }
 
     private function avgFillPrice(Order $order, float $fallback): float

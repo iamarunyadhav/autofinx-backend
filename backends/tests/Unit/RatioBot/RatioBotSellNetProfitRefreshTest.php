@@ -87,6 +87,8 @@ class RatioBotSellNetProfitRefreshTest extends TestCase
             app(\App\Domain\RatioBot\StrategyManagerService::class),
             app(\App\Domain\Exchange\ExchangeClientFactory::class),
             app(\App\Domain\MarketData\MarketSnapshotService::class),
+            app(\App\Domain\RatioBot\RatioBotExchangeStopOrderService::class),
+            app(\App\Domain\RatioBot\RatioBotFundingCostService::class),
         );
     }
 

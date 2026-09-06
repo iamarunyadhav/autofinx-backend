@@ -34,4 +34,9 @@ return [
         // able to override it — inconsistent with every sibling scheduler toggle.
         'ratio_bots' => filter_var(env('AUTOFINX_SCHEDULER_RATIO_BOTS', true), FILTER_VALIDATE_BOOL),
     ],
+
+    'recovery_slot' => [
+        'default_allocation_pct' => (float) env('AUTOFINX_RECOVERY_SLOT_DEFAULT_ALLOCATION_PCT', 10.0),
+        'default_target_pct' => (float) env('AUTOFINX_RECOVERY_SLOT_DEFAULT_TARGET_PCT', 25.0),
+    ],
 ];
