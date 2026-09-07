@@ -102,6 +102,7 @@ class RatioBotConfig extends BaseModel
         'recovery_max_observation_minutes' => 'integer',
         'sell_selector_weights'       => 'array',
         'emergency_atr_multiple_threshold' => 'decimal:2',
+        'seed_position_pct'           => 'decimal:2',
     ];
 
     public function spotExecutionRoute(): string
@@ -620,6 +621,30 @@ class RatioBotConfig extends BaseModel
         $value = strtoupper(trim((string) ($this->starting_entry ?? '')));
 
         return in_array($value, ['BUY', 'SELL'], true) ? $value : null;
+    }
+
+    /**
+     * Reads the raw starting_entry column directly rather than through
+     * startingEntry() -- that accessor deliberately narrows to BUY/SELL only
+     * (verified before adding these: 4 existing call sites branch on
+     * startingEntry() === 'SELL'/BUY specifically, so widening its allow-list
+     * would risk changing their behavior). WATCH_ONLY/SEED_POSITION are a
+     * completely separate concern from the existing BUY/SELL/declared-
+     * inventory paths, so they get their own accessors instead.
+     */
+    public function isWatchOnlyMode(): bool
+    {
+        return strtoupper(trim((string) ($this->starting_entry ?? ''))) === 'WATCH_ONLY';
+    }
+
+    public function isSeedPositionMode(): bool
+    {
+        return strtoupper(trim((string) ($this->starting_entry ?? ''))) === 'SEED_POSITION';
+    }
+
+    public function seedPositionPct(): float
+    {
+        return max(1.0, min(50.0, (float) ($this->seed_position_pct ?? 10.0)));
     }
 
     /**

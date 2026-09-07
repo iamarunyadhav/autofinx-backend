@@ -885,7 +885,8 @@ class RatioBotController extends Controller
             'brain_min_confidence'         => 'nullable|integer|min:0|max:100',
             'forecast_horizon_seconds'     => 'nullable|integer|min:30|max:86400',
             'side_mode'                    => $optional . '|string|in:buy_sell,long_only,short_only,both',
-            'starting_entry'               => 'nullable|string|in:BUY,SELL',
+            'starting_entry'               => 'nullable|string|in:BUY,SELL,WATCH_ONLY,SEED_POSITION',
+            'seed_position_pct'            => 'required_if:starting_entry,SEED_POSITION|nullable|numeric|min:1|max:50',
             'mode'                         => $optional . '|string|in:advisor,manual_approval,restricted_auto',
             'execution_mode'               => $optional . '|string|in:sandbox,live',
             'spot_execution_route'         => 'nullable|string|in:spot_market,convert',
@@ -1136,5 +1137,6 @@ class RatioBotController extends Controller
         'recovery_max_observation_minutes',
         'sell_selector_weights',
         'emergency_atr_multiple_threshold',
+        'seed_position_pct',
     ];
 }

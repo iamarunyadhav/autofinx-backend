@@ -13,13 +13,16 @@ use App\Domain\RatioBot\MultiWindowTrendScoringService;
 use App\Domain\RatioBot\RatioBotAlertService;
 use App\Domain\RatioBot\RatioBotBrainService;
 use App\Domain\RatioBot\RatioBotDecisionService;
+use App\Domain\RatioBot\RatioBotExecutionService;
 use App\Domain\RatioBot\RatioBotRealtimeEngine;
+use App\Domain\RatioBot\RatioBotRiskService;
 use App\Domain\RatioBot\RatioBotRuntimeQueryService;
 use App\Domain\RatioBot\RatioBotStateService;
 use App\Models\ExchangeConnection;
 use App\Models\MarketOhlc;
 use App\Models\Order;
 use App\Models\RatioBotConfig;
+use App\Models\RatioBotDecision;
 use App\Models\RatioBotEvent;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldBeUnique;
@@ -32,6 +35,7 @@ use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 use Throwable;
 
 /**
@@ -149,7 +153,20 @@ class RunRatioBotEvaluationJob implements ShouldQueue, ShouldBeUnique
             }
 
             if ($config->state?->isIdle()) {
-                $this->maybeAutoAnchor($config, (float) $pricePayload['price'], $wallet, $stateService);
+                // SEED_POSITION -- a single, deliberate, bounded initial buy,
+                // never repeated (guarded by seed_position_executed_at, set
+                // BEFORE execution is attempted). WATCH_ONLY needs no branch
+                // here at all: startingEntry() already returns null for it
+                // (it's not in that accessor's BUY/SELL allow-list), so
+                // maybeAutoAnchor() below already treats a WATCH_ONLY bot
+                // identically to one with no starting_entry set today --
+                // provably the absence of the forced-anchor behavior, not a
+                // new decision branch.
+                if ($config->isSeedPositionMode() && $config->state->seed_position_executed_at === null) {
+                    $this->maybeExecuteSeedPosition($config, (float) $pricePayload['price']);
+                } else {
+                    $this->maybeAutoAnchor($config, (float) $pricePayload['price'], $wallet, $stateService);
+                }
                 $config = $config->fresh('state');
             }
 
@@ -334,6 +351,108 @@ class RunRatioBotEvaluationJob implements ShouldQueue, ShouldBeUnique
             'base_available' => $baseAvailable,
             'base_notional' => $baseNotional,
             'price' => $currentPrice,
+        ]);
+    }
+
+    /**
+     * SEED_POSITION mode -- a single, deliberate, bounded initial buy at the
+     * current market price, sized as seed_position_pct% of base_quote_amount,
+     * then managed by every existing mechanism afterward exactly like a
+     * normal reversal-confirmed fill (ordinary NORMAL lot -- no `stage`
+     * metadata key is set here, so RatioBotLotService::createBuyLot()'s own
+     * default already produces TYPE_NORMAL with zero changes needed there).
+     *
+     * Reuses metadata.stage_quote_amount -- the SAME override key
+     * RatioBotExecutionService::resolveQuantity()'s buy branch already reads
+     * for the live-balance-capped quote-amount case -- so sizing goes
+     * through the real, already-tested execution path unchanged, exactly
+     * like forceExitDecision()/controlledLossExitDecision() already
+     * construct a decision manually and route it through the same
+     * execute() path.
+     *
+     * seed_position_executed_at is set BEFORE the risk check/execute() call,
+     * not after -- confirmed maybeAutoAnchor()'s own idle-tick loop has no
+     * one-shot flag and re-fires every tick while idle, so without this a
+     * failed seed buy would resubmit indefinitely.
+     */
+    private function maybeExecuteSeedPosition(RatioBotConfig $config, float $currentPrice): void
+    {
+        if ($currentPrice <= 0) {
+            return;
+        }
+
+        $state = $config->state()->first();
+        if (! $state || $state->seed_position_executed_at !== null) {
+            return;
+        }
+
+        $state->update(['seed_position_executed_at' => now()]);
+
+        $seedQuoteAmount = (float) $config->base_quote_amount * ($config->seedPositionPct() / 100);
+        if ($seedQuoteAmount <= 0) {
+            Log::warning('[RatioBotJob] Seed position skipped: base_quote_amount is zero', ['config_id' => $config->id]);
+            return;
+        }
+
+        $decision = RatioBotDecision::create([
+            'ratio_bot_config_id' => $config->id,
+            'correlation_id' => (string) Str::uuid(),
+            'decision' => RatioBotDecision::DECISION_BUY,
+            'evaluated_price' => $currentPrice,
+            'position_state_before' => $state->position_state,
+            'position_state_after' => $state->position_state,
+            'execution_status' => RatioBotDecision::EXEC_PENDING,
+            'reason' => sprintf('seed_position: deliberate %.2f%% initial seed at market price', $config->seedPositionPct()),
+            'metadata' => [
+                'trigger' => 'seed_position',
+                'stage_quote_amount' => $seedQuoteAmount,
+            ],
+            'decided_at' => now(),
+        ]);
+
+        $riskBlock = app(RatioBotRiskService::class)->preTradeBlockReason($config, $decision);
+        if ($riskBlock !== null) {
+            $decision->update([
+                'execution_status' => RatioBotDecision::EXEC_SKIPPED,
+                'reason' => $riskBlock['detail'],
+                'metadata' => array_merge((array) $decision->metadata, ['risk_block' => $riskBlock]),
+            ]);
+            Log::warning('[RatioBotJob] Seed position blocked by risk guard', [
+                'config_id' => $config->id,
+                'code' => $riskBlock['code'],
+            ]);
+
+            return;
+        }
+
+        RatioBotEvent::create([
+            'ratio_bot_config_id' => $config->id,
+            'event_type' => RatioBotEvent::EVENT_SEED_POSITION_EXECUTED,
+            'context' => [
+                'decision_id' => (string) $decision->id,
+                'seed_position_pct' => $config->seedPositionPct(),
+                'seed_quote_amount' => $seedQuoteAmount,
+            ],
+            'occurred_at' => now(),
+        ]);
+
+        if ($config->isAutoMode()) {
+            app(RatioBotExecutionService::class)->execute($config, $decision);
+
+            return;
+        }
+
+        // Same manual-approval shape RatioBotRealtimeEngine::evaluate() uses
+        // for every other decision -- without this, a seed buy created under
+        // the default manual_approval mode would sit invisibly as
+        // EXEC_PENDING, never surfacing in the Pending Approval UI at all.
+        $decision->update([
+            'execution_status' => RatioBotDecision::EXEC_SKIPPED,
+            'reason' => 'mode=' . $config->mode . ' requires manual approval',
+            'metadata' => array_merge((array) $decision->metadata, [
+                'requires_manual_approval' => true,
+                'manual_decision' => null,
+            ]),
         ]);
     }
 

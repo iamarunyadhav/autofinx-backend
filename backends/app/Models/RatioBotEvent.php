@@ -65,6 +65,11 @@ class RatioBotEvent extends BaseModel
     public const EVENT_RATIO_BRAIN_EMERGENCY_CLEARED         = 'ratio_brain_emergency_cleared';
     public const EVENT_RATIO_BRAIN_CONTROLLED_LOSS_EXIT      = 'ratio_brain_controlled_loss_exit';
 
+    // Coin onboarding modes -- WATCH_ONLY needs no dedicated event (it is
+    // provably the absence of the existing forced-anchor behavior); this one
+    // covers SEED_POSITION's single deliberate initial buy.
+    public const EVENT_SEED_POSITION_EXECUTED = 'seed_position_executed';
+
     public function config(): BelongsTo
     {
         return $this->belongsTo(RatioBotConfig::class, 'ratio_bot_config_id');
