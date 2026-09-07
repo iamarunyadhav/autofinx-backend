@@ -78,6 +78,11 @@ class RatioBotBrainService
 
     public function horizonSeconds(RatioBotConfig $config): int
     {
+        $override = $config->forecastHorizonSeconds();
+        if ($override !== null) {
+            return $override;
+        }
+
         return max(1, $this->timeframes->seconds($config->timeFrame()));
     }
 

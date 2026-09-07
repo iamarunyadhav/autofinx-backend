@@ -461,6 +461,7 @@ Route::prefix('v1')->group(function () {
         Route::get('ratio-bots/{ratioBot}/recovery-slot', [RatioBotController::class, 'recoverySlot']);
         Route::get('ratio-bots/{ratioBot}/liquidation-guard', [RatioBotController::class, 'liquidationGuard']);
         Route::get('ratio-bots/{ratioBot}/market-hours', [RatioBotController::class, 'marketHours']);
+        Route::get('ratio-bots/{ratioBot}/trend-score', [RatioBotController::class, 'trendScore']);
         Route::get('ratio-bots/{ratioBot}/effective-feed-status', [RatioBotController::class, 'effectiveFeedStatus']);
 Route::get('ratio-bots/{ratioBot}/diagnostics', [RatioBotController::class, 'diagnostics']);
 Route::post('ratio-bots/{ratioBot}/diagnostics/fix', [RatioBotController::class, 'applyDiagnosticsFix'])

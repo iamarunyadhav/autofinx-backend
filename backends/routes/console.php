@@ -176,6 +176,18 @@ if ($schedulerEnabled && (bool) config('autofinx.scheduler.ratio_bots', true)) {
         ->after(fn () => $markRunEnd('ratio-bots:reconcile'));
 }
 
+// Multi-Window Forecast Engine Part C -- a once-daily walk-forward backtest,
+// independently toggleable from the per-minute ratio_bots jobs above since
+// it's a read-only analysis job, not part of the live trading loop.
+if ($schedulerEnabled && (bool) config('autofinx.scheduler.ratio_bots_backtest', true)) {
+    Schedule::command('ratio-bots:forecast-backtest')
+        ->dailyAt('03:15')
+        ->withoutOverlapping()
+        ->runInBackground()
+        ->before(fn () => $markRunStart('ratio-bots:forecast-backtest'))
+        ->after(fn () => $markRunEnd('ratio-bots:forecast-backtest'));
+}
+
 if ($schedulerEnabled && ! $supervisorRuntime && $allowBinanceRest) {
     Schedule::job(new KeepAliveUserStreamsJob)
         ->everyThirtyMinutes()

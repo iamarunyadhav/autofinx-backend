@@ -33,6 +33,10 @@ return [
         // it silently always fell back to the hardcoded default with no env var
         // able to override it — inconsistent with every sibling scheduler toggle.
         'ratio_bots' => filter_var(env('AUTOFINX_SCHEDULER_RATIO_BOTS', true), FILTER_VALIDATE_BOOL),
+        // Walk-forward forecast-accuracy backtest (Multi-Window Forecast
+        // Engine Part C) -- a once-daily, low-cost job, independently
+        // toggleable from the per-minute ratio_bots evaluation/reconcile jobs.
+        'ratio_bots_backtest' => filter_var(env('AUTOFINX_SCHEDULER_RATIO_BOTS_BACKTEST', true), FILTER_VALIDATE_BOOL),
     ],
 
     'recovery_slot' => [

@@ -9,6 +9,7 @@ use App\Domain\MarketData\CanonicalQuoteService;
 use App\Domain\MarketData\Enums\StreamType;
 use App\Domain\MarketData\MarketRecoveryManager;
 use App\Domain\Ops\OperationalBreakerService;
+use App\Domain\RatioBot\MultiWindowTrendScoringService;
 use App\Domain\RatioBot\RatioBotAlertService;
 use App\Domain\RatioBot\RatioBotBrainService;
 use App\Domain\RatioBot\RatioBotDecisionService;
@@ -419,7 +420,22 @@ class RunRatioBotEvaluationJob implements ShouldQueue, ShouldBeUnique
         }
         $confidence = (float) ($brain?->forecast_confidence ?? $brain?->confidence ?? 0);
         $minConfidence = max(0, min(100, (float) data_get($config->strategy_params, 'auto_start_min_confidence', $config->brain_min_confidence ?? 60)));
-        $trendDirection = $this->observedCandleDirection($config);
+
+        // Multi-window agreement-weighted trend scoring (default) replaces
+        // the old single-window boolean anchor-direction check with a
+        // 0.5/0.3/0.2 weighted composite across three windows -- see
+        // MultiWindowTrendScoringService's own docblock for why. Kept
+        // switchable back to the legacy single-window check via
+        // strategy_params.trend_scoring_mode as a rollback valve, since this
+        // gates real order placement.
+        $trendScoringMode = strtolower((string) data_get($config->strategy_params, 'trend_scoring_mode', 'multi_window'));
+        $trendScore = null;
+        if ($trendScoringMode === 'legacy_single_window') {
+            $trendDirection = $this->observedCandleDirection($config);
+        } else {
+            $trendScore = app(MultiWindowTrendScoringService::class)->score($config);
+            $trendDirection = $trendScore['direction'];
+        }
 
         $reason = null;
         $direction = null;
@@ -449,6 +465,8 @@ class RunRatioBotEvaluationJob implements ShouldQueue, ShouldBeUnique
                 'min_confidence' => $minConfidence,
                 'has_base' => $hasBase,
                 'has_quote' => $hasQuote,
+                'trend_scoring_mode' => $trendScoringMode,
+                'trend_score' => $trendScore,
             ],
             'occurred_at' => now(),
         ]);

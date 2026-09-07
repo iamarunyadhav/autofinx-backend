@@ -18,6 +18,7 @@ class RatioBotConfig extends BaseModel
         'kill_switch'                => 'boolean',
         'brain_enabled'               => 'boolean',
         'brain_min_confidence'        => 'integer',
+        'forecast_horizon_seconds'    => 'integer',
         'base_quote_amount'           => 'decimal:8',
         'initial_entry_pct'           => 'decimal:4',
         'reserve_tranche_count'       => 'integer',
@@ -262,6 +263,23 @@ class RatioBotConfig extends BaseModel
     public function timeFrame(): string
     {
         return strtolower(trim((string) ($this->timeframe ?: '1m')));
+    }
+
+    /**
+     * Decouples "how far ahead the brain forecasts" from "which candle size
+     * the ladder trades on" (see RatioBotBrainService::horizonSeconds()).
+     * Null means no override -- the brain keeps deriving the horizon from
+     * timeFrame() exactly as it always has, so every existing bot is
+     * unaffected until an operator explicitly sets this.
+     */
+    public function forecastHorizonSeconds(): ?int
+    {
+        $value = $this->forecast_horizon_seconds;
+        if ($value === null) {
+            return null;
+        }
+
+        return (int) max(30, min(86400, (int) $value));
     }
 
     /**

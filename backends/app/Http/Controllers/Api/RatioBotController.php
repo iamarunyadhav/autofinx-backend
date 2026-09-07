@@ -285,6 +285,38 @@ class RatioBotController extends Controller
         return response()->json(app(\App\Domain\RatioBot\RatioBotMarketHoursService::class)->status($ratioBot));
     }
 
+    /**
+     * GET /ratio-bots/{config}/trend-score — the same multi-window weighted
+     * trend score the auto-start-direction gate itself reads (see
+     * MultiWindowTrendScoringService), plus the latest walk-forward forecast
+     * backtest stats for this bot's effective horizon (see
+     * ForecastHorizonBacktestService) so the UI's "Trend Window Breakdown"
+     * card can show real, honestly-computed hit-rate context alongside it.
+     */
+    public function trendScore(RatioBotConfig $ratioBot): JsonResponse
+    {
+        $score = app(\App\Domain\RatioBot\MultiWindowTrendScoringService::class)->score($ratioBot);
+        $horizonSeconds = app(\App\Domain\RatioBot\RatioBotBrainService::class)->horizonSeconds($ratioBot);
+
+        $backtest = \App\Models\RatioBotForecastBacktest::query()
+            ->where('ratio_bot_config_id', $ratioBot->id)
+            ->where('horizon_seconds', $horizonSeconds)
+            ->first();
+
+        return response()->json($score + [
+            'bot_id' => (string) $ratioBot->id,
+            'symbol' => $ratioBot->normalizedSymbol(),
+            'horizon_seconds' => $horizonSeconds,
+            'backtest' => $backtest ? [
+                'sample_size' => (int) $backtest->sample_size,
+                'hits' => (int) $backtest->hits,
+                'hit_rate_pct' => $backtest->hit_rate_pct !== null ? (float) $backtest->hit_rate_pct : null,
+                'avg_confidence_pct' => $backtest->avg_confidence_pct !== null ? (float) $backtest->avg_confidence_pct : null,
+                'computed_at' => optional($backtest->computed_at)->toIso8601String(),
+            ] : null,
+        ]);
+    }
+
     // -----------------------------------------------------------------------
     // Manual / Assisted mode (spec §51) — same decision engine as automatic
     // mode, execution just waits for an explicit operator approval.
@@ -815,6 +847,7 @@ class RatioBotController extends Controller
             'timeframe'                    => $optional . '|string|in:1m,3m,5m,15m,1h,4h',
             'brain_enabled'                => 'nullable|boolean',
             'brain_min_confidence'         => 'nullable|integer|min:0|max:100',
+            'forecast_horizon_seconds'     => 'nullable|integer|min:30|max:86400',
             'side_mode'                    => $optional . '|string|in:buy_sell,long_only,short_only,both',
             'starting_entry'               => 'nullable|string|in:BUY,SELL',
             'mode'                         => $optional . '|string|in:advisor,manual_approval,restricted_auto',
@@ -1047,5 +1080,6 @@ class RatioBotController extends Controller
         'futures_recovery_timeout_minutes',
         'futures_recovery_min_confidence',
         'recovery_lot_min_profit_ratio',
+        'forecast_horizon_seconds',
     ];
 }
