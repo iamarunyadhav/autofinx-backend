@@ -39,6 +39,16 @@ return [
         'ratio_bots_backtest' => filter_var(env('AUTOFINX_SCHEDULER_RATIO_BOTS_BACKTEST', true), FILTER_VALIDATE_BOOL),
     ],
 
+    // RatioBrain orchestration facade -- global kill switch AND per-bot
+    // ratio_brain_enabled must both be true before any bot uses it (see
+    // RatioBotConfig::ratioBrainEnabled()); shadow_mode defaults true so a
+    // newly-enabled bot only logs shadow decisions until manually reviewed
+    // and switched off.
+    'ratio_brain' => [
+        'enabled' => filter_var(env('RATIO_BRAIN_ENABLED', false), FILTER_VALIDATE_BOOL),
+        'shadow_mode' => filter_var(env('RATIO_BRAIN_SHADOW_MODE', true), FILTER_VALIDATE_BOOL),
+    ],
+
     'recovery_slot' => [
         'default_allocation_pct' => (float) env('AUTOFINX_RECOVERY_SLOT_DEFAULT_ALLOCATION_PCT', 10.0),
         'default_target_pct' => (float) env('AUTOFINX_RECOVERY_SLOT_DEFAULT_TARGET_PCT', 25.0),

@@ -76,6 +76,10 @@ class RatioBotState extends BaseModel
         'futures_recovery_review_at'   => 'datetime',
         'futures_recovery_used'        => 'boolean',
         'futures_recovery_topup_notional' => 'decimal:8',
+        'recovery_trend_composite_at_last_review' => 'decimal:4',
+        'recovery_trend_reviewed_at' => 'datetime',
+        'emergency_entered_at' => 'datetime',
+        'emergency_cleared_at' => 'datetime',
     ];
 
     // Valid position states
@@ -95,6 +99,12 @@ class RatioBotState extends BaseModel
     public const STATE_CASH_RECOVERY_MONITORING = 'cash_recovery_monitoring';
     public const STATE_STRATEGY_RANGE_EXHAUSTED_DOWN = 'strategy_range_exhausted_down';
     public const STATE_STRATEGY_RANGE_EXHAUSTED_UP = 'strategy_range_exhausted_up';
+
+    // RatioBrain -- spot flash-crash protection. Deliberately stored on the
+    // separate `emergency_state` column, NOT as a position_state value (see
+    // the migration comment) -- this constant is that column's one active
+    // value, never assigned to `position_state`.
+    public const STATE_EMERGENCY = 'emergency';
 
     public function config(): BelongsTo
     {

@@ -7,6 +7,7 @@ use App\Domain\RatioBot\Strategies\StrategySignal;
 use App\Models\RatioBotConfig;
 use App\Models\RatioBotDecision;
 use App\Models\RatioBotEvent;
+use App\Models\RatioBotState;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
@@ -25,6 +26,7 @@ class RatioBotRealtimeEngine
         private readonly RatioBotBrainService $brain,
         private readonly RatioBotLiquidationGuardService $liquidationGuard,
         private readonly FuturesRecoveryReviewService $futuresRecovery,
+        private readonly RatioBrain $ratioBrain,
     ) {
     }
 
@@ -77,6 +79,33 @@ class RatioBotRealtimeEngine
                 }
 
                 return ['decision' => $decision->decision, 'decision_record' => $decision, 'reason' => $decision->reason];
+            }
+        }
+
+        // RatioBrain -- gated behind BOTH the global kill switch and this
+        // bot's own opt-in (RatioBotConfig::ratioBrainEnabled()). Always
+        // logs a shadow decision every tick when enabled; only the narrow
+        // CONTROLLED_LOSS_EXIT recommendation ever places a real trade, and
+        // only once shadow_mode has been explicitly turned off for this bot.
+        if ($config->ratioBrainEnabled()) {
+            $brainState = $config->state()->first();
+            if ($brainState) {
+                $brainResult = $this->ratioBrain->evaluate($config, $brainState, $currentPrice);
+                $this->applyRatioBrainSideEffects($config, $brainState, $brainResult);
+
+                if (! $config->ratioBrainShadowMode() && $brainResult['action'] === RatioBrain::ACTION_CONTROLLED_LOSS_EXIT) {
+                    $lockKey = 'ratio-bot-brain-exit:' . $config->workspace_id . ':' . $config->normalizedSymbol();
+                    $lock = Cache::lock($lockKey, 10);
+                    if ($lock->get()) {
+                        try {
+                            $decision = $this->controlledLossExitDecision($config, $brainResult, $currentPrice, $context);
+                        } finally {
+                            $lock->release();
+                        }
+
+                        return ['decision' => $decision->decision, 'decision_record' => $decision, 'reason' => $decision->reason];
+                    }
+                }
             }
         }
 
@@ -369,6 +398,97 @@ class RatioBotRealtimeEngine
         if ($config->isAutoMode()) {
             $this->execution->execute($config, $decision);
         }
+    }
+
+    /**
+     * Side effects a pure "assess" call (RatioBrain::evaluate(), mirroring
+     * RatioBotLiquidationGuardService::assess()'s own read-only shape)
+     * deliberately does not perform itself. Runs regardless of shadow mode
+     * for the emergency status + trend-velocity bookkeeping (neither places
+     * a trade); the observation-window timer override is the one piece
+     * gated to shadow_mode=false, since it's a real behavior change to the
+     * existing recovery-review cadence.
+     */
+    private function applyRatioBrainSideEffects(RatioBotConfig $config, RatioBotState $state, array $result): void
+    {
+        $isEmergency = (bool) data_get($result, 'component_breakdown.emergency.is_emergency', false);
+        $this->stateService->syncEmergencyStatus($config, $isEmergency);
+
+        $observationWindow = data_get($result, 'component_breakdown.observation_window');
+        $trendScore = data_get($result, 'component_breakdown.trend_score');
+        if ($observationWindow === null || $trendScore === null) {
+            return;
+        }
+
+        $updates = [
+            'recovery_trend_composite_at_last_review' => (float) $trendScore['composite_score'],
+            'recovery_trend_reviewed_at' => now(),
+        ];
+
+        if (! $config->ratioBrainShadowMode()) {
+            $updates['recovery_review_at'] = now()->addMinutes((int) $observationWindow['minutes']);
+        }
+
+        $state->update($updates);
+    }
+
+    /**
+     * Mirrors forceExitDecision()'s shape (see that method's docblock) so
+     * this decision is indistinguishable in storage/reporting from a normal
+     * one, then routes through the exact same RatioBotExecutionService::
+     * execute() path a normal SELL already uses. Explicitly sets
+     * metadata.sell_quantity to the FULL stuck-position quantity RatioBrain
+     * measured -- without it, resolveQuantity() would fall back to whatever
+     * partial-sell/staged-sell settings this bot has configured, which would
+     * under-close a position this check specifically determined should be
+     * fully exited.
+     */
+    private function controlledLossExitDecision(RatioBotConfig $config, array $brainResult, float $currentPrice, array $context): RatioBotDecision
+    {
+        $state = $config->state()->first();
+        $lotIds = (array) data_get($brainResult, 'component_breakdown.candidate_lot_ids', []);
+        $sellQuantity = $lotIds !== []
+            ? (float) \App\Models\RatioBotLot::query()->whereIn('id', $lotIds)->sum('remaining_qty')
+            : (float) ($state?->last_buy_quantity ?? 0);
+
+        $decision = RatioBotDecision::create([
+            'ratio_bot_config_id' => $config->id,
+            'correlation_id' => (string) Str::uuid(),
+            'decision' => RatioBotDecision::DECISION_SELL,
+            'evaluated_price' => $currentPrice,
+            'price_source' => isset($context['price_source']) ? (string) $context['price_source'] : null,
+            'position_state_before' => $state?->position_state,
+            'position_state_after' => $state?->position_state,
+            'execution_status' => RatioBotDecision::EXEC_PENDING,
+            'reason' => 'ratio_brain_controlled_loss_exit: ' . $brainResult['reason'],
+            'metadata' => [
+                'trigger' => 'ratio_brain_controlled_loss_exit',
+                'protective_exit' => true,
+                'sell_quantity' => $sellQuantity,
+                'ratio_brain' => $brainResult,
+            ],
+            'decided_at' => now(),
+        ]);
+
+        RatioBotEvent::create([
+            'ratio_bot_config_id' => $config->id,
+            'event_type' => RatioBotEvent::EVENT_RATIO_BRAIN_CONTROLLED_LOSS_EXIT,
+            'context' => $brainResult + ['decision_id' => (string) $decision->id],
+            'occurred_at' => now(),
+        ]);
+
+        Log::warning('[RatioBotEngine] RatioBrain executing a controlled loss exit', [
+            'config_id' => $config->id,
+            'symbol' => $config->normalizedSymbol(),
+            'sell_quantity' => $sellQuantity,
+            'reason' => $brainResult['reason'],
+        ]);
+
+        if ($config->isAutoMode()) {
+            $this->execution->execute($config, $decision);
+        }
+
+        return $decision->fresh();
     }
 
     private function marketHealthSnapshot(RatioBotConfig $config, array $context, array $indicatorSnapshot, array $dynamicThresholds): array

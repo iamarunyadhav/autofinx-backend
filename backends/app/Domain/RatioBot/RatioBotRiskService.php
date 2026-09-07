@@ -4,6 +4,7 @@ namespace App\Domain\RatioBot;
 
 use App\Models\RatioBotConfig;
 use App\Models\RatioBotDecision;
+use App\Models\RatioBotState;
 
 class RatioBotRiskService
 {
@@ -38,6 +39,25 @@ class RatioBotRiskService
             if ($guard['action'] === 'block_new_entries' || $guard['action'] === 'force_exit') {
                 return $this->reason('liquidation_guard_block_new_entries', $guard['reason'], false, ['liquidation_guard' => $guard]);
             }
+        }
+
+        // RatioBrain's SpotEmergencyGuard already flagged this tick's flash-
+        // move condition (see RatioBotRealtimeEngine, which assesses and
+        // persists emergency_state before this runs) -- block only NEW buy
+        // entries, same shape as the liquidation_guard block above. A sell
+        // (including a protective/controlled-loss exit) is never affected.
+        if (! $protectiveExit
+            && $decision->decision === RatioBotDecision::DECISION_BUY
+            && $config->marketType() === 'spot'
+            && $config->ratioBrainEnabled()
+            && $state->emergency_state === RatioBotState::STATE_EMERGENCY
+        ) {
+            return $this->reason(
+                'ratio_brain_emergency_block_new_entries',
+                'Spot Emergency Guard is active: blocking new buy entries while the flash-move condition persists.',
+                false,
+                ['emergency_entered_at' => optional($state->emergency_entered_at)->toIso8601String()],
+            );
         }
 
         // Confirmed missing entirely before this: Ratio Bot had zero

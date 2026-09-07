@@ -94,6 +94,14 @@ class RatioBotConfig extends BaseModel
         'recovery_buy_drop_pct'       => 'decimal:4',
         'recovery_sell_rise_pct'      => 'decimal:4',
         'no_trade_alert_minutes'      => 'integer',
+        'ratio_brain_enabled'         => 'boolean',
+        'ratio_brain_shadow_mode'     => 'boolean',
+        'portfolio_guard_min_profit_usdt' => 'decimal:4',
+        'portfolio_guard_safety_margin_pct' => 'decimal:2',
+        'recovery_min_observation_minutes' => 'integer',
+        'recovery_max_observation_minutes' => 'integer',
+        'sell_selector_weights'       => 'array',
+        'emergency_atr_multiple_threshold' => 'decimal:2',
     ];
 
     public function spotExecutionRoute(): string
@@ -502,6 +510,109 @@ class RatioBotConfig extends BaseModel
         $dampening = min(1.0, 2.0 / $leverage);
 
         return $originalNotional * ($pct / 100) * $dampening;
+    }
+
+    /**
+     * RatioBrain -- global kill switch (config('autofinx.ratio_brain.enabled'))
+     * AND this bot's own opt-in must both be true. Never a workspace-wide or
+     * global-only switch on its own -- every bot opts in independently, this
+     * repo has a documented history of un-scoped toggles causing cross-bot
+     * bleed.
+     */
+    public function ratioBrainEnabled(): bool
+    {
+        if (! (bool) config('autofinx.ratio_brain.enabled', false)) {
+            return false;
+        }
+
+        return (bool) $this->ratio_brain_enabled;
+    }
+
+    /**
+     * Null inherits the global default (config('autofinx.ratio_brain.shadow_mode'),
+     * itself defaulting true) so lowering the global default doesn't require
+     * touching every bot's row -- an explicit per-bot value always wins.
+     */
+    public function ratioBrainShadowMode(): bool
+    {
+        if ($this->ratio_brain_shadow_mode !== null) {
+            return (bool) $this->ratio_brain_shadow_mode;
+        }
+
+        return (bool) config('autofinx.ratio_brain.shadow_mode', true);
+    }
+
+    public function portfolioGuardMinProfitUsdt(): float
+    {
+        return max(0.0, (float) ($this->portfolio_guard_min_profit_usdt ?? 0.5));
+    }
+
+    public function portfolioGuardSafetyMarginPct(): float
+    {
+        $value = $this->portfolio_guard_safety_margin_pct !== null ? (float) $this->portfolio_guard_safety_margin_pct : 15.0;
+
+        return max(0.0, min(100.0, $value));
+    }
+
+    /**
+     * Composed, never hand-entered directly: estimated_total_costs_this_cycle
+     * (derived from the real fee_bps/max_slippage_bps against the candidate
+     * notional -- the same cost-floor formula recoveryLotMinProfitRatio()
+     * already uses) + minimum_expected_net_profit + a safety margin on top
+     * of both. Per the source spec's own rule: never "overall profit > 0"
+     * alone -- a $0.01 net result after many trades is meaningless.
+     */
+    public function minimumCycleProfitBuffer(float $candidateNotional): float
+    {
+        $feeBps = max(0.0, (float) ($this->fee_bps ?? 0));
+        $slippageBps = max(0.0, (float) ($this->max_slippage_bps ?? 0));
+        $estimatedCosts = max(0.0, $candidateNotional) * ((($feeBps * 2) + $slippageBps) / 10000);
+        $base = $estimatedCosts + $this->portfolioGuardMinProfitUsdt();
+
+        return $base + ($base * ($this->portfolioGuardSafetyMarginPct() / 100));
+    }
+
+    public function recoveryMinObservationMinutes(): int
+    {
+        return max(1, (int) ($this->recovery_min_observation_minutes ?? 15));
+    }
+
+    public function recoveryMaxObservationMinutes(): int
+    {
+        $min = $this->recoveryMinObservationMinutes();
+        $value = (int) ($this->recovery_max_observation_minutes ?? 240);
+
+        return max($min, $value);
+    }
+
+    /**
+     * Normalized to sum to 1.0 regardless of what's stored -- a
+     * partially-edited or stale JSON blob can never silently over- or
+     * under-weight the composite score.
+     */
+    public function sellSelectorWeights(): array
+    {
+        $defaults = ['profit' => 0.4, 'capital_release' => 0.3, 'age' => 0.1, 'cycle_effect' => 0.2];
+        $configured = is_array($this->sell_selector_weights) ? $this->sell_selector_weights : [];
+
+        $weights = [];
+        foreach ($defaults as $key => $default) {
+            $weights[$key] = isset($configured[$key]) ? max(0.0, (float) $configured[$key]) : $default;
+        }
+
+        $sum = array_sum($weights);
+        if ($sum <= 0) {
+            return $defaults;
+        }
+
+        return array_map(fn ($w) => $w / $sum, $weights);
+    }
+
+    public function emergencyAtrMultipleThreshold(): float
+    {
+        $value = $this->emergency_atr_multiple_threshold !== null ? (float) $this->emergency_atr_multiple_threshold : 3.0;
+
+        return max(1.0, min(20.0, $value));
     }
 
     public function startingEntry(): ?string

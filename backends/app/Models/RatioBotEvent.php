@@ -59,6 +59,12 @@ class RatioBotEvent extends BaseModel
     public const EVENT_FUTURES_RECOVERY_TOPUP_EXECUTED = 'futures_recovery_topup_executed';
     public const EVENT_FUTURES_RECOVERY_PAUSED         = 'futures_recovery_paused';
 
+    // RatioBrain -- orchestration facade (spot emergency guard + portfolio-
+    // guarded controlled loss exit)
+    public const EVENT_RATIO_BRAIN_EMERGENCY_ENTERED         = 'ratio_brain_emergency_entered';
+    public const EVENT_RATIO_BRAIN_EMERGENCY_CLEARED         = 'ratio_brain_emergency_cleared';
+    public const EVENT_RATIO_BRAIN_CONTROLLED_LOSS_EXIT      = 'ratio_brain_controlled_loss_exit';
+
     public function config(): BelongsTo
     {
         return $this->belongsTo(RatioBotConfig::class, 'ratio_bot_config_id');

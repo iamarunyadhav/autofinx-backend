@@ -317,6 +317,42 @@ class RatioBotController extends Controller
         ]);
     }
 
+    /**
+     * GET /ratio-bots/{config}/ratio-brain — the latest RatioBrainDecisionLog
+     * row for this bot, plus whether RatioBrain is even reachable (both the
+     * global kill switch AND this bot's own opt-in must be true) so the UI
+     * can show an honest "not active" state instead of stale/empty data.
+     */
+    public function ratioBrain(RatioBotConfig $ratioBot): JsonResponse
+    {
+        $log = \App\Models\RatioBrainDecisionLog::query()
+            ->where('ratio_bot_config_id', $ratioBot->id)
+            ->latest('occurred_at')
+            ->first();
+
+        return response()->json([
+            'bot_id' => (string) $ratioBot->id,
+            'enabled' => $ratioBot->ratioBrainEnabled(),
+            'shadow_mode' => $ratioBot->ratioBrainShadowMode(),
+            'emergency_state' => $ratioBot->state?->emergency_state,
+            'emergency_entered_at' => optional($ratioBot->state?->emergency_entered_at)->toIso8601String(),
+            'latest_decision' => $log ? [
+                'occurred_at' => optional($log->occurred_at)->toIso8601String(),
+                'market_price' => $log->market_price !== null ? (float) $log->market_price : null,
+                'position_state' => $log->position_state,
+                'action' => $log->action,
+                'reason' => $log->reason,
+                'shadow_mode' => (bool) $log->shadow_mode,
+                'trend_score_breakdown' => $log->trend_score_breakdown,
+                'portfolio_guard_result' => $log->portfolio_guard_result,
+                'observation_window_minutes' => $log->observation_window_minutes,
+                'sell_candidates' => $log->sell_candidates,
+                'emergency_assessment' => $log->emergency_assessment,
+                'executed' => (bool) $log->executed,
+            ] : null,
+        ]);
+    }
+
     // -----------------------------------------------------------------------
     // Manual / Assisted mode (spec §51) — same decision engine as automatic
     // mode, execution just waits for an explicit operator approval.
@@ -950,6 +986,18 @@ class RatioBotController extends Controller
             'futures_recovery_timeout_minutes' => 'nullable|integer|min:1|max:100000',
             'futures_recovery_min_confidence'  => 'nullable|numeric|min:0|max:100',
             'recovery_lot_min_profit_ratio'    => 'nullable|numeric|min:0|max:1',
+            'ratio_brain_enabled'              => 'nullable|boolean',
+            'ratio_brain_shadow_mode'          => 'nullable|boolean',
+            'portfolio_guard_min_profit_usdt'  => 'nullable|numeric|min:0',
+            'portfolio_guard_safety_margin_pct'=> 'nullable|numeric|min:0|max:100',
+            'recovery_min_observation_minutes' => 'nullable|integer|min:1|max:100000',
+            'recovery_max_observation_minutes' => 'nullable|integer|min:1|max:100000',
+            'sell_selector_weights'            => 'nullable|array',
+            'sell_selector_weights.profit'          => 'nullable|numeric|min:0',
+            'sell_selector_weights.capital_release'  => 'nullable|numeric|min:0',
+            'sell_selector_weights.age'              => 'nullable|numeric|min:0',
+            'sell_selector_weights.cycle_effect'     => 'nullable|numeric|min:0',
+            'emergency_atr_multiple_threshold' => 'nullable|numeric|min:1|max:20',
         ]);
 
         $this->assertFuturesConfigSanity($data, $workspaceId, $existing);
@@ -1081,5 +1129,12 @@ class RatioBotController extends Controller
         'futures_recovery_min_confidence',
         'recovery_lot_min_profit_ratio',
         'forecast_horizon_seconds',
+        'ratio_brain_shadow_mode',
+        'portfolio_guard_min_profit_usdt',
+        'portfolio_guard_safety_margin_pct',
+        'recovery_min_observation_minutes',
+        'recovery_max_observation_minutes',
+        'sell_selector_weights',
+        'emergency_atr_multiple_threshold',
     ];
 }

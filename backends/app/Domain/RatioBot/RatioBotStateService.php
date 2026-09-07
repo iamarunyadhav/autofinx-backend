@@ -1113,6 +1113,38 @@ class RatioBotStateService
         return true;
     }
 
+    /**
+     * RatioBrain's SpotEmergencyGuard signal, persisted on its own separate
+     * `emergency_state` column rather than `position_state` -- see the
+     * migration comment and RatioBotState::STATE_EMERGENCY's docblock for
+     * why overloading position_state here would be unsafe. Idempotent: only
+     * writes (and only fires an event) on an actual transition.
+     */
+    public function syncEmergencyStatus(RatioBotConfig $config, bool $isEmergency): void
+    {
+        $state = $this->getOrCreate($config);
+        $currentlyActive = $state->emergency_state === RatioBotState::STATE_EMERGENCY;
+
+        if ($isEmergency && ! $currentlyActive) {
+            $state->update([
+                'emergency_state' => RatioBotState::STATE_EMERGENCY,
+                'emergency_entered_at' => now(),
+                'emergency_cleared_at' => null,
+            ]);
+            $this->emitEvent($config, RatioBotEvent::EVENT_RATIO_BRAIN_EMERGENCY_ENTERED, []);
+
+            return;
+        }
+
+        if (! $isEmergency && $currentlyActive) {
+            $state->update([
+                'emergency_state' => null,
+                'emergency_cleared_at' => now(),
+            ]);
+            $this->emitEvent($config, RatioBotEvent::EVENT_RATIO_BRAIN_EMERGENCY_CLEARED, []);
+        }
+    }
+
     public function markMarketSnapshot(
         RatioBotConfig $config,
         float $price,
