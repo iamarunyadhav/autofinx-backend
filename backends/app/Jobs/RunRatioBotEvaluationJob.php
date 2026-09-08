@@ -24,6 +24,7 @@ use App\Models\Order;
 use App\Models\RatioBotConfig;
 use App\Models\RatioBotDecision;
 use App\Models\RatioBotEvent;
+use App\Models\RatioBotForecastBacktest;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -558,18 +559,49 @@ class RunRatioBotEvaluationJob implements ShouldQueue, ShouldBeUnique
 
         $reason = null;
         $direction = null;
+        $resolutionForLog = null;
         if ($confidence < $minConfidence) {
             $reason = "confidence {$confidence} below required {$minConfidence}";
         } elseif (! in_array($forecastDirection, ['bullish', 'bearish'], true)) {
             $reason = "forecast direction is {$forecastDirection}";
         } elseif ($trendDirection !== $forecastDirection) {
-            $reason = "graph trend {$trendDirection} does not match forecast {$forecastDirection}";
-        } elseif ($forecastDirection === 'bullish' && ! $hasBase) {
-            $reason = 'bullish auto-start needs base-asset balance for SELL-watch';
-        } elseif ($forecastDirection === 'bearish' && ! $hasQuote) {
-            $reason = 'bearish auto-start needs quote-asset balance for BUY-watch';
-        } else {
-            $direction = $forecastDirection === 'bullish' ? 'SELL' : 'BUY';
+            // Rigid AND-gate fix: a forecast that has never been measured (or
+            // measured no-better-than-a-coin-flip) must not be able to veto a
+            // trend signal that already independently cleared its own
+            // strength threshold (trendDirection is only non-neutral once
+            // MultiWindowTrendScoringService's own composite has cleared
+            // trend_score_min_composite -- see its docblock). Reliability-
+            // scaled, winner-take-all weighting replaces the old
+            // unconditional wait -- but only for multi-window mode
+            // (trend_score is null under legacy_single_window, which has no
+            // composite to weight with -- that mode keeps the old hard veto
+            // unchanged).
+            if ($trendScore !== null) {
+                $horizonSeconds = app(RatioBotBrainService::class)->horizonSeconds($config);
+                $resolved = $this->resolveDirectionWithReliabilityWeighting($config, $trendDirection, $trendScore, $forecastDirection, $horizonSeconds);
+                $forecastDirection = $resolved['direction']; // downstream balance checks + the final SELL/BUY mapping below already key off $forecastDirection -- reuse it so nothing else in this function needs editing
+                $reason = $resolved['reason']; // null -- no longer a blocking reason on its own, falls through to the balance-check branches below exactly like the agreement case always has
+                $resolutionForLog = $resolved['resolution'] ?? null;
+            } else {
+                $reason = "graph trend {$trendDirection} does not match forecast {$forecastDirection}";
+            }
+        }
+
+        if ($reason === null && $direction === null) {
+            if ($forecastDirection === 'bullish' && ! $hasBase) {
+                $reason = 'bullish auto-start needs base-asset balance for SELL-watch';
+            } elseif ($forecastDirection === 'bearish' && ! $hasQuote) {
+                $reason = 'bearish auto-start needs quote-asset balance for BUY-watch';
+            } elseif (in_array($forecastDirection, ['bullish', 'bearish'], true)) {
+                $direction = $forecastDirection === 'bullish' ? 'SELL' : 'BUY';
+            } else {
+                // Reliability-weighted resolution can itself settle on
+                // 'neutral' (e.g. a barely-non-neutral trend composite beats
+                // an unreliable-forecast contribution of 0, but the trend
+                // itself was too weak to be bullish/bearish) -- keep waiting,
+                // but leave a readable reason rather than a blank one.
+                $reason = "resolved direction is {$forecastDirection}";
+            }
         }
 
         RatioBotEvent::create([
@@ -586,11 +618,86 @@ class RunRatioBotEvaluationJob implements ShouldQueue, ShouldBeUnique
                 'has_quote' => $hasQuote,
                 'trend_scoring_mode' => $trendScoringMode,
                 'trend_score' => $trendScore,
+                'resolution' => $resolutionForLog,
             ],
             'occurred_at' => now(),
         ]);
 
         return $direction;
+    }
+
+    /**
+     * Winner-take-all resolution for the trend/forecast mismatch case: the
+     * forecast's contribution is its own measured (walk-forward backtested)
+     * reliability weight for this bot's horizon -- see
+     * ForecastHorizonBacktestService / RatioBotForecastBacktest, already
+     * computed on a schedule for every brain_enabled bot -- multiplied by 1.0
+     * (the forecast is a binary bullish/bearish call today, with no internal
+     * strength gradient beyond that reliability weight). The trend's
+     * contribution is the *magnitude* of its own composite score (direction
+     * already came from $trendDirection, so the sign is dropped here --
+     * otherwise a negative composite_score would always make the trend
+     * contribution negative and always lose) multiplied by the complementary
+     * weight. Whichever contribution is larger wins outright; a tie favors
+     * the trend (>=), since it's the side already independently confirmed to
+     * have cleared its own strength threshold.
+     *
+     * A missing backtest record is treated the same as a proven-unreliable
+     * forecast (weight 0.0) -- a forecast only earns weight once it has
+     * actually demonstrated better-than-coin-flip accuracy for this specific
+     * bot, it is never assumed reliable by default.
+     *
+     * @return array{direction:string, reason:?string, resolution?:string}
+     */
+    private function resolveDirectionWithReliabilityWeighting(
+        RatioBotConfig $config,
+        string $trendDirection,
+        ?array $trendScore,
+        string $forecastDirection,
+        int $horizonSeconds,
+    ): array {
+        // No disagreement -- nothing to weigh, keep existing behavior
+        // exactly, and skip the backtest lookup entirely (this is the hot
+        // path, run on every agreeing tick for every bot -- don't do wasted
+        // DB work when there's nothing to resolve).
+        if ($trendDirection === $forecastDirection) {
+            return ['direction' => $forecastDirection, 'reason' => null];
+        }
+
+        $backtest = RatioBotForecastBacktest::where('ratio_bot_config_id', $config->id)
+            ->where('horizon_seconds', $horizonSeconds)
+            ->latest('computed_at')
+            ->first();
+
+        $forecastHitRate = $backtest?->hit_rate_pct !== null ? (float) $backtest->hit_rate_pct : null;
+
+        $forecastWeight = match (true) {
+            $forecastHitRate === null => 0.0,
+            $forecastHitRate <= 50.0  => 0.0,
+            $forecastHitRate <= 60.0  => 0.10,
+            $forecastHitRate <= 70.0  => 0.20,
+            default                    => 0.30,
+        };
+
+        $trendCompositeScore = abs((float) ($trendScore['composite_score'] ?? 0.0)); // magnitude, not signed -- this is a "how strong is the trend's own directional call" weight, not a direction indicator (direction already came from $trendDirection)
+        $trendWeight = 1.0 - $forecastWeight;
+
+        $trendContribution = $trendCompositeScore * $trendWeight;
+        $forecastContribution = 1.0 * $forecastWeight; // forecast is binary bullish/bearish today, no internal strength gradient beyond its measured reliability weight, so its full weight is its contribution
+
+        if ($trendContribution >= $forecastContribution) {
+            return [
+                'direction' => $trendDirection,
+                'reason' => null,
+                'resolution' => "trend favored: composite={$trendCompositeScore} x weight={$trendWeight} ({$trendContribution}) >= forecast hit_rate=" . ($forecastHitRate ?? 'null') . " x weight={$forecastWeight} ({$forecastContribution})",
+            ];
+        }
+
+        return [
+            'direction' => $forecastDirection,
+            'reason' => null,
+            'resolution' => "forecast favored: hit_rate=" . ($forecastHitRate ?? 'null') . " x weight={$forecastWeight} ({$forecastContribution}) > trend composite={$trendCompositeScore} x weight={$trendWeight} ({$trendContribution})",
+        ];
     }
 
     private function observedCandleDirection(RatioBotConfig $config): string

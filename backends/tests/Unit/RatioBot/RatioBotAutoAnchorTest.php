@@ -158,8 +158,20 @@ class RatioBotAutoAnchorTest extends TestCase
         $this->assertEquals(0.5, (float) $state->last_buy_quantity);
     }
 
-    public function test_auto_direction_waits_when_forecast_and_graph_disagree(): void
+    public function test_auto_direction_follows_the_trend_when_forecast_and_graph_disagree_and_forecast_has_no_proven_reliability(): void
     {
+        // Reliability-weighted mismatch resolution (see
+        // RunRatioBotEvaluationJob::resolveDirectionWithReliabilityWeighting):
+        // with no RatioBotForecastBacktest row seeded for this config/horizon,
+        // the forecast's reliability weight is 0.0 -- its contribution is
+        // always 0, so any non-zero trend composite wins outright. This bot
+        // has a strong, consistent bearish trend (12 candles of -5.0/step),
+        // so the previously-unconditional wait/veto on a forecast/trend
+        // mismatch is now correctly overridden by the trend, which is the
+        // literal bug this fix addresses (an unproven forecast should never
+        // be able to block an independently-qualified trend signal). This
+        // test used to assert STATE_IDLE (the old hard-veto behavior) --
+        // that assertion described the bug, not the fix.
         $config = $this->makeBot([
             'execution_mode' => 'live',
             'brain_enabled' => true,
@@ -167,6 +179,43 @@ class RatioBotAutoAnchorTest extends TestCase
                 'auto_start_direction_mode' => 'auto',
                 'auto_start_min_confidence' => 60,
                 'auto_start_observation_candles' => 12,
+            ],
+        ]);
+        $this->seedTrend($config, 2100.0, -5.0, 12);
+        $this->seedBrain($config, 'bullish', 72);
+
+        $this->mock(RatioBotRuntimeQueryService::class, function ($mock) {
+            $mock->shouldReceive('walletBalances')->once()->andReturn([
+                'base' => ['available' => 0.5, 'balance' => 0.5],
+                'quote' => ['available' => 1000.0, 'balance' => 1000.0],
+            ]);
+        });
+
+        $this->invokeAutoAnchor($config, 2000.0);
+
+        $state = $config->fresh('state')->state;
+        // Trend is bearish (composite < 0) -> resolved direction bearish ->
+        // watches for BUY -> FLAT/sell_anchor, exactly like the existing
+        // "graph is bearish" auto-direction test above.
+        $this->assertSame(RatioBotState::STATE_FLAT, $state->position_state);
+        $this->assertSame('sell_anchor', $state->active_anchor_type);
+    }
+
+    public function test_auto_direction_still_waits_on_mismatch_under_legacy_single_window_trend_mode(): void
+    {
+        // The reliability-weighted resolution only applies to the default
+        // multi_window trend scoring mode (it needs a numeric composite
+        // score to weigh against the forecast). legacy_single_window has no
+        // composite score, so the original unconditional veto/wait on a
+        // trend/forecast mismatch must remain completely unchanged.
+        $config = $this->makeBot([
+            'execution_mode' => 'live',
+            'brain_enabled' => true,
+            'strategy_params' => [
+                'auto_start_direction_mode' => 'auto',
+                'auto_start_min_confidence' => 60,
+                'auto_start_observation_candles' => 12,
+                'trend_scoring_mode' => 'legacy_single_window',
             ],
         ]);
         $this->seedTrend($config, 2100.0, -5.0, 12);
