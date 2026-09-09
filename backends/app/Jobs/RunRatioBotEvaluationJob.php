@@ -9,6 +9,7 @@ use App\Domain\MarketData\CanonicalQuoteService;
 use App\Domain\MarketData\Enums\StreamType;
 use App\Domain\MarketData\MarketRecoveryManager;
 use App\Domain\Ops\OperationalBreakerService;
+use App\Domain\RatioBot\ForecastReliabilityWeighting;
 use App\Domain\RatioBot\MultiWindowTrendScoringService;
 use App\Domain\RatioBot\RatioBotAlertService;
 use App\Domain\RatioBot\RatioBotBrainService;
@@ -18,6 +19,7 @@ use App\Domain\RatioBot\RatioBotRealtimeEngine;
 use App\Domain\RatioBot\RatioBotRiskService;
 use App\Domain\RatioBot\RatioBotRuntimeQueryService;
 use App\Domain\RatioBot\RatioBotStateService;
+use App\Domain\RatioBot\WalletAwareDirectionFallbackService;
 use App\Models\ExchangeConnection;
 use App\Models\MarketOhlc;
 use App\Models\Order;
@@ -587,11 +589,14 @@ class RunRatioBotEvaluationJob implements ShouldQueue, ShouldBeUnique
             }
         }
 
+        $walletFallbackBlockedDirection = null;
         if ($reason === null && $direction === null) {
             if ($forecastDirection === 'bullish' && ! $hasBase) {
                 $reason = 'bullish auto-start needs base-asset balance for SELL-watch';
+                $walletFallbackBlockedDirection = 'SELL';
             } elseif ($forecastDirection === 'bearish' && ! $hasQuote) {
                 $reason = 'bearish auto-start needs quote-asset balance for BUY-watch';
+                $walletFallbackBlockedDirection = 'BUY';
             } elseif (in_array($forecastDirection, ['bullish', 'bearish'], true)) {
                 $direction = $forecastDirection === 'bullish' ? 'SELL' : 'BUY';
             } else {
@@ -601,6 +606,34 @@ class RunRatioBotEvaluationJob implements ShouldQueue, ShouldBeUnique
                 // itself was too weak to be bullish/bearish) -- keep waiting,
                 // but leave a readable reason rather than a blank one.
                 $reason = "resolved direction is {$forecastDirection}";
+            }
+        }
+
+        // WalletAwareDirectionFallback -- ONLY reachable via the two literal
+        // wallet-insufficiency reasons set immediately above (never for a
+        // confidence block or a trend/forecast-disagreement block, both of
+        // which return/reason out long before this point). Requires
+        // multi-window trend scoring (trendScore !== null) -- legacy_single_
+        // window mode has no composite to independently justify the opposite
+        // side with, so the feature is inert there by construction, not by an
+        // extra check inside the service.
+        $walletFallbackResult = null;
+        if ($walletFallbackBlockedDirection !== null && $config->walletFallbackEnabled() && $trendScore !== null) {
+            $state = $config->state()->first();
+            if ($state !== null) {
+                $walletFallbackResult = app(WalletAwareDirectionFallbackService::class)->evaluate(
+                    $config,
+                    $state,
+                    $walletFallbackBlockedDirection,
+                    $trendScore,
+                    $hasBase,
+                    $hasQuote,
+                );
+
+                if (($walletFallbackResult['action'] ?? null) === 'flip') {
+                    $direction = $walletFallbackResult['new_direction'];
+                    $reason = null;
+                }
             }
         }
 
@@ -619,6 +652,7 @@ class RunRatioBotEvaluationJob implements ShouldQueue, ShouldBeUnique
                 'trend_scoring_mode' => $trendScoringMode,
                 'trend_score' => $trendScore,
                 'resolution' => $resolutionForLog,
+                'wallet_fallback' => $walletFallbackResult,
             ],
             'occurred_at' => now(),
         ]);
@@ -671,13 +705,7 @@ class RunRatioBotEvaluationJob implements ShouldQueue, ShouldBeUnique
 
         $forecastHitRate = $backtest?->hit_rate_pct !== null ? (float) $backtest->hit_rate_pct : null;
 
-        $forecastWeight = match (true) {
-            $forecastHitRate === null => 0.0,
-            $forecastHitRate <= 50.0  => 0.0,
-            $forecastHitRate <= 60.0  => 0.10,
-            $forecastHitRate <= 70.0  => 0.20,
-            default                    => 0.30,
-        };
+        $forecastWeight = ForecastReliabilityWeighting::weightForHitRate($forecastHitRate);
 
         $trendCompositeScore = abs((float) ($trendScore['composite_score'] ?? 0.0)); // magnitude, not signed -- this is a "how strong is the trend's own directional call" weight, not a direction indicator (direction already came from $trendDirection)
         $trendWeight = 1.0 - $forecastWeight;

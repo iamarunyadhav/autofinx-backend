@@ -103,6 +103,11 @@ class RatioBotConfig extends BaseModel
         'sell_selector_weights'       => 'array',
         'emergency_atr_multiple_threshold' => 'decimal:2',
         'seed_position_pct'           => 'decimal:2',
+        'wallet_fallback_enabled'      => 'boolean',
+        'wallet_fallback_min_cooldown_minutes' => 'integer',
+        'wallet_fallback_base_observation_minutes' => 'integer',
+        'wallet_fallback_min_observation_minutes' => 'integer',
+        'wallet_fallback_max_observation_minutes' => 'integer',
     ];
 
     public function spotExecutionRoute(): string
@@ -584,6 +589,41 @@ class RatioBotConfig extends BaseModel
         $value = (int) ($this->recovery_max_observation_minutes ?? 240);
 
         return max($min, $value);
+    }
+
+    /**
+     * WalletAwareDirectionFallback -- see WalletAwareDirectionFallbackService's
+     * own docblock. Deliberately its own dedicated config surface (not a
+     * reuse of recovery_* fields) even though it shares DynamicObservationWindow's
+     * math -- the two features must never clobber each other's velocity
+     * tracking on the same bot (see the extended resolveWindowMinutes()
+     * override params).
+     */
+    public function walletFallbackEnabled(): bool
+    {
+        return (bool) ($this->wallet_fallback_enabled ?? false);
+    }
+
+    public function walletFallbackMinCooldownMinutes(): int
+    {
+        return max(1, (int) ($this->wallet_fallback_min_cooldown_minutes ?? 60));
+    }
+
+    public function walletFallbackBaseObservationMinutes(): int
+    {
+        return max(1, (int) ($this->wallet_fallback_base_observation_minutes ?? 60));
+    }
+
+    public function walletFallbackMinObservationMinutes(): int
+    {
+        return max(1, (int) ($this->wallet_fallback_min_observation_minutes ?? 15));
+    }
+
+    public function walletFallbackMaxObservationMinutes(): int
+    {
+        $min = $this->walletFallbackMinObservationMinutes();
+
+        return max($min, (int) ($this->wallet_fallback_max_observation_minutes ?? 240));
     }
 
     /**

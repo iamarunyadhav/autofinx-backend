@@ -80,6 +80,10 @@ class RatioBotState extends BaseModel
         'recovery_trend_reviewed_at' => 'datetime',
         'emergency_entered_at' => 'datetime',
         'emergency_cleared_at' => 'datetime',
+        'wallet_fallback_streak_started_at' => 'datetime',
+        'wallet_fallback_streak_ticks' => 'integer',
+        'wallet_fallback_trend_composite_at_last_review' => 'decimal:4',
+        'last_wallet_fallback_flip_at' => 'datetime',
     ];
 
     // Valid position states

@@ -70,6 +70,13 @@ class RatioBotEvent extends BaseModel
     // covers SEED_POSITION's single deliberate initial buy.
     public const EVENT_SEED_POSITION_EXECUTED = 'seed_position_executed';
 
+    // WalletAwareDirectionFallback -- see WalletAwareDirectionFallbackService.
+    // Only fired when a wallet-insufficiency block on the brain/trend-resolved
+    // direction is overridden in favor of the opposite, independently
+    // market-justified, wallet-funded direction. Never fired for a confidence
+    // or trend/forecast-disagreement block.
+    public const EVENT_WALLET_FALLBACK_FLIP = 'wallet_aware_direction_flip';
+
     public function config(): BelongsTo
     {
         return $this->belongsTo(RatioBotConfig::class, 'ratio_bot_config_id');
