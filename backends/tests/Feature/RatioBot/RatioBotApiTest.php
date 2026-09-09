@@ -93,6 +93,46 @@ class RatioBotApiTest extends TestCase
     }
 
     /** @test */
+    public function can_update_wallet_aware_direction_fallback_fields(): void
+    {
+        $config = $this->createConfig();
+
+        $response = $this->actingAs($this->user)
+            ->putJson("/api/v1/ratio-bots/{$config->id}", [
+                'wallet_fallback_enabled'                  => true,
+                'wallet_fallback_min_cooldown_minutes'     => 90,
+                'wallet_fallback_base_observation_minutes' => 45,
+                'wallet_fallback_min_observation_minutes'  => 10,
+                'wallet_fallback_max_observation_minutes'  => 180,
+            ]);
+
+        $response->assertOk()
+            ->assertJsonPath('wallet_fallback_enabled', true)
+            ->assertJsonPath('wallet_fallback_min_cooldown_minutes', 90)
+            ->assertJsonPath('wallet_fallback_base_observation_minutes', 45)
+            ->assertJsonPath('wallet_fallback_min_observation_minutes', 10)
+            ->assertJsonPath('wallet_fallback_max_observation_minutes', 180);
+
+        $this->assertDatabaseHas('ratio_bot_configs', [
+            'id'                                        => $config->id,
+            'wallet_fallback_enabled'                    => true,
+            'wallet_fallback_min_cooldown_minutes'       => 90,
+            'wallet_fallback_base_observation_minutes'   => 45,
+            'wallet_fallback_min_observation_minutes'    => 10,
+            'wallet_fallback_max_observation_minutes'    => 180,
+        ]);
+
+        // Fetch it back independently to confirm the values persisted, not
+        // just that the update response echoed the request payload back.
+        $config->refresh();
+        $this->assertTrue($config->walletFallbackEnabled());
+        $this->assertSame(90, $config->walletFallbackMinCooldownMinutes());
+        $this->assertSame(45, $config->walletFallbackBaseObservationMinutes());
+        $this->assertSame(10, $config->walletFallbackMinObservationMinutes());
+        $this->assertSame(180, $config->walletFallbackMaxObservationMinutes());
+    }
+
+    /** @test */
     public function can_create_trailing_ratio_bot_with_negative_buy_threshold(): void
     {
         $response = $this->actingAs($this->user)
