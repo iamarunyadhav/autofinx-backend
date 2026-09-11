@@ -40,6 +40,13 @@ class DetectStaleFeedsJob implements ShouldQueue, ShouldBeUnique
         foreach ($activeWorkspaceSymbols as $workspaceId => $symbols) {
             $stale = [];
             $fresh = [];
+            // Genuine freshness confirmations only — unlike $fresh (which
+            // also absorbs the market_closed skip below for its existing
+            // logging/context use), this array is the sole basis for the
+            // safety-net clears further down. A market-closed skip means "we
+            // didn't check," not "we confirmed the feed is alive," so it
+            // must never be able to unlatch a breaker.
+            $confirmedFreshForClear = [];
 
             foreach ($symbols as $symbol) {
                 $snapshot = $snapshots->getLiveSnapshot('binance', $symbol, 'binance', $this->thresholdSeconds);
@@ -55,6 +62,28 @@ class DetectStaleFeedsJob implements ShouldQueue, ShouldBeUnique
                         'received_at' => $snapshot['received_at'] ?? null,
                         'age_ms' => $snapshot['age_ms'] ?? null,
                     ];
+                    $confirmedFreshForClear[] = [
+                        'symbol' => $symbol,
+                        'received_at' => $snapshot['received_at'] ?? null,
+                        'age_ms' => $snapshot['age_ms'] ?? null,
+                    ];
+
+                    // Conservative safety net: this job's OWN freshness check
+                    // (not elapsed time, not the absence of a stale
+                    // detection) just confirmed this symbol is genuinely
+                    // alive. If its breaker somehow latched active anyway
+                    // (e.g. a transient delay that straddled a prior run
+                    // before websocket ingest could clear it), self-heal it
+                    // here rather than waiting on a live tick.
+                    if ($breakers->isStaleFeedBreakerActive((string) $workspaceId, $symbol)) {
+                        $breakers->clearStaleFeedBreaker((string) $workspaceId, [
+                            'symbol' => $symbol,
+                            'received_at' => $snapshot['received_at'] ?? null,
+                            'age_ms' => $snapshot['age_ms'] ?? null,
+                            'reason' => 'scheduled_detector_confirmed_fresh_safety_net',
+                        ], 'stale_feed_detector_safety_net', $symbol);
+                    }
+
                     continue;
                 }
 
@@ -103,6 +132,28 @@ class DetectStaleFeedsJob implements ShouldQueue, ShouldBeUnique
             // a genuinely new canonical tick is written for the selected
             // symbols. The scheduled detector is read-only on recovery so a
             // process restart or stale compatibility key cannot unlatch trading.
+            // Conservative exception: the safety net above (per-symbol) and
+            // below (workspace-wide) only fires off THIS run's own confirmed
+            // freshness evidence ($confirmedFreshForClear) — never off
+            // elapsed time, never merely because no stale symbol was
+            // detected this run, and never off a market-closed skip (which
+            // proves nothing about the feed being alive). $stale === []
+            // alone is not sufficient: a workspace whose only symbol was
+            // market-closed this run also has $stale === [] with zero
+            // genuine confirmations, so the workspace-wide clear additionally
+            // requires every selected symbol to have been confirmed fresh
+            // ($symbols !== [] guards the zero-symbols case defensively,
+            // matching the reference implementation's $allFresh = $symbols
+            // !== []; initialization).
+            $allSelectedSymbolsConfirmedFresh = $symbols !== [] && count($confirmedFreshForClear) === count($symbols);
+
+            if ($allSelectedSymbolsConfirmedFresh && $breakers->isStaleFeedBreakerActive((string) $workspaceId)) {
+                $breakers->clearStaleFeedBreaker((string) $workspaceId, [
+                    'symbols' => $symbols,
+                    'fresh_symbols' => $fresh,
+                    'reason' => 'scheduled_detector_confirmed_all_fresh_safety_net',
+                ], 'stale_feed_detector_safety_net');
+            }
         }
     }
 

@@ -183,8 +183,21 @@ class RatioBotStartupChecklistTest extends TestCase
     }
 
     /** @test */
-    public function scheduled_detector_does_not_clear_stale_breaker_without_new_ingest_tick(): void
+    public function scheduled_detector_safety_net_clears_workspace_wide_breaker_confirmed_fresh_without_a_new_ingest_tick(): void
     {
+        // Historically (pre safety-net) the scheduled detector was
+        // read-only on recovery: clearing was owned entirely by websocket
+        // ingest's clearRecoveredWorkspaceBreakers() side effect, so a
+        // breaker latched active by anything other than a brand-new tick
+        // would stay stuck forever even once the feed was genuinely
+        // healthy again — this was the actual production bug (breaker
+        // stuck `active:true` while the live snapshot showed
+        // `is_fresh:true, age_ms:397`). The conservative safety net added
+        // to DetectStaleFeedsJob fixes exactly this: it clears based on
+        // THIS run's own confirmed-fresh evidence, not on a new tick having
+        // just arrived, so this scenario (tick ingested earlier, breaker
+        // latched after the fact, no NEW tick before the job runs) must now
+        // self-heal instead of staying latched.
         $this->createConfig(['enabled' => true, 'stale_feed_timeout_seconds' => 30]);
         app(RealtimeMarketFeedService::class)->ingest([
             'stream' => 'btcusdt@trade',
@@ -208,7 +221,9 @@ class RatioBotStartupChecklistTest extends TestCase
             app(\App\Domain\MarketData\MarketSnapshotService::class),
         );
 
-        $this->assertTrue(app(OperationalBreakerService::class)->isStaleFeedBreakerActive((string) $this->workspace->id));
+        $breakers = app(OperationalBreakerService::class);
+        $this->assertFalse($breakers->isStaleFeedBreakerActive((string) $this->workspace->id));
+        $this->assertSame('stale_feed_detector_safety_net', $breakers->staleFeedState((string) $this->workspace->id)['source']);
     }
 
     /** @test */
