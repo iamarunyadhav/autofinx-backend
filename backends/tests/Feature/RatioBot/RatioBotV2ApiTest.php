@@ -6,6 +6,7 @@ use App\Models\RatioBotConfig;
 use App\Models\RatioBotState;
 use App\Models\User;
 use App\Models\Workspace;
+use App\Models\WorkspaceMember;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Queue;
 use Tests\TestCase;
@@ -23,6 +24,11 @@ class RatioBotV2ApiTest extends TestCase
 
         $this->user = User::factory()->create(['two_factor_confirmed_at' => now()]);
         $this->workspace = Workspace::factory()->create();
+        WorkspaceMember::create([
+            'workspace_id' => $this->workspace->id,
+            'user_id' => $this->user->id,
+            'role' => 'owner',
+        ]);
 
         // store()/update() dispatch BackfillMarketOhlcJob (real Binance REST
         // call) — fake the queue so these tests never make a live network call.

@@ -95,6 +95,20 @@ return [
         'account_id' => env('OANDA_ACCOUNT_ID'),
     ],
 
+    // Pepperstone Metals & Energy CFDs (Gold/Silver/Platinum/Crude Oil) --
+    // sandbox mode (the default) needs no credentials and is the only mode
+    // actually implemented right now (see App\Domain\Venue\
+    // PepperstoneBrokerAdapter's docblock). The real connection method
+    // (cTrader OpenAPI vs an MT5 bridge) is unconfirmed pending a real
+    // Pepperstone account -- do not set 'mode' to anything but 'sandbox'
+    // until that is resolved and the live path is actually built.
+    'pepperstone' => [
+        'mode' => env('PEPPERSTONE_MODE', 'sandbox'),
+        'api_url' => env('PEPPERSTONE_API_URL', ''),
+        'api_key' => env('PEPPERSTONE_API_KEY'),
+        'account_id' => env('PEPPERSTONE_ACCOUNT_ID'),
+    ],
+
     'fx' => [
         'provider' => env('FX_RATE_PROVIDER', 'openexchangerates'),
         'api_url' => env('FX_RATE_API_URL'),

@@ -87,6 +87,17 @@ class RatioBrainEngineWiringTest extends TestCase
             'ratio_bot_config_id' => $config->id,
             'event_type' => RatioBotEvent::EVENT_RATIO_BRAIN_CONTROLLED_LOSS_EXIT,
         ]);
+
+        $this->assertDatabaseHas('audit_events', [
+            'event_type' => 'ratio_bot_controlled_loss_exit',
+            'bot_type' => 'ratio_bot',
+            'bot_instance_id' => $config->id,
+            'correlation_id' => $result['decision_record']->correlation_id,
+        ]);
+        $this->assertDatabaseHas('audit_decision_snapshots', [
+            'ratio_bot_decision_id' => $result['decision_record']->id,
+            'correlation_id' => $result['decision_record']->correlation_id,
+        ]);
     }
 
     public function test_shadow_mode_logs_a_recommendation_but_never_returns_it_as_the_executed_decision(): void

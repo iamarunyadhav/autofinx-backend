@@ -47,6 +47,28 @@ class StrategyDecisionRecorder
             'decided_at' => now(),
         ]);
 
+        // Audit Research instrumentation — additive only, log-and-continue on
+        // failure (never throws back into the trading path). Reuses this
+        // decision's own correlation_id, does not invent a second one.
+        $auditEvent = \App\Domain\AuditResearch\AuditEventRecorder::record(
+            eventType: 'ratio_bot_strategy_decision_recorded',
+            category: \App\Models\AuditEvent::CATEGORY_DECISION,
+            context: [
+                'bot_type' => 'ratio_bot',
+                'bot_instance_id' => $config->id,
+                'environment' => $config->execution_mode,
+                'symbol' => $config->normalizedSymbol(),
+                'market_price' => $currentPrice,
+                'metadata' => [
+                    'decision' => $decision->decision,
+                    'reason' => $decision->reason,
+                    'algorithm' => $config->algorithmKey(),
+                ],
+            ],
+            correlationId: $decision->correlation_id,
+        );
+        \App\Domain\AuditResearch\RuleEvaluationRecorder::recordForDecision($decision, $auditEvent?->id);
+
         $this->stateService->rememberSignal($config, $decision->decision, $decision->reason ?? '', $signalHash, [
             'decision_id' => $decision->id,
             'metadata' => $decision->metadata,

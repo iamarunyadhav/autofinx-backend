@@ -119,6 +119,15 @@ class FuturesRecoveryExecutionTest extends TestCase
             'ratio_bot_config_id' => $config->id,
             'event_type' => RatioBotEvent::EVENT_EXCHANGE_STOP_ORDER_PLACED,
         ]);
+
+        $this->assertDatabaseHas('audit_events', [
+            'event_type' => 'ratio_bot_futures_recovery_topup',
+            'bot_type' => 'ratio_bot',
+            'bot_instance_id' => $config->id,
+        ]);
+        $this->assertDatabaseHas('audit_decision_snapshots', [
+            'final_decision' => 'LONG',
+        ]);
     }
 
     /** @test */

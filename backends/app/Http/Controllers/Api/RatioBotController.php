@@ -14,6 +14,7 @@ use App\Jobs\RunRatioBotEvaluationJob;
 use App\Models\RatioBotConfig;
 use App\Models\RatioBotDecision;
 use App\Models\RatioBotState;
+use App\Models\WorkspaceMember;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -42,8 +43,10 @@ class RatioBotController extends Controller
      * stale-feed breaker, recent bot events, background daemon/queue
      * health, and other enabled bots sharing this symbol.
      */
-    public function diagnostics(RatioBotConfig $ratioBot): JsonResponse
+    public function diagnostics(Request $request, RatioBotConfig $ratioBot): JsonResponse
     {
+        $this->assertBotOwnership($request, $ratioBot);
+
         return response()->json($this->diagnostics->diagnose($ratioBot));
     }
 
@@ -55,6 +58,8 @@ class RatioBotController extends Controller
      */
     public function applyDiagnosticsFix(Request $request, RatioBotConfig $ratioBot): JsonResponse
     {
+        $this->assertBotOwnership($request, $ratioBot);
+
         $data = $request->validate(['fix_key' => 'required|string']);
 
         try {
@@ -75,8 +80,10 @@ class RatioBotController extends Controller
     /**
      * GET /workspaces/{workspace}/ratio-bots
      */
-    public function index(string $workspaceId): JsonResponse
+    public function index(Request $request, string $workspaceId): JsonResponse
     {
+        $this->assertWorkspaceMembership($request, $workspaceId);
+
         $configs = RatioBotConfig::where('workspace_id', $workspaceId)
             ->with('state')
             ->orderByDesc('updated_at')
@@ -90,6 +97,8 @@ class RatioBotController extends Controller
      */
     public function store(Request $request, string $workspaceId): JsonResponse
     {
+        $this->assertWorkspaceMembership($request, $workspaceId);
+
         $data = $this->validatedPayload($request, false, $workspaceId);
 
         $config = RatioBotConfig::create(array_merge($this->normalizePayload($data), [
@@ -107,8 +116,10 @@ class RatioBotController extends Controller
     /**
      * GET /ratio-bots/{config}
      */
-    public function show(RatioBotConfig $ratioBot): JsonResponse
+    public function show(Request $request, RatioBotConfig $ratioBot): JsonResponse
     {
+        $this->assertBotOwnership($request, $ratioBot);
+
         $config = $ratioBot->load('state');
 
         return response()->json($config->toArray() + [
@@ -121,6 +132,8 @@ class RatioBotController extends Controller
      */
     public function update(Request $request, RatioBotConfig $ratioBot): JsonResponse
     {
+        $this->assertBotOwnership($request, $ratioBot);
+
         $data = $this->validatedPayload($request, true, (string) $ratioBot->workspace_id, $ratioBot);
 
         $ratioBot->update($this->normalizePayload($data));
@@ -136,8 +149,10 @@ class RatioBotController extends Controller
     /**
      * DELETE /ratio-bots/{config}
      */
-    public function destroy(RatioBotConfig $ratioBot): JsonResponse
+    public function destroy(Request $request, RatioBotConfig $ratioBot): JsonResponse
     {
+        $this->assertBotOwnership($request, $ratioBot);
+
         $this->stateService->stop($ratioBot);
 
         // ratio_bot_states cascades via FK, but decisions/events/reconciliation
@@ -164,6 +179,8 @@ class RatioBotController extends Controller
      */
     public function start(Request $request, RatioBotConfig $ratioBot): JsonResponse
     {
+        $this->assertBotOwnership($request, $ratioBot);
+
         $readiness = $this->runtime->startingEntryReadiness($ratioBot);
         if (! $readiness['ready']) {
             return response()->json(['message' => $readiness['reason'], 'readiness' => $readiness], 422);
@@ -178,8 +195,10 @@ class RatioBotController extends Controller
      * independently so the UI can show BOT NOT READY before the user even
      * presses Start.
      */
-    public function readiness(RatioBotConfig $ratioBot): JsonResponse
+    public function readiness(Request $request, RatioBotConfig $ratioBot): JsonResponse
     {
+        $this->assertBotOwnership($request, $ratioBot);
+
         return response()->json($this->runtime->startingEntryReadiness($ratioBot));
     }
 
@@ -188,8 +207,10 @@ class RatioBotController extends Controller
      * readiness (spec §3): exchange connection, wallet, market feed,
      * symbol, risk state, exchange filters.
      */
-    public function startupChecklist(RatioBotConfig $ratioBot): JsonResponse
+    public function startupChecklist(Request $request, RatioBotConfig $ratioBot): JsonResponse
     {
+        $this->assertBotOwnership($request, $ratioBot);
+
         return response()->json($this->runtime->startupChecklist($ratioBot));
     }
 
@@ -197,8 +218,10 @@ class RatioBotController extends Controller
      * GET /ratio-bots/{config}/wallet — live exchange balance for both sides
      * of the trading pair (spec §4/§52 wallet dashboard).
      */
-    public function wallet(RatioBotConfig $ratioBot): JsonResponse
+    public function wallet(Request $request, RatioBotConfig $ratioBot): JsonResponse
     {
+        $this->assertBotOwnership($request, $ratioBot);
+
         return response()->json($this->runtime->walletBalances($ratioBot));
     }
 
@@ -206,8 +229,10 @@ class RatioBotController extends Controller
      * GET /ratio-bots/{config}/lots — per-lot cost-basis ledger (spec §17/§57),
      * including Stage 4 Recovery lots.
      */
-    public function lots(RatioBotConfig $ratioBot): JsonResponse
+    public function lots(Request $request, RatioBotConfig $ratioBot): JsonResponse
     {
+        $this->assertBotOwnership($request, $ratioBot);
+
         return response()->json($this->runtime->lots($ratioBot));
     }
 
@@ -216,8 +241,10 @@ class RatioBotController extends Controller
      * check execution gates on (spec §60-61); the UI should show this
      * instead of deriving freshness from raw price age on its own.
      */
-    public function effectiveFeedStatus(RatioBotConfig $ratioBot): JsonResponse
+    public function effectiveFeedStatus(Request $request, RatioBotConfig $ratioBot): JsonResponse
     {
+        $this->assertBotOwnership($request, $ratioBot);
+
         return response()->json($this->runtime->effectiveFeedStatus($ratioBot));
     }
 
@@ -225,13 +252,17 @@ class RatioBotController extends Controller
      * GET /ratio-bots/{config}/daily-report — per-day trade/P&L rollup for
      * Testnet observation (spec §80-81).
      */
-    public function dailyReport(RatioBotConfig $ratioBot): JsonResponse
+    public function dailyReport(Request $request, RatioBotConfig $ratioBot): JsonResponse
     {
+        $this->assertBotOwnership($request, $ratioBot);
+
         return response()->json($this->runtime->dailyReport($ratioBot));
     }
 
-    public function recoverySlot(RatioBotConfig $ratioBot): JsonResponse
+    public function recoverySlot(Request $request, RatioBotConfig $ratioBot): JsonResponse
     {
+        $this->assertBotOwnership($request, $ratioBot);
+
         return response()->json(app(\App\Domain\RatioBot\RatioBotRecoverySlotService::class)->payload($ratioBot));
     }
 
@@ -240,8 +271,10 @@ class RatioBotController extends Controller
      * distance, danger level, and any shared-position siblings for a
      * futures bot (see RatioBotLiquidationGuardService).
      */
-    public function liquidationGuard(RatioBotConfig $ratioBot): JsonResponse
+    public function liquidationGuard(Request $request, RatioBotConfig $ratioBot): JsonResponse
     {
+        $this->assertBotOwnership($request, $ratioBot);
+
         $guardService = app(\App\Domain\RatioBot\RatioBotLiquidationGuardService::class);
         $guard = $guardService->assess($ratioBot);
         $state = $ratioBot->state;
@@ -280,8 +313,10 @@ class RatioBotController extends Controller
      * can never disagree with what actually blocks a trade. Always
      * `applicable: false` for crypto bots.
      */
-    public function marketHours(RatioBotConfig $ratioBot): JsonResponse
+    public function marketHours(Request $request, RatioBotConfig $ratioBot): JsonResponse
     {
+        $this->assertBotOwnership($request, $ratioBot);
+
         return response()->json(app(\App\Domain\RatioBot\RatioBotMarketHoursService::class)->status($ratioBot));
     }
 
@@ -293,8 +328,10 @@ class RatioBotController extends Controller
      * ForecastHorizonBacktestService) so the UI's "Trend Window Breakdown"
      * card can show real, honestly-computed hit-rate context alongside it.
      */
-    public function trendScore(RatioBotConfig $ratioBot): JsonResponse
+    public function trendScore(Request $request, RatioBotConfig $ratioBot): JsonResponse
     {
+        $this->assertBotOwnership($request, $ratioBot);
+
         $score = app(\App\Domain\RatioBot\MultiWindowTrendScoringService::class)->score($ratioBot);
         $horizonSeconds = app(\App\Domain\RatioBot\RatioBotBrainService::class)->horizonSeconds($ratioBot);
 
@@ -323,8 +360,10 @@ class RatioBotController extends Controller
      * global kill switch AND this bot's own opt-in must be true) so the UI
      * can show an honest "not active" state instead of stale/empty data.
      */
-    public function ratioBrain(RatioBotConfig $ratioBot): JsonResponse
+    public function ratioBrain(Request $request, RatioBotConfig $ratioBot): JsonResponse
     {
+        $this->assertBotOwnership($request, $ratioBot);
+
         $log = \App\Models\RatioBrainDecisionLog::query()
             ->where('ratio_bot_config_id', $ratioBot->id)
             ->latest('occurred_at')
@@ -361,8 +400,10 @@ class RatioBotController extends Controller
     /**
      * GET /ratio-bots/{config}/pending-approval
      */
-    public function pendingApproval(RatioBotConfig $ratioBot): JsonResponse
+    public function pendingApproval(Request $request, RatioBotConfig $ratioBot): JsonResponse
     {
+        $this->assertBotOwnership($request, $ratioBot);
+
         return response()->json($this->runtime->pendingApproval($ratioBot));
     }
 
@@ -371,6 +412,8 @@ class RatioBotController extends Controller
      */
     public function approveDecision(Request $request, RatioBotConfig $ratioBot, RatioBotDecision $decision): JsonResponse
     {
+        $this->assertBotOwnership($request, $ratioBot);
+
         if ((string) $decision->ratio_bot_config_id !== (string) $ratioBot->id) {
             return response()->json(['message' => 'Decision does not belong to this bot.'], 404);
         }
@@ -402,6 +445,8 @@ class RatioBotController extends Controller
      */
     public function rejectDecision(Request $request, RatioBotConfig $ratioBot, RatioBotDecision $decision): JsonResponse
     {
+        $this->assertBotOwnership($request, $ratioBot);
+
         if ((string) $decision->ratio_bot_config_id !== (string) $ratioBot->id) {
             return response()->json(['message' => 'Decision does not belong to this bot.'], 404);
         }
@@ -426,6 +471,8 @@ class RatioBotController extends Controller
      */
     public function pause(Request $request, RatioBotConfig $ratioBot): JsonResponse
     {
+        $this->assertBotOwnership($request, $ratioBot);
+
         $reason = $request->input('reason', 'operator');
         $this->stateService->pause($ratioBot, $reason, $request->user()?->id);
         return response()->json(['message' => 'Bot paused.']);
@@ -436,12 +483,16 @@ class RatioBotController extends Controller
      */
     public function resume(Request $request, RatioBotConfig $ratioBot): JsonResponse
     {
+        $this->assertBotOwnership($request, $ratioBot);
+
         $this->stateService->resume($ratioBot, $request->user()?->id);
         return response()->json(['message' => 'Bot resumed.', 'state' => $ratioBot->state]);
     }
 
     public function recalculateResume(Request $request, RatioBotConfig $ratioBot): JsonResponse
     {
+        $this->assertBotOwnership($request, $ratioBot);
+
         $state = $this->stateService->getOrCreate($ratioBot);
         if ($state->position_state !== \App\Models\RatioBotState::STATE_PAUSED) {
             return response()->json([
@@ -499,6 +550,8 @@ class RatioBotController extends Controller
      */
     public function stop(Request $request, RatioBotConfig $ratioBot): JsonResponse
     {
+        $this->assertBotOwnership($request, $ratioBot);
+
         $this->stateService->stop($ratioBot, $request->user()?->id);
         return response()->json(['message' => 'Bot stopped and reset to idle.']);
     }
@@ -515,6 +568,8 @@ class RatioBotController extends Controller
      */
     public function anchorBuy(Request $request, RatioBotConfig $ratioBot): JsonResponse
     {
+        $this->assertBotOwnership($request, $ratioBot);
+
         $data = $request->validate([
             'buy_price' => 'required|numeric|min:0.000001',
             'quantity'  => 'required|numeric|min:0.000001',
@@ -543,6 +598,8 @@ class RatioBotController extends Controller
      */
     public function anchorSell(Request $request, RatioBotConfig $ratioBot): JsonResponse
     {
+        $this->assertBotOwnership($request, $ratioBot);
+
         $data = $request->validate([
             'sell_price' => 'required|numeric|min:0.000001',
             'quantity'   => 'required|numeric|min:0.000001',
@@ -573,6 +630,8 @@ class RatioBotController extends Controller
      */
     public function anchorStartingInventory(Request $request, RatioBotConfig $ratioBot): JsonResponse
     {
+        $this->assertBotOwnership($request, $ratioBot);
+
         if ($ratioBot->startingEntry() !== 'SELL') {
             return response()->json(['message' => 'Starting inventory can only be declared when Starting Entry is set to SELL.'], 422);
         }
@@ -607,14 +666,18 @@ class RatioBotController extends Controller
     /**
      * GET /ratio-bots/{config}/state
      */
-    public function state(RatioBotConfig $ratioBot): JsonResponse
+    public function state(Request $request, RatioBotConfig $ratioBot): JsonResponse
     {
+        $this->assertBotOwnership($request, $ratioBot);
+
         $state = $this->stateService->getOrCreate($ratioBot);
         return response()->json($state);
     }
 
-    public function status(RatioBotConfig $ratioBot): JsonResponse
+    public function status(Request $request, RatioBotConfig $ratioBot): JsonResponse
     {
+        $this->assertBotOwnership($request, $ratioBot);
+
         return response()->json([
             'symbol' => $ratioBot->normalizedSymbol(),
             'market_type' => $ratioBot->marketType(),
@@ -662,6 +725,8 @@ class RatioBotController extends Controller
      */
     public function currentRatio(Request $request, RatioBotConfig $ratioBot): JsonResponse
     {
+        $this->assertBotOwnership($request, $ratioBot);
+
         $price = $request->input('price');
 
         if ($price === null) {
@@ -699,8 +764,10 @@ class RatioBotController extends Controller
      *
      * Trigger an immediate evaluation (dispatches the job).
      */
-    public function evaluate(RatioBotConfig $ratioBot): JsonResponse
+    public function evaluate(Request $request, RatioBotConfig $ratioBot): JsonResponse
     {
+        $this->assertBotOwnership($request, $ratioBot);
+
         // manualTrigger=true — an operator clicking "Evaluate now" on a
         // disabled/paused bot to sanity-check config before re-enabling it
         // must actually run; RunRatioBotEvaluationJob::handle() silently
@@ -712,6 +779,8 @@ class RatioBotController extends Controller
 
     public function killSwitch(Request $request, RatioBotConfig $ratioBot): JsonResponse
     {
+        $this->assertBotOwnership($request, $ratioBot);
+
         $data = $request->validate([
             'kill_switch' => 'required|boolean',
             'reason' => 'nullable|string|max:255',
@@ -739,6 +808,8 @@ class RatioBotController extends Controller
      */
     public function decisions(Request $request, RatioBotConfig $ratioBot): JsonResponse
     {
+        $this->assertBotOwnership($request, $ratioBot);
+
         $decisions = $ratioBot->decisions()
             ->when($request->input('decision'), fn ($q, $v) => $q->where('decision', strtoupper($v)))
             ->orderByDesc('decided_at')
@@ -751,8 +822,10 @@ class RatioBotController extends Controller
     /**
      * GET /ratio-bots/{config}/events
      */
-    public function events(RatioBotConfig $ratioBot): JsonResponse
+    public function events(Request $request, RatioBotConfig $ratioBot): JsonResponse
     {
+        $this->assertBotOwnership($request, $ratioBot);
+
         $events = $ratioBot->events()
             ->orderByDesc('occurred_at')
             ->limit(100)
@@ -761,33 +834,45 @@ class RatioBotController extends Controller
         return response()->json($events);
     }
 
-    public function lastSignal(RatioBotConfig $ratioBot): JsonResponse
+    public function lastSignal(Request $request, RatioBotConfig $ratioBot): JsonResponse
     {
+        $this->assertBotOwnership($request, $ratioBot);
+
         return response()->json($this->runtime->lastSignal($ratioBot));
     }
 
-    public function lastOrder(RatioBotConfig $ratioBot): JsonResponse
+    public function lastOrder(Request $request, RatioBotConfig $ratioBot): JsonResponse
     {
+        $this->assertBotOwnership($request, $ratioBot);
+
         return response()->json($this->runtime->lastOrder($ratioBot));
     }
 
-    public function currentPosition(RatioBotConfig $ratioBot): JsonResponse
+    public function currentPosition(Request $request, RatioBotConfig $ratioBot): JsonResponse
     {
+        $this->assertBotOwnership($request, $ratioBot);
+
         return response()->json($this->runtime->currentPosition($ratioBot));
     }
 
-    public function pnlSummary(RatioBotConfig $ratioBot): JsonResponse
+    public function pnlSummary(Request $request, RatioBotConfig $ratioBot): JsonResponse
     {
+        $this->assertBotOwnership($request, $ratioBot);
+
         return response()->json($this->runtime->pnlSummary($ratioBot));
     }
 
-    public function feedHealth(RatioBotConfig $ratioBot): JsonResponse
+    public function feedHealth(Request $request, RatioBotConfig $ratioBot): JsonResponse
     {
+        $this->assertBotOwnership($request, $ratioBot);
+
         return response()->json($this->runtime->feedHealth($ratioBot));
     }
 
     public function candles(Request $request, RatioBotConfig $ratioBot): JsonResponse
     {
+        $this->assertBotOwnership($request, $ratioBot);
+
         $limit = max(10, min(500, (int) $request->integer('limit', 200)));
 
         return response()->json($this->runtime->recentCandles($ratioBot, $limit));
@@ -801,6 +886,8 @@ class RatioBotController extends Controller
      */
     public function candleFeed(Request $request, RatioBotConfig $ratioBot): StreamedResponse
     {
+        $this->assertBotOwnership($request, $ratioBot);
+
         $iterations = (int) min(60, max(1, (int) $request->query('iterations', 30)));
         $intervalSeconds = (int) min(10, max(1, (int) $request->query('interval', 2)));
 
@@ -852,8 +939,10 @@ class RatioBotController extends Controller
         ]);
     }
 
-    public function snapshot(RatioBotConfig $ratioBot): JsonResponse
+    public function snapshot(Request $request, RatioBotConfig $ratioBot): JsonResponse
     {
+        $this->assertBotOwnership($request, $ratioBot);
+
         return response()->json($this->runtime->snapshot($ratioBot));
     }
 
@@ -864,9 +953,34 @@ class RatioBotController extends Controller
      * shaped to match Quick Trade's SignalPreview/ForecastPayload types so
      * the frontend can reuse the same cards.
      */
-    public function brainSnapshot(RatioBotConfig $ratioBot): JsonResponse
+    public function brainSnapshot(Request $request, RatioBotConfig $ratioBot): JsonResponse
     {
+        $this->assertBotOwnership($request, $ratioBot);
+
         return response()->json($this->runtime->brainSnapshot($ratioBot));
+    }
+
+    // -----------------------------------------------------------------------
+    // Authorization
+    // -----------------------------------------------------------------------
+
+    private function assertBotOwnership(Request $request, RatioBotConfig $ratioBot): void
+    {
+        $this->assertWorkspaceMembership($request, (string) $ratioBot->workspace_id);
+    }
+
+    private function assertWorkspaceMembership(Request $request, string $workspaceId): void
+    {
+        $user = $request->user();
+
+        $isMember = $user && WorkspaceMember::query()
+            ->where('workspace_id', $workspaceId)
+            ->where('user_id', $user->id)
+            ->exists();
+
+        if (! $isMember) {
+            abort(403, 'You do not have access to this workspace.');
+        }
     }
 
     private function validatedPayload(Request $request, bool $partial = false, ?string $workspaceId = null, ?RatioBotConfig $existing = null): array

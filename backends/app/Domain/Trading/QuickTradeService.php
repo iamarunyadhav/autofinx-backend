@@ -49,6 +49,13 @@ class QuickTradeService
         $source = (string) ($payload['source'] ?? 'manual_quick_trade');
         $robotSessionId = $payload['robot_session_id'] ?? null;
         $requestIdempotencyKey = trim((string) ($payload['idempotency_key'] ?? ''));
+        // Generated here (rather than at its original ~118 call site) purely
+        // so the Audit Research instrumentation below has a single stable
+        // correlation_id to reuse across every entry gate, including the
+        // ones that can reject the trade before the rest of place() would
+        // otherwise have created one. Still a fresh random uuid either way —
+        // moving the generation earlier changes nothing about its value.
+        $traceId = (string) Str::uuid();
 
         if (! in_array($side, ['buy', 'sell'], true)) {
             throw new RuntimeException('Trade side must be buy or sell.');
@@ -67,7 +74,12 @@ class QuickTradeService
             throw new RuntimeException('Selected duration is not enabled for quick trading.');
         }
 
-        $this->riskGuard->enforceOrFail($workspaceId);
+        try {
+            $this->riskGuard->enforceOrFail($workspaceId);
+        } catch (\Throwable $e) {
+            $this->auditEntryGateFailure($traceId, $robotSessionId, $workspaceId, $symbol, $mode, 'risk_guard', $e->getMessage());
+            throw $e;
+        }
 
         if ($requestIdempotencyKey !== '') {
             $cacheKey = 'quick_trade:place:idempotency:'.sha1($workspaceId.'|'.$requestIdempotencyKey);
@@ -92,6 +104,7 @@ class QuickTradeService
                 ->first();
 
             if ($duplicate) {
+                $this->auditEntryGateFailure($traceId, $robotSessionId, $workspaceId, $symbol, $mode, 'duplicate_live_position', 'duplicate_live_position_detected: Another live position is already open for this symbol.');
                 throw new RuntimeException('duplicate_live_position_detected: Another live position is already open for this symbol.');
             }
         }
@@ -106,7 +119,51 @@ class QuickTradeService
             }
         }
 
-        $this->assertFreshLiveFeedForEntry($mode, $providerKey, $symbol, $workspaceId);
+        try {
+            $this->assertFreshLiveFeedForEntry($mode, $providerKey, $symbol, $workspaceId);
+        } catch (\Throwable $e) {
+            $this->auditEntryGateFailure($traceId, $robotSessionId, $workspaceId, $symbol, $mode, 'live_feed_freshness', $e->getMessage());
+            throw $e;
+        }
+
+        // Audit Research instrumentation — every entry gate above has now
+        // passed. Additive only, never throws back into the trading path.
+        // Reuses $traceId (generated above) as the correlation_id; uses the
+        // robot session id as bot_instance_id when this placement came from
+        // one (a natural session-scoped id already flowing through this
+        // call), otherwise null for a manual/direct placement.
+        $auditEvent = \App\Domain\AuditResearch\AuditEventRecorder::record(
+            eventType: 'quick_trade_entry_gates_passed',
+            category: \App\Models\AuditEvent::CATEGORY_DECISION,
+            context: [
+                'bot_type' => 'quick_trade',
+                'bot_instance_id' => $robotSessionId,
+                'environment' => $mode,
+                'symbol' => $symbol,
+                'metadata' => [
+                    'side' => $side,
+                    'stake_amount' => $stake,
+                    'source' => $source,
+                ],
+            ],
+            correlationId: $traceId,
+        );
+        \App\Domain\AuditResearch\RuleEvaluationRecorder::recordGeneric(
+            passedRules: [
+                ['rule' => 'risk_guard', 'detail' => 'within configured daily-loss/drawdown limits'],
+                ['rule' => 'duplicate_live_position_check', 'detail' => 'no duplicate open live position for this symbol'],
+                ['rule' => 'live_feed_freshness', 'detail' => 'feed fresh or not applicable (paper mode)'],
+            ],
+            failedRules: [],
+            finalDecision: 'PLACED',
+            finalReason: 'entry gates satisfied',
+            diagnosisCategory: \App\Domain\AuditResearch\RootCauseCategory::CORRECT_BEHAVIOR,
+            diagnosisConfidence: 'high',
+            expectedBehavior: 'Place the quick trade once risk/duplicate/feed-freshness gates all pass.',
+            actualBehavior: 'Placed — all entry gates satisfied.',
+            auditEventId: $auditEvent?->id,
+            correlationId: $traceId,
+        );
 
         $symbolMeta = $this->settings->symbolMeta($workspaceId, $symbol, $mode, $providerKey);
         $marketPayload = $this->market->latestQuote($symbol, $timeframe, $context);
@@ -115,7 +172,6 @@ class QuickTradeService
             $timeframe,
             (array) ($payload['indicator_set'] ?? [])
         );
-        $traceId = (string) Str::uuid();
         $entryAt = CarbonImmutable::now();
         $walletAccountId = $payload['wallet_account_id'] ?? null;
         $entryIdempotencyKey = $requestIdempotencyKey !== ''
@@ -346,8 +402,52 @@ class QuickTradeService
                 app(RobotSessionService::class)->refreshPerformance($locked->robotSession);
             }
 
+            $this->auditSettlement($locked, $result['status'], $result['profit_loss']);
+
             return $locked->fresh();
         });
+    }
+
+    /**
+     * Audit Research instrumentation for a settlement — additive only,
+     * never throws back into the trading path. The entry-side $traceId
+     * generated in place() is never reused here (per this session's own
+     * research, it isn't carried through to settlement); the QuickTrade
+     * row's own stable id links the entry and settlement phases instead.
+     */
+    private function auditSettlement(QuickTrade $trade, string $status, float $profitLoss): void
+    {
+        $auditEvent = \App\Domain\AuditResearch\AuditEventRecorder::record(
+            eventType: 'quick_trade_settled',
+            category: \App\Models\AuditEvent::CATEGORY_EXECUTION,
+            context: [
+                'bot_type' => 'quick_trade',
+                'bot_instance_id' => $trade->robot_session_id,
+                'environment' => $trade->mode,
+                'symbol' => $trade->symbol,
+                'market_price' => (float) ($trade->exit_price ?? 0),
+                'metadata' => [
+                    'quick_trade_id' => $trade->id,
+                    'status' => $status,
+                    'profit_loss' => $profitLoss,
+                ],
+            ],
+            correlationId: $trade->id,
+        );
+        \App\Domain\AuditResearch\RuleEvaluationRecorder::recordGeneric(
+            passedRules: [
+                ['rule' => 'settlement_price_resolved', 'detail' => 'exit price resolved and wallet settled'],
+            ],
+            failedRules: [],
+            finalDecision: strtoupper($status),
+            finalReason: 'settled: ' . $status,
+            diagnosisCategory: \App\Domain\AuditResearch\RootCauseCategory::CORRECT_BEHAVIOR,
+            diagnosisConfidence: 'high',
+            expectedBehavior: 'Settle the trade against the resolved exit price once it expires.',
+            actualBehavior: 'Settled — result: ' . $status,
+            auditEventId: $auditEvent?->id,
+            correlationId: $trade->id,
+        );
     }
 
     public function active(string $workspaceId, ?string $source = null, ?string $robotSessionId = null)
@@ -731,7 +831,59 @@ class QuickTradeService
             app(RobotSessionService::class)->refreshPerformance($trade->robotSession);
         }
 
+        $this->auditSettlement($trade, $result['status'], $profitLoss);
+
         return $trade->fresh();
+    }
+
+    /**
+     * Audit Research instrumentation for an entry gate that just rejected
+     * this placement. Additive only, never throws back into the trading
+     * path — the caller always rethrows the original exception itself right
+     * after calling this, this method never changes that outcome.
+     */
+    private function auditEntryGateFailure(
+        string $traceId,
+        ?string $robotSessionId,
+        string $workspaceId,
+        string $symbol,
+        string $mode,
+        string $rule,
+        string $detail,
+    ): void {
+        $auditEvent = \App\Domain\AuditResearch\AuditEventRecorder::record(
+            eventType: 'quick_trade_entry_gate_blocked',
+            category: \App\Models\AuditEvent::CATEGORY_RISK,
+            context: [
+                'bot_type' => 'quick_trade',
+                'bot_instance_id' => $robotSessionId,
+                'environment' => $mode,
+                'symbol' => $symbol,
+                'metadata' => [
+                    'rule' => $rule,
+                    'detail' => $detail,
+                    'workspace_id' => $workspaceId,
+                ],
+            ],
+            correlationId: $traceId,
+            severity: \App\Models\AuditEvent::SEVERITY_MEDIUM,
+        );
+        \App\Domain\AuditResearch\RuleEvaluationRecorder::recordGeneric(
+            passedRules: [],
+            failedRules: [
+                ['rule' => $rule, 'detail' => $detail],
+            ],
+            finalDecision: 'BLOCKED',
+            finalReason: $detail,
+            diagnosisCategory: $rule === 'live_feed_freshness'
+                ? \App\Domain\AuditResearch\RootCauseCategory::DATA_STALE
+                : \App\Domain\AuditResearch\RootCauseCategory::RISK_BLOCK,
+            diagnosisConfidence: 'high',
+            expectedBehavior: 'Block this placement while the ' . $rule . ' gate is failing.',
+            actualBehavior: 'Blocked as expected.',
+            auditEventId: $auditEvent?->id,
+            correlationId: $traceId,
+        );
     }
 
     private function liveResultForPnl(QuickTrade $trade, float $profitLoss): array

@@ -51,3 +51,34 @@ test('signal preview returns buy when bearish exhaustion dominates', function ()
         ->and($preview['confidence'])->toBeGreaterThan(40)
         ->and($preview['supporting_indicators'])->not->toBeEmpty();
 });
+
+test('adxWithDi returns the same adx value as the existing scalar adx() for an identical candle series', function () {
+    $candles = [];
+    $close = 100.0;
+    foreach (range(1, 40) as $i) {
+        $close += ($i % 2 === 0) ? 1.5 : -0.5; // net uptrend with noise
+        $candles[] = [
+            'open' => $close - 0.3,
+            'high' => $close + 1.0,
+            'low' => $close - 1.0,
+            'close' => $close,
+        ];
+    }
+
+    $scalarAdx = Indicators::adx($candles, 14);
+    $withDi = Indicators::adxWithDi($candles, 14);
+
+    expect($withDi)->toBeArray()
+        ->and($withDi['adx'])->toEqualWithDelta($scalarAdx, 0.0000001)
+        ->and($withDi['plus_di'])->toBeFloat()
+        ->and($withDi['minus_di'])->toBeFloat()
+        // Net uptrend -> +DI should dominate -DI.
+        ->and($withDi['plus_di'])->toBeGreaterThan($withDi['minus_di']);
+});
+
+test('adxWithDi returns null for insufficient candle history, matching adx()', function () {
+    $candles = array_fill(0, 5, ['open' => 100, 'high' => 101, 'low' => 99, 'close' => 100]);
+
+    expect(Indicators::adxWithDi($candles, 14))->toBeNull()
+        ->and(Indicators::adx($candles, 14))->toBeNull();
+});

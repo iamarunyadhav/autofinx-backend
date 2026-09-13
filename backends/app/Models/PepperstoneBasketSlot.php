@@ -1,0 +1,32 @@
+<?php
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+
+class PepperstoneBasketSlot extends BaseModel
+{
+    protected $casts = [
+        'level_index' => 'integer',
+        'entry_price' => 'decimal:6',
+        'lot_size' => 'decimal:4',
+        'opened_at' => 'datetime',
+        'closed_at' => 'datetime',
+        'realized_pnl' => 'decimal:6',
+    ];
+
+    public const STATUS_PENDING = 'pending';
+    public const STATUS_FILLED = 'filled';
+    public const STATUS_CLOSED = 'closed';
+    public const STATUS_CANCELLED = 'cancelled';
+
+    public function basket(): BelongsTo
+    {
+        return $this->belongsTo(PepperstoneBasket::class, 'pepperstone_basket_id');
+    }
+
+    public function isOpen(): bool
+    {
+        return in_array($this->status, [self::STATUS_PENDING, self::STATUS_FILLED], true);
+    }
+}

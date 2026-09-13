@@ -3706,6 +3706,49 @@ class FutureTradeBotService
                 $settings,
                 $state
             );
+
+            // Audit Research instrumentation — additive only, alongside (not
+            // instead of) the FutureTradeAiDecision row the gate itself just
+            // persisted. Reuses $signalKey (already the natural correlation
+            // id equivalent for this engine, per buildSignalKey()) rather
+            // than inventing a new scheme.
+            $aiAuditEvent = \App\Domain\AuditResearch\AuditEventRecorder::record(
+                eventType: 'future_trade_ai_gate_evaluated',
+                category: \App\Models\AuditEvent::CATEGORY_DECISION,
+                context: [
+                    'bot_type' => 'future_trade',
+                    'bot_instance_id' => $config->id,
+                    'environment' => $this->isLiveMode($config) ? 'live' : 'sandbox',
+                    'symbol' => strtoupper((string) ($signal['symbol'] ?? '')),
+                    'metadata' => [
+                        'ai_decision' => $aiResult['decision'],
+                        'allow' => $aiResult['allow'],
+                        'size_multiplier' => $aiResult['size_multiplier'],
+                        'ai_decision_id' => $aiResult['record']?->id,
+                    ],
+                ],
+                correlationId: $signalKey,
+                severity: $aiResult['allow'] ? \App\Models\AuditEvent::SEVERITY_INFO : \App\Models\AuditEvent::SEVERITY_MEDIUM,
+            );
+            \App\Domain\AuditResearch\RuleEvaluationRecorder::recordGeneric(
+                passedRules: $aiResult['allow'] ? [
+                    ['rule' => 'ai_confirmation_gate', 'detail' => (string) $aiResult['reason']],
+                ] : [],
+                failedRules: $aiResult['allow'] ? [] : [
+                    ['rule' => 'ai_confirmation_gate', 'detail' => (string) $aiResult['reason']],
+                ],
+                finalDecision: (string) $aiResult['decision'],
+                finalReason: (string) $aiResult['reason'],
+                diagnosisCategory: $aiResult['allow']
+                    ? \App\Domain\AuditResearch\RootCauseCategory::CORRECT_BEHAVIOR
+                    : \App\Domain\AuditResearch\RootCauseCategory::STRATEGY_RULE,
+                diagnosisConfidence: 'high',
+                expectedBehavior: 'AI gate may only confirm, resize down, or veto — never upsize or bypass a deterministic gate.',
+                actualBehavior: $aiResult['allow'] ? 'Confirmed/resized: entry allowed to proceed.' : 'Vetoed: entry blocked.',
+                auditEventId: $aiAuditEvent?->id,
+                correlationId: $signalKey,
+            );
+
             if (! $aiResult['allow']) {
                 $reason = 'ai_gate_' . strtolower((string) $aiResult['decision']);
                 $this->recordMissedTradeAudit($config, $signal, $dynamic, [$reason]);
@@ -3823,6 +3866,24 @@ class FutureTradeBotService
 
             $side = $signal['signal'] === 'BUY' ? 'LONG' : 'SHORT';
             $price = (float) $signal['price'];
+
+            // Audit Research instrumentation — order request. Additive only,
+            // never throws back into the trading path. Reuses $signalKey as
+            // the correlation_id.
+            \App\Domain\AuditResearch\AuditEventRecorder::record(
+                eventType: 'future_trade_order_request_submitted',
+                category: \App\Models\AuditEvent::CATEGORY_EXECUTION,
+                context: [
+                    'bot_type' => 'future_trade',
+                    'bot_instance_id' => $config->id,
+                    'environment' => 'sandbox',
+                    'symbol' => $symbolUpper,
+                    'market_price' => $price,
+                    'metadata' => ['side' => $side, 'mode' => 'PAPER'],
+                ],
+                correlationId: $signalKey,
+            );
+
             $tradeAmountUsdt = (float) ($settings['tradeAmountUsdt'] ?? 25);
             if (($settings['weakSetupAction'] ?? 'reduce_size') === 'reduce_size' && (bool) ($signal['fastTimeframeWeakSetup'] ?? false)) {
                 $tradeAmountUsdt *= 0.5;
@@ -3925,6 +3986,29 @@ class FutureTradeBotService
                     'signalKey' => $signalKey,
                     'logicalTradeId' => $logical->id,
                 ], $signal)
+            );
+
+            // Audit Research instrumentation — order result (paper fills are
+            // instant, mirroring RatioBotExecutionService's sandbox path).
+            // Additive only, never throws back into the trading path.
+            // Reuses $signalKey as the correlation_id.
+            \App\Domain\AuditResearch\AuditEventRecorder::record(
+                eventType: 'future_trade_order_result_received',
+                category: \App\Models\AuditEvent::CATEGORY_EXECUTION,
+                context: [
+                    'bot_type' => 'future_trade',
+                    'bot_instance_id' => $config->id,
+                    'environment' => 'sandbox',
+                    'symbol' => $symbolUpper,
+                    'market_price' => $price,
+                    'metadata' => [
+                        'side' => $side,
+                        'quantity' => $qty,
+                        'mode' => 'PAPER',
+                        'logical_trade_id' => $logical->id,
+                    ],
+                ],
+                correlationId: $signalKey,
             );
 
             return true;
@@ -4461,6 +4545,24 @@ class FutureTradeBotService
             'signalKey' => $signalKey,
             'transport' => (string) ($settings['orderTransport'] ?? config('future_trade.order_router.transport', 'rest')),
         ]);
+
+        // Audit Research instrumentation — order request. Additive only,
+        // alongside (not instead of) the existing FutureTradeAuditService
+        // order-request row above. Reuses $signalKey as the correlation_id.
+        \App\Domain\AuditResearch\AuditEventRecorder::record(
+            eventType: 'future_trade_order_request_submitted',
+            category: \App\Models\AuditEvent::CATEGORY_EXECUTION,
+            context: [
+                'bot_type' => 'future_trade',
+                'bot_instance_id' => $config->id,
+                'environment' => 'live',
+                'symbol' => $symbol,
+                'market_price' => $price,
+                'metadata' => ['side' => $side, 'quantity' => $qty, 'client_order_id' => $clientOrderId],
+            ],
+            correlationId: $signalKey,
+        );
+
         try {
             $routed = app(FutureTradeOrderRouter::class)->place($config, $client, $orderPayload, [
                 'intent' => 'entry',
@@ -4474,8 +4576,42 @@ class FutureTradeBotService
                 'trace_id' => $routed['trace_id'] ?? null,
             ];
             app(FutureTradeAuditService::class)->markOrderSuccess($orderAudit, $response);
+
+            // Audit Research instrumentation — order result (success).
+            // Additive only, alongside the existing FutureTradeAuditService
+            // markOrderSuccess() call above.
+            \App\Domain\AuditResearch\AuditEventRecorder::record(
+                eventType: 'future_trade_order_result_received',
+                category: \App\Models\AuditEvent::CATEGORY_EXECUTION,
+                context: [
+                    'bot_type' => 'future_trade',
+                    'bot_instance_id' => $config->id,
+                    'environment' => 'live',
+                    'symbol' => $symbol,
+                    'metadata' => ['status' => 'success', 'order_id' => $response['orderId'] ?? null],
+                ],
+                correlationId: $signalKey,
+            );
         } catch (Throwable $e) {
             app(FutureTradeAuditService::class)->markOrderFailed($orderAudit, $e);
+
+            // Audit Research instrumentation — order result (failure).
+            // Additive only, never changes the original exception, which is
+            // still rethrown unmodified right after this call.
+            \App\Domain\AuditResearch\AuditEventRecorder::record(
+                eventType: 'future_trade_order_result_received',
+                category: \App\Models\AuditEvent::CATEGORY_EXECUTION,
+                context: [
+                    'bot_type' => 'future_trade',
+                    'bot_instance_id' => $config->id,
+                    'environment' => 'live',
+                    'symbol' => $symbol,
+                    'metadata' => ['status' => 'failed', 'error' => $e->getMessage()],
+                ],
+                correlationId: $signalKey,
+                severity: \App\Models\AuditEvent::SEVERITY_HIGH,
+            );
+
             throw $e;
         }
         $markTiming('entryOrderPlacedMs');

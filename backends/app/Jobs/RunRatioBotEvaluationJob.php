@@ -125,6 +125,27 @@ class RunRatioBotEvaluationJob implements ShouldQueue, ShouldBeUnique
                 'manual' => $this->manualTrigger,
             ]);
 
+            // Audit Research instrumentation — market tick received. Additive
+            // only, log-and-continue on failure inside the recorder itself.
+            \App\Domain\AuditResearch\AuditEventRecorder::record(
+                eventType: 'market_tick_received',
+                category: \App\Models\AuditEvent::CATEGORY_MARKET,
+                context: [
+                    'bot_type' => 'ratio_bot',
+                    'bot_instance_id' => $config->id,
+                    'environment' => $config->execution_mode,
+                    'symbol' => $config->normalizedSymbol(),
+                    'market_price' => $pricePayload['price'],
+                    'latency_ms' => $pricePayload['latency_ms'] ?? null,
+                    'occurred_at' => $pricePayload['timestamp'] ?? now(),
+                    'metadata' => [
+                        'price_source' => $pricePayload['source'],
+                        'price_age_seconds' => $pricePayload['price_age_seconds'] ?? null,
+                        'manual_trigger' => $this->manualTrigger,
+                    ],
+                ],
+            );
+
             $stateService->clearTransientFeedBlock($config, [
                 'price_source' => $pricePayload['source'],
                 'price_age_seconds' => $pricePayload['price_age_seconds'] ?? null,
@@ -637,25 +658,44 @@ class RunRatioBotEvaluationJob implements ShouldQueue, ShouldBeUnique
             }
         }
 
+        $autoStartContext = [
+            'direction' => $direction,
+            'reason' => $reason,
+            'forecast_direction' => $forecastDirection,
+            'graph_direction' => $trendDirection,
+            'confidence' => $confidence,
+            'min_confidence' => $minConfidence,
+            'has_base' => $hasBase,
+            'has_quote' => $hasQuote,
+            'trend_scoring_mode' => $trendScoringMode,
+            'trend_score' => $trendScore,
+            'resolution' => $resolutionForLog,
+            'wallet_fallback' => $walletFallbackResult,
+        ];
+
         RatioBotEvent::create([
             'ratio_bot_config_id' => $config->id,
             'event_type' => $direction ? 'auto_start_direction_selected' : 'auto_start_direction_waiting',
-            'context' => [
-                'direction' => $direction,
-                'reason' => $reason,
-                'forecast_direction' => $forecastDirection,
-                'graph_direction' => $trendDirection,
-                'confidence' => $confidence,
-                'min_confidence' => $minConfidence,
-                'has_base' => $hasBase,
-                'has_quote' => $hasQuote,
-                'trend_scoring_mode' => $trendScoringMode,
-                'trend_score' => $trendScore,
-                'resolution' => $resolutionForLog,
-                'wallet_fallback' => $walletFallbackResult,
-            ],
+            'context' => $autoStartContext,
             'occurred_at' => now(),
         ]);
+
+        // Audit Research instrumentation — additive only, never throws back
+        // into the trading path. No RatioBotDecision is created on this
+        // path (pre-anchor posture choice), so there is no existing
+        // correlation_id to reuse here — correlation_id stays null.
+        $auditEvent = \App\Domain\AuditResearch\AuditEventRecorder::record(
+            eventType: $direction ? 'auto_start_direction_selected' : 'auto_start_direction_waiting',
+            category: \App\Models\AuditEvent::CATEGORY_DECISION,
+            context: [
+                'bot_type' => 'ratio_bot',
+                'bot_instance_id' => $config->id,
+                'environment' => $config->execution_mode,
+                'symbol' => $config->normalizedSymbol(),
+                'metadata' => $autoStartContext,
+            ],
+        );
+        \App\Domain\AuditResearch\RuleEvaluationRecorder::recordForAutoStartContext($autoStartContext, $auditEvent?->id);
 
         return $direction;
     }

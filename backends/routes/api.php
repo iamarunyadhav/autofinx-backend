@@ -38,6 +38,8 @@ use App\Http\Controllers\Api\LiveOrderController;
 use App\Http\Controllers\Api\LiveExecutionController;
 use App\Http\Controllers\Api\RoutingController;
 use App\Http\Controllers\Api\GuardrailsController;
+use App\Http\Controllers\Api\AuditResearchController;
+use App\Http\Controllers\Api\ServerConnectionController;
 use App\Http\Controllers\Api\PortfolioTargetsController;
 use App\Http\Controllers\Api\AssistantActionController;
 use App\Http\Controllers\Api\ArbitrageOpportunityController;
@@ -53,6 +55,9 @@ use App\Http\Controllers\Api\ProviderController;
 use App\Http\Controllers\Api\QuickTradeController;
 use App\Http\Controllers\Api\RobotSessionController;
 use App\Http\Controllers\Api\RatioBotController;
+use App\Http\Controllers\Api\ForexGridBotController;
+use App\Http\Controllers\Api\InstrumentController;
+use App\Http\Controllers\Api\PepperstoneBotController;
 use App\Http\Controllers\Api\Fast2XController;
 use App\Http\Controllers\Api\FutureTradeAiController;
 use App\Http\Controllers\Api\FutureTradeBotController;
@@ -470,6 +475,63 @@ Route::post('ratio-bots/{ratioBot}/diagnostics/fix', [RatioBotController::class,
         Route::get('ratio-bots/{ratioBot}/pending-approval', [RatioBotController::class, 'pendingApproval']);
         Route::post('ratio-bots/{ratioBot}/decisions/{decision}/approve', [RatioBotController::class, 'approveDecision'])->middleware('require.2fa');
         Route::post('ratio-bots/{ratioBot}/decisions/{decision}/reject', [RatioBotController::class, 'rejectDecision'])->middleware('require.2fa');
+
+        // ---- Audit Research (Ratio Bot observability) -------------------------
+        Route::get('workspaces/{workspace}/audit-research/sessions', [AuditResearchController::class, 'index']);
+        Route::post('workspaces/{workspace}/audit-research/sessions', [AuditResearchController::class, 'store']);
+        Route::get('workspaces/{workspace}/audit-research/incidents', [AuditResearchController::class, 'workspaceIncidents']);
+        Route::get('workspaces/{workspace}/audit-research/prediction-accuracy', [AuditResearchController::class, 'predictionAccuracy']);
+        Route::get('audit-research/sessions/{session}', [AuditResearchController::class, 'show']);
+        Route::post('audit-research/sessions/{session}/stop', [AuditResearchController::class, 'stop']);
+        Route::get('audit-research/sessions/{session}/events', [AuditResearchController::class, 'events']);
+        Route::get('audit-research/sessions/{session}/decisions', [AuditResearchController::class, 'decisions']);
+        Route::get('audit-research/sessions/{session}/incidents', [AuditResearchController::class, 'incidents']);
+        Route::get('audit-research/sessions/{session}/report', [AuditResearchController::class, 'report']);
+        Route::get('audit-research/sessions/{session}/export/csv', [AuditResearchController::class, 'exportCsv']);
+        Route::get('audit-research/sessions/{session}/export/json', [AuditResearchController::class, 'exportJson']);
+        Route::get('audit-research/sessions/{session}/export/markdown', [AuditResearchController::class, 'exportMarkdown']);
+        Route::get('audit-research/sessions/{session}/export/pdf', [AuditResearchController::class, 'exportPdf']);
+        Route::get('workspaces/{workspace}/audit-research/compare', [AuditResearchController::class, 'compare']);
+        Route::get('workspaces/{workspace}/audit-research/readiness', [AuditResearchController::class, 'readiness']);
+
+        // ---- Audit Research: server connections + diagnostics -----------------
+        Route::get('workspaces/{workspace}/server-connections', [ServerConnectionController::class, 'index']);
+        Route::post('workspaces/{workspace}/server-connections', [ServerConnectionController::class, 'store'])->middleware('throttle:20,1');
+        Route::get('server-connections/{connection}', [ServerConnectionController::class, 'show']);
+        Route::put('server-connections/{connection}', [ServerConnectionController::class, 'update'])->middleware('throttle:20,1');
+        Route::delete('server-connections/{connection}', [ServerConnectionController::class, 'destroy'])->middleware('throttle:20,1');
+        Route::post('server-connections/{connection}/test', [ServerConnectionController::class, 'test'])->middleware('throttle:20,1');
+        Route::post('server-connections/{connection}/run-check', [ServerConnectionController::class, 'runCheck'])->middleware('throttle:30,1');
+        Route::get('server-connections/{connection}/checks', [ServerConnectionController::class, 'checks']);
+
+        // ---- Forex Grid Bot (brand-new, fully independent of Ratio Bot) -----
+        Route::get('workspaces/{workspace}/forex-grid-bots', [ForexGridBotController::class, 'index']);
+        Route::post('workspaces/{workspace}/forex-grid-bots', [ForexGridBotController::class, 'store'])->middleware('require.2fa');
+        Route::get('forex-grid-bots/{forexGridBot}', [ForexGridBotController::class, 'show']);
+        Route::put('forex-grid-bots/{forexGridBot}', [ForexGridBotController::class, 'update'])->middleware('require.2fa');
+        Route::delete('forex-grid-bots/{forexGridBot}', [ForexGridBotController::class, 'destroy'])->middleware('require.2fa');
+        Route::post('forex-grid-bots/{forexGridBot}/start', [ForexGridBotController::class, 'start'])->middleware('require.2fa');
+        Route::post('forex-grid-bots/{forexGridBot}/pause', [ForexGridBotController::class, 'pause'])->middleware('require.2fa');
+        Route::post('forex-grid-bots/{forexGridBot}/stop', [ForexGridBotController::class, 'stop'])->middleware('require.2fa');
+        Route::post('forex-grid-bots/{forexGridBot}/kill-switch', [ForexGridBotController::class, 'killSwitch'])->middleware('require.2fa');
+        Route::get('forex-grid-bots/{forexGridBot}/levels', [ForexGridBotController::class, 'levels']);
+        Route::get('forex-grid-bots/{forexGridBot}/events', [ForexGridBotController::class, 'events']);
+
+        // ---- Pepperstone Metals & Energy Bot (brand-new, fully independent
+        // of Ratio Bot and Forex Grid) ----------------------------------------
+        Route::get('workspaces/{workspace}/pepperstone-bots', [PepperstoneBotController::class, 'index']);
+        Route::post('workspaces/{workspace}/pepperstone-bots', [PepperstoneBotController::class, 'store'])->middleware('require.2fa');
+        Route::get('pepperstone-bots/{pepperstoneBot}', [PepperstoneBotController::class, 'show']);
+        Route::put('pepperstone-bots/{pepperstoneBot}', [PepperstoneBotController::class, 'update'])->middleware('require.2fa');
+        Route::delete('pepperstone-bots/{pepperstoneBot}', [PepperstoneBotController::class, 'destroy'])->middleware('require.2fa');
+        Route::post('pepperstone-bots/{pepperstoneBot}/start', [PepperstoneBotController::class, 'start'])->middleware('require.2fa');
+        Route::post('pepperstone-bots/{pepperstoneBot}/pause', [PepperstoneBotController::class, 'pause'])->middleware('require.2fa');
+        Route::post('pepperstone-bots/{pepperstoneBot}/stop', [PepperstoneBotController::class, 'stop'])->middleware('require.2fa');
+        Route::post('pepperstone-bots/{pepperstoneBot}/kill-switch', [PepperstoneBotController::class, 'killSwitch'])->middleware('require.2fa');
+        Route::get('pepperstone-bots/{pepperstoneBot}/positions', [PepperstoneBotController::class, 'positions']);
+        Route::get('pepperstone-bots/{pepperstoneBot}/baskets', [PepperstoneBotController::class, 'baskets']);
+        Route::get('pepperstone-bots/{pepperstoneBot}/events', [PepperstoneBotController::class, 'events']);
+        Route::get('instruments', [InstrumentController::class, 'index']);
 
         // ---- Fast2X ---------------------------------------------------------
         Route::get('workspaces/{workspace}/fast2x/status', [Fast2XController::class, 'status']);

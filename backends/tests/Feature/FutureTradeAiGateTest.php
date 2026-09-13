@@ -153,6 +153,24 @@ test('ai gate CONFIRM executes the trade at full size and links the logical trad
     $settings = $config->fresh()->mergedSettings();
     $expectedQty = ((float) $settings['tradeAmountUsdt'] * (float) $settings['leverage']) / 2500.25;
     expect(abs((float) $logical->quantity - $expectedQty))->toBeLessThan(0.0001);
+
+    // Audit Research instrumentation — alongside (not instead of) the
+    // existing FutureTradeAiDecision row asserted above.
+    $auditEvent = \App\Models\AuditEvent::where('event_type', 'future_trade_ai_gate_evaluated')
+        ->where('bot_type', 'future_trade')
+        ->where('bot_instance_id', $config->id)
+        ->first();
+    expect($auditEvent)->not->toBeNull()
+        ->and($auditEvent->correlation_id)->toBe($decision->signal_key);
+
+    $snapshot = \App\Models\AuditDecisionSnapshot::where('correlation_id', $decision->signal_key)->first();
+    expect($snapshot)->not->toBeNull()
+        ->and($snapshot->final_decision)->toBe('CONFIRM');
+
+    $orderEvent = \App\Models\AuditEvent::where('event_type', 'future_trade_order_result_received')
+        ->where('correlation_id', $decision->signal_key)
+        ->first();
+    expect($orderEvent)->not->toBeNull();
 });
 
 test('ai gate VETO blocks the trade and records the decision', function () {
@@ -176,6 +194,13 @@ test('ai gate VETO blocks the trade and records the decision', function () {
         ->and((bool) $decision->executed)->toBeFalse()
         ->and($decision->risk_flags)->toContain('counter_htf_trend')
         ->and($config->logs()->where('event', 'AI_GATE_BLOCKED')->exists())->toBeTrue();
+
+    // Audit Research instrumentation — alongside (not instead of) the
+    // existing FutureTradeAiDecision row asserted above.
+    $snapshot = \App\Models\AuditDecisionSnapshot::where('correlation_id', $decision->signal_key)->first();
+    expect($snapshot)->not->toBeNull()
+        ->and($snapshot->final_decision)->toBe('VETO')
+        ->and(collect($snapshot->failed_rules)->pluck('rule'))->toContain('ai_confirmation_gate');
 });
 
 test('ai gate RESIZE halves the position size', function () {

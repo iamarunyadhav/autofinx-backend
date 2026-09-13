@@ -1711,6 +1711,34 @@ class RatioBotDecisionService
             'decided_at' => now(),
         ]);
 
+        // Audit Research instrumentation — additive only, never throws back
+        // into the trading path (both calls internally log-and-continue on
+        // failure). Reuses this decision's own correlation_id rather than
+        // inventing a second one. This single choke point covers every
+        // decision this service records (BUY/SELL/HOLD/BLOCK/PAUSE/COOLDOWN).
+        $auditEvent = \App\Domain\AuditResearch\AuditEventRecorder::record(
+            eventType: 'ratio_bot_decision_recorded',
+            category: \App\Models\AuditEvent::CATEGORY_DECISION,
+            context: [
+                'bot_type' => 'ratio_bot',
+                'bot_instance_id' => $config->id,
+                'environment' => $config->execution_mode,
+                'symbol' => $config->normalizedSymbol(),
+                'market_price' => $price,
+                'metadata' => [
+                    'decision' => $decision,
+                    'reason' => $reason,
+                    'ratio' => $ratio,
+                    'threshold' => $threshold,
+                ],
+            ],
+            correlationId: $correlationId,
+            severity: in_array($decision, [RatioBotDecision::DECISION_BLOCK, RatioBotDecision::DECISION_PAUSE], true)
+                ? \App\Models\AuditEvent::SEVERITY_MEDIUM
+                : \App\Models\AuditEvent::SEVERITY_INFO,
+        );
+        \App\Domain\AuditResearch\RuleEvaluationRecorder::recordForDecision($record, $auditEvent?->id);
+
         $preserveLastSeen = (bool) ($metadata['preserve_last_seen'] ?? false);
         $stateUpdates = [
             'last_evaluated_at' => now(),

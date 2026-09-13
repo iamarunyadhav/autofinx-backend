@@ -78,6 +78,31 @@ return [
         'mode_note' => 'sandbox — real API shape, no live account connected yet',
     ],
 
+    'pepperstone' => [
+        'key' => 'pepperstone',
+        'label' => 'Pepperstone',
+        'asset_class' => 'FOREX',
+        // Same status as 'oanda' above: no LiveTradeProviderInterface
+        // implementation yet -- TradingVenueClientFactory resolves this
+        // provider_key to PepperstoneBrokerAdapter for connection-test/bot-
+        // execution paths. Sandbox mode only until a real account exists
+        // (Phase 0) -- see PepperstoneBrokerAdapter's own docblock.
+        'provider_class' => null,
+        'live_supported' => false,
+        'default_market_type' => 'spot',
+        'supports_short' => true,
+        'requires_integration' => true,
+        'symbols' => [
+            ['symbol' => 'XAUUSD', 'display' => 'Gold / USD', 'asset_class' => 'METALS', 'payout_rate' => 0],
+            ['symbol' => 'XAGUSD', 'display' => 'Silver / USD', 'asset_class' => 'METALS', 'payout_rate' => 0],
+            ['symbol' => 'XPTUSD', 'display' => 'Platinum / USD', 'asset_class' => 'METALS', 'payout_rate' => 0],
+            ['symbol' => 'WTICOUSD', 'display' => 'Crude Oil', 'asset_class' => 'ENERGY', 'payout_rate' => 0],
+        ],
+        'timeframes' => ['5m', '15m', '30m', '1h', '4h', '1d'],
+        'durations' => [300, 900, 1800],
+        'mode_note' => 'sandbox — real API shape not yet confirmed, no live account connected yet',
+    ],
+
     'coinbase' => [
         'key' => 'coinbase',
         'label' => 'Coinbase',

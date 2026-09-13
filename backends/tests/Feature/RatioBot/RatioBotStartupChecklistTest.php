@@ -6,6 +6,7 @@ use App\Models\RatioBotConfig;
 use App\Models\RatioBotState;
 use App\Models\User;
 use App\Models\Workspace;
+use App\Models\WorkspaceMember;
 use App\Domain\Market\RealtimeMarketFeedService;
 use App\Domain\MarketData\MarketSnapshotService;
 use App\Domain\Ops\OperationalBreakerService;
@@ -27,6 +28,11 @@ class RatioBotStartupChecklistTest extends TestCase
         parent::setUp();
         $this->user = User::factory()->create(['two_factor_confirmed_at' => now()]);
         $this->workspace = Workspace::factory()->create();
+        WorkspaceMember::create([
+            'workspace_id' => $this->workspace->id,
+            'user_id' => $this->user->id,
+            'role' => 'owner',
+        ]);
         Queue::fake();
         $this->clearMarketRedis('BTCUSDT');
         $this->clearMarketRedis('ETHUSDT');

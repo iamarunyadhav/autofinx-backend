@@ -212,6 +212,96 @@ class Indicators
         return $adx;
     }
 
+    /**
+     * Additive sibling of adx() -- same exact smoothing math (deliberately
+     * NOT diverged, per this codebase's discipline), but also surfaces
+     * +DI/-DI, which adx() computes internally but never returns. adx()'s
+     * own signature/return type is untouched (8 existing consumers rely on
+     * its scalar-float return) -- this is a new, independent method.
+     *
+     * @return array{adx: float, plus_di: float, minus_di: float}|null
+     */
+    public static function adxWithDi(array $candles, int $period = 14): ?array
+    {
+        if ($period <= 0 || count($candles) < ($period * 2)) {
+            return null;
+        }
+
+        $trs = [];
+        $plusDm = [];
+        $minusDm = [];
+
+        for ($i = 1; $i < count($candles); $i++) {
+            $current = $candles[$i];
+            $previous = $candles[$i - 1];
+
+            $high = (float) ($current['high'] ?? 0);
+            $low = (float) ($current['low'] ?? 0);
+            $prevHigh = (float) ($previous['high'] ?? 0);
+            $prevLow = (float) ($previous['low'] ?? 0);
+            $prevClose = (float) ($previous['close'] ?? 0);
+
+            $upMove = $high - $prevHigh;
+            $downMove = $prevLow - $low;
+
+            $plusDm[] = ($upMove > $downMove && $upMove > 0) ? $upMove : 0.0;
+            $minusDm[] = ($downMove > $upMove && $downMove > 0) ? $downMove : 0.0;
+            $trs[] = max(
+                $high - $low,
+                abs($high - $prevClose),
+                abs($low - $prevClose),
+            );
+        }
+
+        if (count($trs) < $period) {
+            return null;
+        }
+
+        $atr = array_sum(array_slice($trs, 0, $period));
+        $plusDmSmooth = array_sum(array_slice($plusDm, 0, $period));
+        $minusDmSmooth = array_sum(array_slice($minusDm, 0, $period));
+        $dxValues = [];
+        $lastPlusDi = 0.0;
+        $lastMinusDi = 0.0;
+
+        for ($i = $period; $i < count($trs); $i++) {
+            $atr = $atr - ($atr / $period) + $trs[$i];
+            $plusDmSmooth = $plusDmSmooth - ($plusDmSmooth / $period) + $plusDm[$i];
+            $minusDmSmooth = $minusDmSmooth - ($minusDmSmooth / $period) + $minusDm[$i];
+
+            if ($atr <= 0) {
+                continue;
+            }
+
+            $plusDi = ($plusDmSmooth / $atr) * 100;
+            $minusDi = ($minusDmSmooth / $atr) * 100;
+            $lastPlusDi = $plusDi;
+            $lastMinusDi = $minusDi;
+            $denominator = $plusDi + $minusDi;
+
+            if ($denominator <= 0) {
+                continue;
+            }
+
+            $dxValues[] = (abs($plusDi - $minusDi) / $denominator) * 100;
+        }
+
+        if (count($dxValues) < $period) {
+            return null;
+        }
+
+        $adx = array_sum(array_slice($dxValues, 0, $period)) / $period;
+        for ($i = $period; $i < count($dxValues); $i++) {
+            $adx = (($adx * ($period - 1)) + $dxValues[$i]) / $period;
+        }
+
+        return [
+            'adx' => $adx,
+            'plus_di' => $lastPlusDi,
+            'minus_di' => $lastMinusDi,
+        ];
+    }
+
     public static function cci(array $candles, int $period = 20): ?float
     {
         if ($period <= 0 || count($candles) < $period) {

@@ -13,6 +13,7 @@ use App\Models\RatioBotState;
 use App\Models\Symbol;
 use App\Models\User;
 use App\Models\Workspace;
+use App\Models\WorkspaceMember;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Str;
@@ -30,6 +31,11 @@ class RatioBotLiquidationGuardTest extends TestCase
         parent::setUp();
         $this->user = User::factory()->create(['two_factor_confirmed_at' => now()]);
         $this->workspace = Workspace::factory()->create();
+        WorkspaceMember::create([
+            'workspace_id' => $this->workspace->id,
+            'user_id' => $this->user->id,
+            'role' => 'owner',
+        ]);
         Queue::fake();
     }
 
@@ -103,6 +109,17 @@ class RatioBotLiquidationGuardTest extends TestCase
         $this->assertDatabaseHas('ratio_bot_events', [
             'ratio_bot_config_id' => $config->id,
             'event_type' => RatioBotEvent::EVENT_LIQUIDATION_GUARD_FORCE_EXIT,
+        ]);
+
+        $this->assertDatabaseHas('audit_events', [
+            'event_type' => 'ratio_bot_liquidation_guard_force_exit',
+            'bot_type' => 'ratio_bot',
+            'bot_instance_id' => $config->id,
+            'correlation_id' => $result['decision_record']->correlation_id,
+        ]);
+        $this->assertDatabaseHas('audit_decision_snapshots', [
+            'ratio_bot_decision_id' => $result['decision_record']->id,
+            'correlation_id' => $result['decision_record']->correlation_id,
         ]);
     }
 

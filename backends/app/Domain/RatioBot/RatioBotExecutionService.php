@@ -111,6 +111,26 @@ class RatioBotExecutionService
             'execution_mode' => $config->execution_mode,
         ]);
 
+        // Audit Research instrumentation — order request. Additive only,
+        // never throws back into the trading path.
+        \App\Domain\AuditResearch\AuditEventRecorder::record(
+            eventType: 'order_request_submitted',
+            category: \App\Models\AuditEvent::CATEGORY_EXECUTION,
+            context: [
+                'bot_type' => 'ratio_bot',
+                'bot_instance_id' => $config->id,
+                'environment' => $config->execution_mode,
+                'symbol' => $symbol,
+                'market_price' => (float) $decision->evaluated_price,
+                'metadata' => [
+                    'side' => $side,
+                    'qty' => $qty,
+                    'client_order_id' => $clientOrderId,
+                ],
+            ],
+            correlationId: $decision->correlation_id,
+        );
+
         if ($config->isSandbox()) {
             $this->simulateSandboxExecution($config, $decision, $side, (float) $decision->evaluated_price, $qty, $clientOrderId);
             return;
@@ -358,6 +378,31 @@ class RatioBotExecutionService
         string $clientOrderId,
     ): void {
         $status = strtoupper((string) $order->status);
+
+        // Audit Research instrumentation — order result. Additive only,
+        // never throws back into the trading path.
+        \App\Domain\AuditResearch\AuditEventRecorder::record(
+            eventType: 'order_result_received',
+            category: \App\Models\AuditEvent::CATEGORY_EXECUTION,
+            context: [
+                'bot_type' => 'ratio_bot',
+                'bot_instance_id' => $config->id,
+                'environment' => $config->execution_mode,
+                'symbol' => $config->normalizedSymbol(),
+                'metadata' => [
+                    'side' => $side,
+                    'status' => $status,
+                    'order_id' => $order->id,
+                    'exchange_order_id' => $order->exchange_order_id,
+                    'client_order_id' => $clientOrderId,
+                ],
+            ],
+            correlationId: $decision->correlation_id,
+            severity: in_array($status, ['FILLED', 'PARTIAL'], true)
+                ? \App\Models\AuditEvent::SEVERITY_INFO
+                : \App\Models\AuditEvent::SEVERITY_MEDIUM,
+        );
+
         if (in_array($status, ['FILLED', 'PARTIAL'], true)) {
             $executedPrice = $this->avgFillPrice($order, (float) $decision->evaluated_price);
             $executedQty = $this->resolveExecutedQty($order, (float) $order->quantity);
@@ -605,6 +650,29 @@ class RatioBotExecutionService
         string $clientOrderId,
     ): void {
         $fakeOrderId = 'SANDBOX-' . strtoupper(Str::random(12));
+
+        // Audit Research instrumentation — order result (sandbox fill is
+        // real code running against a simulated exchange, not fabricated
+        // data). Additive only, never throws back into the trading path.
+        \App\Domain\AuditResearch\AuditEventRecorder::record(
+            eventType: 'order_result_received',
+            category: \App\Models\AuditEvent::CATEGORY_EXECUTION,
+            context: [
+                'bot_type' => 'ratio_bot',
+                'bot_instance_id' => $config->id,
+                'environment' => $config->execution_mode,
+                'symbol' => $config->normalizedSymbol(),
+                'market_price' => $price,
+                'metadata' => [
+                    'side' => $side,
+                    'status' => 'FILLED',
+                    'order_id' => $fakeOrderId,
+                    'client_order_id' => $clientOrderId,
+                    'sandbox' => true,
+                ],
+            ],
+            correlationId: $decision->correlation_id,
+        );
 
         if ($side === RatioBotDecision::DECISION_BUY) {
             $this->stateService->onBuyFilled($config, $decision, $price, $qty, $fakeOrderId, $clientOrderId);

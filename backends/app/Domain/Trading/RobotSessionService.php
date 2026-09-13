@@ -669,6 +669,38 @@ class RobotSessionService
                     ],
                 ]);
 
+                // Audit Research instrumentation — additive only, alongside
+                // (not instead of) the engine-specific RobotTradeAudit row
+                // above. Reuses the session's own idempotency-key format as
+                // the correlation_id rather than inventing a new scheme.
+                $robotCorrelationId = $this->robotSessionIdempotencyKey($session->id, 'NEUTRAL', 30);
+                $auditEvent = \App\Domain\AuditResearch\AuditEventRecorder::record(
+                    eventType: 'robot_trade_volatility_block',
+                    category: \App\Models\AuditEvent::CATEGORY_RISK,
+                    context: [
+                        'bot_type' => 'robot_trade',
+                        'bot_instance_id' => $session->id,
+                        'environment' => $session->mode,
+                        'symbol' => $session->symbol,
+                        'metadata' => ['reason' => $volatility['reason'], 'volatility' => $volatility],
+                    ],
+                    correlationId: $robotCorrelationId,
+                );
+                \App\Domain\AuditResearch\RuleEvaluationRecorder::recordGeneric(
+                    passedRules: [],
+                    failedRules: [
+                        ['rule' => 'volatility_gate', 'detail' => (string) $volatility['reason']],
+                    ],
+                    finalDecision: 'HOLD',
+                    finalReason: (string) $volatility['reason'],
+                    diagnosisCategory: \App\Domain\AuditResearch\RootCauseCategory::STRATEGY_RULE,
+                    diagnosisConfidence: 'high',
+                    expectedBehavior: 'No new entry while the volatility gate is blocking new entries.',
+                    actualBehavior: 'Held — volatility gate fired as configured.',
+                    auditEventId: $auditEvent?->id,
+                    correlationId: $robotCorrelationId,
+                );
+
                 return ['session_id' => $session->id, 'status' => 'volatility_block', 'action' => 'skipped', 'reason' => $volatility['reason']];
             }
         }
@@ -677,6 +709,49 @@ class RobotSessionService
         $latest = $candles[array_key_last($candles)];
         $closePrice = (float) ($latest['close'] ?? 0);
         app(FutureTradeAuditService::class)->recordRobotDecision($session, $candles, $decision);
+
+        // Audit Research instrumentation — additive only, alongside (not
+        // instead of) the engine-specific RobotTradeAudit row above. Reuses
+        // the session's own idempotency-key format as the correlation_id
+        // rather than inventing a new scheme.
+        $decisionAction = (string) ($decision['action'] ?? 'HOLD');
+        $robotDecisionCorrelationId = $this->robotSessionIdempotencyKey($session->id, $decisionAction === 'HOLD' ? 'NEUTRAL' : $decisionAction, 30);
+        $isActionable = in_array($decisionAction, ['BUY', 'SELL', 'CLOSE'], true);
+        $decisionAuditEvent = \App\Domain\AuditResearch\AuditEventRecorder::record(
+            eventType: 'robot_trade_decision_recorded',
+            category: \App\Models\AuditEvent::CATEGORY_DECISION,
+            context: [
+                'bot_type' => 'robot_trade',
+                'bot_instance_id' => $session->id,
+                'environment' => $session->mode,
+                'symbol' => $session->symbol,
+                'market_price' => $closePrice,
+                'metadata' => [
+                    'action' => $decisionAction,
+                    'reason' => $decision['reason'] ?? null,
+                    'confidence' => $decision['confidence'] ?? null,
+                ],
+            ],
+            correlationId: $robotDecisionCorrelationId,
+        );
+        \App\Domain\AuditResearch\RuleEvaluationRecorder::recordGeneric(
+            passedRules: $isActionable ? [
+                ['rule' => 'candle_direction_signal', 'detail' => (string) ($decision['reason'] ?? $decisionAction)],
+            ] : [],
+            failedRules: $isActionable ? [] : [
+                ['rule' => 'no_actionable_signal', 'detail' => (string) ($decision['reason'] ?? 'no actionable signal')],
+            ],
+            finalDecision: $decisionAction,
+            finalReason: (string) ($decision['reason'] ?? ''),
+            diagnosisCategory: \App\Domain\AuditResearch\RootCauseCategory::CORRECT_BEHAVIOR,
+            diagnosisConfidence: 'high',
+            expectedBehavior: $isActionable
+                ? 'Act (' . $decisionAction . ') once the candle-direction engine confirms a signal.'
+                : 'Hold until the candle-direction engine confirms an actionable signal.',
+            actualBehavior: $isActionable ? 'Acted: ' . $decisionAction : 'Held — no actionable signal yet.',
+            auditEventId: $decisionAuditEvent?->id,
+            correlationId: $robotDecisionCorrelationId,
+        );
 
         $totalLossLimit = $session->loss_limit !== null
             ? abs((float) $session->loss_limit)

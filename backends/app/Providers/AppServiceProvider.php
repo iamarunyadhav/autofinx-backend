@@ -11,6 +11,8 @@ use App\Domain\Execution\Adapters\CoinbaseAdapter;
 use App\Domain\Ops\SafeLiveGate;
 use App\Domain\RatioBot\Contracts\AnchorCandidateProviderInterface;
 use App\Domain\RatioBot\NullAnchorCandidateProvider;
+use App\Domain\AuditResearch\ServerDiagnostics\SshExecutor;
+use App\Domain\AuditResearch\ServerDiagnostics\PhpseclibSshExecutor;
 
 class AppServiceProvider extends ServiceProvider
 {
@@ -34,6 +36,13 @@ class AppServiceProvider extends ServiceProvider
         // provider so Ratio Bot V2 recovery review works today, safely
         // falling back to CONTINUE_WAIT until a real implementation exists.
         $this->app->bind(AnchorCandidateProviderInterface::class, NullAnchorCandidateProvider::class);
+
+        // Real transport for App\Domain\AuditResearch\ServerDiagnostics --
+        // phpseclib/phpseclib installed successfully in this environment
+        // (composer.lock), so the live (non-sandbox) SSH path is real, not a
+        // stub. Sandbox-mode connections never reach this class at all (see
+        // ServerDiagnosticsService::isSandbox()).
+        $this->app->bind(SshExecutor::class, PhpseclibSshExecutor::class);
     }
 
     /**

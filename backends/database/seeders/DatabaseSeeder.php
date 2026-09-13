@@ -268,5 +268,7 @@ class DatabaseSeeder extends Seeder
                 'updated_by' => $user->id,
             ]
         );
+
+        $this->call(PepperstoneInstrumentSeeder::class);
     }
 }

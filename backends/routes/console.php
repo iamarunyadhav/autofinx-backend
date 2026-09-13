@@ -176,6 +176,18 @@ if ($schedulerEnabled && (bool) config('autofinx.scheduler.ratio_bots', true)) {
         ->after(fn () => $markRunEnd('ratio-bots:reconcile'));
 }
 
+// Forex Grid (brand-new, fully independent module) -- REST-polled (OANDA
+// has no websocket driver here, unlike Ratio Bot's WS-primary path), so this
+// is the PRIMARY evaluation driver, not just a safety net.
+if ($schedulerEnabled && (bool) config('autofinx.scheduler.forex_grid_bots', true)) {
+    Schedule::command('forex-grid-bots:evaluate')
+        ->everyMinute()
+        ->withoutOverlapping()
+        ->runInBackground()
+        ->before(fn () => $markRunStart('forex-grid-bots:evaluate'))
+        ->after(fn () => $markRunEnd('forex-grid-bots:evaluate'));
+}
+
 // Multi-Window Forecast Engine Part C -- a once-daily walk-forward backtest,
 // independently toggleable from the per-minute ratio_bots jobs above since
 // it's a read-only analysis job, not part of the live trading loop.

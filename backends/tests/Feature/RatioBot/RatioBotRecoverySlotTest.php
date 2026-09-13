@@ -8,6 +8,7 @@ use App\Models\RatioBotEvent;
 use App\Models\RatioBotState;
 use App\Models\User;
 use App\Models\Workspace;
+use App\Models\WorkspaceMember;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
 
@@ -26,6 +27,11 @@ class RatioBotRecoverySlotTest extends TestCase
             'two_factor_confirmed_at' => now(),
         ]);
         $this->workspace = Workspace::factory()->create();
+        WorkspaceMember::create([
+            'workspace_id' => $this->workspace->id,
+            'user_id' => $this->user->id,
+            'role' => 'owner',
+        ]);
     }
 
     /** @test */

@@ -40,6 +40,10 @@ class TradingVenueClientFactory
             return $this->makeOandaClient($bot->connection);
         }
 
+        if ($provider === 'pepperstone') {
+            return $this->makePepperstoneClient($bot->connection);
+        }
+
         throw new RuntimeException("Unsupported trading provider: {$provider}");
     }
 
@@ -64,6 +68,10 @@ class TradingVenueClientFactory
             return $this->makeOandaClient($connection);
         }
 
+        if ($provider === 'pepperstone') {
+            return $this->makePepperstoneClient($connection);
+        }
+
         throw new RuntimeException("Unsupported provider: {$provider}");
     }
 
@@ -80,6 +88,10 @@ class TradingVenueClientFactory
 
         if ($provider === 'oanda') {
             return $this->makeOandaClientFromIntegration($integration);
+        }
+
+        if ($provider === 'pepperstone') {
+            return $this->makePepperstoneClientFromIntegration($integration);
         }
 
         throw new RuntimeException("Unsupported integration provider: {$provider}");
@@ -156,6 +168,40 @@ class TradingVenueClientFactory
             apiKey: $apiKey,
             accountId: $accountId,
             mode: (string) config('services.oanda.mode', 'sandbox'),
+        );
+    }
+
+    private function makePepperstoneClientFromIntegration(Integration $integration): PepperstoneBrokerAdapter
+    {
+        $secrets = $this->integrations->decryptSecrets($integration->secrets_encrypted);
+
+        return $this->makePepperstoneClient(null, [
+            'api_key' => (string) ($secrets['api_key'] ?? ''),
+            'account_id' => (string) ($secrets['account_id'] ?? ''),
+        ]);
+    }
+
+    private function makePepperstoneClient(?ExchangeConnection $connection = null, ?array $secretsOverride = null): PepperstoneBrokerAdapter
+    {
+        $apiUrl = (string) config('services.pepperstone.api_url', '');
+        $apiKey = (string) config('services.pepperstone.api_key', '');
+        $accountId = (string) config('services.pepperstone.account_id', '');
+
+        if ($connection) {
+            $apiKey = (string) ($this->vault->decrypt($connection->api_key_encrypted) ?: $apiKey);
+            $accountId = (string) ($this->vault->decrypt($connection->api_secret_encrypted) ?: $accountId);
+        }
+
+        if ($secretsOverride) {
+            $apiKey = $secretsOverride['api_key'] !== '' ? $secretsOverride['api_key'] : $apiKey;
+            $accountId = $secretsOverride['account_id'] !== '' ? $secretsOverride['account_id'] : $accountId;
+        }
+
+        return new PepperstoneBrokerAdapter(
+            apiUrl: $apiUrl,
+            apiKey: $apiKey,
+            accountId: $accountId,
+            mode: (string) config('services.pepperstone.mode', 'sandbox'),
         );
     }
 }

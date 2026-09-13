@@ -11,6 +11,7 @@ use App\Models\RatioBotLot;
 use App\Models\RatioBotState;
 use App\Models\User;
 use App\Models\Workspace;
+use App\Models\WorkspaceMember;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Queue;
 use ReflectionMethod;
@@ -107,6 +108,11 @@ class RatioBotSeedPositionModeTest extends TestCase
     public function test_seed_position_pct_above_fifty_is_rejected_at_the_api_validation_layer(): void
     {
         $user = User::factory()->create(['two_factor_confirmed_at' => now()]);
+        WorkspaceMember::create([
+            'workspace_id' => $this->workspace->id,
+            'user_id' => $user->id,
+            'role' => 'owner',
+        ]);
         Queue::fake();
 
         $response = $this->actingAs($user)
@@ -125,6 +131,11 @@ class RatioBotSeedPositionModeTest extends TestCase
     public function test_seed_position_pct_is_required_when_starting_entry_is_seed_position(): void
     {
         $user = User::factory()->create(['two_factor_confirmed_at' => now()]);
+        WorkspaceMember::create([
+            'workspace_id' => $this->workspace->id,
+            'user_id' => $user->id,
+            'role' => 'owner',
+        ]);
         Queue::fake();
 
         $response = $this->actingAs($user)

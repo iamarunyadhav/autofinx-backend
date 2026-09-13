@@ -285,6 +285,29 @@ class RatioBotRealtimeEngine
             'occurred_at' => now(),
         ]);
 
+        // Audit Research instrumentation — additive only, never throws back
+        // into the trading path. Reuses this decision's own correlation_id
+        // rather than inventing a second one.
+        $auditEvent = \App\Domain\AuditResearch\AuditEventRecorder::record(
+            eventType: 'ratio_bot_liquidation_guard_force_exit',
+            category: \App\Models\AuditEvent::CATEGORY_RISK,
+            context: [
+                'bot_type' => 'ratio_bot',
+                'bot_instance_id' => $config->id,
+                'environment' => $config->execution_mode,
+                'symbol' => $config->normalizedSymbol(),
+                'market_price' => $currentPrice,
+                'metadata' => [
+                    'decision' => $decision->decision,
+                    'reason' => $decision->reason,
+                    'liquidation_guard' => $guard,
+                ],
+            ],
+            correlationId: $decision->correlation_id,
+            severity: \App\Models\AuditEvent::SEVERITY_HIGH,
+        );
+        \App\Domain\AuditResearch\RuleEvaluationRecorder::recordForDecision($decision, $auditEvent?->id);
+
         Log::warning('[RatioBotEngine] Liquidation guard forcing protective exit', [
             'config_id' => $config->id,
             'symbol' => $config->normalizedSymbol(),
@@ -379,6 +402,29 @@ class RatioBotRealtimeEngine
             ],
             'decided_at' => now(),
         ]);
+
+        // Audit Research instrumentation — additive only, never throws back
+        // into the trading path. Reuses this decision's own correlation_id
+        // rather than inventing a second one.
+        $auditEvent = \App\Domain\AuditResearch\AuditEventRecorder::record(
+            eventType: 'ratio_bot_futures_recovery_topup',
+            category: \App\Models\AuditEvent::CATEGORY_DECISION,
+            context: [
+                'bot_type' => 'ratio_bot',
+                'bot_instance_id' => $config->id,
+                'environment' => $config->execution_mode,
+                'symbol' => $config->normalizedSymbol(),
+                'market_price' => $currentPrice,
+                'metadata' => [
+                    'decision' => $decision->decision,
+                    'reason' => $decision->reason,
+                    'futures_recovery' => $review,
+                ],
+            ],
+            correlationId: $decision->correlation_id,
+            severity: \App\Models\AuditEvent::SEVERITY_MEDIUM,
+        );
+        \App\Domain\AuditResearch\RuleEvaluationRecorder::recordForDecision($decision, $auditEvent?->id);
 
         // Same risk gate every other entry goes through (kill_switch,
         // cooldown, stale_feed, indicator confirmation, this bot's own
@@ -476,6 +522,30 @@ class RatioBotRealtimeEngine
             'context' => $brainResult + ['decision_id' => (string) $decision->id],
             'occurred_at' => now(),
         ]);
+
+        // Audit Research instrumentation — additive only, never throws back
+        // into the trading path. Reuses this decision's own correlation_id
+        // rather than inventing a second one.
+        $auditEvent = \App\Domain\AuditResearch\AuditEventRecorder::record(
+            eventType: 'ratio_bot_controlled_loss_exit',
+            category: \App\Models\AuditEvent::CATEGORY_RISK,
+            context: [
+                'bot_type' => 'ratio_bot',
+                'bot_instance_id' => $config->id,
+                'environment' => $config->execution_mode,
+                'symbol' => $config->normalizedSymbol(),
+                'market_price' => $currentPrice,
+                'metadata' => [
+                    'decision' => $decision->decision,
+                    'reason' => $decision->reason,
+                    'sell_quantity' => $sellQuantity,
+                    'ratio_brain' => $brainResult,
+                ],
+            ],
+            correlationId: $decision->correlation_id,
+            severity: \App\Models\AuditEvent::SEVERITY_HIGH,
+        );
+        \App\Domain\AuditResearch\RuleEvaluationRecorder::recordForDecision($decision, $auditEvent?->id);
 
         Log::warning('[RatioBotEngine] RatioBrain executing a controlled loss exit', [
             'config_id' => $config->id,
