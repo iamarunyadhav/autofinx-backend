@@ -2,27 +2,99 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Domain\Trading\LiveWalletService;
 use App\Domain\Trading\Providers\LiveTradeProviderRegistry;
 use App\Domain\Trading\TradingIntegrationResolver;
 use App\Domain\Trading\TradingModuleSettingsService;
 use App\Http\Controllers\Controller;
+use App\Models\Integration;
 use App\Models\Payment;
 use App\Models\Setting;
 use App\Models\WalletAccount;
 use App\Models\WalletLedgerEntry;
 use App\Models\WithdrawalRequest;
 use App\Support\PaymentGatewayService;
+use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
 class LiveWalletController extends Controller
 {
-    public function balances(string $workspaceId)
-    {
+    /**
+     * Minimum time between live provider balance refreshes for a single
+     * wallet account. The frontend's balances poll (useBalances()) hits this
+     * endpoint every 10s; a 5s floor keeps the number genuinely close to
+     * live (never more than one missed poll stale) while capping live
+     * exchange API calls to roughly one per account per two polls, even
+     * across rapid page loads / tab switches / multiple open tabs.
+     */
+    private const PROVIDER_REFRESH_MIN_INTERVAL_SECONDS = 5;
+
+    public function balances(
+        string $workspaceId,
+        LiveWalletService $liveWallet,
+        TradingModuleSettingsService $settings,
+        TradingIntegrationResolver $integrations,
+    ) {
         $accounts = WalletAccount::where('workspace_id', $workspaceId)
             ->orderBy('currency')
             ->get();
+
+        $accounts->each(function (WalletAccount $account) use ($workspaceId, $liveWallet, $settings, $integrations) {
+            $integrationId = (string) (($account->metadata ?? [])['integration_id'] ?? '');
+
+            $lastSyncAt = (($account->metadata ?? [])['last_provider_sync_at']) ?? null;
+            if ($lastSyncAt) {
+                try {
+                    if (Carbon::parse($lastSyncAt)->gt(now()->subSeconds(self::PROVIDER_REFRESH_MIN_INTERVAL_SECONDS))) {
+                        return;
+                    }
+                } catch (\Throwable $e) {
+                    // Unparseable timestamp — fall through and refresh.
+                }
+            }
+
+            try {
+                $integration = null;
+
+                if ($integrationId !== '') {
+                    $integration = Integration::where('workspace_id', $workspaceId)
+                        ->whereKey($integrationId)
+                        ->first();
+                }
+
+                if (! $integration) {
+                    // No integration tagged on this account yet (e.g. the
+                    // account was created before any live trade bootstrapped
+                    // it — this is exactly the "wallet still shows old data"
+                    // case: the metadata-tag path above never fires because
+                    // there was never a tag to find). Fall back to the SAME
+                    // workspace-active-integration resolution already proven
+                    // by exchangeBalance() below — only when the workspace is
+                    // actually in live mode; a paper-mode workspace has no
+                    // real integration to resolve, and that's correct, not a
+                    // bug.
+                    $state = $settings->tradingState($workspaceId);
+                    if (($state['mode'] ?? 'paper') !== 'live') {
+                        return;
+                    }
+
+                    $provider = (string) ($state['preferred_provider'] ?? 'binance');
+                    $integration = $integrations->resolve($workspaceId, $provider, $state['preferred_integration_id'] ?? null);
+                }
+
+                $refreshed = $liveWallet->refreshProviderSnapshot($account, $integration);
+                $account->setRawAttributes($refreshed->getAttributes(), true);
+            } catch (\Throwable $e) {
+                Log::warning('Live wallet balance refresh failed; returning last-known DB values.', [
+                    'workspace_id' => $workspaceId,
+                    'wallet_account_id' => $account->id,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        });
 
         return response()->json($accounts);
     }
