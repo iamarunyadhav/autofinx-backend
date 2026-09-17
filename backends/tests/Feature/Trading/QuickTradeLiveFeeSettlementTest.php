@@ -139,6 +139,26 @@ function placeLiveEthQuickTrade(string $workspaceId, string $integrationId, stri
     ], $userId);
 }
 
+test('malformed funding and a missing exit fee preserve the verified entry fee', function () {
+    [$user, $workspace, $integration] = liveQuickTradeWorkspace();
+    fakeBinanceLive(function (string $url) {
+        if (str_contains($url, '/fapi/v1/income')) {
+            return Http::response([['unexpected' => 'payload']], 200);
+        }
+        if (str_contains($url, '/fapi/v1/userTrades')) {
+            return Http::response(fakeQueryParam($url, 'orderId') === '9001'
+                ? [['commission' => '0.03', 'commissionAsset' => 'USDT']]
+                : [], 200);
+        }
+        return null;
+    });
+    $trade = placeLiveEthQuickTrade($workspace->id, $integration->id, $user->id);
+    $settled = app(QuickTradeService::class)->settleTrade($trade->fresh());
+    expect($settled->fee_source)->toBe('partial');
+    expect($settled->funding_fee_actual)->toBeNull();
+    expect((float) $settled->fees_total)->toEqualWithDelta(0.04005, 0.00000001);
+});
+
 test('a live settlement with real commission and funding fee lookups uses real values and marks fee_source real', function () {
     [$user, $workspace, $integration] = liveQuickTradeWorkspace();
 

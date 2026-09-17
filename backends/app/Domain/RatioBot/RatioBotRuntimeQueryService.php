@@ -227,7 +227,7 @@ class RatioBotRuntimeQueryService
             'realized_pnl' => $realizedPnl,
             'estimated_slippage_cost' => round($estimatedSlippageCost, 8),
             'total_fees' => round($totalFees, 8),
-            'net_realized_pnl' => round($realizedPnl - $totalFees - $estimatedSlippageCost, 8),
+            'net_realized_pnl' => app(\App\Domain\Trading\ExchangeExecutionCostReconciliationService::class)->netPnl($realizedPnl, $totalFees),
         ];
     }
 

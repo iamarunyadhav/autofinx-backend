@@ -345,12 +345,15 @@ class BinanceTimedFuturesProvider implements LiveTradeProviderInterface
         $realizedPnl = 0.0;
 
         foreach ($rows as $row) {
-            if (! is_array($row)) {
+            if (! is_array($row)
+                || ! isset($row['commission'], $row['commissionAsset'])
+                || ! is_numeric($row['commission'])
+                || ! is_finite((float) $row['commission'])) {
                 return null;
             }
 
             $asset = strtoupper((string) ($row['commissionAsset'] ?? ''));
-            if ($asset !== '' && $asset !== $expectedQuoteAsset) {
+            if ($asset !== $expectedQuoteAsset) {
                 Log::warning('binance_futures_real_fee_unexpected_asset', [
                     'symbol' => $symbol,
                     'order_id' => $orderId,
@@ -422,7 +425,22 @@ class BinanceTimedFuturesProvider implements LiveTradeProviderInterface
             return null;
         }
 
-        return round($rows->sum(fn ($row) => is_array($row) ? (float) ($row['income'] ?? 0) : 0.0), 8);
+        // Unknown/malformed data must never masquerade as verified zero cost.
+        // A full page may be truncated; leave the result unresolved in that case.
+        if ($rows->count() >= 1000) {
+            return null;
+        }
+        foreach ($rows as $row) {
+            if (! is_array($row) || ! isset($row['income'], $row['asset'], $row['incomeType'], $row['symbol'])
+                || ! is_numeric($row['income']) || ! is_finite((float) $row['income'])
+                || strtoupper((string) $row['asset']) !== 'USDT'
+                || $row['incomeType'] !== 'FUNDING_FEE'
+                || strtoupper((string) $row['symbol']) !== strtoupper($symbol)) {
+                return null;
+            }
+        }
+
+        return round($rows->sum(fn ($row) => (float) $row['income']), 8);
     }
 
     private function takerFeeRate(Integration $integration): float

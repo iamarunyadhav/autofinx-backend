@@ -874,20 +874,9 @@ class QuickTradeService
             }
         }
 
-        $commissionReal = $entryFeeActual !== null && $exitFeeActual !== null;
-        $fundingReal = $fundingFeeActual !== null;
-
-        $entryFee = $commissionReal ? $entryFeeActual : $entryFeeEstimate;
-        $exitFee = $commissionReal ? $exitFeeActual : $exitFeeEstimate;
-        $fundingFee = $fundingReal ? $fundingFeeActual : 0.0;
-
-        $feeSource = match (true) {
-            $commissionReal && $fundingReal => 'real',
-            $commissionReal || $fundingReal => 'partial',
-            default => 'estimated',
-        };
-
-        return [$entryFee, $exitFee, $fundingFee, $entryFeeActual, $exitFeeActual, $fundingFeeActual, $feeSource];
+        return app(ExchangeExecutionCostReconciliationService::class)->resolveFees(
+            $entryFeeActual, $exitFeeActual, $fundingFeeActual, $entryFeeEstimate, $exitFeeEstimate,
+        );
     }
 
     private function settleLiveTrade(QuickTrade $trade): QuickTrade
@@ -914,7 +903,7 @@ class QuickTradeService
             $this->reconcileLiveFees($trade, $integration, $execution, $entryFeeEstimate, $exitFeeEstimate);
 
         $feesTotal = round($entryFee + $exitFee + $fundingFee, 8);
-        $profitLoss = round($grossProfitLoss - $feesTotal, 8);
+        $profitLoss = app(ExchangeExecutionCostReconciliationService::class)->netPnl($grossProfitLoss, $feesTotal);
         $result = $this->liveResultForPnl($trade, $profitLoss);
         $traceId = (string) Str::uuid();
 
