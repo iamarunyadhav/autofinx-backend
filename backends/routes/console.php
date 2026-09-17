@@ -174,6 +174,13 @@ if ($schedulerEnabled && (bool) config('autofinx.scheduler.ratio_bots', true)) {
         ->runInBackground()
         ->before(fn () => $markRunStart('ratio-bots:reconcile'))
         ->after(fn () => $markRunEnd('ratio-bots:reconcile'));
+
+    Schedule::command('ratio-bots:reconcile-costs --limit=20')
+        ->everyTenMinutes()
+        ->withoutOverlapping(15)
+        ->runInBackground()
+        ->before(fn () => $markRunStart('ratio-bots:reconcile-costs'))
+        ->after(fn () => $markRunEnd('ratio-bots:reconcile-costs'));
 }
 
 // Forex Grid (brand-new, fully independent module) -- REST-polled (OANDA

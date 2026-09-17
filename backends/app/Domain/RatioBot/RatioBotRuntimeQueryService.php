@@ -203,8 +203,8 @@ class RatioBotRuntimeQueryService
         $feeBps = max(0.0, (float) ($config->fee_bps ?? 0));
         $fills = \App\Models\RatioBotDecision::query()
             ->where('ratio_bot_config_id', $config->id)
-            ->whereIn('decision', [\App\Models\RatioBotDecision::DECISION_BUY, \App\Models\RatioBotDecision::DECISION_SELL])
-            ->where('execution_status', \App\Models\RatioBotDecision::EXEC_FILLED)
+            ->whereIn('decision', ['BUY', 'SELL', 'LONG', 'SHORT', 'EXIT_LONG', 'EXIT_SHORT'])
+            ->whereIn('execution_status', [\App\Models\RatioBotDecision::EXEC_FILLED, \App\Models\RatioBotDecision::EXEC_PARTIAL])
             ->get(['evaluated_price', 'executed_price', 'executed_qty']);
 
         $estimatedSlippageCost = 0.0;
@@ -219,6 +219,32 @@ class RatioBotRuntimeQueryService
 
         $realizedPnl = (float) ($config->state?->realized_pnl ?? 0);
 
+        $costReport = \Illuminate\Support\Facades\Schema::hasTable('ratio_bot_execution_cost_records')
+            ? (\App\Models\RatioBotExecutionCostRecord::where('ratio_bot_config_id', $config->id)
+                ->where('source_key', 'report')->first()?->payload ?? []) : [];
+        if (isset($costReport['checked_at'])) {
+            $checked = \Illuminate\Support\Carbon::parse($costReport['checked_at']);
+            $changed = \App\Models\Order::where('workspace_id', $config->workspace_id)
+                ->where('meta->ratio_bot_config_id', (string) $config->id)->where('updated_at', '>', $checked)->exists();
+            if ($changed || $checked->lt(now()->subMinutes(30))) {
+                $costReport['cost_source'] = 'unavailable';
+                $costReport['fee_source'] = 'unavailable';
+                $costReport['funding_source'] = 'unavailable';
+                $costReport['net_pnl_actual'] = null;
+                $costReport['reason'] = 'Accounting snapshot is stale or orders changed; reconciliation pending.';
+            }
+        }
+        // Runtime is polled frequently: keep its audit preview bounded.
+        $costReport['order_count'] = count($costReport['orders'] ?? []);
+        $costReport['orders'] = array_slice($costReport['orders'] ?? [], -50);
+        $costReport['funding_events'] = array_slice($costReport['funding_events'] ?? [], -50);
+        $feeSource = $costReport['fee_source'] ?? 'estimated';
+        if ($feeSource === 'real') {
+            $totalFees = (float) $costReport['commission_actual_known'];
+        }
+        $funding = (float) ($costReport['funding_actual_known'] ?? 0);
+        $netActual = $costReport['net_pnl_actual'] ?? null;
+
         return [
             'today_realized_pnl' => (float) $todayRealized,
             'unrealized_pnl' => (float) ($position['unrealized_pnl'] ?? $config->state?->unrealized_pnl ?? 0),
@@ -228,6 +254,11 @@ class RatioBotRuntimeQueryService
             'estimated_slippage_cost' => round($estimatedSlippageCost, 8),
             'total_fees' => round($totalFees, 8),
             'net_realized_pnl' => app(\App\Domain\Trading\ExchangeExecutionCostReconciliationService::class)->netPnl($realizedPnl, $totalFees),
+            'fee_source' => $feeSource,
+            'funding_source' => $costReport['funding_source'] ?? ($config->marketType() === 'futures' ? 'unavailable' : 'not_applicable'),
+            'actual_funding_cost_known' => $funding,
+            'actual_net_pnl' => $netActual,
+            'execution_cost_reconciliation' => $costReport,
         ];
     }
 

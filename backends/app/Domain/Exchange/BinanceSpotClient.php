@@ -272,6 +272,17 @@ class BinanceSpotClient implements ExchangeClientInterface
         return (array) $response->json();
     }
 
+    public function fetchAccountingOrderTrades(string $symbol, string $orderId): array
+    {
+        $rows = $this->signedRequest('GET', '/api/v3/myTrades', [
+            'symbol' => $this->normalizeSymbol($symbol), 'orderId' => $orderId, 'limit' => 1000,
+        ])->json();
+        if (! is_array($rows) || ! array_is_list($rows) || count($rows) >= 1000) {
+            throw new \RuntimeException('Invalid or truncated spot commission response.');
+        }
+        return $rows;
+    }
+
     public function fetchExchangeInfo(?string $symbol = null): array
     {
         $params = [];

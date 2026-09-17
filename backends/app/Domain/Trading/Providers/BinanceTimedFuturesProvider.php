@@ -15,6 +15,23 @@ use Throwable;
 
 class BinanceTimedFuturesProvider implements LiveTradeProviderInterface
 {
+    /**
+     * Safety buffer applied on top of the raw required initial margin before
+     * comparing it against the real Binance available balance. This platform's
+     * margin/notional model ties leverage only to notional exposure — required
+     * margin is always exactly the stake amount regardless of leverage
+     * (notional = stake * leverage, required margin = notional / leverage =
+     * stake) — so this buffer exists purely to absorb the gap between "this
+     * check passed" and "the order actually lands on Binance a moment later":
+     * price can move slightly in that window, and Binance deducts its own
+     * opening fee from the same margin asset. A trade that only just clears
+     * the raw stake requirement could still be rejected by Binance itself
+     * without this buffer. Documented constant (not config) so it can't be
+     * silently loosened without a code review — never let Binance's own API
+     * be the only thing catching insufficient margin.
+     */
+    public const MARGIN_SAFETY_BUFFER_PCT = 10.0;
+
     public function providerKey(): string
     {
         return 'binance';
@@ -120,6 +137,12 @@ class BinanceTimedFuturesProvider implements LiveTradeProviderInterface
         $quote = $this->latestQuote($integration, $symbol);
         $referencePrice = (float) ($quote['price'] ?? 0);
 
+        // Minimum-margin pre-check — applies regardless of leverage (required
+        // margin is always the stake amount in this platform's model; see
+        // MARGIN_SAFETY_BUFFER_PCT docblock). Runs before any leverage/order
+        // call so Binance's own API is never the only thing catching this.
+        $this->assertSufficientMargin($integration, $stakeAmount);
+
         // Leverage OFF (the default): behavior below is byte-for-byte
         // unchanged from before this parameter existed — effectiveLeverage
         // stays 1.0 and notionalTarget stays exactly $stakeAmount.
@@ -148,8 +171,43 @@ class BinanceTimedFuturesProvider implements LiveTradeProviderInterface
                 ));
             }
 
-            // Only after the real-exchange check passes do we touch the
-            // account's actual leverage setting or place any order.
+            // Pre-trade liquidation-distance check — reuses the maintenance
+            // margin rate already captured by the validate() call above, no
+            // second leverageBracket() lookup. $referencePrice (the current
+            // live quote) is used as an entry-price proxy; the real fill
+            // price may differ slightly. Fails closed if the maintenance
+            // margin rate couldn't be determined — never assumes a "safe"
+            // default in its absence.
+            $maintMarginRate = $validation['maint_margin_rate'] ?? null;
+            if ($maintMarginRate === null) {
+                throw new RuntimeException(sprintf(
+                    'Leverage %sx rejected for %s: unable_to_verify_liquidation_distance (maintenance margin rate not available from the exchange bracket data).',
+                    $requestedLeverage,
+                    strtoupper($symbol)
+                ));
+            }
+
+            $liquidation = app(LeverageValidationService::class)->estimateLiquidationDistance(
+                $side,
+                $referencePrice,
+                $requestedLeverage,
+                (float) $maintMarginRate,
+            );
+
+            if ($liquidation['estimated_distance_pct'] < LeverageValidationService::MIN_LIQUIDATION_DISTANCE_PCT) {
+                throw new RuntimeException(sprintf(
+                    'Leverage %sx rejected for %s: estimated_liquidation_distance_pct (%.4f%%) is below the minimum safety floor (%.2f%%). Estimated liquidation price: %.8f (entry reference ~%.8f). This is an ESTIMATE, not Binance\'s exact liquidation figure.',
+                    $requestedLeverage,
+                    strtoupper($symbol),
+                    $liquidation['estimated_distance_pct'],
+                    LeverageValidationService::MIN_LIQUIDATION_DISTANCE_PCT,
+                    $liquidation['estimated_liquidation_price'],
+                    $referencePrice
+                ));
+            }
+
+            // Only after every real-exchange/estimate check passes do we
+            // touch the account's actual leverage setting or place any order.
             try {
                 $client->setLeverage($symbol, $requestedLeverage);
             } catch (Throwable $e) {
@@ -441,6 +499,34 @@ class BinanceTimedFuturesProvider implements LiveTradeProviderInterface
         }
 
         return round($rows->sum(fn ($row) => (float) $row['income']), 8);
+    }
+
+    /**
+     * Confirms the real Binance futures available balance covers the
+     * required initial margin (stake amount, plus MARGIN_SAFETY_BUFFER_PCT)
+     * BEFORE any leverage/order call. Applies regardless of leverage — see
+     * MARGIN_SAFETY_BUFFER_PCT's docblock for why required margin doesn't
+     * vary with leverage in this platform's model. Never falls back to
+     * "assume sufficient": any failure of the underlying availableBalance()
+     * call (network error, auth failure, etc.) propagates as an exception
+     * and blocks the trade — fails closed, exactly like the leverage
+     * bracket lookup above it.
+     */
+    private function assertSufficientMargin(Integration $integration, float $stakeAmount): void
+    {
+        $requiredMargin = round($stakeAmount * (1 + self::MARGIN_SAFETY_BUFFER_PCT / 100), 8);
+        $balance = $this->availableBalance($integration, 'USDT');
+        $available = (float) ($balance['available'] ?? 0);
+
+        if ($requiredMargin > $available) {
+            throw new RuntimeException(sprintf(
+                'insufficient_margin: Required margin $%.2f (stake $%.2f plus %s%% safety buffer) exceeds available Binance futures balance $%.2f USDT.',
+                $requiredMargin,
+                $stakeAmount,
+                rtrim(rtrim(number_format(self::MARGIN_SAFETY_BUFFER_PCT, 2), '0'), '.'),
+                $available
+            ));
+        }
     }
 
     private function takerFeeRate(Integration $integration): float

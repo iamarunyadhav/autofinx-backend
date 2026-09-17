@@ -18,8 +18,17 @@ use Illuminate\Support\Facades\Log;
 
 /**
  * Per-tick check of open, live Quick Trades that have an optional per-trade
- * stop-loss configured (`stop_loss_pct`). Dispatched synchronously (never
- * queued for real) by MonitorQuickTradeStopLossCommand every few seconds.
+ * stop-loss (`stop_loss_pct`) and/or take-profit (`take_profit_pct`)
+ * configured. Dispatched synchronously (never queued for real) by
+ * MonitorQuickTradeStopLossCommand every few seconds. Kept as one job/class
+ * (not split/renamed) since both conditions reuse the exact same per-tick
+ * price read, per-position lock, and settlement call — a second parallel
+ * poller would just duplicate that work against the same price cache.
+ *
+ * Both conditions are checked in the same tick, on the same fresh price
+ * snapshot: whichever threshold is met first triggers the early close, and
+ * the other is simply never reached for that trade (the trade is already
+ * settled) — they cannot both fire for the same trade.
  *
  * This does NOT introduce a new way to close a live futures position — it
  * calls the same `QuickTradeService::settleTrade()` used by the normal
@@ -46,7 +55,10 @@ class CheckQuickTradeStopLossJob implements ShouldQueue
         $trades = QuickTrade::query()
             ->where('status', 'open')
             ->where('mode', 'live')
-            ->whereNotNull('stop_loss_pct')
+            ->where(function ($query): void {
+                $query->whereNotNull('stop_loss_pct')
+                    ->orWhereNotNull('take_profit_pct');
+            })
             ->where('expires_at', '>', now())
             ->get();
 
@@ -82,7 +94,10 @@ class CheckQuickTradeStopLossJob implements ShouldQueue
             // (expiry, manual close, another tick) between the query above
             // and acquiring this lock.
             $fresh = QuickTrade::find($trade->id);
-            if (! $fresh || $fresh->status !== 'open' || $fresh->stop_loss_pct === null) {
+            if (! $fresh || $fresh->status !== 'open') {
+                return;
+            }
+            if ($fresh->stop_loss_pct === null && $fresh->take_profit_pct === null) {
                 return;
             }
 
@@ -108,38 +123,70 @@ class CheckQuickTradeStopLossJob implements ShouldQueue
 
             // Reuse the existing raw price-based P&L helper (the same one
             // `settleLiveTrade()` uses for the gross P&L before fees) rather
-            // than duplicating the delta/side math here.
+            // than duplicating the delta/side math here. Both stop-loss and
+            // take-profit are checked against this SAME snapshot/pnlPct — one
+            // tick, one price read, whichever threshold is met first wins.
             $rawPnl = $liveTimedTrades->pnlFor($fresh, $currentPrice);
-            $lossPct = ($rawPnl / $stake) * 100;
+            $pnlPct = ($rawPnl / $stake) * 100;
 
-            $threshold = (float) $fresh->stop_loss_pct;
-            if ($lossPct > $threshold) {
-                // Loss (if any) hasn't reached the configured threshold yet.
+            $stopLossThreshold = $fresh->stop_loss_pct !== null ? (float) $fresh->stop_loss_pct : null;
+            $takeProfitThreshold = $fresh->take_profit_pct !== null ? (float) $fresh->take_profit_pct : null;
+
+            $stopLossHit = $stopLossThreshold !== null && $pnlPct <= $stopLossThreshold;
+            $takeProfitHit = ! $stopLossHit && $takeProfitThreshold !== null && $pnlPct >= $takeProfitThreshold;
+
+            if (! $stopLossHit && ! $takeProfitHit) {
+                // Neither threshold reached yet this tick.
                 return;
             }
 
             $settled = $quickTrades->settleTrade($fresh);
-            $settled->update(['stop_loss_triggered_at' => now()]);
 
-            AuditEventRecorder::record(
-                eventType: 'quick_trade_stop_loss_triggered',
-                category: AuditEvent::CATEGORY_RISK,
-                context: [
-                    'bot_type' => 'quick_trade',
-                    'bot_instance_id' => $settled->robot_session_id,
-                    'environment' => 'live',
-                    'symbol' => $settled->symbol,
-                    'market_price' => $currentPrice,
-                    'metadata' => [
-                        'quick_trade_id' => $settled->id,
-                        'trigger_price' => $currentPrice,
-                        'loss_pct' => round($lossPct, 4),
-                        'stop_loss_pct' => $threshold,
+            if ($stopLossHit) {
+                $settled->update(['stop_loss_triggered_at' => now()]);
+
+                AuditEventRecorder::record(
+                    eventType: 'quick_trade_stop_loss_triggered',
+                    category: AuditEvent::CATEGORY_RISK,
+                    context: [
+                        'bot_type' => 'quick_trade',
+                        'bot_instance_id' => $settled->robot_session_id,
+                        'environment' => 'live',
+                        'symbol' => $settled->symbol,
+                        'market_price' => $currentPrice,
+                        'metadata' => [
+                            'quick_trade_id' => $settled->id,
+                            'trigger_price' => $currentPrice,
+                            'loss_pct' => round($pnlPct, 4),
+                            'stop_loss_pct' => $stopLossThreshold,
+                        ],
                     ],
-                ],
-                correlationId: $settled->id,
-                severity: AuditEvent::SEVERITY_HIGH,
-            );
+                    correlationId: $settled->id,
+                    severity: AuditEvent::SEVERITY_HIGH,
+                );
+            } else {
+                $settled->update(['take_profit_triggered_at' => now()]);
+
+                AuditEventRecorder::record(
+                    eventType: 'quick_trade_take_profit_triggered',
+                    category: AuditEvent::CATEGORY_RISK,
+                    context: [
+                        'bot_type' => 'quick_trade',
+                        'bot_instance_id' => $settled->robot_session_id,
+                        'environment' => 'live',
+                        'symbol' => $settled->symbol,
+                        'market_price' => $currentPrice,
+                        'metadata' => [
+                            'quick_trade_id' => $settled->id,
+                            'trigger_price' => $currentPrice,
+                            'profit_pct' => round($pnlPct, 4),
+                            'take_profit_pct' => $takeProfitThreshold,
+                        ],
+                    ],
+                    correlationId: $settled->id,
+                    severity: AuditEvent::SEVERITY_MEDIUM,
+                );
+            }
         } finally {
             $lock->release();
         }

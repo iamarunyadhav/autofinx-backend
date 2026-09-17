@@ -118,7 +118,11 @@ function placeLeveragedQuickTrade(Workspace $workspace, Integration $integration
 
 test('a leverage-on trade within the real exchange limit sets leverage, computes leveraged notional/quantity and a leveraged-notional-correct fee', function () {
     [$user, $workspace, $integration] = leverageLiveWorkspace([
-        ['bracket' => 1, 'initialLeverage' => 20, 'notionalCap' => 50000, 'notionalFloor' => 0],
+        // maintMarginRatio added for the new pre-trade liquidation-distance
+        // check — 10x leverage against a 0.5% maintenance margin rate gives
+        // an estimated ~9.5% distance to liquidation, comfortably above the
+        // MIN_LIQUIDATION_DISTANCE_PCT safety floor (3%).
+        ['bracket' => 1, 'initialLeverage' => 20, 'notionalCap' => 50000, 'notionalFloor' => 0, 'maintMarginRatio' => 0.005],
     ]);
     $this->actingAs($user);
 
@@ -144,7 +148,7 @@ test('a leverage-on trade within the real exchange limit sets leverage, computes
 
 test('a leverage-on trade exceeding the real exchange max for its notional is rejected with zero order placed and zero setLeverage call attempted', function () {
     [$user, $workspace, $integration] = leverageLiveWorkspace([
-        ['bracket' => 1, 'initialLeverage' => 15, 'notionalCap' => 50000, 'notionalFloor' => 0],
+        ['bracket' => 1, 'initialLeverage' => 15, 'notionalCap' => 50000, 'notionalFloor' => 0, 'maintMarginRatio' => 0.005],
     ]);
     $this->actingAs($user);
 
@@ -162,7 +166,7 @@ test('a leverage-on trade exceeding the real exchange max for its notional is re
 
 test('high leverage without a stop-loss is rejected before any exchange call is made', function () {
     [$user, $workspace, $integration] = leverageLiveWorkspace([
-        ['bracket' => 1, 'initialLeverage' => 50, 'notionalCap' => 50000, 'notionalFloor' => 0],
+        ['bracket' => 1, 'initialLeverage' => 50, 'notionalCap' => 50000, 'notionalFloor' => 0, 'maintMarginRatio' => 0.005],
     ]);
     $this->actingAs($user);
 
@@ -179,7 +183,9 @@ test('high leverage without a stop-loss is rejected before any exchange call is 
 
 test('high leverage WITH a stop-loss set is allowed through the leverage gate', function () {
     [$user, $workspace, $integration] = leverageLiveWorkspace([
-        ['bracket' => 1, 'initialLeverage' => 50, 'notionalCap' => 50000, 'notionalFloor' => 0],
+        // 25x against a 0.5% maintenance margin rate: estimated distance
+        // ~3.5%, above the 3% safety floor — must still pass.
+        ['bracket' => 1, 'initialLeverage' => 50, 'notionalCap' => 50000, 'notionalFloor' => 0, 'maintMarginRatio' => 0.005],
     ]);
     $this->actingAs($user);
 

@@ -164,7 +164,18 @@ class BinanceFuturesClient
      * return as "cannot verify the real exchange max," never fall back to a
      * locally-configured number as if it were exchange-confirmed.
      *
-     * @return array<int, array{bracket: int, initialLeverage: int|float, notionalCap: int|float, notionalFloor: int|float}>|null
+     * `maintMarginRatio` (Binance's real per-tier maintenance-margin rate,
+     * used for `LeverageValidationService::estimateLiquidationDistance()`)
+     * is captured additively when present, but — unlike `initialLeverage`/
+     * `notionalCap`/`notionalFloor` — it is NOT required for a bracket to be
+     * considered valid here, so this does not change the existing leverage
+     * check's fail-closed behavior for callers/tests that don't supply it.
+     * A bracket missing it simply yields a null `maintMarginRatio`, and it is
+     * the liquidation-distance caller's own responsibility to fail closed on
+     * that null (see `estimateLiquidationDistance()`'s caller in
+     * `BinanceTimedFuturesProvider`), not this method's.
+     *
+     * @return array<int, array{bracket: int, initialLeverage: int|float, notionalCap: int|float, notionalFloor: int|float, maintMarginRatio: int|float|null}>|null
      */
     public function leverageBrackets(string $symbol): ?array
     {
@@ -326,6 +337,59 @@ class BinanceFuturesClient
     }
 
     // ── Private helpers ───────────────────────────────────────────────────────
+
+    /** Strict accounting reads: an error or a full, potentially truncated page is never zero cost. */
+    public function fetchAccountingTrades(string $symbol, int $start, int $end): array
+    {
+        $budget = 64;
+        return $this->readAccountingTradeWindow($symbol, $start, $end, $budget);
+    }
+
+    private function readAccountingTradeWindow(string $symbol, int $start, int $end, int &$budget): array
+    {
+        if (--$budget < 0) {
+            throw new RuntimeException('Accounting trade request budget reached; history incomplete.');
+        }
+        if ($end < $start || $end - $start > 604800000) {
+            throw new RuntimeException('Accounting trade window must be at most seven days.');
+        }
+        $rows = $this->signedRequest('GET', '/fapi/v1/userTrades', [
+            'symbol' => BinanceSymbolNormalizer::normalize($symbol),
+            'startTime' => $start, 'endTime' => $end, 'limit' => 1000,
+        ])->json();
+        if (! is_array($rows) || ! array_is_list($rows)) {
+            throw new RuntimeException('Invalid accounting trades response.');
+        }
+        // Bisect saturated time windows instead of mixing fromId with time filters.
+        if (count($rows) >= 1000) {
+            if ($end <= $start) {
+                throw new RuntimeException('Accounting trade page saturated at one millisecond.');
+            }
+            $mid = intdiv($start + $end, 2);
+            return array_merge($this->readAccountingTradeWindow($symbol, $start, $mid, $budget),
+                $this->readAccountingTradeWindow($symbol, $mid + 1, $end, $budget));
+        }
+        return $rows;
+    }
+
+    public function fetchAccountingFunding(string $symbol, int $start, int $end): array
+    {
+        $all = [];
+        for ($page = 1; $page <= 100; $page++) {
+            $rows = $this->signedRequest('GET', '/fapi/v1/income', [
+                'symbol' => BinanceSymbolNormalizer::normalize($symbol), 'incomeType' => 'FUNDING_FEE',
+                'startTime' => $start, 'endTime' => $end, 'limit' => 1000, 'page' => $page,
+            ])->json();
+            if (! is_array($rows) || ! array_is_list($rows)) {
+                throw new RuntimeException('Invalid funding history response.');
+            }
+            $all = array_merge($all, $rows);
+            if (count($rows) < 1000) {
+                return $all;
+            }
+        }
+        throw new RuntimeException('Funding history pagination limit reached.');
+    }
 
     private function signedRequest(string $method, string $path, array $params = [], bool $throw = true): Response
     {

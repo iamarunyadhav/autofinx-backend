@@ -104,3 +104,57 @@ test('a network exception during the bracket lookup fails closed', function () {
     expect($result['allowed'])->toBeFalse()
         ->and($result['reason'])->toBe(LeverageValidationService::REASON_UNABLE_TO_VERIFY);
 });
+
+test('validate() additively captures the matched tier maintMarginRatio without changing the leverage-ceiling outcome', function () {
+    Http::fake([
+        '*/fapi/v1/leverageBracket*' => Http::response([
+            'symbol' => 'ETHUSDT',
+            'brackets' => [
+                ['bracket' => 1, 'initialLeverage' => 20, 'notionalCap' => 50000, 'notionalFloor' => 0, 'maintMarginRatio' => 0.005],
+            ],
+        ], 200),
+    ]);
+
+    $result = app(LeverageValidationService::class)->validate(leverageValidationClient(), 'ETHUSDT', 10.0, 200.0);
+
+    expect($result['allowed'])->toBeTrue()
+        ->and($result['maint_margin_rate'])->toBe(0.005);
+});
+
+test('validate() returns a null maint_margin_rate (not a silent zero) when the exchange bracket omits it', function () {
+    Http::fake([
+        '*/fapi/v1/leverageBracket*' => Http::response([
+            'symbol' => 'ETHUSDT',
+            'brackets' => [
+                ['bracket' => 1, 'initialLeverage' => 20, 'notionalCap' => 50000, 'notionalFloor' => 0],
+            ],
+        ], 200),
+    ]);
+
+    $result = app(LeverageValidationService::class)->validate(leverageValidationClient(), 'ETHUSDT', 10.0, 200.0);
+
+    expect($result['allowed'])->toBeTrue()
+        ->and($result['maint_margin_rate'])->toBeNull();
+});
+
+test('estimateLiquidationDistance: a long position liquidation price is estimated BELOW entry', function () {
+    $result = app(LeverageValidationService::class)->estimateLiquidationDistance('buy', 2000.0, 10.0, 0.005);
+
+    expect($result['estimated_liquidation_price'])->toBeLessThan(2000.0)
+        // 1/10 - 0.005 = 9.5%
+        ->and($result['estimated_distance_pct'])->toEqualWithDelta(9.5, 0.01);
+});
+
+test('estimateLiquidationDistance: a short position liquidation price is estimated ABOVE entry', function () {
+    $result = app(LeverageValidationService::class)->estimateLiquidationDistance('sell', 2000.0, 10.0, 0.005);
+
+    expect($result['estimated_liquidation_price'])->toBeGreaterThan(2000.0)
+        ->and($result['estimated_distance_pct'])->toEqualWithDelta(9.5, 0.01);
+});
+
+test('estimateLiquidationDistance: higher leverage produces a smaller estimated distance', function () {
+    $low = app(LeverageValidationService::class)->estimateLiquidationDistance('buy', 2000.0, 5.0, 0.005);
+    $high = app(LeverageValidationService::class)->estimateLiquidationDistance('buy', 2000.0, 50.0, 0.005);
+
+    expect($high['estimated_distance_pct'])->toBeLessThan($low['estimated_distance_pct']);
+});

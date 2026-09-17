@@ -5,6 +5,7 @@ namespace App\Domain\Trading;
 use App\Domain\Market\MarketPriceCacheService;
 use App\Domain\Ops\TradingEnvironmentGuard;
 use App\Domain\Ops\TradingRuntimeHealthService;
+use App\Domain\Risk\WorkspaceLiveRiskService;
 use App\Models\Order;
 use App\Models\QuickTrade;
 use App\Models\RobotSession;
@@ -38,6 +39,7 @@ class QuickTradeService
         private readonly TradingIntegrationResolver $integrations,
         private readonly TradingEnvironmentGuard $modeGuard,
         private readonly MarketPriceCacheService $prices,
+        private readonly WorkspaceLiveRiskService $liveRisk,
     ) {
     }
 
@@ -65,6 +67,17 @@ class QuickTradeService
         $rawStopLossPct = $payload['stop_loss_pct'] ?? null;
         if ($mode === 'live' && $rawStopLossPct !== null && $rawStopLossPct !== '') {
             $stopLossPct = (float) $rawStopLossPct;
+        }
+        // Optional per-trade take-profit — live mode only, mirrors the
+        // stop-loss-field pattern exactly above (opposite sign convention:
+        // POSITIVE percentage of stake, e.g. 5.00 for "close at +5% of
+        // stake"). Paper trades silently ignore any value submitted, same
+        // as stop_loss_pct/leverage, keeping the paper request path
+        // byte-for-byte unchanged.
+        $takeProfitPct = null;
+        $rawTakeProfitPct = $payload['take_profit_pct'] ?? null;
+        if ($mode === 'live' && $rawTakeProfitPct !== null && $rawTakeProfitPct !== '') {
+            $takeProfitPct = (float) $rawTakeProfitPct;
         }
         // Optional per-trade leverage — live mode only, mirrors the
         // stop-loss-field pattern above exactly. Paper trades have no real
@@ -103,6 +116,9 @@ class QuickTradeService
         }
         if ($stopLossPct !== null && $stopLossPct >= 0) {
             throw new RuntimeException('stop_loss_pct must be a negative percentage (e.g. -2.00 for a 2% stop).');
+        }
+        if ($takeProfitPct !== null && $takeProfitPct <= 0) {
+            throw new RuntimeException('take_profit_pct must be a positive percentage (e.g. 5.00 for a 5% target).');
         }
         if ($leverageEnabled && $leverage < 1) {
             throw new RuntimeException('leverage must be at least 1.');
@@ -164,6 +180,20 @@ class QuickTradeService
         } catch (\Throwable $e) {
             $this->auditEntryGateFailure($traceId, $robotSessionId, $workspaceId, $symbol, $mode, 'live_feed_freshness', $e->getMessage());
             throw $e;
+        }
+
+        // Portfolio-wide exposure cap — live mode only. Applies regardless of
+        // leverage: the intended notional is stake * leverage when leverage
+        // is enabled, or just stake otherwise (same notional convention
+        // LeverageValidationService/BinanceTimedFuturesProvider already use).
+        if ($mode === 'live') {
+            $intendedNotional = ($leverageEnabled && $leverage !== null) ? $stake * $leverage : $stake;
+            try {
+                $this->liveRisk->assertQuickTradeExposureAllowed($workspaceId, $intendedNotional);
+            } catch (\Throwable $e) {
+                $this->auditEntryGateFailure($traceId, $robotSessionId, $workspaceId, $symbol, $mode, 'max_account_exposure', $e->getMessage());
+                throw $e;
+            }
         }
 
         // Audit Research instrumentation — every entry gate above has now
@@ -238,6 +268,7 @@ class QuickTradeService
                 userId: $userId,
                 entryIdempotencyKey: $entryIdempotencyKey,
                 stopLossPct: $stopLossPct,
+                takeProfitPct: $takeProfitPct,
                 leverageEnabled: $leverageEnabled,
                 leverage: $leverage,
             );
@@ -635,6 +666,7 @@ class QuickTradeService
         ?string $userId,
         string $entryIdempotencyKey,
         ?float $stopLossPct = null,
+        ?float $takeProfitPct = null,
         bool $leverageEnabled = false,
         ?float $leverage = null,
     ): QuickTrade {
@@ -687,6 +719,7 @@ class QuickTradeService
                 $userId,
                 $signalPayload,
                 $stopLossPct,
+                $takeProfitPct,
                 $leverageEnabled,
                 $leverage
             ) {
@@ -727,6 +760,7 @@ class QuickTradeService
                     'expiry_seconds' => $expirySeconds,
                     'payout_ratio' => 0,
                     'stop_loss_pct' => $stopLossPct,
+                    'take_profit_pct' => $takeProfitPct,
                     'leverage_enabled' => $leverageEnabled,
                     'leverage' => $leverageEnabled ? $leverage : null,
                     'mode' => 'live',

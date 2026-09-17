@@ -29,6 +29,8 @@ class QuickTrade extends BaseModel
         'stop_loss_triggered_at' => 'datetime',
         'leverage_enabled' => 'boolean',
         'leverage' => 'decimal:2',
+        'take_profit_pct' => 'decimal:2',
+        'take_profit_triggered_at' => 'datetime',
     ];
 
     public function order(): BelongsTo

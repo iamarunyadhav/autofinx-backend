@@ -7,12 +7,86 @@ use App\Models\Guardrails;
 use App\Models\Ledger;
 use App\Models\Order;
 use App\Models\Position;
+use App\Models\QuickTrade;
 use App\Models\RiskProfile;
 use App\Models\WalletAccount;
 use RuntimeException;
 
 class WorkspaceLiveRiskService
 {
+    /**
+     * Portfolio-wide exposure gate for a live Quick Trade, called from
+     * `QuickTradeService::place()` right before a leveraged/non-leveraged
+     * live order is placed. Quick Trade does not create `Position` rows
+     * (confirmed by inspection — Quick Trade's leveraged notional is tracked
+     * only on the `quick_trades` table itself), so `enforceMaxAccountExposure()`
+     * above — which only sums `Position` notional — would silently miss every
+     * open Quick Trade's exposure entirely if reused as-is. This method
+     * reuses the SAME config resolution (`resolveRules()`) and equity
+     * calculation (`currentEquity()`) as `enforceMaxAccountExposure()`, but
+     * adds open live Quick Trade notional to the aggregate so the cap is
+     * genuinely portfolio-wide: existing `Position`-tracked engines (Ratio
+     * Bot, Future Trade, Robot Trade's underlying positions if any) AND
+     * open Quick Trades are all counted together against the one configured
+     * `max_account_exposure_pct`.
+     *
+     * Same permissive-when-unconfigured behavior as `enforceMaxAccountExposure()`
+     * (no rejection when the cap or equity aren't configured/resolvable) —
+     * this is the existing, already-established semantics for this config
+     * value across every other engine, not a new behavior introduced here.
+     */
+    public function assertQuickTradeExposureAllowed(string $workspaceId, float $additionalNotional): void
+    {
+        $rules = $this->resolveRules($workspaceId);
+        $limit = (float) ($rules['max_account_exposure_pct'] ?? 0);
+        if ($limit <= 0) {
+            return;
+        }
+
+        $equity = $this->currentEquity($workspaceId);
+        if ($equity <= 0) {
+            return;
+        }
+
+        $currentExposure = $this->currentExposureNotional($workspaceId) + $this->currentOpenQuickTradeNotional($workspaceId);
+        $projectedPct = (($currentExposure + max(0.0, $additionalNotional)) / $equity) * 100;
+
+        if ($projectedPct > $limit) {
+            throw new RuntimeException(sprintf(
+                'quick_trade_exceeds_max_account_exposure: projected workspace exposure %.2f%% of equity would exceed the configured max_account_exposure_pct (%.2f%%). Current exposure: %.2f, additional notional: %.2f, equity: %.2f.',
+                $projectedPct,
+                $limit,
+                $currentExposure,
+                $additionalNotional,
+                $equity
+            ));
+        }
+    }
+
+    /**
+     * Sum of open, live Quick Trade notional for a workspace — stake amount
+     * for non-leveraged trades, stake * leverage for leveraged ones (the same
+     * notional value `LeverageValidationService`/`BinanceTimedFuturesProvider`
+     * already use as "the position's real exposure"). Only `mode = 'live'`
+     * and `status = 'open'` rows count — paper trades have no real exchange
+     * exposure, and settled trades no longer hold any.
+     */
+    private function currentOpenQuickTradeNotional(string $workspaceId): float
+    {
+        return (float) QuickTrade::where('workspace_id', $workspaceId)
+            ->where('mode', 'live')
+            ->where('status', 'open')
+            ->get(['stake_amount', 'leverage_enabled', 'leverage'])
+            ->reduce(function (float $carry, QuickTrade $trade): float {
+                $stake = (float) ($trade->stake_amount ?? 0);
+                $leverage = ((bool) $trade->leverage_enabled && (float) ($trade->leverage ?? 0) > 0)
+                    ? (float) $trade->leverage
+                    : 1.0;
+
+                return $carry + ($stake * $leverage);
+            }, 0.0);
+    }
+
     public function enforceOrFail(string $workspaceId, array $context = []): array
     {
         $rules = $this->resolveRules($workspaceId, $context);
