@@ -2,13 +2,16 @@
 
 namespace App\Domain\Trading\Providers;
 
+use App\Domain\Exchange\BinanceFuturesClient;
 use App\Domain\Trading\FuturesOrderSizingService;
+use App\Domain\Trading\LeverageValidationService;
 use App\Models\Integration;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use RuntimeException;
+use Throwable;
 
 class BinanceTimedFuturesProvider implements LiveTradeProviderInterface
 {
@@ -110,11 +113,55 @@ class BinanceTimedFuturesProvider implements LiveTradeProviderInterface
         string $symbol,
         string $side,
         float $stakeAmount,
-        string $idempotencyKey
+        string $idempotencyKey,
+        bool $leverageEnabled = false,
+        ?float $leverage = null,
     ): array {
         $quote = $this->latestQuote($integration, $symbol);
-        $quantity = $this->normalizeQuantity($integration, $symbol, $stakeAmount / max($quote['price'], 0.00000001), $quote['price']);
         $referencePrice = (float) ($quote['price'] ?? 0);
+
+        // Leverage OFF (the default): behavior below is byte-for-byte
+        // unchanged from before this parameter existed — effectiveLeverage
+        // stays 1.0 and notionalTarget stays exactly $stakeAmount.
+        $effectiveLeverage = 1.0;
+        $notionalTarget = $stakeAmount;
+
+        if ($leverageEnabled) {
+            $requestedLeverage = (float) ($leverage ?? 1.0);
+            if ($requestedLeverage < 1) {
+                throw new RuntimeException('leverage must be at least 1.');
+            }
+
+            $notionalTarget = $stakeAmount * $requestedLeverage;
+            $client = $this->futuresClient($integration);
+            $validation = app(LeverageValidationService::class)->validate($client, $symbol, $requestedLeverage, $notionalTarget);
+
+            if (! ($validation['allowed'] ?? false)) {
+                $reason = (string) ($validation['reason'] ?? 'leverage_rejected');
+                $realMax = $validation['real_max_for_notional'] ?? null;
+                throw new RuntimeException(sprintf(
+                    'Leverage %sx rejected for %s: %s%s',
+                    $requestedLeverage,
+                    strtoupper($symbol),
+                    $reason,
+                    $realMax !== null ? sprintf(' (real exchange max for this notional: %sx)', $realMax) : ''
+                ));
+            }
+
+            // Only after the real-exchange check passes do we touch the
+            // account's actual leverage setting or place any order.
+            try {
+                $client->setLeverage($symbol, $requestedLeverage);
+            } catch (Throwable $e) {
+                if (! str_contains($e->getMessage(), '-4046') && ! str_contains(strtolower($e->getMessage()), 'no need to change')) {
+                    throw $e;
+                }
+            }
+
+            $effectiveLeverage = $requestedLeverage;
+        }
+
+        $quantity = $this->normalizeQuantity($integration, $symbol, $notionalTarget / max($referencePrice, 0.00000001), $referencePrice);
 
         $response = $this->signedRequest($integration, 'POST', '/fapi/v1/order', [
             'symbol' => strtoupper($symbol),
@@ -154,6 +201,7 @@ class BinanceTimedFuturesProvider implements LiveTradeProviderInterface
             'estimated_fee_rate' => $this->takerFeeRate($integration),
             'estimated_fee' => round($price * $executedQty * $this->takerFeeRate($integration), 8),
             'slippage_pct' => $this->slippagePct(strtolower($side) === 'sell' ? 'sell' : 'buy', $price, $referencePrice),
+            'leverage' => $effectiveLeverage,
             'response' => $payload,
         ];
     }
@@ -513,6 +561,28 @@ class BinanceTimedFuturesProvider implements LiveTradeProviderInterface
         $normalized = preg_replace('/[^A-Za-z0-9_-]/', '', $idempotencyKey) ?: uniqid('qt', true);
 
         return substr($normalized . '_' . $suffix, 0, 36);
+    }
+
+    /**
+     * Builds a real `BinanceFuturesClient` (the same class Future Trade uses
+     * for its own `setLeverage`/`leverageBrackets` calls) from this
+     * integration's own stored credentials — mirroring the credential
+     * decoding already done in `signedRequest()` below rather than
+     * introducing a second decryption path.
+     */
+    private function futuresClient(Integration $integration): BinanceFuturesClient
+    {
+        $credentials = $integration->secrets_encrypted
+            ? (json_decode(Crypt::decryptString($integration->secrets_encrypted), true) ?? [])
+            : [];
+        $apiKey = (string) ($credentials['api_key'] ?? '');
+        $apiSecret = (string) ($credentials['api_secret'] ?? '');
+
+        if ($apiKey === '' || $apiSecret === '') {
+            throw new RuntimeException('Binance API credentials are missing.');
+        }
+
+        return new BinanceFuturesClient($apiKey, $apiSecret, $this->baseUrl($integration), 'quick_trade');
     }
 
     private function signedRequest(Integration $integration, string $method, string $path, array $params): Response

@@ -24,10 +24,12 @@ class LiveTimedTradeService
         string $side,
         float $stakeAmount,
         string $idempotencyKey,
+        bool $leverageEnabled = false,
+        ?float $leverage = null,
     ): array {
         return $this->providers
             ->for((string) $integration->provider_key)
-            ->openTimedTrade($integration, $symbol, $side, $stakeAmount, $idempotencyKey);
+            ->openTimedTrade($integration, $symbol, $side, $stakeAmount, $idempotencyKey, $leverageEnabled, $leverage);
     }
 
     public function executeExit(Integration $integration, QuickTrade $trade, string $idempotencyKey): array

@@ -16,12 +16,22 @@ interface LiveTradeProviderInterface
 
     public function availableBalance(Integration $integration, string $asset = 'USDT'): array;
 
+    /**
+     * @param bool $leverageEnabled When true, the provider must verify
+     *   $leverage against the real exchange max for the resulting notional
+     *   (via LeverageValidationService) BEFORE placing any order, reject the
+     *   trade outright if it exceeds that real max, and only then call the
+     *   exchange's real "set leverage" endpoint. When false, behavior must be
+     *   byte-for-byte identical to before this parameter existed.
+     */
     public function openTimedTrade(
         Integration $integration,
         string $symbol,
         string $side,
         float $stakeAmount,
-        string $idempotencyKey
+        string $idempotencyKey,
+        bool $leverageEnabled = false,
+        ?float $leverage = null,
     ): array;
 
     public function closeTimedTrade(

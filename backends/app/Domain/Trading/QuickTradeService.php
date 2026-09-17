@@ -18,6 +18,14 @@ use RuntimeException;
 
 class QuickTradeService
 {
+    /**
+     * Leverage above this level requires stop_loss_pct to also be set on the
+     * same live request — reuses the already-built stop-loss field rather
+     * than inventing a second risk mechanism. Same threshold Future Trade's
+     * leverage path enforces (`LeverageValidationService::HIGH_LEVERAGE_STOP_LOSS_THRESHOLD`).
+     */
+    public const HIGH_LEVERAGE_STOP_LOSS_THRESHOLD = \App\Domain\Trading\LeverageValidationService::HIGH_LEVERAGE_STOP_LOSS_THRESHOLD;
+
     public function __construct(
         private readonly PaperWalletService $wallets,
         private readonly LiveWalletService $liveWallets,
@@ -58,6 +66,17 @@ class QuickTradeService
         if ($mode === 'live' && $rawStopLossPct !== null && $rawStopLossPct !== '') {
             $stopLossPct = (float) $rawStopLossPct;
         }
+        // Optional per-trade leverage — live mode only, mirrors the
+        // stop-loss-field pattern above exactly. Paper trades have no real
+        // exchange position, so any leverage fields submitted for a paper
+        // trade are silently ignored rather than rejected, keeping the paper
+        // request path byte-for-byte unchanged.
+        $leverageEnabled = false;
+        $leverage = null;
+        if ($mode === 'live' && filter_var($payload['leverage_enabled'] ?? false, FILTER_VALIDATE_BOOLEAN)) {
+            $leverageEnabled = true;
+            $leverage = (float) ($payload['leverage'] ?? 1.0);
+        }
         // Generated here (rather than at its original ~118 call site) purely
         // so the Audit Research instrumentation below has a single stable
         // correlation_id to reuse across every entry gate, including the
@@ -84,6 +103,15 @@ class QuickTradeService
         }
         if ($stopLossPct !== null && $stopLossPct >= 0) {
             throw new RuntimeException('stop_loss_pct must be a negative percentage (e.g. -2.00 for a 2% stop).');
+        }
+        if ($leverageEnabled && $leverage < 1) {
+            throw new RuntimeException('leverage must be at least 1.');
+        }
+        if ($leverageEnabled && $leverage > self::HIGH_LEVERAGE_STOP_LOSS_THRESHOLD && $stopLossPct === null) {
+            throw new RuntimeException(sprintf(
+                'Leverage above %sx requires stop_loss_pct to also be set on this trade.',
+                rtrim(rtrim(number_format(self::HIGH_LEVERAGE_STOP_LOSS_THRESHOLD, 2), '0'), '.')
+            ));
         }
 
         try {
@@ -210,6 +238,8 @@ class QuickTradeService
                 userId: $userId,
                 entryIdempotencyKey: $entryIdempotencyKey,
                 stopLossPct: $stopLossPct,
+                leverageEnabled: $leverageEnabled,
+                leverage: $leverage,
             );
         }
 
@@ -605,6 +635,8 @@ class QuickTradeService
         ?string $userId,
         string $entryIdempotencyKey,
         ?float $stopLossPct = null,
+        bool $leverageEnabled = false,
+        ?float $leverage = null,
     ): QuickTrade {
         $workspaceId = (string) $payload['workspace_id'];
         $integration = $this->integrations->resolve($workspaceId, $context['provider'], $context['integration_id']);
@@ -632,6 +664,8 @@ class QuickTradeService
                 $side,
                 $stake,
                 $entryIdempotencyKey,
+                $leverageEnabled,
+                $leverage,
             );
 
             return DB::transaction(function () use (
@@ -652,7 +686,9 @@ class QuickTradeService
                 $robotSessionId,
                 $userId,
                 $signalPayload,
-                $stopLossPct
+                $stopLossPct,
+                $leverageEnabled,
+                $leverage
             ) {
                 $booked = $this->liveTimedTrades->bookEntry(
                     $integration,
@@ -691,6 +727,8 @@ class QuickTradeService
                     'expiry_seconds' => $expirySeconds,
                     'payout_ratio' => 0,
                     'stop_loss_pct' => $stopLossPct,
+                    'leverage_enabled' => $leverageEnabled,
+                    'leverage' => $leverageEnabled ? $leverage : null,
                     'mode' => 'live',
                     'source' => $source,
                     'provider_key' => strtolower((string) $integration->provider_key),

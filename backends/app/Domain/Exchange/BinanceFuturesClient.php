@@ -151,6 +151,72 @@ class BinanceFuturesClient
         return (array) $response->json();
     }
 
+    /**
+     * GET /fapi/v1/leverageBracket — the REAL, account/symbol-specific tiered
+     * leverage limits Binance actually enforces (leverage allowed varies by the
+     * notional value of the position, not a single flat "max leverage" per
+     * symbol). Returns null (never an empty/best-effort array) if the response
+     * can't be parsed into the expected `{symbol, brackets: [{bracket,
+     * initialLeverage, notionalCap, notionalFloor, ...}, ...]}` shape, or if the
+     * request itself fails for any reason — this method has no live-docs
+     * access to verify Binance's exact schema this session, so it is built to
+     * fail closed: callers (see `LeverageValidationService`) must treat a null
+     * return as "cannot verify the real exchange max," never fall back to a
+     * locally-configured number as if it were exchange-confirmed.
+     *
+     * @return array<int, array{bracket: int, initialLeverage: int|float, notionalCap: int|float, notionalFloor: int|float}>|null
+     */
+    public function leverageBrackets(string $symbol): ?array
+    {
+        try {
+            $response = $this->signedRequest('GET', '/fapi/v1/leverageBracket', [
+                'symbol' => BinanceSymbolNormalizer::normalize($symbol),
+            ], false);
+        } catch (\Throwable) {
+            return null;
+        }
+
+        if (! $response->successful()) {
+            return null;
+        }
+
+        $body = $response->json();
+        if (! is_array($body)) {
+            return null;
+        }
+
+        // Binance returns either a single object ({symbol, brackets:[...]})
+        // or a list of such objects (one per symbol) depending on whether
+        // the `symbol` param was echoed back as a single-item response.
+        $row = array_key_exists('brackets', $body)
+            ? $body
+            : collect($body)->first(
+                fn ($candidate) => is_array($candidate)
+                    && strtoupper((string) ($candidate['symbol'] ?? '')) === BinanceSymbolNormalizer::normalize($symbol)
+            );
+
+        $brackets = is_array($row) ? ($row['brackets'] ?? null) : null;
+        if (! is_array($brackets) || $brackets === []) {
+            return null;
+        }
+
+        foreach ($brackets as $bracket) {
+            if (
+                ! is_array($bracket)
+                || ! array_key_exists('initialLeverage', $bracket)
+                || ! array_key_exists('notionalCap', $bracket)
+                || ! array_key_exists('notionalFloor', $bracket)
+            ) {
+                // One malformed tier makes the whole tier table untrustworthy —
+                // fail the entire lookup rather than validate against a
+                // partially-understood bracket set.
+                return null;
+            }
+        }
+
+        return $brackets;
+    }
+
     public function placeOrder(array $payload): array
     {
         $response = $this->signedRequest('POST', '/fapi/v1/order', $payload);

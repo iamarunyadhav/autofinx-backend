@@ -345,6 +345,12 @@ class QuickTradeController extends Controller
             // for paper trades in QuickTradeService::place — see docblock
             // there). Negative percentage of stake, e.g. -2.00 for a 2% stop.
             'stop_loss_pct' => 'nullable|numeric|lt:0|gte:-100',
+            // Optional per-trade leverage, live mode only. No app-layer upper
+            // bound — the real ceiling is whatever LeverageValidationService
+            // determines from Binance's own tiered leverage brackets for this
+            // symbol/notional (see QuickTradeService::placeLiveTrade()).
+            'leverage_enabled' => 'nullable|boolean',
+            'leverage' => 'required_if:leverage_enabled,true|nullable|numeric|min:1',
         ]);
 
         $headerKey = $request->header('Idempotency-Key');

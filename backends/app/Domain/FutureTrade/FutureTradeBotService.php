@@ -10,6 +10,7 @@ use App\Domain\Portfolio\LivePortfolioGuardService;
 use App\Domain\Signals\IndicatorIntelligenceService;
 use App\Domain\Signals\StrategyResearchLabService;
 use App\Domain\Trading\FuturesOrderSizingService;
+use App\Domain\Trading\LeverageValidationService;
 use App\Domain\Trading\RuntimeSafetySettingsService;
 use App\Models\FutureTradeBotConfig;
 use App\Models\FutureTradeBotLog;
@@ -4500,6 +4501,66 @@ class FutureTradeBotService
             );
 
             return 'min_notional_invalid';
+        }
+
+        // Leverage is REJECTED, never silently reduced, when it exceeds the
+        // real Binance-verified max for this position's actual notional.
+        // `$leverage` above is already the operator's own configured ceiling
+        // (min of settings.leverage/settings.maxLeverage) — that local number
+        // was never previously checked against Binance's real tiered
+        // leverage-bracket table (which varies by notional, not a single
+        // flat max per symbol), so a config combination the account couldn't
+        // really support at this position size used to be trusted blindly.
+        $leverageValidation = app(LeverageValidationService::class)->validate($client, $symbol, (float) $leverage, $notional);
+        if (! ($leverageValidation['allowed'] ?? false)) {
+            $this->log(
+                $config->fresh('state'),
+                'TRADE_BLOCKED',
+                $symbol,
+                $signal['signal'],
+                (float) ($signal['confidence'] ?? 0),
+                sprintf(
+                    'Leverage %sx blocked for %s: %s%s',
+                    $leverage,
+                    $symbol,
+                    (string) ($leverageValidation['reason'] ?? 'leverage_rejected'),
+                    $leverageValidation['real_max_for_notional'] !== null
+                        ? sprintf(' (real exchange max for this notional: %sx)', $leverageValidation['real_max_for_notional'])
+                        : ''
+                ),
+                $this->runtimeContext($dynamic, [
+                    'status' => 'BLOCKED',
+                    'requestedLeverage' => $leverage,
+                    'notional' => $notional,
+                    'realMaxForNotional' => $leverageValidation['real_max_for_notional'],
+                ], $signal, ['leverage_exceeds_exchange_max'])
+            );
+
+            return 'leverage_exceeds_exchange_max';
+        }
+
+        if (
+            (float) $leverage > LeverageValidationService::HIGH_LEVERAGE_STOP_LOSS_THRESHOLD
+            && (float) ($settings['stopLossPercent'] ?? 0) <= 0
+        ) {
+            $this->log(
+                $config->fresh('state'),
+                'TRADE_BLOCKED',
+                $symbol,
+                $signal['signal'],
+                (float) ($signal['confidence'] ?? 0),
+                sprintf(
+                    'Leverage %sx exceeds the high-leverage threshold (%sx) and requires a configured stop-loss.',
+                    $leverage,
+                    LeverageValidationService::HIGH_LEVERAGE_STOP_LOSS_THRESHOLD
+                ),
+                $this->runtimeContext($dynamic, [
+                    'status' => 'BLOCKED',
+                    'requestedLeverage' => $leverage,
+                ], $signal, ['high_leverage_requires_stop_loss'])
+            );
+
+            return 'high_leverage_requires_stop_loss';
         }
 
         // setLeverage/setMarginType: Binance returns -4046 if already set to the
