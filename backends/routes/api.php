@@ -493,6 +493,7 @@ Route::post('ratio-bots/{ratioBot}/diagnostics/fix', [RatioBotController::class,
         Route::get('audit-research/sessions/{session}/export/pdf', [AuditResearchController::class, 'exportPdf']);
         Route::get('workspaces/{workspace}/audit-research/compare', [AuditResearchController::class, 'compare']);
         Route::get('workspaces/{workspace}/audit-research/readiness', [AuditResearchController::class, 'readiness']);
+        Route::get('workspaces/{workspace}/audit-research/forecast-shadow-report', [AuditResearchController::class, 'forecastShadowReport']);
 
         // ---- Audit Research: server connections + diagnostics -----------------
         Route::get('workspaces/{workspace}/server-connections', [ServerConnectionController::class, 'index']);

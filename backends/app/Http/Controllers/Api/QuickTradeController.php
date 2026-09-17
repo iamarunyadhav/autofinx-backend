@@ -2,15 +2,19 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Domain\AuditResearch\AuditEventRecorder;
+use App\Domain\MarketIntelligence\UnifiedForecastEngine;
 use App\Domain\Trading\QuickTradeService;
 use App\Domain\Trading\TradeForecastService;
 use App\Domain\Trading\TradingModuleSettingsService;
 use App\Http\Controllers\Controller;
+use App\Models\AuditEvent;
 use App\Support\WebSocket\SimpleWebSocketClient;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Http\Request;
 use Symfony\Component\HttpFoundation\StreamedResponse;
+use Throwable;
 
 class QuickTradeController extends Controller
 {
@@ -92,20 +96,81 @@ class QuickTradeController extends Controller
             'timeframe' => 'required|string|max:16',
             'expiry_seconds' => 'required|integer|min:5|max:3600',
             'stake_amount' => 'required|numeric|min:0.01',
+            // Optional, additive: only used for the Unified Forecast Engine
+            // shadow comparison below -- today's real callers don't send
+            // these (see useQuickTrade.ts), and the response is byte-for-
+            // byte unchanged whether they're present or not.
+            'symbol' => 'nullable|string|max:32',
+            'exchange' => 'nullable|string|max:32',
         ]);
 
         $candles = $data['candles'];
         $decision = isset($data['signal']) ? $forecastSvc->decisionFromSignalPreview($data['signal']) : null;
 
+        $forecastResult = $forecastSvc->forecast(
+            $candles,
+            (string) $data['timeframe'],
+            (int) $data['expiry_seconds'],
+            $decision,
+        );
+        $netEdgeResult = $forecastSvc->netEdge($candles, (float) $data['stake_amount']);
+
+        // Unified Forecast Engine, Phase 5 -- SHADOW COMPARISON ONLY. This
+        // block never changes $forecastResult/$netEdgeResult above (already
+        // computed) and the response returned below is identical whether
+        // this runs or not. Feature-flag-checked FIRST, before any
+        // computation, so the flag being off means genuinely zero
+        // UnifiedForecastEngine work happens -- not just "the result is
+        // discarded".
+        if ((bool) config('unified_forecast.quick_trade_shadow_enabled', true) && ! empty($data['symbol'])) {
+            $this->recordUnifiedForecastShadowComparison($data, $forecastResult);
+        }
+
         return response()->json([
-            'forecast' => $forecastSvc->forecast(
-                $candles,
-                (string) $data['timeframe'],
-                (int) $data['expiry_seconds'],
-                $decision,
-            ),
-            'net_edge' => $forecastSvc->netEdge($candles, (float) $data['stake_amount']),
+            'forecast' => $forecastResult,
+            'net_edge' => $netEdgeResult,
         ]);
+    }
+
+    /**
+     * Shadow-only: computes UnifiedForecastEngine::evaluate() for the same
+     * symbol/timeframe/horizon the real forecast() call above just used,
+     * and logs the comparison via the existing AuditEventRecorder (no
+     * second logging mechanism). Wrapped in its own try/catch so a shadow
+     * failure can NEVER affect the real response -- AuditEventRecorder::record()
+     * itself already never throws, but the engine computation this method
+     * adds around it is new and must carry the same guarantee.
+     */
+    private function recordUnifiedForecastShadowComparison(array $data, array $forecastResult): void
+    {
+        try {
+            $exchange = (string) ($data['exchange'] ?: config('unified_forecast.quick_trade_default_exchange', 'binance'));
+            $symbol = (string) $data['symbol'];
+            $timeframe = (string) $data['timeframe'];
+            $horizonSeconds = (int) $data['expiry_seconds'];
+            $botInstanceId = sprintf('%s:%s:%s', $exchange, $symbol, $timeframe);
+
+            $engine = app(UnifiedForecastEngine::class);
+            $newResult = $engine->evaluate($botType = 'quick_trade', $botInstanceId, $exchange, $symbol, $timeframe, $horizonSeconds);
+
+            AuditEventRecorder::record(
+                'unified_forecast_shadow_comparison',
+                AuditEvent::CATEGORY_DECISION,
+                [
+                    'bot_type' => $botType,
+                    'bot_instance_id' => $botInstanceId,
+                    'symbol' => $symbol,
+                    'metadata' => [
+                        'old' => $forecastResult,
+                        'new' => $newResult,
+                    ],
+                ],
+            );
+        } catch (Throwable $e) {
+            Log::warning('[UnifiedForecastEngine] Quick Trade shadow comparison failed (non-fatal, real forecast response unaffected)', [
+                'error' => $e->getMessage(),
+            ]);
+        }
     }
 
     /**
@@ -276,6 +341,10 @@ class QuickTradeController extends Controller
             'integration_id' => 'nullable|uuid',
             'indicator_set' => 'nullable|array',
             'idempotency_key' => 'nullable|string|max:120',
+            // Optional per-trade stop-loss, live mode only (silently ignored
+            // for paper trades in QuickTradeService::place — see docblock
+            // there). Negative percentage of stake, e.g. -2.00 for a 2% stop.
+            'stop_loss_pct' => 'nullable|numeric|lt:0|gte:-100',
         ]);
 
         $headerKey = $request->header('Idempotency-Key');

@@ -7,6 +7,7 @@ use App\Models\Integration;
 use App\Models\Order;
 use App\Models\QuickTrade;
 use App\Models\Trade;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
 class LiveTimedTradeService
@@ -257,6 +258,83 @@ class LiveTimedTradeService
             'order' => $order,
             'trade' => $trade,
         ];
+    }
+
+    /**
+     * Real, exchange-reported fee for an already-placed order, if the
+     * resolved provider supports the lookup (only Binance does today).
+     * Never throws — resolving an unknown provider, a provider that doesn't
+     * implement the lookup, or the lookup itself failing all simply return
+     * null so the caller can fall back to its existing fee estimate.
+     *
+     * @return array{commission: float, commission_asset: string, realized_pnl: float, fills: int}|null
+     */
+    public function realFeeForOrder(
+        Integration $integration,
+        string $providerKey,
+        string $symbol,
+        string $orderId,
+        string $expectedQuoteAsset = 'USDT',
+    ): ?array {
+        try {
+            $provider = $this->providers->for($providerKey);
+        } catch (\Throwable) {
+            return null;
+        }
+
+        if (! method_exists($provider, 'realFeeForOrder')) {
+            return null;
+        }
+
+        try {
+            return $provider->realFeeForOrder($integration, $symbol, $orderId, $expectedQuoteAsset);
+        } catch (\Throwable $e) {
+            Log::warning('live_timed_trade_real_fee_lookup_failed', [
+                'provider' => $providerKey,
+                'symbol' => $symbol,
+                'order_id' => $orderId,
+                'error' => $e->getMessage(),
+            ]);
+
+            return null;
+        }
+    }
+
+    /**
+     * Real, exchange-reported funding fee(s) for a symbol over a position's
+     * open-to-close window, if the resolved provider supports the lookup.
+     * Returns null (not 0.0) on any failure so the caller can distinguish
+     * "genuinely no funding fee" from "couldn't check" for the fee_source
+     * auditability field — never throws.
+     */
+    public function realFundingFee(
+        Integration $integration,
+        string $providerKey,
+        string $symbol,
+        \DateTimeInterface $from,
+        \DateTimeInterface $to,
+    ): ?float {
+        try {
+            $provider = $this->providers->for($providerKey);
+        } catch (\Throwable) {
+            return null;
+        }
+
+        if (! method_exists($provider, 'realFundingFee')) {
+            return null;
+        }
+
+        try {
+            return $provider->realFundingFee($integration, $symbol, $from, $to);
+        } catch (\Throwable $e) {
+            Log::warning('live_timed_trade_real_funding_fee_lookup_failed', [
+                'provider' => $providerKey,
+                'symbol' => $symbol,
+                'error' => $e->getMessage(),
+            ]);
+
+            return null;
+        }
     }
 
     public function pnlFor(QuickTrade $trade, float $exitPrice): float

@@ -24,6 +24,7 @@ class RobotSession extends BaseModel
         'runtime_json' => 'array',
         'stop_loss_pct' => 'decimal:4',
         'take_profit_pct' => 'decimal:4',
+        'quick_trade_stop_loss_pct' => 'decimal:2',
         'multi_symbol' => 'boolean',
         'symbol_list' => 'array',
         'peak_profit' => 'decimal:8',

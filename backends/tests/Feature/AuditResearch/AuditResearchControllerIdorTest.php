@@ -154,6 +154,14 @@ class AuditResearchControllerIdorTest extends TestCase
     }
 
     /** @test */
+    public function cannot_read_the_forecast_shadow_report_of_a_workspace_the_user_is_not_a_member_of(): void
+    {
+        $this->actingAs($this->userA)
+            ->getJson("/api/v1/workspaces/{$this->workspaceB->id}/audit-research/forecast-shadow-report")
+            ->assertStatus(403);
+    }
+
+    /** @test */
     public function a_member_of_the_owning_workspace_can_read_the_session(): void
     {
         $memberOfB = User::factory()->create(['two_factor_confirmed_at' => now()]);

@@ -11,6 +11,7 @@ use App\Domain\AuditResearch\Export\PdfAuditExporter;
 use App\Domain\AuditResearch\BuildComparisonService;
 use App\Domain\AuditResearch\ProductionReadinessService;
 use App\Domain\AuditResearch\PredictionAccuracyService;
+use App\Domain\MarketIntelligence\ForecastShadowReportService;
 use App\Http\Controllers\Controller;
 use App\Models\AuditDecisionSnapshot;
 use App\Models\AuditEvent;
@@ -270,6 +271,32 @@ class AuditResearchController extends Controller
         $this->assertWorkspaceMembership($request, $workspaceId);
 
         return response()->json(['bots' => $service->forWorkspace($workspaceId)]);
+    }
+
+    /**
+     * Old Quick Trade forecast mechanism vs UnifiedForecastEngine, shadow
+     * mode only -- see ForecastShadowReportService's own docblock for the
+     * exact outcome-resolution contract. Read-only; never touches a real
+     * trade decision.
+     *
+     * NOTE (honest limitation, not fixed here -- out of this task's scope):
+     * `unified_forecast_shadow_comparison` AuditEvent rows carry no
+     * workspace_id (audit_events has none, and Quick Trade's forecast()
+     * endpoint that writes them takes no workspace_id either) -- this route
+     * is gated by workspace membership like every other route in this
+     * controller, but the underlying shadow-comparison data itself is
+     * global (workspace-agnostic), not scoped per workspace.
+     */
+    public function forecastShadowReport(Request $request, string $workspaceId, ForecastShadowReportService $service): JsonResponse
+    {
+        $this->assertWorkspaceMembership($request, $workspaceId);
+
+        $data = $request->validate([
+            'days' => 'nullable|integer|min:1|max:90',
+            'symbol' => 'nullable|string|max:32',
+        ]);
+
+        return response()->json($service->report((int) ($data['days'] ?? 7), $data['symbol'] ?? null));
     }
 
     private function assertWorkspaceMembership(Request $request, string $workspaceId): void

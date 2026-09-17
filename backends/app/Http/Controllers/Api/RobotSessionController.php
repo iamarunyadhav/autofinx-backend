@@ -52,6 +52,13 @@ class RobotSessionController extends Controller
             'symbol_list.*' => 'string|max:32',
             'cooldown_seconds' => 'nullable|integer|min:0|max:86400',
             'daily_loss_limit' => 'nullable|numeric|min:0',
+            // Optional, per-session hard stop-loss forwarded verbatim into
+            // every QuickTrade this session opens -- same negative-percent-
+            // of-stake convention as quick_trades.stop_loss_pct (see
+            // QuickTradeController::place()). Distinct from stop_loss_pct
+            // above, which is the candle-direction bot's own positive-
+            // percentage trailing-stop setting.
+            'quick_trade_stop_loss_pct' => 'nullable|numeric|lt:0|gte:-100',
         ]);
 
         return response()->json(
@@ -87,6 +94,7 @@ class RobotSessionController extends Controller
             'symbol_list.*' => 'string|max:32',
             'cooldown_seconds' => 'sometimes|integer|min:0|max:86400',
             'daily_loss_limit' => 'nullable|numeric|min:0',
+            'quick_trade_stop_loss_pct' => 'nullable|numeric|lt:0|gte:-100',
         ]);
 
         return response()->json($sessions->update($robotSession, $payload));

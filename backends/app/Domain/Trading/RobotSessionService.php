@@ -75,6 +75,12 @@ class RobotSessionService
                 : 'timed_expiry',
             'stop_loss_pct' => round((float) ($payload['stop_loss_pct'] ?? 12.0), 4),
             'take_profit_pct' => round((float) ($payload['take_profit_pct'] ?? 2.0), 4),
+            // Opt-in only -- unlike stop_loss_pct above (which always has a
+            // default), this stays null unless the caller explicitly sets it,
+            // mirroring Quick Trade's own stop-loss opt-in.
+            'quick_trade_stop_loss_pct' => isset($payload['quick_trade_stop_loss_pct'])
+                ? round((float) $payload['quick_trade_stop_loss_pct'], 2)
+                : null,
             'cooldown_seconds' => (int) ($payload['cooldown_seconds'] ?? 600),
             'daily_loss_limit' => isset($payload['daily_loss_limit'])
                 ? round((float) $payload['daily_loss_limit'], 8)
@@ -115,6 +121,7 @@ class RobotSessionService
             'bot_mode',
             'stop_loss_pct',
             'take_profit_pct',
+            'quick_trade_stop_loss_pct',
             'cooldown_seconds',
             'daily_loss_limit',
             'multi_symbol',
@@ -135,6 +142,7 @@ class RobotSessionService
                     'bot_mode',
                     'stop_loss_pct',
                     'take_profit_pct',
+                    'quick_trade_stop_loss_pct',
                     'cooldown_seconds',
                     'daily_loss_limit',
                     'multi_symbol',
@@ -446,6 +454,56 @@ class RobotSessionService
         return $sessionId . ':' . strtolower($direction) . ':' . $bucket;
     }
 
+    /**
+     * Shadow-only: computes UnifiedForecastEngine::evaluate() for the same
+     * symbol/timeframe/horizon this session's own SignalPreviewService::preview()
+     * call just used, and logs the comparison via the existing
+     * AuditEventRecorder (no second logging mechanism) -- exactly mirrors
+     * QuickTradeController::recordUnifiedForecastShadowComparison(). Wrapped
+     * in its own try/catch so a shadow failure can NEVER affect the real
+     * session-evaluation path.
+     *
+     * bot_instance_id deliberately uses the same "{exchange}:{symbol}:{timeframe}"
+     * convention Quick Trade's own shadow wiring uses (NOT the robot session
+     * id) -- ForecastShadowReportService::parseBotInstanceId() parses that
+     * exact format back out to resolve real outcomes from MarketOhlc; a
+     * per-session id there would parse as a bogus "exchange" and every Robot
+     * Trade row would permanently report an "unknown" outcome.
+     */
+    private function recordUnifiedForecastShadowComparison(RobotSession $session, array $signal): void
+    {
+        try {
+            $exchange = (string) ($session->provider_key ?: 'binance');
+            $symbol = (string) $session->symbol;
+            $timeframe = (string) $session->timeframe;
+            $horizonSeconds = (int) $session->expiry_seconds;
+            $botInstanceId = sprintf('%s:%s:%s', $exchange, $symbol, $timeframe);
+
+            $engine = app(\App\Domain\MarketIntelligence\UnifiedForecastEngine::class);
+            $newResult = $engine->evaluate('robot_trade', $botInstanceId, $exchange, $symbol, $timeframe, $horizonSeconds);
+
+            \App\Domain\AuditResearch\AuditEventRecorder::record(
+                'unified_forecast_shadow_comparison',
+                \App\Models\AuditEvent::CATEGORY_DECISION,
+                [
+                    'bot_type' => 'robot_trade',
+                    'bot_instance_id' => $botInstanceId,
+                    'symbol' => $symbol,
+                    'metadata' => [
+                        'robot_session_id' => $session->id,
+                        'old' => $signal,
+                        'new' => $newResult,
+                    ],
+                ],
+            );
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::warning('[UnifiedForecastEngine] Robot Trade shadow comparison failed (non-fatal, real session evaluation unaffected)', [
+                'session_id' => $session->id,
+                'error' => $e->getMessage(),
+            ]);
+        }
+    }
+
     private function evaluateTimedExpirySession(RobotSession $session): array
     {
         $cooldownSeconds = (int) ($this->settings->robotConfig($session->workspace_id)['cooldown_seconds'] ?? 15);
@@ -480,6 +538,15 @@ class RobotSessionService
 
         $signal = $this->signals->preview($candles, $session->timeframe, (array) $session->indicator_set);
         $session->last_signal_at = now();
+
+        // Unified Forecast Engine -- SHADOW COMPARISON ONLY, mirrors Quick
+        // Trade's own Phase 5 wiring exactly (QuickTradeController::forecast()).
+        // Never changes $signal above (already computed) or anything this
+        // method returns -- gated first, before any engine work, so the flag
+        // being off means genuinely zero UnifiedForecastEngine calls.
+        if ((bool) config('unified_forecast.robot_trade_shadow_enabled', true)) {
+            $this->recordUnifiedForecastShadowComparison($session, $signal);
+        }
 
         // ── Signal stability gate ──────────────────────────────────────────
         // Require the same direction on 2 consecutive evaluations before entering.
@@ -553,6 +620,12 @@ class RobotSessionService
             'provider' => $session->provider_key,
             'integration_id' => $session->integration_id,
             'idempotency_key' => $this->robotSessionIdempotencyKey($session->id, $direction, $cooldownSeconds),
+            // Optional, session-level hard stop-loss -- QuickTradeService::place()
+            // itself silently ignores this for anything but live mode, so it's
+            // safe to always pass it through when configured.
+            'stop_loss_pct' => $session->quick_trade_stop_loss_pct !== null
+                ? (float) $session->quick_trade_stop_loss_pct
+                : null,
         ], $session->user_id);
 
         $session->last_trade_at = now();
@@ -866,6 +939,9 @@ class RobotSessionService
                 'provider' => $session->provider_key,
                 'integration_id' => $session->integration_id,
                 'idempotency_key' => $this->robotSessionIdempotencyKey($session->id, $openDirection, 30),
+                'stop_loss_pct' => $session->quick_trade_stop_loss_pct !== null
+                    ? (float) $session->quick_trade_stop_loss_pct
+                    : null,
             ], $session->user_id);
 
             $session->active_side = $action;

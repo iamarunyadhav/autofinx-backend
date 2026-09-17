@@ -7,6 +7,7 @@ use App\Models\Integration;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 use RuntimeException;
 
 class BinanceTimedFuturesProvider implements LiveTradeProviderInterface
@@ -230,6 +231,150 @@ class BinanceTimedFuturesProvider implements LiveTradeProviderInterface
             'slippage_pct' => $this->slippagePct($closeSide === 'SELL' ? 'sell' : 'buy', $price, $referencePrice),
             'response' => $payload,
         ];
+    }
+
+    /**
+     * The REAL commission Binance actually charged for an order, summed across
+     * any partial fills, as reported by the exchange itself — as opposed to
+     * `estimated_fee`/`takerFeeRate()` above, which are a static assumption
+     * baked in at order time and never reconciled against what Binance
+     * actually took.
+     *
+     * Verified against Binance's public USDS-M Futures API docs
+     * (`GET /fapi/v1/userTrades`, signed, `symbol` + `orderId`): each row
+     * returned for a filled order includes `commission` (the fee actually
+     * charged for that fill) and `commissionAsset` (the asset it was charged
+     * in). On USDS-M futures, commission is charged in the position's margin
+     * asset (USDT for every symbol this platform trades) by default — unlike
+     * Binance Spot, futures does not offer a BNB fee-discount mechanism that
+     * would put a different asset in `commissionAsset` for a normal account.
+     * If a fill nonetheless reports a `commissionAsset` other than
+     * `$expectedQuoteAsset`, this codebase has no price-conversion service to
+     * reuse (confirmed via grep before writing this), so rather than invent
+     * one or guess a conversion rate, this method treats that as an
+     * unreliable read and returns null — the caller then falls back to the
+     * existing fee estimate exactly as it did before this method existed.
+     *
+     * NEVER throws: any network error, empty/unexpected response, or mixed
+     * commission asset returns null so a live settlement can always fall
+     * back to the estimate rather than fail or stall.
+     *
+     * @return array{commission: float, commission_asset: string, realized_pnl: float, fills: int}|null
+     */
+    public function realFeeForOrder(
+        Integration $integration,
+        string $symbol,
+        string $orderId,
+        string $expectedQuoteAsset = 'USDT'
+    ): ?array {
+        $orderId = trim($orderId);
+        if ($orderId === '' || $orderId === '0') {
+            return null;
+        }
+
+        try {
+            $response = $this->signedRequest($integration, 'GET', '/fapi/v1/userTrades', [
+                'symbol' => strtoupper($symbol),
+                'orderId' => $orderId,
+            ]);
+            $rows = collect((array) $response->json());
+        } catch (\Throwable $e) {
+            Log::warning('binance_futures_real_fee_lookup_failed', [
+                'symbol' => $symbol,
+                'order_id' => $orderId,
+                'error' => $e->getMessage(),
+            ]);
+
+            return null;
+        }
+
+        if ($rows->isEmpty()) {
+            return null;
+        }
+
+        $expectedQuoteAsset = strtoupper($expectedQuoteAsset);
+        $commission = 0.0;
+        $realizedPnl = 0.0;
+
+        foreach ($rows as $row) {
+            if (! is_array($row)) {
+                return null;
+            }
+
+            $asset = strtoupper((string) ($row['commissionAsset'] ?? ''));
+            if ($asset !== '' && $asset !== $expectedQuoteAsset) {
+                Log::warning('binance_futures_real_fee_unexpected_asset', [
+                    'symbol' => $symbol,
+                    'order_id' => $orderId,
+                    'commission_asset' => $asset,
+                    'expected' => $expectedQuoteAsset,
+                ]);
+
+                return null;
+            }
+
+            $commission += (float) ($row['commission'] ?? 0);
+            $realizedPnl += (float) ($row['realizedPnl'] ?? 0);
+        }
+
+        return [
+            'commission' => round($commission, 8),
+            'commission_asset' => $expectedQuoteAsset,
+            'realized_pnl' => round($realizedPnl, 8),
+            'fills' => $rows->count(),
+        ];
+    }
+
+    /**
+     * REAL futures funding fee(s) actually credited/debited for a symbol over
+     * a position's open-to-close window — as opposed to the existing
+     * settlement path, which has no funding-fee term at all today. Funding
+     * can be positive (credited to the account) or negative (charged), and
+     * settles every 8 hours (00:00/08:00/16:00 UTC on Binance); any of this
+     * platform's 1h/4h/24h Quick Trade durations can span one of those
+     * boundaries.
+     *
+     * Verified against Binance's public USDS-M Futures API docs
+     * (`GET /fapi/v1/income`, signed, `symbol` + `incomeType=FUNDING_FEE` +
+     * `startTime`/`endTime`): each row has an `income` field (signed, in the
+     * symbol's margin asset) for one funding settlement event.
+     *
+     * Returns null — not 0.0 — on any failure (network error, unexpected
+     * response shape) specifically so the caller can distinguish "looked it
+     * up, there was genuinely no funding fee in this window" (0.0) from
+     * "couldn't look it up" (null), which this platform's `fee_source`
+     * auditability column depends on. A caller that only wants a safe
+     * numeric contribution to a P&L sum should treat null as 0.0. Never
+     * throws; a failure is logged as a warning so a missed funding fee is at
+     * least visible, not silently swallowed without a trace.
+     */
+    public function realFundingFee(
+        Integration $integration,
+        string $symbol,
+        \DateTimeInterface $from,
+        \DateTimeInterface $to
+    ): ?float {
+        try {
+            $response = $this->signedRequest($integration, 'GET', '/fapi/v1/income', [
+                'symbol' => strtoupper($symbol),
+                'incomeType' => 'FUNDING_FEE',
+                'startTime' => (int) floor($from->getTimestamp() * 1000),
+                'endTime' => (int) floor($to->getTimestamp() * 1000),
+                'limit' => 1000,
+            ]);
+            $rows = collect((array) $response->json());
+        } catch (\Throwable $e) {
+            Log::warning('binance_futures_real_funding_fee_lookup_failed', [
+                'symbol' => $symbol,
+                'from' => $from->format(DATE_ATOM),
+                'to' => $to->format(DATE_ATOM),
+                'error' => $e->getMessage(),
+            ]);
+
+            return null;
+        }
+
+        return round($rows->sum(fn ($row) => is_array($row) ? (float) ($row['income'] ?? 0) : 0.0), 8);
     }
 
     private function takerFeeRate(Integration $integration): float

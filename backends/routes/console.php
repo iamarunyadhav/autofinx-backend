@@ -200,6 +200,21 @@ if ($schedulerEnabled && (bool) config('autofinx.scheduler.ratio_bots_backtest',
         ->after(fn () => $markRunEnd('ratio-bots:forecast-backtest'));
 }
 
+// Unified Forecast Engine, Phase 4c -- Quick Trade's own periodic
+// calibration refresh, mirroring the ratio_bots_backtest job above
+// (read-only analysis job, not part of any live trading loop; shadow-mode
+// data only -- see QuickTradeController::forecast()'s shadow comparison).
+// Quick Trade only, per the plan's scope -- Robot Trade/Future
+// Trade/Fast2X are separate, later tasks.
+if ($schedulerEnabled && (bool) config('autofinx.scheduler.quick_trade_forecast_backtest', true)) {
+    Schedule::command('quick-trade:forecast-backtest')
+        ->dailyAt('03:45')
+        ->withoutOverlapping()
+        ->runInBackground()
+        ->before(fn () => $markRunStart('quick-trade:forecast-backtest'))
+        ->after(fn () => $markRunEnd('quick-trade:forecast-backtest'));
+}
+
 if ($schedulerEnabled && ! $supervisorRuntime && $allowBinanceRest) {
     Schedule::job(new KeepAliveUserStreamsJob)
         ->everyThirtyMinutes()

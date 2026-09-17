@@ -49,6 +49,15 @@ class QuickTradeService
         $source = (string) ($payload['source'] ?? 'manual_quick_trade');
         $robotSessionId = $payload['robot_session_id'] ?? null;
         $requestIdempotencyKey = trim((string) ($payload['idempotency_key'] ?? ''));
+        // Optional per-trade stop-loss — live mode only. Paper trades have no
+        // real position to protect, so any value submitted for a paper trade
+        // is silently ignored (stored as null / feature off) rather than
+        // rejected, to keep the paper request path unchanged.
+        $stopLossPct = null;
+        $rawStopLossPct = $payload['stop_loss_pct'] ?? null;
+        if ($mode === 'live' && $rawStopLossPct !== null && $rawStopLossPct !== '') {
+            $stopLossPct = (float) $rawStopLossPct;
+        }
         // Generated here (rather than at its original ~118 call site) purely
         // so the Audit Research instrumentation below has a single stable
         // correlation_id to reuse across every entry gate, including the
@@ -72,6 +81,9 @@ class QuickTradeService
         }
         if (! in_array($expirySeconds, $this->settings->durationsForMode($workspaceId, $mode, $providerKey), true)) {
             throw new RuntimeException('Selected duration is not enabled for quick trading.');
+        }
+        if ($stopLossPct !== null && $stopLossPct >= 0) {
+            throw new RuntimeException('stop_loss_pct must be a negative percentage (e.g. -2.00 for a 2% stop).');
         }
 
         try {
@@ -197,6 +209,7 @@ class QuickTradeService
                 side: $side,
                 userId: $userId,
                 entryIdempotencyKey: $entryIdempotencyKey,
+                stopLossPct: $stopLossPct,
             );
         }
 
@@ -591,6 +604,7 @@ class QuickTradeService
         string $side,
         ?string $userId,
         string $entryIdempotencyKey,
+        ?float $stopLossPct = null,
     ): QuickTrade {
         $workspaceId = (string) $payload['workspace_id'];
         $integration = $this->integrations->resolve($workspaceId, $context['provider'], $context['integration_id']);
@@ -637,7 +651,8 @@ class QuickTradeService
                 $walletAccount,
                 $robotSessionId,
                 $userId,
-                $signalPayload
+                $signalPayload,
+                $stopLossPct
             ) {
                 $booked = $this->liveTimedTrades->bookEntry(
                     $integration,
@@ -675,6 +690,7 @@ class QuickTradeService
                     'timeframe' => $timeframe,
                     'expiry_seconds' => $expirySeconds,
                     'payout_ratio' => 0,
+                    'stop_loss_pct' => $stopLossPct,
                     'mode' => 'live',
                     'source' => $source,
                     'provider_key' => strtolower((string) $integration->provider_key),
@@ -751,6 +767,91 @@ class QuickTradeService
         }
     }
 
+    /**
+     * Resolve real-vs-estimated fees for a live settlement. Only ever
+     * attempted for Binance (the only provider with a real-fee lookup
+     * today); every other provider key falls straight through to the
+     * pre-existing estimate-only behaviour. This method itself never
+     * throws — `LiveTimedTradeService::realFeeForOrder()`/`realFundingFee()`
+     * already swallow every failure and return null, so a lookup failure
+     * here only ever means "use the estimate", never a blocked settlement.
+     *
+     * @return array{0: float, 1: float, 2: float, 3: ?float, 4: ?float, 5: float, 6: string}
+     *   [entryFee, exitFee, fundingFee, entryFeeActual, exitFeeActual, fundingFeeActual, feeSource]
+     */
+    private function reconcileLiveFees(
+        QuickTrade $trade,
+        \App\Models\Integration $integration,
+        array $exitExecution,
+        float $entryFeeEstimate,
+        float $exitFeeEstimate,
+    ): array {
+        $providerKey = strtolower((string) ($trade->provider_key ?: $integration->provider_key));
+        $quoteCurrency = strtoupper((string) ($trade->quote_currency ?: 'USDT'));
+
+        $entryFeeActual = null;
+        $exitFeeActual = null;
+        $fundingFeeActual = null;
+
+        if ($providerKey === 'binance') {
+            $entryOrderId = (string) ($trade->order?->exchange_order_id ?? '');
+            $exitOrderId = (string) data_get($exitExecution, 'response.orderId', '');
+
+            $entryLookup = $this->liveTimedTrades->realFeeForOrder(
+                $integration,
+                $providerKey,
+                $trade->symbol,
+                $entryOrderId,
+                $quoteCurrency,
+            );
+            $exitLookup = $this->liveTimedTrades->realFeeForOrder(
+                $integration,
+                $providerKey,
+                $trade->symbol,
+                $exitOrderId,
+                $quoteCurrency,
+            );
+
+            if ($entryLookup !== null) {
+                $entryFeeActual = round((float) $entryLookup['commission'], 8);
+            }
+            if ($exitLookup !== null) {
+                $exitFeeActual = round((float) $exitLookup['commission'], 8);
+            }
+
+            // Binance's `income` sign is negative when the account was
+            // *charged* funding and positive when it was *credited* — the
+            // opposite of this platform's fee convention (positive = cost).
+            // Invert here so `funding_fee_actual`/`fundingFee` stay on the
+            // same "positive = cost" convention as entry/exit commission.
+            $rawFundingIncome = $this->liveTimedTrades->realFundingFee(
+                $integration,
+                $providerKey,
+                $trade->symbol,
+                CarbonImmutable::parse($trade->entry_at),
+                CarbonImmutable::now(),
+            );
+            if ($rawFundingIncome !== null) {
+                $fundingFeeActual = round(-1 * $rawFundingIncome, 8);
+            }
+        }
+
+        $commissionReal = $entryFeeActual !== null && $exitFeeActual !== null;
+        $fundingReal = $fundingFeeActual !== null;
+
+        $entryFee = $commissionReal ? $entryFeeActual : $entryFeeEstimate;
+        $exitFee = $commissionReal ? $exitFeeActual : $exitFeeEstimate;
+        $fundingFee = $fundingReal ? $fundingFeeActual : 0.0;
+
+        $feeSource = match (true) {
+            $commissionReal && $fundingReal => 'real',
+            $commissionReal || $fundingReal => 'partial',
+            default => 'estimated',
+        };
+
+        return [$entryFee, $exitFee, $fundingFee, $entryFeeActual, $exitFeeActual, $fundingFeeActual, $feeSource];
+    }
+
     private function settleLiveTrade(QuickTrade $trade): QuickTrade
     {
         $integration = $this->integrations->resolve(
@@ -762,9 +863,19 @@ class QuickTradeService
         $execution = $this->liveTimedTrades->executeExit($integration, $trade, (string) Str::uuid());
         $exitPrice = (float) ($execution['price'] ?? 0);
         $grossProfitLoss = $this->liveTimedTrades->pnlFor($trade, $exitPrice);
-        $entryFee = round((float) ($trade->fees_total ?? $trade->order?->fee_amount ?? 0), 8);
-        $exitFee = round((float) ($execution['estimated_fee'] ?? 0), 8);
-        $feesTotal = round($entryFee + $exitFee, 8);
+        $entryFeeEstimate = round((float) ($trade->fees_total ?? $trade->order?->fee_amount ?? 0), 8);
+        $exitFeeEstimate = round((float) ($execution['estimated_fee'] ?? 0), 8);
+
+        // Real-fee reconciliation: never allowed to fail/delay settlement.
+        // `realFeeForOrder`/`realFundingFee` on LiveTimedTradeService already
+        // catch everything internally and return null on any failure — this
+        // block only ever chooses between "real" and the estimate already
+        // computed above, it never introduces a new way for settlement to
+        // fail.
+        [$entryFee, $exitFee, $fundingFee, $entryFeeActual, $exitFeeActual, $fundingFeeActual, $feeSource] =
+            $this->reconcileLiveFees($trade, $integration, $execution, $entryFeeEstimate, $exitFeeEstimate);
+
+        $feesTotal = round($entryFee + $exitFee + $fundingFee, 8);
         $profitLoss = round($grossProfitLoss - $feesTotal, 8);
         $result = $this->liveResultForPnl($trade, $profitLoss);
         $traceId = (string) Str::uuid();
@@ -772,9 +883,13 @@ class QuickTradeService
         $bookedExit = $this->liveTimedTrades->bookExit($trade, $integration, $execution, $traceId, $profitLoss);
         $signalPayload = (array) ($trade->signal_payload ?? []);
         $executionCost = array_merge((array) ($signalPayload['execution_cost'] ?? []), [
-            'fee_model' => (string) data_get($signalPayload, 'execution_cost.fee_model', 'estimated_binance_futures_taker'),
+            'fee_model' => $feeSource === 'estimated'
+                ? 'estimated_binance_futures_taker'
+                : 'binance_futures_real_commission',
+            'fee_source' => $feeSource,
             'entry_fee' => $entryFee,
             'exit_fee' => $exitFee,
+            'funding_fee' => $fundingFee,
             'total_fees' => $feesTotal,
             'gross_pnl' => $grossProfitLoss,
             'net_pnl' => $profitLoss,
@@ -821,6 +936,11 @@ class QuickTradeService
             'profit_loss' => $profitLoss,
             'payout_amount' => $result['credit_amount'],
             'fees_total' => $feesTotal,
+            'gross_pnl' => $grossProfitLoss,
+            'entry_fee_actual' => $entryFeeActual,
+            'exit_fee_actual' => $exitFeeActual,
+            'funding_fee_actual' => $fundingFeeActual,
+            'fee_source' => $feeSource,
             'signal_payload' => array_merge($signalPayload, [
                 'execution_cost' => $executionCost,
             ]),

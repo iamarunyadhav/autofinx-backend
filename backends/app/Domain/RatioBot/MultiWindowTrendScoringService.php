@@ -46,12 +46,74 @@ class MultiWindowTrendScoringService
 
     public function score(RatioBotConfig $config): array
     {
-        $baseCandles = max(8, min(120, (int) data_get($config->strategy_params, 'auto_start_observation_candles', 24)));
+        // Thin wrapper: extract the same two RatioBotConfig coupling points
+        // this class has always had (strategy_params scalars, and
+        // exchange/symbol/timeframe scalars) and delegate to the generic
+        // scoreFor(). The two new diagnostic keys scoreFor() adds
+        // ('threshold_cleared', 'status' -- see that method's docblock) are
+        // stripped back off here so this method's output stays byte-for-byte
+        // identical to before scoreFor() existed; Ratio Bot's own call sites
+        // and tests never see them.
+        $baseCandles = (int) data_get($config->strategy_params, 'auto_start_observation_candles', 24);
+        $minComposite = (float) data_get($config->strategy_params, 'trend_score_min_composite', 0.15);
+
+        $result = $this->scoreFor(
+            $config->exchangeKey(),
+            $config->normalizedSymbol(),
+            $config->timeFrame(),
+            $baseCandles,
+            $minComposite,
+        );
+
+        unset($result['threshold_cleared'], $result['status']);
+
+        return $result;
+    }
+
+    /**
+     * Generalized, `RatioBotConfig`-free version of the real windowing/ATR-
+     * normalization/composite logic that used to live only inside score().
+     * Reused as-is by score() above (zero behavior change for Ratio Bot) and
+     * intended for later reuse by Quick Trade/Robot Trade/Future Trade call
+     * sites (not wired in this pass).
+     *
+     * Max-wait bound (plan correction #1): this method is stateless -- it
+     * has no memory of how many prior ticks failed to clear the composite
+     * threshold. What it DOES do is expose that per-call fact explicitly:
+     * `threshold_cleared` (bool) and `status` ('clear' | 'insufficient_clarity')
+     * tell a caller whether THIS tick's composite genuinely cleared
+     * min_composite. A single 'insufficient_clarity' tick is not itself a
+     * verdict -- it is the raw signal a STATEFUL caller (built in a later
+     * phase) is expected to accumulate across ticks, the same way
+     * `WalletAwareDirectionFallbackService` tracks a streak-with-reset-on-
+     * dropout using its own `*_streak_started_at`/`*_streak_ticks` state
+     * fields rather than asking this kind of stateless scorer to remember
+     * anything itself. `$maxWaitTicks`, when supplied, is only echoed back
+     * into the return array (as `max_wait_ticks`) for that future stateful
+     * caller's own bookkeeping -- it does not change this method's own
+     * computation, keeping it a pure function.
+     *
+     * @return array{
+     *   direction:string, composite_score:float, min_composite:float,
+     *   agreement_count:int, window_count:int, windows:array,
+     *   threshold_cleared:bool, status:string, max_wait_ticks?:int,
+     * }
+     */
+    public function scoreFor(
+        string $exchange,
+        string $symbol,
+        string $timeframe,
+        int $baseCandles,
+        float $minComposite,
+        ?int $maxWaitTicks = null,
+    ): array {
+        $baseCandles = max(8, min(120, $baseCandles));
+        $minComposite = max(0.01, $minComposite);
 
         $windows = [];
         foreach (self::WINDOW_DEFS as $def) {
             $limit = max(8, min(240, (int) round($baseCandles * $def['multiplier'])));
-            $windows[] = array_merge($def, ['candles' => $limit], $this->windowScore($config, $limit));
+            $windows[] = array_merge($def, ['candles' => $limit], $this->windowScoreFor($exchange, $symbol, $timeframe, $limit));
         }
 
         $composite = 0.0;
@@ -60,13 +122,14 @@ class MultiWindowTrendScoringService
         }
         $composite = round($composite, 4);
 
-        $minComposite = max(0.01, (float) data_get($config->strategy_params, 'trend_score_min_composite', 0.15));
         $direction = 'neutral';
         if ($composite >= $minComposite) {
             $direction = 'bullish';
         } elseif ($composite <= -$minComposite) {
             $direction = 'bearish';
         }
+
+        $thresholdCleared = $direction !== 'neutral';
 
         $agreementCount = 0;
         if ($direction !== 'neutral') {
@@ -77,22 +140,30 @@ class MultiWindowTrendScoringService
             }
         }
 
-        return [
+        $result = [
             'direction' => $direction,
             'composite_score' => $composite,
             'min_composite' => round($minComposite, 4),
             'agreement_count' => $agreementCount,
             'window_count' => count($windows),
             'windows' => $windows,
+            'threshold_cleared' => $thresholdCleared,
+            'status' => $thresholdCleared ? 'clear' : 'insufficient_clarity',
         ];
+
+        if ($maxWaitTicks !== null) {
+            $result['max_wait_ticks'] = $maxWaitTicks;
+        }
+
+        return $result;
     }
 
-    private function windowScore(RatioBotConfig $config, int $limit): array
+    private function windowScoreFor(string $exchange, string $symbol, string $timeframe, int $limit): array
     {
         $candles = MarketOhlc::query()
-            ->where('exchange', $config->exchangeKey())
-            ->where('symbol', $config->normalizedSymbol())
-            ->where('timeframe', $config->timeFrame())
+            ->where('exchange', $exchange)
+            ->where('symbol', $symbol)
+            ->where('timeframe', $timeframe)
             ->orderByDesc('ts')
             ->limit($limit)
             ->get(['open', 'high', 'low', 'close'])
