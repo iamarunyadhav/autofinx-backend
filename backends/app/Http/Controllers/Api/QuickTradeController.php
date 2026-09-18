@@ -114,7 +114,6 @@ class QuickTradeController extends Controller
             $decision,
         );
         $netEdgeResult = $forecastSvc->netEdge($candles, (float) $data['stake_amount']);
-        $unifiedForecast = null;
 
         // Unified Forecast Engine, Phase 5 -- SHADOW COMPARISON ONLY. This
         // block never changes $forecastResult/$netEdgeResult above (already
@@ -124,34 +123,12 @@ class QuickTradeController extends Controller
         // UnifiedForecastEngine work happens -- not just "the result is
         // discarded".
         if ((bool) config('unified_forecast.quick_trade_shadow_enabled', true) && ! empty($data['symbol'])) {
-            try {
-                $exchange = (string) ($data['exchange'] ?? config('unified_forecast.quick_trade_default_exchange', 'binance'));
-                $unifiedForecast = app(UnifiedForecastEngine::class)->evaluate(
-                    'quick_trade', $exchange.':'.$data['symbol'].':'.$data['timeframe'], $exchange,
-                    (string) $data['symbol'], (string) $data['timeframe'], (int) $data['expiry_seconds']
-                );
-                $unifiedForecast['source'] = 'unified';
-                $unifiedForecast['mode'] = 'shadow';
-                $unifiedForecast['symbol'] = (string) $data['symbol'];
-                $unifiedForecast['timeframe'] = (string) $data['timeframe'];
-                $unifiedForecast['horizon_seconds'] = (int) $data['expiry_seconds'];
-                $unifiedForecast['price_target_available'] = false;
-            } catch (Throwable $e) {
-                Log::warning('[UnifiedForecastEngine] comparison response failed; current forecast remains available', ['error' => $e->getMessage()]);
-            }
             $this->recordUnifiedForecastShadowComparison($data, $forecastResult);
         }
 
         return response()->json([
             'forecast' => $forecastResult,
             'net_edge' => $netEdgeResult,
-            'unified' => $unifiedForecast,
-            'comparison' => [
-                'direction_agreement' => $unifiedForecast !== null && isset($forecastResult['bias'])
-                    ? strtoupper((string) $forecastResult['bias']) === strtoupper((string) ($unifiedForecast['direction'] ?? '')) : null,
-                'agreement' => $unifiedForecast === null ? 'UNAVAILABLE'
-                    : (strtoupper((string) $forecastResult['bias']) === strtoupper((string) ($unifiedForecast['direction'] ?? '')) ? 'AGREE' : 'DISAGREE'),
-            ],
         ]);
     }
 

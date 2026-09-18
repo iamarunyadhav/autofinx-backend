@@ -32,7 +32,10 @@ class TradeForecastService
         }
 
         $tfSeconds = max(1, $this->timeframes->seconds($timeframe));
-        $horizonSeconds = max($tfSeconds, $horizonSeconds ?: $tfSeconds);
+        // Chart timeframe supplies the context; requested trade duration is
+        // the forecast target. Never silently stretch a 5m trade forecast to
+        // 15m merely because the user is viewing a 15m chart.
+        $horizonSeconds = max(5, $horizonSeconds ?: $tfSeconds);
         $horizonCandles = max(1, (int) ceil($horizonSeconds / $tfSeconds));
         $recent = array_slice($candles, -min(100, count($candles)));
         $closes = array_map(static fn ($c) => (float) ($c['close'] ?? 0), $recent);
@@ -74,6 +77,10 @@ class TradeForecastService
             'available' => true,
             'horizon_seconds' => $horizonSeconds,
             'horizon_candles' => $horizonCandles,
+            'context_timeframe' => $timeframe,
+            'context_timeframe_seconds' => $tfSeconds,
+            'resolution_warning' => $horizonSeconds < $tfSeconds
+                ? 'Forecast horizon is shorter than chart candle resolution; use a chart timeframe at or below the trade duration for the most directly observable context.' : null,
             'bias' => $bias,
             'confidence' => round($quality, 1),
             'current_price' => round($currentPrice, 8),
