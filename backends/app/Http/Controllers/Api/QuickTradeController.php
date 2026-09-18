@@ -114,6 +114,7 @@ class QuickTradeController extends Controller
             $decision,
         );
         $netEdgeResult = $forecastSvc->netEdge($candles, (float) $data['stake_amount']);
+        $unifiedForecast = null;
 
         // Unified Forecast Engine, Phase 5 -- SHADOW COMPARISON ONLY. This
         // block never changes $forecastResult/$netEdgeResult above (already
@@ -123,13 +124,71 @@ class QuickTradeController extends Controller
         // UnifiedForecastEngine work happens -- not just "the result is
         // discarded".
         if ((bool) config('unified_forecast.quick_trade_shadow_enabled', true) && ! empty($data['symbol'])) {
+            try {
+                $exchange = (string) ($data['exchange'] ?? config('unified_forecast.quick_trade_default_exchange', 'binance'));
+                $unifiedForecast = app(UnifiedForecastEngine::class)->evaluate(
+                    'quick_trade', $exchange.':'.$data['symbol'].':'.$data['timeframe'], $exchange,
+                    (string) $data['symbol'], (string) $data['timeframe'], (int) $data['expiry_seconds']
+                );
+                $unifiedForecast['source'] = 'unified';
+                $unifiedForecast['mode'] = 'shadow';
+                $unifiedForecast['symbol'] = (string) $data['symbol'];
+                $unifiedForecast['timeframe'] = (string) $data['timeframe'];
+                $unifiedForecast['horizon_seconds'] = (int) $data['expiry_seconds'];
+                $unifiedForecast['price_target_available'] = false;
+            } catch (Throwable $e) {
+                Log::warning('[UnifiedForecastEngine] comparison response failed; current forecast remains available', ['error' => $e->getMessage()]);
+            }
             $this->recordUnifiedForecastShadowComparison($data, $forecastResult);
         }
 
         return response()->json([
             'forecast' => $forecastResult,
             'net_edge' => $netEdgeResult,
+            'unified' => $unifiedForecast,
+            'comparison' => [
+                'direction_agreement' => $unifiedForecast !== null && isset($forecastResult['bias'])
+                    ? strtoupper((string) $forecastResult['bias']) === strtoupper((string) ($unifiedForecast['direction'] ?? '')) : null,
+                'agreement' => $unifiedForecast === null ? 'UNAVAILABLE'
+                    : (strtoupper((string) $forecastResult['bias']) === strtoupper((string) ($unifiedForecast['direction'] ?? '')) ? 'AGREE' : 'DISAGREE'),
+            ],
         ]);
+    }
+
+    /** Read-only normalized comparison for Quick/Robot/Future decision-support UIs. */
+    public function forecastComparison(Request $request, TradeForecastService $forecastSvc)
+    {
+        $data = $request->validate([
+            'bot_type' => 'required|string|in:quick_trade,robot_trade,future_trade',
+            'symbol' => 'required|string|max:32', 'timeframe' => 'required|string|max:16',
+            'expiry_seconds' => 'required|integer|min:5|max:3600', 'candles' => 'required|array|min:10',
+            'candles.*.open' => 'required|numeric', 'candles.*.high' => 'required|numeric',
+            'candles.*.low' => 'required|numeric', 'candles.*.close' => 'required|numeric',
+            'signal' => 'nullable|array', 'exchange' => 'nullable|string|max:32',
+        ]);
+        $candles = $data['candles'];
+        $current = $forecastSvc->forecast($candles, $data['timeframe'], (int) $data['expiry_seconds'],
+            isset($data['signal']) ? $forecastSvc->decisionFromSignalPreview($data['signal']) : null);
+        $exchange = (string) ($data['exchange'] ?? 'binance');
+        $unified = null;
+        try {
+            $unified = app(UnifiedForecastEngine::class)->evaluate(
+                $data['bot_type'], $exchange.':'.$data['symbol'].':'.$data['timeframe'], $exchange,
+                $data['symbol'], $data['timeframe'], (int) $data['expiry_seconds']
+            );
+            $unified = array_merge($unified, ['source' => 'unified', 'mode' => 'shadow',
+                'symbol' => $data['symbol'], 'timeframe' => $data['timeframe'],
+                'horizon_seconds' => (int) $data['expiry_seconds'], 'price_target_available' => false]);
+        } catch (Throwable $e) {
+            Log::warning('[UnifiedForecastEngine] normalized comparison failed', ['bot_type' => $data['bot_type'], 'error' => $e->getMessage()]);
+        }
+        $same = $unified !== null && strtoupper((string) ($current['bias'] ?? '')) === strtoupper((string) ($unified['direction'] ?? ''));
+        return response()->json(['schema_version' => 1, 'bot_type' => $data['bot_type'],
+            'current' => array_merge($current, ['source' => 'current', 'mode' => 'primary',
+                'symbol' => $data['symbol'], 'timeframe' => $data['timeframe'], 'price_target_available' => true]),
+            'unified' => $unified, 'comparison' => ['direction_agreement' => $unified === null ? null : $same,
+                'agreement' => $unified === null ? 'UNAVAILABLE' : ($same ? 'AGREE' : 'DISAGREE')],
+            'execution_source' => 'unchanged_existing_engine']);
     }
 
     /**
