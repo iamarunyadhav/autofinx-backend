@@ -237,11 +237,22 @@ class QuickTradeService
 
         $symbolMeta = $this->settings->symbolMeta($workspaceId, $symbol, $mode, $providerKey);
         $marketPayload = $this->market->latestQuote($symbol, $timeframe, $context);
+        $signalCandles = isset($payload['signal_payload']) ? [] : $this->market->candles($symbol, $timeframe, 80, $context);
         $signalPayload = $payload['signal_payload'] ?? $this->signals->preview(
-            $this->market->candles($symbol, $timeframe, 80, $context),
+            $signalCandles,
             $timeframe,
             (array) ($payload['indicator_set'] ?? [])
         );
+        // Fail-safe, pre-entry research snapshot. It has no decision authority.
+        if ($source === 'manual_quick_trade' && config('quick_trade_research.enabled', true)) {
+            try {
+                $signalPayload['research'] = app(QuickTradeResearchService::class)->capture($signalCandles, $signalPayload,
+                    array_merge($payload, ['symbol' => $symbol, 'timeframe' => $timeframe,
+                        'expiry_seconds' => $expirySeconds, 'mode' => $mode, 'provider' => $providerKey]));
+            } catch (\Throwable $e) {
+                \Illuminate\Support\Facades\Log::warning('Quick Trade research capture unavailable', ['symbol' => $symbol]);
+            }
+        }
         $entryAt = CarbonImmutable::now();
         $walletAccountId = $payload['wallet_account_id'] ?? null;
         $entryIdempotencyKey = $requestIdempotencyKey !== ''
@@ -672,6 +683,11 @@ class QuickTradeService
     ): QuickTrade {
         $workspaceId = (string) $payload['workspace_id'];
         $integration = $this->integrations->resolve($workspaceId, $context['provider'], $context['integration_id']);
+
+        if (isset($signalPayload['research'])) {
+            $signalPayload['research']['execution_environment'] = strtolower((string) data_get($integration->config_json, 'environment', 'live'));
+            $signalPayload['research']['execution_market'] = $integration->provider_key === 'binance' ? 'binance_futures' : $integration->provider_key;
+        }
 
         $walletAccount = null;
         $execution = null;

@@ -175,6 +175,8 @@ Route::prefix('v1')->group(function () {
         Route::post('quick-trade/settle-due', [QuickTradeController::class, 'settleDue']);
         Route::get('workspaces/{workspace}/quick-trades/active', [QuickTradeController::class, 'active']);
         Route::get('workspaces/{workspace}/quick-trades/history', [QuickTradeController::class, 'history']);
+        Route::get('workspaces/{workspace}/quick-trades/research', [\App\Http\Controllers\Api\QuickTradeResearchController::class, 'index'])->middleware('throttle:30,1');
+        Route::post('workspaces/{workspace}/quick-trades/research/export', [\App\Http\Controllers\Api\QuickTradeResearchController::class, 'index'])->middleware('throttle:30,1');
         Route::get('workspaces/{workspace}/robot-sessions', [RobotSessionController::class, 'index']);
         Route::post('workspaces/{workspace}/robot-sessions', [RobotSessionController::class, 'store']);
         Route::patch('robot-sessions/{robotSession}', [RobotSessionController::class, 'update']);

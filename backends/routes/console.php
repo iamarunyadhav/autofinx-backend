@@ -155,6 +155,11 @@ Schedule::job(new SyncOrderStatusJob(100))
     ->withoutOverlapping();
 */
 
+// Read-only research observations from the existing cached futures feed.
+if ($schedulerEnabled && config('quick_trade_research.enabled', true)) {
+    Schedule::command('quick-trades:sample-research')->everyFiveSeconds()->withoutOverlapping(1)->runInBackground();
+}
+
 // Ratio Bot: WS (autofinx-ratio-feed supervisor daemon) is the primary driver
 // of evaluations via RunRatioBotEvaluationJob on the dedicated "ratio_bot"
 // queue. This is only a low-frequency safety net for any bot whose WS tick
