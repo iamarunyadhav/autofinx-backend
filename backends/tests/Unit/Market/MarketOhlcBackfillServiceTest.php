@@ -92,6 +92,58 @@ class MarketOhlcBackfillServiceTest extends TestCase
         Http::assertNotSent(fn ($request) => str_contains($request->url(), '/api/v3/klines'));
     }
 
+    /** @test */
+    public function detect_gaps_returns_empty_for_a_contiguous_sequence(): void
+    {
+        $this->seedRows('binance', 'BTCUSDT', '1h', 30);
+
+        $gaps = $this->service->detectGaps('binance', 'BTCUSDT', '1h');
+
+        $this->assertSame([], $gaps);
+    }
+
+    /** @test */
+    public function detect_gaps_flags_a_missing_window_in_the_candle_sequence(): void
+    {
+        $base = now()->startOfHour();
+        // Contiguous 1h candles for hours 0..4, then a jump straight to
+        // hour 10 -- a 5-hour hole (hours 5..9 missing).
+        foreach ([0, 1, 2, 3, 4, 10] as $hourOffset) {
+            MarketOhlc::create([
+                'exchange' => 'binance', 'symbol' => 'BTCUSDT', 'timeframe' => '1h',
+                'ts' => $base->copy()->addHours($hourOffset),
+                'open' => 100, 'high' => 101, 'low' => 99, 'close' => 100.5, 'volume' => 10,
+            ]);
+        }
+
+        $gaps = $this->service->detectGaps('binance', 'BTCUSDT', '1h');
+
+        $this->assertCount(1, $gaps);
+        $this->assertSame(5, $gaps[0]['missing_candles']);
+    }
+
+    /** @test */
+    public function backfill_logs_a_warning_when_the_fetched_candles_contain_a_gap(): void
+    {
+        \Illuminate\Support\Facades\Log::spy();
+
+        $rows = $this->fakeKlines(5, startPrice: 100.0);
+        // Remove the middle candle to create a real gap in what Binance
+        // "returned" (simulating a genuine exchange-side data hole).
+        unset($rows[2]);
+        $rows = array_values($rows);
+
+        Http::fake([
+            '*/api/v3/klines*' => Http::response($rows),
+        ]);
+
+        $this->service->backfill('binance', 'GAPUSDT', '1h', 40);
+
+        \Illuminate\Support\Facades\Log::shouldHaveReceived('warning')
+            ->withArgs(fn ($message) => str_contains($message, 'gap detected'))
+            ->once();
+    }
+
     private function seedRows(string $exchange, string $symbol, string $timeframe, int $count): void
     {
         for ($i = 0; $i < $count; $i++) {

@@ -6,10 +6,12 @@ use App\Domain\Market\MarketPriceCacheService;
 use App\Domain\Trading\QuickTradeResearchService;
 use App\Models\QuickTrade;
 use App\Models\QuickTradeResearchSample;
+use App\Models\RatioBotForecastBacktest;
 use App\Models\User;
 use App\Models\Workspace;
 use App\Models\WorkspaceMember;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Str;
 use Tests\TestCase;
 
 class QuickTradeResearchTest extends TestCase
@@ -138,6 +140,67 @@ class QuickTradeResearchTest extends TestCase
         for ($i = 0; $i < 5; $i++) $this->artisan('quick-trades:sample-research')->assertSuccessful();
         $this->assertSame(1, QuickTradeResearchSample::where('quick_trade_id', $trade->id)->count());
         $this->assertSame('open', $trade->fresh()->status);
+    }
+
+    private function backtestRow(array $overrides = []): RatioBotForecastBacktest
+    {
+        return RatioBotForecastBacktest::create(array_merge([
+            'id' => (string) Str::uuid(), 'bot_type' => 'quick_trade',
+            'bot_instance_id' => 'binance_futures:BTCUSDT:1m', 'horizon_seconds' => 60,
+            'confidence_bucket' => '80-90', 'evaluation_period' => 'holdout',
+            'sample_size' => 40, 'hits' => 30, 'hit_rate_pct' => 75.0,
+            'avg_confidence_pct' => 85.0, 'computed_at' => now(),
+        ], $overrides));
+    }
+
+    public function test_calibration_endpoint_returns_real_reliability_curve_and_is_workspace_scoped(): void
+    {
+        $this->backtestRow();
+        $url = '/api/v1/workspaces/'.$this->workspace->id.'/quick-trades/research/calibration';
+        $response = $this->getJson($url.'?bot_instance_id=binance_futures:BTCUSDT:1m&horizon_seconds=60')
+            ->assertOk()
+            ->assertJsonPath('bot_type', 'quick_trade')
+            ->assertJsonPath('bot_instance_id', 'binance_futures:BTCUSDT:1m');
+        $bucket = collect($response->json('reliability_curve'))->firstWhere('confidence_bucket', '80-90');
+        $this->assertSame(40, $bucket['sample_size']);
+        $this->assertTrue($bucket['calibrated']);
+        $this->assertEquals(75.0, $bucket['actual_hit_rate_pct']);
+
+        $other = Workspace::factory()->create();
+        $this->getJson('/api/v1/workspaces/'.$other->id.'/quick-trades/research/calibration?bot_instance_id=binance_futures:BTCUSDT:1m&horizon_seconds=60')
+            ->assertForbidden();
+    }
+
+    public function test_readiness_endpoint_reports_known_limitations_from_real_data_and_is_workspace_scoped(): void
+    {
+        $this->backtestRow(['evaluation_period' => 'training']);
+        $this->backtestRow(['evaluation_period' => 'holdout']);
+        $url = '/api/v1/workspaces/'.$this->workspace->id.'/quick-trades/research/readiness';
+        $this->getJson($url.'?bot_instance_id=binance_futures:BTCUSDT:1m&horizon_seconds=60&symbol=BTCUSDT&timeframe=1m')
+            ->assertOk()
+            ->assertJsonPath('bot_type', 'quick_trade')
+            ->assertJsonStructure(['data_source', 'performance', 'calibration', 'promotion_gate', 'known_limitations'])
+            ->assertJsonPath('promotion_gate.status', 'NOT_VALIDATED');
+
+        $other = Workspace::factory()->create();
+        $this->getJson('/api/v1/workspaces/'.$other->id.'/quick-trades/research/readiness?bot_instance_id=binance_futures:BTCUSDT:1m&horizon_seconds=60')
+            ->assertForbidden();
+    }
+
+    public function test_compare_endpoint_returns_two_scopes_with_a_recommendation_and_is_workspace_scoped(): void
+    {
+        $this->backtestRow(['bot_instance_id' => 'binance_futures:BTCUSDT:1m']);
+        $this->backtestRow(['bot_instance_id' => 'binance_futures:ETHUSDT:1m']);
+        $url = '/api/v1/workspaces/'.$this->workspace->id.'/quick-trades/research/compare';
+        $params = 'a[bot_instance_id]=binance_futures:BTCUSDT:1m&a[horizon_seconds]=60'
+            .'&b[bot_instance_id]=binance_futures:ETHUSDT:1m&b[horizon_seconds]=60';
+        $this->getJson($url.'?'.$params)->assertOk()
+            ->assertJsonPath('model_a.bot_instance_id', 'binance_futures:BTCUSDT:1m')
+            ->assertJsonPath('model_b.bot_instance_id', 'binance_futures:ETHUSDT:1m')
+            ->assertJsonStructure(['deltas', 'recommendation']);
+
+        $other = Workspace::factory()->create();
+        $this->getJson('/api/v1/workspaces/'.$other->id.'/quick-trades/research/compare?'.$params)->assertForbidden();
     }
 
     public function test_capture_whitelists_config_and_preserves_pre_entry_inputs(): void

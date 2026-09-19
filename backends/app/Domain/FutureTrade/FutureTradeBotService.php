@@ -9,6 +9,7 @@ use App\Domain\Ops\OperationalHealthService;
 use App\Domain\Portfolio\LivePortfolioGuardService;
 use App\Domain\Signals\IndicatorIntelligenceService;
 use App\Domain\Signals\StrategyResearchLabService;
+use App\Domain\Trading\ExchangeExecutionCostReconciliationService;
 use App\Domain\Trading\FuturesOrderSizingService;
 use App\Domain\Trading\LeverageValidationService;
 use App\Domain\Trading\RuntimeSafetySettingsService;
@@ -4822,6 +4823,79 @@ class FutureTradeBotService
         return true;
     }
 
+    /**
+     * Resolve real-vs-estimated fees/funding for a confirmed live Future
+     * Trade close. Only ever attempted once `closeLivePosition()` has
+     * confirmed the exit against the exchange (an unconfirmed SUBMITTED
+     * close has no exit fill to look up yet). Reuses
+     * `BinanceFuturesClient::realFeeForOrder()`/`realFundingFee()` — the
+     * same real-exchange-lookup contract Quick Trade's
+     * `BinanceTimedFuturesProvider` established — and the shared
+     * `ExchangeExecutionCostReconciliationService` to decide
+     * real/partial/estimated exactly the same way Quick Trade does.
+     *
+     * NEVER throws: `realFeeForOrder()`/`realFundingFee()` already swallow
+     * every failure (network, circuit breaker, malformed response) and
+     * return null, and the try/catch below is a second safety net in case
+     * anything else in this method misbehaves — a lookup failure here only
+     * ever means "use the estimate", never a blocked/delayed settlement.
+     *
+     * @return array{0: float, 1: float, 2: float, 3: ?float, 4: ?float, 5: ?float, 6: string}
+     *   [entryFee, exitFee, fundingFee, entryFeeActual, exitFeeActual, fundingFeeActual, feeSource]
+     */
+    private function reconcileLiveFutureFees(
+        BinanceFuturesClient $client,
+        ?FutureTradeLogicalTrade $logicalForClose,
+        string $symbol,
+        string $exitOrderId,
+        float $entryFeeEstimate,
+        float $exitFeeEstimate,
+    ): array {
+        $entryFeeActual = null;
+        $exitFeeActual = null;
+        $fundingFeeActual = null;
+
+        try {
+            $entryOrderId = (string) ($logicalForClose?->entry_exchange_order_id ?? '');
+
+            if ($entryOrderId !== '') {
+                $entryLookup = $client->realFeeForOrder($symbol, $entryOrderId);
+                if ($entryLookup !== null) {
+                    $entryFeeActual = round((float) $entryLookup['commission'], 8);
+                }
+            }
+            if ($exitOrderId !== '') {
+                $exitLookup = $client->realFeeForOrder($symbol, $exitOrderId);
+                if ($exitLookup !== null) {
+                    $exitFeeActual = round((float) $exitLookup['commission'], 8);
+                }
+            }
+
+            $openedAt = $logicalForClose?->opened_at ?? $logicalForClose?->created_at;
+            if ($openedAt) {
+                // Binance's `income` sign is negative when the account was
+                // *charged* funding and positive when *credited* — the
+                // opposite of this platform's fee convention (positive =
+                // cost). Invert here so `funding_fee_actual` stays on the
+                // same "positive = cost" convention as entry/exit commission.
+                $rawFundingIncome = $client->realFundingFee($symbol, $openedAt, now());
+                if ($rawFundingIncome !== null) {
+                    $fundingFeeActual = round(-1 * $rawFundingIncome, 8);
+                }
+            }
+        } catch (Throwable $e) {
+            Log::warning('future_trade_real_fee_reconciliation_failed', [
+                'symbol' => $symbol,
+                'exit_order_id' => $exitOrderId,
+                'error' => $e->getMessage(),
+            ]);
+        }
+
+        return app(ExchangeExecutionCostReconciliationService::class)->resolveFees(
+            $entryFeeActual, $exitFeeActual, $fundingFeeActual, $entryFeeEstimate, $exitFeeEstimate,
+        );
+    }
+
     private function closeLivePosition(FutureTradeBotConfig $config, float $price, string $reason): void
     {
         $state = $this->state($config);
@@ -4946,7 +5020,29 @@ class FutureTradeBotService
         $closeQty = (float) $qty;
         $direction = $positionSide === 'LONG' ? 1 : -1;
         $gross = ($price - $entry) * $closeQty * $direction;
-        $fees = ($entry + $price) * $closeQty * 0.0004;
+        $entryFeeEstimate = $entry * $closeQty * 0.0004;
+        $exitFeeEstimate = $price * $closeQty * 0.0004;
+
+        $entryFeeActual = null;
+        $exitFeeActual = null;
+        $fundingFeeActual = null;
+        $feeSource = 'estimated';
+        $entryFee = $entryFeeEstimate;
+        $exitFee = $exitFeeEstimate;
+        $fundingFee = 0.0;
+
+        // Real-fee/funding reconciliation is only attempted once the close is
+        // actually confirmed against the exchange (an unconfirmed
+        // SUBMITTED close has no exit fill to look up yet). Never allowed to
+        // fail/delay settlement: reconcileLiveFutureFees() below never
+        // throws and only ever chooses between "real" and the estimate
+        // already computed above.
+        if ($positionClosed) {
+            [$entryFee, $exitFee, $fundingFee, $entryFeeActual, $exitFeeActual, $fundingFeeActual, $feeSource] =
+                $this->reconcileLiveFutureFees($client, $logicalForClose, $symbol, (string) ($response['orderId'] ?? ''), $entryFeeEstimate, $exitFeeEstimate);
+        }
+
+        $fees = round($entryFee + $exitFee + $fundingFee, 8);
         $net = $gross - $fees;
         $moveStats = $this->positionMoveStats($state);
         $moveStats['side'] = $positionSide;
@@ -4993,7 +5089,12 @@ class FutureTradeBotService
             if ($positionClosed) {
                 $logicalUpdate['exit_price'] = $price;
                 $logicalUpdate['gross_pnl'] = $gross;
+                $logicalUpdate['fees'] = $fees;
                 $logicalUpdate['net_pnl'] = $net;
+                $logicalUpdate['entry_fee_actual'] = $entryFeeActual;
+                $logicalUpdate['exit_fee_actual'] = $exitFeeActual;
+                $logicalUpdate['funding_fee_actual'] = $fundingFeeActual;
+                $logicalUpdate['fee_source'] = $feeSource;
                 $logicalUpdate['closed_at'] = now();
             }
 

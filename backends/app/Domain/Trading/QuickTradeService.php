@@ -253,6 +253,14 @@ class QuickTradeService
                 \Illuminate\Support\Facades\Log::warning('Quick Trade research capture unavailable', ['symbol' => $symbol]);
             }
         }
+        // Observational only (spec item 61) -- never alters $side/order
+        // routing below. Uses the research snapshot's own primary forecast,
+        // which was just computed synchronously above from the same live
+        // candles, i.e. it genuinely is "the system's most recent
+        // prediction for this symbol/timeframe/expiry at the time of
+        // entry", not a guess or stale value.
+        $manualActionDisagreedWithPrediction = $this->manualActionDisagreedWithPrediction($signalPayload, $side);
+
         $entryAt = CarbonImmutable::now();
         $walletAccountId = $payload['wallet_account_id'] ?? null;
         $entryIdempotencyKey = $requestIdempotencyKey !== ''
@@ -282,6 +290,7 @@ class QuickTradeService
                 takeProfitPct: $takeProfitPct,
                 leverageEnabled: $leverageEnabled,
                 leverage: $leverage,
+                manualActionDisagreedWithPrediction: $manualActionDisagreedWithPrediction,
             );
         }
 
@@ -301,6 +310,7 @@ class QuickTradeService
             $traceId,
             $entryAt,
             $expirySeconds,
+            $manualActionDisagreedWithPrediction,
             $walletAccountId,
             $timeframe,
             $userId
@@ -368,6 +378,7 @@ class QuickTradeService
                 'indicator_snapshot' => $signalPayload['indicator_values'] ?? [],
                 'entry_at' => $entryAt,
                 'expires_at' => $entryAt->addSeconds($expirySeconds),
+                'manual_action_disagreed_with_prediction' => $manualActionDisagreedWithPrediction,
             ]);
 
             if ($robotSessionId) {
@@ -488,6 +499,13 @@ class QuickTradeService
             }
 
             $this->auditSettlement($locked, $result['status'], $result['profit_loss']);
+
+            // Research is deliberately dispatched after the settlement
+            // transaction. It cannot add latency or failure risk to money
+            // movement; the job is idempotent because it rewrites one trade's
+            // research snapshot only.
+            \App\Jobs\EvaluateQuickTradeForecastOutcomeJob::dispatch($locked->id)
+                ->onQueue('analytics')->afterCommit();
 
             return $locked->fresh();
         });
@@ -658,6 +676,35 @@ class QuickTradeService
         throw new RuntimeException('live_feed_stale: '.$reason);
     }
 
+    /**
+     * Observational only (spec item 61): "If system says Expiry Decision:
+     * BUY but user manually chooses SELL, allow existing behavior unless
+     * current rules prohibit it. Record manual_action_disagreed_with_
+     * prediction = true for research. Do not secretly change user's order."
+     *
+     * Reads `$signalPayload['research']['primary']['decision_trend']`, i.e.
+     * TradeForecastService::forecast()'s own decision for this exact
+     * symbol/timeframe/expiry, captured synchronously moments before this
+     * same place() call creates the trade row (see the research-capture
+     * block above) -- a real, fresh snapshot, never a guess or stale value.
+     *
+     * Returns null (never a fabricated true/false) whenever there is
+     * nothing honest to compare against: no research snapshot was captured
+     * (e.g. non-manual source, capture disabled/failed) or the prediction
+     * itself had no directional call (WAIT/NEUTRAL/unavailable). This value
+     * is purely additive metadata -- it is never read back into $side or
+     * any order-routing decision.
+     */
+    private function manualActionDisagreedWithPrediction(array $signalPayload, string $side): ?bool
+    {
+        $decisionTrend = strtoupper((string) data_get($signalPayload, 'research.primary.decision_trend', ''));
+        if (! in_array($decisionTrend, ['BUY', 'SELL'], true)) {
+            return null;
+        }
+
+        return strtolower($decisionTrend) !== strtolower($side);
+    }
+
     private function placeLiveTrade(
         array $payload,
         array $context,
@@ -680,6 +727,7 @@ class QuickTradeService
         ?float $takeProfitPct = null,
         bool $leverageEnabled = false,
         ?float $leverage = null,
+        ?bool $manualActionDisagreedWithPrediction = null,
     ): QuickTrade {
         $workspaceId = (string) $payload['workspace_id'];
         $integration = $this->integrations->resolve($workspaceId, $context['provider'], $context['integration_id']);
@@ -737,7 +785,8 @@ class QuickTradeService
                 $stopLossPct,
                 $takeProfitPct,
                 $leverageEnabled,
-                $leverage
+                $leverage,
+                $manualActionDisagreedWithPrediction
             ) {
                 $booked = $this->liveTimedTrades->bookEntry(
                     $integration,
@@ -810,6 +859,7 @@ class QuickTradeService
                     'indicator_snapshot' => $signalPayload['indicator_values'] ?? [],
                     'entry_at' => $entryAt,
                     'expires_at' => $entryAt->addSeconds($expirySeconds),
+                    'manual_action_disagreed_with_prediction' => $manualActionDisagreedWithPrediction,
                 ]);
 
                 if ($robotSessionId) {

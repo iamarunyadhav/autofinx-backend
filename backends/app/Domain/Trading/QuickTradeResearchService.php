@@ -3,6 +3,8 @@
 namespace App\Domain\Trading;
 
 use App\Domain\MarketIntelligence\UnifiedForecastEngine;
+use App\Domain\MarketIntelligence\UnifiedForecastLiveGate;
+use App\Domain\Ops\FeatureFlagService;
 use App\Models\QuickTrade;
 use App\Models\QuickTradeResearchSample;
 use Carbon\CarbonImmutable;
@@ -20,23 +22,70 @@ class QuickTradeResearchService
             'mode' => 'shadow_only', 'config' => Arr::only($payload, [
                 'symbol', 'timeframe', 'expiry_seconds', 'stake_amount', 'side', 'mode', 'provider',
                 'indicator_set', 'stop_loss_pct', 'take_profit_pct', 'leverage_enabled', 'leverage',
-            ]), 'primary' => null, 'shadow' => null];
+            ]), 'primary' => null, 'shadow' => null, 'decision_source' => 'internal'];
         try {
             $forecasts = app(TradeForecastService::class);
             $result['primary'] = $forecasts->forecast($candles, $payload['timeframe'],
-                (int) $payload['expiry_seconds'], $forecasts->decisionFromSignalPreview($signal));
+                (int) $payload['expiry_seconds'], $forecasts->decisionFromSignalPreview($signal),
+                null, null, isset($payload['symbol']) ? (string) $payload['symbol'] : null);
             $result['input_candles'] = array_map(fn ($row) => Arr::only($row,
                 ['timestamp', 'time', 'opens_at', 'open', 'high', 'low', 'close', 'volume']), array_slice($candles, -100));
             $result['input_candles_include_forming_bar'] = true;
             $result['market_exchange'] = (string) config('unified_forecast.quick_trade_default_exchange', 'binance');
-            if (($payload['mode'] ?? 'paper') === 'live' && ($payload['provider'] ?? 'binance') === 'binance'
-                && config('unified_forecast.quick_trade_shadow_enabled', true)) {
-                $result['shadow'] = app(UnifiedForecastEngine::class)->evaluate('quick_trade',
-                    $result['market_exchange'].':'.$payload['symbol'].':'.$payload['timeframe'],
-                    $result['market_exchange'], $payload['symbol'], $payload['timeframe'], (int) $payload['expiry_seconds']);
+            $isLiveBinance = ($payload['mode'] ?? 'paper') === 'live' && ($payload['provider'] ?? 'binance') === 'binance';
+            $botInstanceId = $result['market_exchange'].':'.$payload['symbol'].':'.$payload['timeframe'];
+            $shadowEngineResult = null;
+            if ($isLiveBinance && app(FeatureFlagService::class)->enabled('unified_forecast.quick_trade_shadow', true)) {
+                $shadowEngineResult = app(UnifiedForecastEngine::class)->evaluate('quick_trade',
+                    $botInstanceId, $result['market_exchange'], $payload['symbol'], $payload['timeframe'], (int) $payload['expiry_seconds']);
+                $result['shadow'] = array_merge($shadowEngineResult, []);
                 $result['shadow']['horizon_seconds'] = (int) $payload['expiry_seconds'];
                 $result['shadow']['current_price'] = $result['primary']['current_price'] ?? null;
                 $result['shadow']['price_target_available'] = false;
+            }
+
+            // Unified Forecast Engine, Phase 6 -- LIVE decision wiring for the
+            // entry_prediction_snapshot pathway (`unified_forecast.quick_trade_live`,
+            // default OFF). Same triple-fail-closed priority as the
+            // /quick-trade/forecast preview endpoint's own wiring
+            // (QuickTradeController::applyUnifiedForecastLiveDecision()): a
+            // data-quality gate that already forced WAIT inside forecast()
+            // itself is authoritative and is never second-guessed here.
+            // Scoped to live+binance only, matching the shadow block above --
+            // the engine's calibration evidence is only ever built from real
+            // (execution_environment==='live') settled trades, so evaluating
+            // it for a paper-mode capture would be gating live automation on
+            // paper-mode inputs it was never validated against.
+            if ($isLiveBinance && isset($payload['symbol']) && ($result['primary']['gate_reason'] ?? null) === null) {
+                $exchange = $result['market_exchange'];
+                $symbol = (string) $payload['symbol'];
+                $timeframe = (string) $payload['timeframe'];
+                $horizonSeconds = (int) $payload['expiry_seconds'];
+
+                $liveDecision = app(UnifiedForecastLiveGate::class)->resolve(
+                    'unified_forecast.quick_trade_live',
+                    'quick_trade',
+                    $botInstanceId,
+                    $exchange,
+                    $symbol,
+                    $timeframe,
+                    $horizonSeconds,
+                    fn () => app(ForecastLiveEvidenceService::class)->quickTradeHoldoutPnlSummary($symbol, $timeframe, $horizonSeconds),
+                    $shadowEngineResult,
+                );
+
+                $result['decision_source'] = $liveDecision['decision_source'];
+                if ($liveDecision['decision_source'] === 'unified_forecast_engine' && is_array($liveDecision['engine_result'])) {
+                    $engine = $liveDecision['engine_result'];
+                    $direction = strtoupper((string) ($engine['direction'] ?? 'NEUTRAL'));
+                    $result['primary']['decision_trend'] = in_array($direction, ['BUY', 'SELL'], true) ? $direction : 'WAIT';
+                    if (($engine['confidence'] ?? null) !== null) {
+                        $confidence = round((float) $engine['confidence'], 1);
+                        $result['primary']['confidence'] = $confidence;
+                        $result['primary']['confidence_status'] = $confidence >= 75 ? 'medium_high' : ($confidence >= 55 ? 'medium' : 'low');
+                    }
+                    $result['unified_forecast_decision'] = $engine;
+                }
             }
         } catch (Throwable $e) {
             $result['capture_status'] = 'partial';
@@ -117,6 +166,10 @@ class QuickTradeResearchService
             'entry_signal_correct_at_trade_exit' => $signal !== null && $direction !== null ? $signal === $direction : null,
             'prediction_horizon_direction' => $primary['actual_direction'] ?? null,
             'prediction_horizon_direction_correct' => $primary['direction_correct'] ?? null,
+            // Async evaluator writes this after settlement without touching
+            // the execution path. Keep it separate from the legacy comparison
+            // so partial/missing historical samples remain explicit.
+            'outcome_evaluation' => $research['outcome_evaluation'] ?? null,
             'research_snapshot' => $research ?: null, 'primary_comparison' => $primary, 'shadow_comparison' => $shadow,
             'timeline' => $timeline,
             'data_quality' => ['snapshot_available' => $research !== [], 'sample_count' => count($rows),

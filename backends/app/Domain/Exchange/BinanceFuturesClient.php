@@ -5,6 +5,7 @@ namespace App\Domain\Exchange;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 use RuntimeException;
 
 class BinanceFuturesClient
@@ -334,6 +335,140 @@ class BinanceFuturesClient
         $body = $response->json();
 
         return is_array($body) ? $body : [];
+    }
+
+    /**
+     * The REAL commission Binance actually charged for an order, summed across
+     * any partial fills, as reported by the exchange itself — mirrors
+     * `BinanceTimedFuturesProvider::realFeeForOrder()` (same contract, same
+     * validation rules) but lives on this client because Future Trade talks
+     * to Binance directly through `BinanceFuturesClient` rather than through
+     * the Integration-based `LiveTradeProviderInterface` Quick Trade uses.
+     * Kept as a separate method (not extracted into a shared trait) because
+     * the two callers build this client from different credential sources
+     * (raw key/secret here vs. an `Integration` model there) and this avoids
+     * introducing a new abstraction for two call sites.
+     *
+     * NEVER throws: any network/circuit-breaker error, non-2xx response,
+     * empty/unexpected payload, or mixed commission asset returns null so a
+     * live settlement can always fall back to the existing fee estimate.
+     *
+     * @return array{commission: float, commission_asset: string, realized_pnl: float, fills: int}|null
+     */
+    public function realFeeForOrder(string $symbol, string $orderId, string $expectedQuoteAsset = 'USDT'): ?array
+    {
+        $orderId = trim($orderId);
+        if ($orderId === '' || $orderId === '0') {
+            return null;
+        }
+
+        try {
+            $response = $this->signedRequest('GET', '/fapi/v1/userTrades', [
+                'symbol' => BinanceSymbolNormalizer::normalize($symbol),
+                'orderId' => $orderId,
+            ], false);
+            if (! $response->successful()) {
+                return null;
+            }
+            $rows = collect((array) $response->json());
+        } catch (\Throwable $e) {
+            Log::warning('binance_futures_client_real_fee_lookup_failed', [
+                'symbol' => $symbol,
+                'order_id' => $orderId,
+                'error' => $e->getMessage(),
+            ]);
+
+            return null;
+        }
+
+        if ($rows->isEmpty()) {
+            return null;
+        }
+
+        $expectedQuoteAsset = strtoupper($expectedQuoteAsset);
+        $commission = 0.0;
+        $realizedPnl = 0.0;
+
+        foreach ($rows as $row) {
+            if (! is_array($row)
+                || ! isset($row['commission'], $row['commissionAsset'])
+                || ! is_numeric($row['commission'])
+                || ! is_finite((float) $row['commission'])) {
+                return null;
+            }
+
+            $asset = strtoupper((string) ($row['commissionAsset'] ?? ''));
+            if ($asset !== $expectedQuoteAsset) {
+                Log::warning('binance_futures_client_real_fee_unexpected_asset', [
+                    'symbol' => $symbol,
+                    'order_id' => $orderId,
+                    'commission_asset' => $asset,
+                    'expected' => $expectedQuoteAsset,
+                ]);
+
+                return null;
+            }
+
+            $commission += (float) ($row['commission'] ?? 0);
+            $realizedPnl += (float) ($row['realizedPnl'] ?? 0);
+        }
+
+        return [
+            'commission' => round($commission, 8),
+            'commission_asset' => $expectedQuoteAsset,
+            'realized_pnl' => round($realizedPnl, 8),
+            'fills' => $rows->count(),
+        ];
+    }
+
+    /**
+     * REAL futures funding fee(s) actually credited/debited for a symbol over
+     * a position's open-to-close window — mirrors
+     * `BinanceTimedFuturesProvider::realFundingFee()`. See that method's
+     * docblock for the sign convention and the `null` (unresolved) vs `0.0`
+     * (genuinely no funding fee) distinction. NEVER throws.
+     */
+    public function realFundingFee(string $symbol, \DateTimeInterface $from, \DateTimeInterface $to): ?float
+    {
+        try {
+            $response = $this->signedRequest('GET', '/fapi/v1/income', [
+                'symbol' => BinanceSymbolNormalizer::normalize($symbol),
+                'incomeType' => 'FUNDING_FEE',
+                'startTime' => (int) floor($from->getTimestamp() * 1000),
+                'endTime' => (int) floor($to->getTimestamp() * 1000),
+                'limit' => 1000,
+            ], false);
+            if (! $response->successful()) {
+                return null;
+            }
+            $rows = collect((array) $response->json());
+        } catch (\Throwable $e) {
+            Log::warning('binance_futures_client_real_funding_fee_lookup_failed', [
+                'symbol' => $symbol,
+                'from' => $from->format(DATE_ATOM),
+                'to' => $to->format(DATE_ATOM),
+                'error' => $e->getMessage(),
+            ]);
+
+            return null;
+        }
+
+        // Unknown/malformed data must never masquerade as verified zero cost.
+        // A full page may be truncated; leave the result unresolved in that case.
+        if ($rows->count() >= 1000) {
+            return null;
+        }
+        foreach ($rows as $row) {
+            if (! is_array($row) || ! isset($row['income'], $row['asset'], $row['incomeType'], $row['symbol'])
+                || ! is_numeric($row['income']) || ! is_finite((float) $row['income'])
+                || strtoupper((string) $row['asset']) !== 'USDT'
+                || $row['incomeType'] !== 'FUNDING_FEE'
+                || strtoupper((string) $row['symbol']) !== strtoupper(BinanceSymbolNormalizer::normalize($symbol))) {
+                return null;
+            }
+        }
+
+        return round($rows->sum(fn ($row) => (float) $row['income']), 8);
     }
 
     // ── Private helpers ───────────────────────────────────────────────────────

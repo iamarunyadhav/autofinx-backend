@@ -3,6 +3,7 @@
 namespace Tests\Feature\Trading;
 
 use App\Domain\MarketIntelligence\UnifiedForecastEngine;
+use App\Domain\Ops\FeatureFlagService;
 use App\Models\AuditEvent;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -58,11 +59,21 @@ class QuickTradeForecastShadowTest extends TestCase
     {
         $user = User::factory()->create();
 
-        config(['unified_forecast.quick_trade_shadow_enabled' => true]);
+        // Freeze time across both calls -- the forecast response embeds a
+        // whole-second `generated_at`/`expiry_at` and a stability window
+        // counter that both depend on wall-clock time, not the shadow flag.
+        // Without this, the two real HTTP round-trips below (now slightly
+        // slower than the old raw config() read, since toggling the flag
+        // goes through FeatureFlagService's DB write + cache invalidation)
+        // can occasionally straddle a real second boundary and produce a
+        // spurious byte-diff unrelated to the flag itself.
+        $this->travelTo(now()->startOfSecond());
+
+        app(FeatureFlagService::class)->set('unified_forecast.quick_trade_shadow', true);
         $onResponse = $this->actingAs($user)->postJson('/api/v1/quick-trade/forecast', $this->payload());
         $onResponse->assertOk();
 
-        config(['unified_forecast.quick_trade_shadow_enabled' => false]);
+        app(FeatureFlagService::class)->set('unified_forecast.quick_trade_shadow', false);
         $offResponse = $this->actingAs($user)->postJson('/api/v1/quick-trade/forecast', $this->payload());
         $offResponse->assertOk();
 
@@ -72,7 +83,7 @@ class QuickTradeForecastShadowTest extends TestCase
     public function test_flag_on_records_an_audit_event_with_both_old_and_new_results(): void
     {
         $user = User::factory()->create();
-        config(['unified_forecast.quick_trade_shadow_enabled' => true]);
+        app(FeatureFlagService::class)->set('unified_forecast.quick_trade_shadow', true);
 
         $this->assertDatabaseCount('audit_events', 0);
 
@@ -92,7 +103,7 @@ class QuickTradeForecastShadowTest extends TestCase
     public function test_flag_off_never_calls_the_unified_forecast_engine_at_all(): void
     {
         $user = User::factory()->create();
-        config(['unified_forecast.quick_trade_shadow_enabled' => false]);
+        app(FeatureFlagService::class)->set('unified_forecast.quick_trade_shadow', false);
 
         $spy = Mockery::mock(UnifiedForecastEngine::class);
         $spy->shouldNotReceive('evaluate');
@@ -111,7 +122,7 @@ class QuickTradeForecastShadowTest extends TestCase
         // to a genuine no-op (not an error, not a fabricated symbol) for
         // that real, currently-shipping caller shape.
         $user = User::factory()->create();
-        config(['unified_forecast.quick_trade_shadow_enabled' => true]);
+        app(FeatureFlagService::class)->set('unified_forecast.quick_trade_shadow', true);
 
         $spy = Mockery::mock(UnifiedForecastEngine::class);
         $spy->shouldNotReceive('evaluate');

@@ -31,6 +31,7 @@ class QuickTrade extends BaseModel
         'leverage' => 'decimal:2',
         'take_profit_pct' => 'decimal:2',
         'take_profit_triggered_at' => 'datetime',
+        'manual_action_disagreed_with_prediction' => 'boolean',
     ];
 
     public function order(): BelongsTo

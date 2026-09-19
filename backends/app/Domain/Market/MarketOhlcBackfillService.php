@@ -6,6 +6,7 @@ use App\Models\MarketOhlc;
 use App\Models\RatioBotConfig;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use RuntimeException;
 
@@ -70,12 +71,22 @@ class MarketOhlcBackfillService
         }
 
         $written = 0;
+        $minTs = null;
+        $maxTs = null;
         foreach ((array) $response->json() as $row) {
             if (! is_array($row) || count($row) < 6) {
                 continue;
             }
 
-            $openTs = Carbon::createFromTimestampMs((int) $row[0]);
+            // Explicit 'UTC' timezone (rather than relying on the app's
+            // default timezone matching UTC) so this stays correct even if
+            // APP_TIMEZONE is ever changed away from UTC in some
+            // environment -- Binance's kline open-time is always a UTC
+            // epoch millisecond value, and RealtimeMarketFeedService (the
+            // live consumer writing to the same table) must be compared
+            // against the same absolute instants for the no-lookahead
+            // backtest guarantee to mean anything.
+            $openTs = Carbon::createFromTimestampMs((int) $row[0], 'UTC');
             $existingId = MarketOhlc::query()
                 ->where('exchange', $exchange)
                 ->where('symbol', $normalizedSymbol)
@@ -95,9 +106,89 @@ class MarketOhlcBackfillService
                 ]
             );
             $written++;
+            $minTs = $minTs === null || $openTs->lt($minTs) ? $openTs : $minTs;
+            $maxTs = $maxTs === null || $openTs->gt($maxTs) ? $openTs : $maxTs;
+        }
+
+        if ($written > 0 && $minTs && $maxTs) {
+            $gaps = $this->detectGaps($exchange, $normalizedSymbol, $interval, $minTs, $maxTs);
+            if (! empty($gaps)) {
+                Log::warning('[MarketOhlcBackfillService] gap detected in candle sequence after backfill', [
+                    'exchange' => $exchange,
+                    'symbol' => $normalizedSymbol,
+                    'timeframe' => $interval,
+                    'gaps' => $gaps,
+                ]);
+            }
         }
 
         return $written;
+    }
+
+    /**
+     * Scan stored candles for the given (exchange, symbol, timeframe) --
+     * optionally bounded to a [$from, $to] window -- and return any gaps
+     * where consecutive candles are further apart than the timeframe's
+     * expected interval (with a 1.5x tolerance to avoid false positives
+     * from Binance's own occasional millisecond jitter). Never throws --
+     * a genuine no-trades window on a real exchange is rare but possible
+     * and must be reported, not treated as a crash condition.
+     *
+     * @return array<int, array{from: string, to: string, gap_seconds: int, missing_candles: int}>
+     */
+    public function detectGaps(string $exchange, string $symbol, string $timeframe, ?Carbon $from = null, ?Carbon $to = null): array
+    {
+        $interval = $this->normalizeInterval($timeframe);
+        $expectedSeconds = self::intervalSeconds($interval);
+
+        $query = MarketOhlc::query()
+            ->where('exchange', $exchange)
+            ->where('symbol', strtoupper($symbol))
+            ->where('timeframe', $interval)
+            ->orderBy('ts');
+
+        if ($from) {
+            $query->where('ts', '>=', $from);
+        }
+        if ($to) {
+            $query->where('ts', '<=', $to);
+        }
+
+        $timestamps = $query->pluck('ts');
+        if ($timestamps->count() < 2) {
+            return [];
+        }
+
+        $toleranceSeconds = (int) round($expectedSeconds * 1.5);
+        $gaps = [];
+        $previous = null;
+        foreach ($timestamps as $ts) {
+            $current = $ts instanceof Carbon ? $ts : Carbon::parse((string) $ts, 'UTC');
+            if ($previous !== null) {
+                $diffSeconds = $previous->diffInSeconds($current);
+                if ($diffSeconds > $toleranceSeconds) {
+                    $gaps[] = [
+                        'from' => $previous->toIso8601String(),
+                        'to' => $current->toIso8601String(),
+                        'gap_seconds' => $diffSeconds,
+                        'missing_candles' => intdiv($diffSeconds, $expectedSeconds) - 1,
+                    ];
+                }
+            }
+            $previous = $current;
+        }
+
+        return $gaps;
+    }
+
+    private static function intervalSeconds(string $interval): int
+    {
+        return match ($interval) {
+            '1m' => 60, '3m' => 180, '5m' => 300, '15m' => 900, '30m' => 1800,
+            '1h' => 3600, '2h' => 7200, '4h' => 14400, '6h' => 21600, '8h' => 28800, '12h' => 43200,
+            '1d' => 86400, '3d' => 259200, '1w' => 604800, '1M' => 2592000,
+            default => 60,
+        };
     }
 
     public function backfillForConfig(RatioBotConfig $config, int $limit = self::DEFAULT_BACKFILL_LIMIT): int

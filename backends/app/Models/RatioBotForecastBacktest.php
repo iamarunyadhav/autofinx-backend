@@ -10,6 +10,7 @@ class RatioBotForecastBacktest extends BaseModel
         'bot_type'            => 'string',
         'bot_instance_id'     => 'string',
         'confidence_bucket'   => 'string',
+        'evaluation_period'   => 'string',
         'horizon_seconds'     => 'integer',
         'sample_size'         => 'integer',
         'hits'                => 'integer',
@@ -50,6 +51,9 @@ class RatioBotForecastBacktest extends BaseModel
             }
             if (blank($model->confidence_bucket)) {
                 $model->confidence_bucket = 'all';
+            }
+            if (blank($model->evaluation_period)) {
+                $model->evaluation_period = 'full';
             }
         });
     }

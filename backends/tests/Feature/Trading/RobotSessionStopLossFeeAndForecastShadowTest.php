@@ -2,13 +2,16 @@
 
 use App\Domain\Market\MarketPriceCacheService;
 use App\Domain\MarketIntelligence\UnifiedForecastEngine;
+use App\Domain\Ops\FeatureFlagService;
 use App\Domain\Trading\QuickTradeService;
 use App\Domain\Trading\RobotSessionService;
 use App\Jobs\CheckQuickTradeStopLossJob;
 use App\Models\AuditEvent;
 use App\Models\Integration;
 use App\Models\MarketFeedStatus;
+use App\Models\MarketOhlc;
 use App\Models\QuickTrade;
+use App\Models\RatioBotForecastBacktest;
 use App\Models\Setting;
 use App\Models\User;
 use App\Models\Workspace;
@@ -334,12 +337,12 @@ test('a live trade opened via RobotSessionService real call path settles with th
 // ── Part 3: Unified Forecast Engine shadow-wiring ───────────────────────────
 
 test('RobotSessionService real evaluation behavior is decision-identical whether the robot_trade shadow flag is on or off', function () {
-    config(['unified_forecast.robot_trade_shadow_enabled' => true]);
+    app(FeatureFlagService::class)->set('unified_forecast.robot_trade_shadow', true);
     robotParityFakeBinance('XRPUSDT');
     [, $sessionOn] = robotParitySessionOpenedViaRealPath('XRPUSDT');
     $tradeOn = QuickTrade::where('robot_session_id', $sessionOn->id)->firstOrFail();
 
-    config(['unified_forecast.robot_trade_shadow_enabled' => false]);
+    app(FeatureFlagService::class)->set('unified_forecast.robot_trade_shadow', false);
     robotParityFakeBinance('LTCUSDT');
     [, $sessionOff] = robotParitySessionOpenedViaRealPath('LTCUSDT');
     $tradeOff = QuickTrade::where('robot_session_id', $sessionOff->id)->firstOrFail();
@@ -352,7 +355,7 @@ test('RobotSessionService real evaluation behavior is decision-identical whether
 
 test('flag on records a robot_trade unified_forecast_shadow_comparison AuditEvent with both old and new results', function () {
     $symbol = 'DOTUSDT';
-    config(['unified_forecast.robot_trade_shadow_enabled' => true]);
+    app(FeatureFlagService::class)->set('unified_forecast.robot_trade_shadow', true);
     robotParityFakeBinance($symbol);
 
     $this->assertDatabaseCount('audit_events', 0);
@@ -372,7 +375,7 @@ test('flag on records a robot_trade unified_forecast_shadow_comparison AuditEven
 
 test('flag off never calls UnifiedForecastEngine at all for Robot Trade', function () {
     $symbol = 'AVAXUSDT';
-    config(['unified_forecast.robot_trade_shadow_enabled' => false]);
+    app(FeatureFlagService::class)->set('unified_forecast.robot_trade_shadow', false);
     robotParityFakeBinance($symbol);
 
     $spy = Mockery::mock(UnifiedForecastEngine::class);
@@ -389,7 +392,7 @@ test('flag off never calls UnifiedForecastEngine at all for Robot Trade', functi
 
 test('ForecastShadowReportService surfaces robot_trade shadow events generically, with zero code change needed', function () {
     $symbol = 'LINKUSDT';
-    config(['unified_forecast.robot_trade_shadow_enabled' => true]);
+    app(FeatureFlagService::class)->set('unified_forecast.robot_trade_shadow', true);
     robotParityFakeBinance($symbol);
     robotParitySessionOpenedViaRealPath($symbol);
 
@@ -399,4 +402,81 @@ test('ForecastShadowReportService surfaces robot_trade shadow events generically
     $report = app(\App\Domain\MarketIntelligence\ForecastShadowReportService::class)->report(7, $symbol);
 
     expect($report['summary']['total_events'])->toBe($before);
+});
+
+// ── Part 4: robot-trade:forecast-backtest periodic calibration tracking ────
+//
+// Tracking-only wiring of Robot Trade into
+// ForecastHorizonBacktestService::runForBot() (Unified Forecast Engine plan,
+// Robot Trade/Future Trade/Fast2X task). Proves the periodic command writes
+// a correctly-tagged calibration row AND never touches the real session or
+// its real trade -- it is a separate scheduled command
+// (routes/console.php), never called from RobotSessionService::evaluateSession()
+// or any other live decision path.
+
+function seedRobotTradeCalibrationTrend(string $exchange, string $symbol, string $timeframe, float $start, float $step, int $count): void
+{
+    $time = now()->subMinutes($count + 1);
+    for ($i = 0; $i < $count; $i++) {
+        $open = $start + ($step * $i);
+        $close = $open + $step;
+        MarketOhlc::create([
+            'exchange' => $exchange,
+            'symbol' => $symbol,
+            'timeframe' => $timeframe,
+            'open' => $open,
+            'high' => max($open, $close) + 1,
+            'low' => min($open, $close) - 1,
+            'close' => $close,
+            'volume' => 10,
+            'ts' => $time->copy()->addMinutes($i),
+        ]);
+    }
+}
+
+test('robot-trade:forecast-backtest writes a calibration row tagged with the real session id and never mutates the session or its real trade', function () {
+    $symbol = 'CHZUSDT';
+    seedRobotTradeCalibrationTrend('binance', $symbol, '1m', 10.0, 0.05, 400);
+
+    robotParityFakeBinance($symbol);
+    [, $session] = robotParitySessionOpenedViaRealPath($symbol);
+    $trade = QuickTrade::where('robot_session_id', $session->id)->firstOrFail();
+
+    $sessionBefore = $session->fresh()->getAttributes();
+    $tradeBefore = $trade->fresh()->getAttributes();
+
+    $this->artisan('robot-trade:forecast-backtest')->assertExitCode(0);
+
+    $rows = RatioBotForecastBacktest::query()->where('bot_type', 'robot_trade')->get();
+    expect($rows->count())->toBeGreaterThan(0);
+    foreach ($rows as $row) {
+        expect($row->bot_instance_id)->not->toBeNull();
+        expect($row->bot_instance_id)->toBe($session->id);
+    }
+
+    expect($session->fresh()->getAttributes())->toBe($sessionBefore);
+    expect($trade->fresh()->getAttributes())->toBe($tradeBefore);
+});
+
+test('robot-trade:forecast-backtest does not change RobotSessionService::evaluateSession real decision behavior', function () {
+    $symbol = 'ENJUSDT';
+    seedRobotTradeCalibrationTrend('binance', $symbol, '1m', 5.0, 0.02, 400);
+
+    robotParityFakeBinance($symbol);
+    [, $session] = robotParitySessionOpenedViaRealPath($symbol);
+
+    // Running the tracking command AFTER the trade already opened must not
+    // retroactively change anything about the session's live evaluation
+    // outcome -- re-evaluating afterwards must behave exactly like Robot
+    // Trade already does post-entry (an active_side/pending-trade session
+    // just reports its current status, since evaluateTimedExpirySession()'s
+    // active-trade-limit gate blocks a second concurrent trade regardless).
+    $beforeReEval = app(RobotSessionService::class)->evaluateSession($session->fresh());
+
+    $this->artisan('robot-trade:forecast-backtest')->assertExitCode(0);
+
+    $afterReEval = app(RobotSessionService::class)->evaluateSession($session->fresh());
+
+    expect($afterReEval['status'])->toBe($beforeReEval['status']);
+    expect($afterReEval['action'])->toBe($beforeReEval['action']);
 });
