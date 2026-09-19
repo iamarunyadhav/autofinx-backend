@@ -115,6 +115,14 @@ Route::prefix('v1')->group(function () {
 
     Route::middleware('auth:sanctum')->group(function () {
         Route::get('workspaces', [WorkspaceController::class, 'index']);
+        Route::prefix('workspaces/{workspace}/nexus')->group(function () {
+            Route::get('/', [\App\Http\Controllers\Api\NexusController::class, 'index']);
+            Route::get('/entries', [\App\Http\Controllers\Api\NexusController::class, 'entries']);
+            Route::get('/export', [\App\Http\Controllers\Api\NexusController::class, 'export'])->middleware('throttle:10,1');
+            Route::post('/run', [\App\Http\Controllers\Api\NexusController::class, 'run'])->middleware('throttle:4,1');
+            Route::post('/experiments', [\App\Http\Controllers\Api\NexusController::class, 'experiment'])->middleware('throttle:4,1');
+            Route::post('/candidates/{entry}/review', [\App\Http\Controllers\Api\NexusController::class, 'review'])->middleware('throttle:20,1');
+        });
         Route::post('workspaces', [WorkspaceController::class, 'store']);
         Route::get('workspaces/{workspace}', [WorkspaceController::class, 'show']);
         Route::put('workspaces/{workspace}', [WorkspaceController::class, 'update']);

@@ -31,6 +31,15 @@ return [
 
     'connections' => [
 
+        'nexus' => [
+            'driver' => 'redis',
+            'connection' => env('REDIS_QUEUE_CONNECTION', 'default'),
+            'queue' => 'agent_research',
+            'retry_after' => 180,
+            'block_for' => 5,
+            'after_commit' => true,
+        ],
+
         'sync' => [
             'driver' => 'sync',
         ],

@@ -36,6 +36,9 @@ $markRunEnd = function (string $command): void {
 
 $sharedHostingMode = (bool) config('future_trade.shared_hosting_mode', true);
 $schedulerEnabled = (bool) config('autofinx.scheduler.enabled', true);
+if ($schedulerEnabled && config('nexus.enabled', false)) {
+    Schedule::command('nexus:run-cycle')->everyFifteenMinutes()->onOneServer()->withoutOverlapping(5)->runInBackground();
+}
 $supervisorRuntime = (bool) config('autofinx.runtime.supervisor', false);
 $allowMarketConsumers = (bool) config('autofinx.scheduler.market_consumers', false);
 $allowBinanceRest = (bool) config('autofinx.scheduler.binance_rest', false);
