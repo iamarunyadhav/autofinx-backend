@@ -1,5 +1,6 @@
 <?php
 
+use App\Domain\Ops\FeatureFlagService;
 use App\Jobs\DetectStaleFeedsJob;
 use App\Jobs\DispatchAiDecisionCycleJob;
 use App\Jobs\ExpireAiDecisionsJob;
@@ -203,7 +204,7 @@ if ($schedulerEnabled && (bool) config('autofinx.scheduler.forex_grid_bots', tru
 // Multi-Window Forecast Engine Part C -- a once-daily walk-forward backtest,
 // independently toggleable from the per-minute ratio_bots jobs above since
 // it's a read-only analysis job, not part of the live trading loop.
-if ($schedulerEnabled && (bool) config('autofinx.scheduler.ratio_bots_backtest', true)) {
+if ($schedulerEnabled && app(FeatureFlagService::class)->enabled('scheduler.ratio_bot_forecast_backtest', true)) {
     Schedule::command('ratio-bots:forecast-backtest')
         ->dailyAt('03:15')
         ->withoutOverlapping()
@@ -218,13 +219,76 @@ if ($schedulerEnabled && (bool) config('autofinx.scheduler.ratio_bots_backtest',
 // data only -- see QuickTradeController::forecast()'s shadow comparison).
 // Quick Trade only, per the plan's scope -- Robot Trade/Future
 // Trade/Fast2X are separate, later tasks.
-if ($schedulerEnabled && (bool) config('autofinx.scheduler.quick_trade_forecast_backtest', true)) {
+if ($schedulerEnabled && app(FeatureFlagService::class)->enabled('scheduler.quick_trade_forecast_backtest', true)) {
     Schedule::command('quick-trade:forecast-backtest')
         ->dailyAt('03:45')
         ->withoutOverlapping()
         ->runInBackground()
         ->before(fn () => $markRunStart('quick-trade:forecast-backtest'))
         ->after(fn () => $markRunEnd('quick-trade:forecast-backtest'));
+}
+
+// Unified Forecast Engine -- Robot Trade's own periodic calibration
+// refresh, mirroring quick_trade_forecast_backtest above exactly (read-only
+// analysis job; NEVER called from RobotSessionService::evaluateSession() or
+// any other live session decision path).
+if ($schedulerEnabled && app(FeatureFlagService::class)->enabled('scheduler.robot_trade_forecast_backtest', true)) {
+    Schedule::command('robot-trade:forecast-backtest')
+        ->dailyAt('04:15')
+        ->withoutOverlapping()
+        ->runInBackground()
+        ->before(fn () => $markRunStart('robot-trade:forecast-backtest'))
+        ->after(fn () => $markRunEnd('robot-trade:forecast-backtest'));
+}
+
+// Unified Forecast Engine -- Future Trade's own periodic calibration
+// refresh, mirroring quick_trade_forecast_backtest above exactly (read-only
+// analysis job; NEVER called from FutureTradeBotService::scan() or any
+// other live scan/entry/exit decision path).
+if ($schedulerEnabled && app(FeatureFlagService::class)->enabled('scheduler.future_trade_forecast_backtest', true)) {
+    Schedule::command('future-trade:forecast-backtest')
+        ->dailyAt('04:45')
+        ->withoutOverlapping()
+        ->runInBackground()
+        ->before(fn () => $markRunStart('future-trade:forecast-backtest'))
+        ->after(fn () => $markRunEnd('future-trade:forecast-backtest'));
+}
+
+// Fast2X's own NATIVE periodic calibration refresh (real
+// fast2x_decision_logs trigger -> real fee/slippage-netted fast2x_trades
+// outcome via Fast2XCalibrationService -- deliberately NOT
+// ForecastHorizonBacktestService::runForBot(), since Fast2X's real
+// entry/exit decision never calls TradeForecastService::forecast()). Same
+// "periodic job writes, live decision path only reads (Fast2X doesn't even
+// read this yet)" split as the other bot types above; NEVER called from
+// Fast2XService::processTick()/evaluateEntry()/manageOpenPosition() or any
+// other live tick-loop path.
+if ($schedulerEnabled && app(FeatureFlagService::class)->enabled('scheduler.fast2x_calibration_backtest', true)) {
+    Schedule::command('fast2x:calibration-backtest')
+        ->dailyAt('05:15')
+        ->withoutOverlapping()
+        ->runInBackground()
+        ->before(fn () => $markRunStart('fast2x:calibration-backtest'))
+        ->after(fn () => $markRunEnd('fast2x:calibration-backtest'));
+}
+
+// Unified Forecast Engine -- automated readiness re-evaluation across all
+// four bot types (ratio_bot/quick_trade/robot_trade/future_trade), running
+// AFTER every backtest command above has refreshed its own bot type's data
+// (ratio_bots:03:15, quick_trade:03:45, robot_trade:04:15,
+// future_trade:04:45, fast2x:05:15 -- this task's four bot types don't
+// depend on fast2x's own calibration, but 05:45 keeps clear of its slot
+// too), so it evaluates freshly-computed calibration data, not
+// stale/mid-refresh data. Read-only reporting job -- never called from any
+// live trading/execution path; only persists forecast_readiness_snapshots
+// rows and logs a status change/downgrade.
+if ($schedulerEnabled && app(FeatureFlagService::class)->enabled('scheduler.forecast_readiness_evaluation', true)) {
+    Schedule::command('forecast:evaluate-readiness')
+        ->dailyAt('05:45')
+        ->withoutOverlapping()
+        ->runInBackground()
+        ->before(fn () => $markRunStart('forecast:evaluate-readiness'))
+        ->after(fn () => $markRunEnd('forecast:evaluate-readiness'));
 }
 
 if ($schedulerEnabled && ! $supervisorRuntime && $allowBinanceRest) {

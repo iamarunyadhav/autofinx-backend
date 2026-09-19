@@ -59,6 +59,14 @@ class RobotSessionController extends Controller
             // above, which is the candle-direction bot's own positive-
             // percentage trailing-stop setting.
             'quick_trade_stop_loss_pct' => 'nullable|numeric|lt:0|gte:-100',
+            // Optional, per-session take-profit/leverage forwarded verbatim
+            // into every QuickTrade this session opens -- same conventions
+            // as quick_trades.take_profit_pct/leverage_enabled/leverage (see
+            // QuickTradeController::place()). Leverage's real exchange-max
+            // enforcement happens inside QuickTradeService::place() itself.
+            'quick_trade_take_profit_pct' => 'nullable|numeric|gt:0|lte:1000',
+            'quick_trade_leverage_enabled' => 'nullable|boolean',
+            'quick_trade_leverage' => 'nullable|numeric|min:1|max:125',
         ]);
 
         return response()->json(
@@ -95,6 +103,9 @@ class RobotSessionController extends Controller
             'cooldown_seconds' => 'sometimes|integer|min:0|max:86400',
             'daily_loss_limit' => 'nullable|numeric|min:0',
             'quick_trade_stop_loss_pct' => 'nullable|numeric|lt:0|gte:-100',
+            'quick_trade_take_profit_pct' => 'nullable|numeric|gt:0|lte:1000',
+            'quick_trade_leverage_enabled' => 'nullable|boolean',
+            'quick_trade_leverage' => 'nullable|numeric|min:1|max:125',
         ]);
 
         return response()->json($sessions->update($robotSession, $payload));

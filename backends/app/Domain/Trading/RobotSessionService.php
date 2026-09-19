@@ -3,6 +3,8 @@
 namespace App\Domain\Trading;
 
 use App\Domain\Market\MarketPriceCacheService;
+use App\Domain\MarketIntelligence\UnifiedForecastLiveGate;
+use App\Domain\Ops\FeatureFlagService;
 use App\Domain\Ops\TradingRuntimeHealthService;
 use App\Domain\FutureTrade\FutureTradeAuditService;
 use App\Models\QuickTrade;
@@ -81,6 +83,20 @@ class RobotSessionService
             'quick_trade_stop_loss_pct' => isset($payload['quick_trade_stop_loss_pct'])
                 ? round((float) $payload['quick_trade_stop_loss_pct'], 2)
                 : null,
+            // Opt-in only, same pattern as quick_trade_stop_loss_pct above --
+            // forwarded verbatim into QuickTradeService::place()'s existing
+            // take_profit_pct parameter (positive percentage-of-stake target).
+            'quick_trade_take_profit_pct' => isset($payload['quick_trade_take_profit_pct'])
+                ? round((float) $payload['quick_trade_take_profit_pct'], 2)
+                : null,
+            // Opt-in leverage, mirroring quick_trades.leverage_enabled/leverage
+            // exactly. Real exchange-bracket validation happens inside
+            // QuickTradeService::place() -> LeverageValidationService::validate()
+            // -- never duplicated here.
+            'quick_trade_leverage_enabled' => (bool) ($payload['quick_trade_leverage_enabled'] ?? false),
+            'quick_trade_leverage' => isset($payload['quick_trade_leverage'])
+                ? round((float) $payload['quick_trade_leverage'], 2)
+                : null,
             'cooldown_seconds' => (int) ($payload['cooldown_seconds'] ?? 600),
             'daily_loss_limit' => isset($payload['daily_loss_limit'])
                 ? round((float) $payload['daily_loss_limit'], 8)
@@ -122,6 +138,9 @@ class RobotSessionService
             'stop_loss_pct',
             'take_profit_pct',
             'quick_trade_stop_loss_pct',
+            'quick_trade_take_profit_pct',
+            'quick_trade_leverage_enabled',
+            'quick_trade_leverage',
             'cooldown_seconds',
             'daily_loss_limit',
             'multi_symbol',
@@ -143,6 +162,9 @@ class RobotSessionService
                     'stop_loss_pct',
                     'take_profit_pct',
                     'quick_trade_stop_loss_pct',
+                    'quick_trade_take_profit_pct',
+                    'quick_trade_leverage_enabled',
+                    'quick_trade_leverage',
                     'cooldown_seconds',
                     'daily_loss_limit',
                     'multi_symbol',
@@ -544,8 +566,54 @@ class RobotSessionService
         // Never changes $signal above (already computed) or anything this
         // method returns -- gated first, before any engine work, so the flag
         // being off means genuinely zero UnifiedForecastEngine calls.
-        if ((bool) config('unified_forecast.robot_trade_shadow_enabled', true)) {
+        if (app(FeatureFlagService::class)->enabled('unified_forecast.robot_trade_shadow', true)) {
             $this->recordUnifiedForecastShadowComparison($session, $signal);
+        }
+
+        // Unified Forecast Engine, Phase 6 -- LIVE decision wiring
+        // (`unified_forecast.robot_trade_live`, default OFF). Additive only:
+        // records 'decision_source' directly on $signal, which flows
+        // straight through into the real QuickTrade row's signal_payload
+        // (see the ->quickTrades->place() call below, `'signal_payload' =>
+        // $signal`) for post-trade auditability -- no separate capture
+        // mechanism invented. Only overrides direction/confidence when the
+        // flag is on AND ForecastModelPromotionGate::evaluate() for this
+        // exact scope is real-evidence VALIDATED AND the engine itself
+        // succeeds. The volatility gate already ran above (applies
+        // regardless of which model decides) and the signal-stability
+        // (2-consecutive-tick) gate immediately below still runs AFTER this
+        // swap, on whichever direction ends up in $signal -- neither
+        // existing data-quality gate is bypassed for the new engine.
+        //
+        // bot_instance_id deliberately uses RobotSession::id (NOT the
+        // shadow block's "{exchange}:{symbol}:{timeframe}" convention
+        // above) -- this is the REAL scope RobotTradeForecastBacktestCommand
+        // calibrates against (see that command's own docblock: a
+        // RobotSession is a persistent, single-symbol bot config row, and
+        // the promotion gate must gate per SPECIFIC bot instance, not blend
+        // multiple sessions on the same symbol together). The shadow
+        // comparison's engine result above is therefore intentionally NOT
+        // reused here -- it was computed for a different scope.
+        $signal['decision_source'] = 'internal';
+        $liveDecision = app(UnifiedForecastLiveGate::class)->resolve(
+            'unified_forecast.robot_trade_live',
+            'robot_trade',
+            (string) $session->id,
+            (string) ($session->provider_key ?: 'binance'),
+            (string) $session->symbol,
+            (string) $session->timeframe,
+            (int) $session->expiry_seconds,
+            fn () => app(ForecastLiveEvidenceService::class)->robotTradeHoldoutPnlSummary((string) $session->id, (int) $session->expiry_seconds),
+        );
+        $signal['decision_source'] = $liveDecision['decision_source'];
+        if ($liveDecision['decision_source'] === 'unified_forecast_engine' && is_array($liveDecision['engine_result'])) {
+            $engine = $liveDecision['engine_result'];
+            $engineDirection = strtoupper((string) ($engine['direction'] ?? 'NEUTRAL'));
+            $signal['direction'] = $engineDirection === 'BUY' ? 'buy' : ($engineDirection === 'SELL' ? 'sell' : 'neutral');
+            if (($engine['confidence'] ?? null) !== null) {
+                $signal['confidence'] = (int) round((float) $engine['confidence']);
+            }
+            $signal['unified_forecast_decision'] = $engine;
         }
 
         // ── Signal stability gate ──────────────────────────────────────────
@@ -620,11 +688,21 @@ class RobotSessionService
             'provider' => $session->provider_key,
             'integration_id' => $session->integration_id,
             'idempotency_key' => $this->robotSessionIdempotencyKey($session->id, $direction, $cooldownSeconds),
-            // Optional, session-level hard stop-loss -- QuickTradeService::place()
-            // itself silently ignores this for anything but live mode, so it's
-            // safe to always pass it through when configured.
+            // Optional, session-level hard stop-loss/take-profit/leverage --
+            // QuickTradeService::place() itself silently ignores these for
+            // anything but live mode, so it's safe to always pass them
+            // through when configured. Leverage validation (real exchange
+            // bracket check) happens inside place() itself via
+            // LeverageValidationService -- never duplicated here.
             'stop_loss_pct' => $session->quick_trade_stop_loss_pct !== null
                 ? (float) $session->quick_trade_stop_loss_pct
+                : null,
+            'take_profit_pct' => $session->quick_trade_take_profit_pct !== null
+                ? (float) $session->quick_trade_take_profit_pct
+                : null,
+            'leverage_enabled' => (bool) $session->quick_trade_leverage_enabled,
+            'leverage' => $session->quick_trade_leverage !== null
+                ? (float) $session->quick_trade_leverage
                 : null,
         ], $session->user_id);
 
@@ -941,6 +1019,13 @@ class RobotSessionService
                 'idempotency_key' => $this->robotSessionIdempotencyKey($session->id, $openDirection, 30),
                 'stop_loss_pct' => $session->quick_trade_stop_loss_pct !== null
                     ? (float) $session->quick_trade_stop_loss_pct
+                    : null,
+                'take_profit_pct' => $session->quick_trade_take_profit_pct !== null
+                    ? (float) $session->quick_trade_take_profit_pct
+                    : null,
+                'leverage_enabled' => (bool) $session->quick_trade_leverage_enabled,
+                'leverage' => $session->quick_trade_leverage !== null
+                    ? (float) $session->quick_trade_leverage
                     : null,
             ], $session->user_id);
 

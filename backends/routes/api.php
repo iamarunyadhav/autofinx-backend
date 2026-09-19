@@ -30,6 +30,7 @@ use App\Http\Controllers\Api\ApiTokenController;
 use App\Http\Controllers\Api\WebhookConfigController;
 use App\Http\Controllers\Api\RegimeController;
 use App\Http\Controllers\Api\IntegrationController;
+use App\Http\Controllers\Api\FeatureFlagController;
 use App\Http\Controllers\Api\ModuleSettingsController;
 use App\Http\Controllers\Api\ProfitCenterController;
 use App\Http\Controllers\Api\AnalyticsController;
@@ -177,7 +178,14 @@ Route::prefix('v1')->group(function () {
         Route::get('workspaces/{workspace}/quick-trades/active', [QuickTradeController::class, 'active']);
         Route::get('workspaces/{workspace}/quick-trades/history', [QuickTradeController::class, 'history']);
         Route::get('workspaces/{workspace}/quick-trades/research', [\App\Http\Controllers\Api\QuickTradeResearchController::class, 'index'])->middleware('throttle:30,1');
+        Route::get('workspaces/{workspace}/quick-trades/research/summary', [\App\Http\Controllers\Api\QuickTradeResearchController::class, 'summary'])->middleware('throttle:30,1');
+        Route::get('workspaces/{workspace}/quick-trades/research/backtest-results', [\App\Http\Controllers\Api\QuickTradeResearchController::class, 'backtestResults'])->middleware('throttle:30,1');
+        Route::post('workspaces/{workspace}/quick-trades/research/backtest', [\App\Http\Controllers\Api\QuickTradeResearchController::class, 'startBacktest'])->middleware('throttle:10,1');
         Route::post('workspaces/{workspace}/quick-trades/research/export', [\App\Http\Controllers\Api\QuickTradeResearchController::class, 'index'])->middleware('throttle:30,1');
+        Route::get('workspaces/{workspace}/quick-trades/research/calibration', [\App\Http\Controllers\Api\QuickTradeResearchController::class, 'calibration'])->middleware('throttle:30,1');
+        Route::get('workspaces/{workspace}/quick-trades/research/readiness', [\App\Http\Controllers\Api\QuickTradeResearchController::class, 'readiness'])->middleware('throttle:30,1');
+        Route::get('workspaces/{workspace}/quick-trades/research/readiness-history', [\App\Http\Controllers\Api\QuickTradeResearchController::class, 'readinessHistory'])->middleware('throttle:30,1');
+        Route::get('workspaces/{workspace}/quick-trades/research/compare', [\App\Http\Controllers\Api\QuickTradeResearchController::class, 'compare'])->middleware('throttle:30,1');
         Route::get('workspaces/{workspace}/robot-sessions', [RobotSessionController::class, 'index']);
         Route::post('workspaces/{workspace}/robot-sessions', [RobotSessionController::class, 'store']);
         Route::patch('robot-sessions/{robotSession}', [RobotSessionController::class, 'update']);
@@ -310,6 +318,11 @@ Route::prefix('v1')->group(function () {
 
         Route::get('modules', [ModuleSettingsController::class, 'index']);
         Route::patch('modules/{moduleKey}', [ModuleSettingsController::class, 'update'])->middleware('require.2fa');
+
+        // Generic AI/automation capability on/off switches (platform-wide,
+        // not workspace-scoped -- see App\Domain\Ops\FeatureFlagService).
+        Route::get('feature-flags', [FeatureFlagController::class, 'index']);
+        Route::patch('feature-flags/{key}', [FeatureFlagController::class, 'update'])->where('key', '.*');
 
         // Profit center
         Route::get('profit/arbitrage/opportunities', [ProfitCenterController::class, 'arbitrage']);
