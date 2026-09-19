@@ -37,9 +37,16 @@ class TradeForecastService
         // 15m merely because the user is viewing a 15m chart.
         $horizonSeconds = max(5, $horizonSeconds ?: $tfSeconds);
         $horizonCandles = max(1, (int) ceil($horizonSeconds / $tfSeconds));
-        $recent = array_slice($candles, -min(100, count($candles)));
+        // The chart resolution and trade expiry are intentionally separate. Use
+        // a bounded, horizon-aware context so a 15m forecast does not merely
+        // repeat the last-candle direction and does not consume unbounded data.
+        $windowSize = min(100, max(20, min(count($candles), max(12, $horizonCandles * 4))));
+        $recent = array_slice($candles, -$windowSize);
         $closes = array_map(static fn ($c) => (float) ($c['close'] ?? 0), $recent);
-        $lastSlice = array_slice($recent, -min(12, count($recent)));
+        $microSize = min(count($recent), max(4, min(8, $horizonCandles)));
+        $shortSize = min(count($recent), max($microSize, min(20, $horizonCandles * 2)));
+        $lastSlice = array_slice($recent, -$shortSize);
+        $microSlice = array_slice($recent, -$microSize);
         $bull = 0;
         $bear = 0;
         foreach ($lastSlice as $candle) {
@@ -51,6 +58,13 @@ class TradeForecastService
             }
         }
 
+        $microBull = $microBear = 0;
+        foreach ($microSlice as $candle) {
+            $direction = $this->candleBot->candleDirection($candle);
+            $microBull += $direction === 'BUY' ? 1 : 0;
+            $microBear += $direction === 'SELL' ? 1 : 0;
+        }
+
         $firstClose = (float) ($closes[0] ?? 0);
         $lastClose = (float) end($closes);
         $driftPct = $firstClose > 0 ? (($lastClose - $firstClose) / $firstClose) * 100 : 0.0;
@@ -60,18 +74,31 @@ class TradeForecastService
         $confidence = (float) data_get($decision, 'confidence', 0);
         $confidencePct = $confidence <= 1 ? $confidence * 100 : $confidence;
 
-        $biasScore = ($bull - $bear) + ($driftPct > 0 ? 1 : ($driftPct < 0 ? -1 : 0));
-        if ($decisionAction === 'BUY') {
-            $biasScore += 2;
-        } elseif ($decisionAction === 'SELL') {
-            $biasScore -= 2;
-        }
+        // Current Trend is deliberately immediate and independent from the
+        // expiry decision. It is based only on the micro window.
+        $currentTrend = ($microBull - $microBear) >= 2 ? 'BUY'
+            : (($microBear - $microBull) >= 2 ? 'SELL' : 'NEUTRAL');
 
-        $bias = $biasScore >= 2 ? 'BUY' : ($biasScore <= -2 ? 'SELL' : 'NEUTRAL');
-        $quality = min(95, max(35, 45 + abs($biasScore) * 8 + min(20, $confidencePct / 5)));
-        $expectedMid = $bias === 'BUY'
-            ? $currentPrice * (1 + ($rangePct * 0.35) / 100)
-            : ($bias === 'SELL' ? $currentPrice * (1 - ($rangePct * 0.35) / 100) : $currentPrice);
+        $contextDrift = $firstClose > 0 ? (($lastClose - $firstClose) / $firstClose) * 100 : 0.0;
+        $trendScore = max(-1.0, min(1.0, ($bull - $bear) / max(1, $shortSize)));
+        $driftScore = max(-1.0, min(1.0, $contextDrift / max(0.01, $atrPct * sqrt($horizonCandles))));
+        $signalScore = $decisionAction === 'BUY' ? 1.0 : ($decisionAction === 'SELL' ? -1.0 : 0.0);
+        // Transparent, versioned weights: trend 45%, price action/drift 30%,
+        // existing signal 25%. Magnitude remains volatility-scaled below.
+        $expiryScore = (0.45 * $trendScore) + (0.30 * $driftScore) + (0.25 * $signalScore);
+        $bias = $expiryScore >= 0.20 ? 'BUY' : ($expiryScore <= -0.20 ? 'SELL' : 'NEUTRAL');
+        $quality = min(95, max(35, 45 + abs($expiryScore) * 38 + min(15, $confidencePct / 6)));
+        $displacementPct = $expiryScore * $rangePct * 0.55;
+        $expectedMid = $currentPrice * (1 + $displacementPct / 100);
+        $feeRate = max(0.0, (float) config('trading.binance_futures_taker_fee_rate', 0.0005));
+        $costPct = ($feeRate * 2 * 100) + max(0.0, (float) config('robot_trade.live_slippage_buffer_pct', 0.04));
+        $decisionTrend = abs($displacementPct) <= max($costPct, $rangePct * 0.12)
+            ? 'WAIT' : ($expectedMid > $currentPrice ? 'BUY' : 'SELL');
+        // Keep the response stable for callers that compare shadow on/off
+        // payloads byte-for-byte; sub-second clock noise is not forecast data.
+        $generatedAt = now()->setMicrosecond(0);
+        $expiryAt = $generatedAt->copy()->addSeconds($horizonSeconds);
+        $rangeHalfPct = max($rangePct * 0.65, $costPct * 1.5);
 
         return [
             'available' => true,
@@ -82,18 +109,36 @@ class TradeForecastService
             'resolution_warning' => $horizonSeconds < $tfSeconds
                 ? 'Forecast horizon is shorter than chart candle resolution; use a chart timeframe at or below the trade duration for the most directly observable context.' : null,
             'bias' => $bias,
+            'current_trend' => $currentTrend,
+            'decision_trend' => $decisionTrend,
             'confidence' => round($quality, 1),
+            'confidence_status' => $quality >= 75 ? 'medium_high' : ($quality >= 55 ? 'medium' : 'low'),
+            'generated_at' => $generatedAt->toISOString(),
+            'expiry_at' => $expiryAt->toISOString(),
+            'reference_price' => round($currentPrice, 8),
             'current_price' => round($currentPrice, 8),
+            'predicted_expiry_price' => round($expectedMid, 8),
             'expected_mid_price' => round($expectedMid, 8),
-            'expected_low' => round($currentPrice * (1 - $rangePct / 100), 8),
-            'expected_high' => round($currentPrice * (1 + $rangePct / 100), 8),
+            'predicted_low' => round($expectedMid * (1 - $rangeHalfPct / 100), 8),
+            'predicted_high' => round($expectedMid * (1 + $rangeHalfPct / 100), 8),
+            'expected_low' => round($expectedMid * (1 - $rangeHalfPct / 100), 8),
+            'expected_high' => round($expectedMid * (1 + $rangeHalfPct / 100), 8),
+            'predicted_move' => round($expectedMid - $currentPrice, 8),
+            'predicted_move_pct' => round($displacementPct, 4),
+            'analysis_window' => ['candles_used' => $windowSize, 'micro' => $microSize, 'short' => $shortSize],
+            'model_version' => 'quick-expiry-v1',
+            'evidence' => [
+                'trend_weight' => 0.45, 'price_action_weight' => 0.30, 'signal_weight' => 0.25,
+                'trend_score' => round($trendScore, 4), 'drift_score' => round($driftScore, 4),
+                'signal_score' => round($signalScore, 4), 'current_expiry_alignment' => $currentTrend === $decisionTrend,
+            ],
             'atr_pct' => round($atrPct, 4),
             'recent_bull_candles' => $bull,
             'recent_bear_candles' => $bear,
             'drift_pct' => round($driftPct, 4),
-            'summary' => $bias === 'NEUTRAL'
-                ? 'Near-term forecast is balanced; wait for stronger direction.'
-                : "Near-term bias favors {$bias}, based on recent candles, ATR and latest robot decision.",
+            'summary' => $decisionTrend === 'WAIT'
+                ? 'Expiry move does not clear uncertainty and estimated costs; wait.'
+                : "{$currentTrend} is the current trend; {$decisionTrend} is derived from the predicted expiry price at {$expiryAt->format('H:i:s')}.",
         ];
     }
 
