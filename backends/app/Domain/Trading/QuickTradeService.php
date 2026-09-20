@@ -168,7 +168,7 @@ class QuickTradeService
         }
 
         if ($mode === 'live' && (bool) config('autofinx.runtime.require_green_for_live', false)) {
-            $runtime = app(TradingRuntimeHealthService::class)->snapshot($workspaceId);
+            $runtime = app(TradingRuntimeHealthService::class)->snapshot($workspaceId, $providerKey === 'binance' ? $symbol : null);
             if (($runtime['quick_trade']['settler'] ?? 'red') !== 'green') {
                 throw new RuntimeException('quick_trade_settler_unhealthy: Quick Trade settler is not running. Timed live trades may not close reliably.');
             }

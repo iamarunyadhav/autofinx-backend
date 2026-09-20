@@ -21,7 +21,7 @@ class TradingRuntimeHealthService
     ) {
     }
 
-    public function snapshot(?string $workspaceId = null): array
+    public function snapshot(?string $workspaceId = null, ?string $symbol = null): array
     {
         $supervisor = $this->supervisorStatus();
         $quickSettler = $this->withSupervisorProcess(
@@ -34,7 +34,9 @@ class TradingRuntimeHealthService
         $futureTick = $this->futureTickHealth($workspaceId, $supervisor['tick_loop'] ?? 'UNKNOWN');
         $futureReconcile = $this->scheduledCommand('future-trade:reconcile', 900);
         $futureUserStream = $this->futureUserStreamHealth($workspaceId, $supervisor['user_stream'] ?? 'UNKNOWN');
-        $futureLiveFeed = $this->marketFeed($workspaceId);
+        $futureLiveFeed = $symbol === null
+            ? $this->marketFeed($workspaceId)
+            : $this->selectedFuturesFeed($workspaceId, $symbol);
         // Ratio Bot's own spot feed (`market:ws-consume --market-type=spot`,
         // Supervisor program `autofinx-ratio-feed`) can go stale while
         // future_trade.live_feed above stays green off a healthy futures
@@ -138,6 +140,27 @@ class TradingRuntimeHealthService
             'supervisor' => $supervisor,
             'reasons' => array_values(array_unique($reasons)),
         ];
+    }
+
+    private function selectedFuturesFeed(?string $workspaceId, string $symbol): array
+    {
+        $symbol = strtoupper(str_replace(['/', '-', ' '], '', trim($symbol)));
+        $maxAge = app(RuntimeSafetySettingsService::class)->liveFeedMaxAgeSeconds($workspaceId);
+        $feed = $this->prices->getLiveFeedSnapshot('binance_futures', $symbol, $maxAge);
+        $fresh = ($feed['fresh'] ?? false) === true && (float) ($feed['price'] ?? 0) > 0;
+
+        // A different symbol's heartbeat cannot establish this order's freshness.
+        return array_merge($feed ?? [], [
+            'state' => $fresh ? 'green' : 'red',
+            'reason' => $fresh ? 'ok_redis_live_feed' : 'market_feed_stale_or_missing_required_symbol',
+            'symbol' => $symbol,
+            'exchange' => 'binance_futures',
+            'market_type' => 'futures',
+            'age_seconds' => $feed['age_seconds'] ?? null,
+            'max_age_seconds' => $maxAge,
+            'truth_source' => 'websocket_redis',
+            'selected_symbol_only' => true,
+        ]);
     }
 
     public function liveAllowed(?string $workspaceId = null): array

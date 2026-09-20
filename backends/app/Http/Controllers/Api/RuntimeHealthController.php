@@ -13,9 +13,10 @@ class RuntimeHealthController extends Controller
 {
     public function show(Request $request, TradingRuntimeHealthService $health)
     {
+        $request->validate(['symbol' => ['sometimes', 'required', 'string', 'max:40', 'regex:/^[A-Za-z0-9\/ -]+$/']]);
         $workspaceId = $request->query('workspace_id');
 
-        return response()->json($health->snapshot(is_string($workspaceId) ? $workspaceId : null));
+        return response()->json($health->snapshot(is_string($workspaceId) ? $workspaceId : null, $request->query('symbol')));
     }
 
     public function repair(Request $request, TradingRuntimeHealthService $health)

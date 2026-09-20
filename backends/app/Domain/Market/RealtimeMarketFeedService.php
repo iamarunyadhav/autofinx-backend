@@ -55,6 +55,7 @@ class RealtimeMarketFeedService
         private ?MarketRecoveryManager $recovery = null,
         private ?InstrumentMapper $instruments = null,
         private ?MarketSnapshotService $snapshots = null,
+        private ?LiveCandleCacheService $liveCandles = null,
     ) {
         $this->ratioBotState ??= app(RatioBotStateService::class);
         $this->breakers ??= app(OperationalBreakerService::class);
@@ -63,6 +64,7 @@ class RealtimeMarketFeedService
         $this->recovery ??= app(MarketRecoveryManager::class);
         $this->instruments ??= app(InstrumentMapper::class);
         $this->snapshots ??= app(MarketSnapshotService::class);
+        $this->liveCandles ??= app(LiveCandleCacheService::class);
     }
 
     /**
@@ -311,6 +313,15 @@ class RealtimeMarketFeedService
             $closedKline = (bool) ($kline['x'] ?? false);
             $timeframe = strtolower((string) ($kline['i'] ?? '1m'));
             $openTs = Carbon::createFromTimestampMs((int) ($kline['t'] ?? $eventTimestampMs));
+            $this->liveCandles->upsert($exchangeKey, $symbol, $timeframe, [
+                'timestamp' => (int) ($kline['t'] ?? $eventTimestampMs),
+                'open' => (float) ($kline['o'] ?? 0),
+                'high' => (float) ($kline['h'] ?? 0),
+                'low' => (float) ($kline['l'] ?? 0),
+                'close' => (float) ($kline['c'] ?? 0),
+                'volume' => (float) ($kline['v'] ?? 0),
+                'opens_at' => $openTs->toIso8601String(),
+            ], $closedKline, $eventTimestampMs);
 
             // Only persist to DB when the candle is closed — open-candle updates are already
             // cached in Redis via setLatestPrice(). Writing on every tick caused 30-50+ DB

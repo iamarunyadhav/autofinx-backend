@@ -2,6 +2,8 @@
 
 namespace App\Domain\Trading;
 
+use App\Domain\Market\MarketPriceCacheService;
+use App\Domain\Market\LiveCandleCacheService;
 use App\Domain\Trading\Providers\LiveTradeProviderRegistry;
 use App\Models\Integration;
 use App\Models\MarketCandle;
@@ -16,6 +18,8 @@ class TradingMarketService
         private readonly TimeframeRegistry $timeframes,
         private readonly LiveTradeProviderRegistry $providers,
         private readonly TradingIntegrationResolver $integrations,
+        private readonly MarketPriceCacheService $prices,
+        private readonly LiveCandleCacheService $liveCandles,
     ) {
     }
 
@@ -40,10 +44,18 @@ class TradingMarketService
 
         if ($this->isLiveContext($context)) {
             $integration = $this->liveIntegration($context);
-
-            return $this->providers
+            $exchange = (string) ($context['provider'] ?? 'binance') === 'binance' ? 'binance_futures' : (string) ($context['provider'] ?? 'binance');
+            $cached = $this->liveCandles->candles($exchange, strtoupper(trim($symbolCode)), $normalizedTimeframe, $limit);
+            // A partial buffer is not enough for RSI/MACD; use it only once it
+            // can produce a meaningful, stable indicator context.
+            if (count($cached) >= min(30, $limit)) {
+                return $cached;
+            }
+            $candles = $this->providers
                 ->for((string) ($context['provider'] ?? 'binance'))
                 ->candles($integration, strtoupper(trim($symbolCode)), $normalizedTimeframe, $limit);
+            $this->liveCandles->seed($exchange, strtoupper(trim($symbolCode)), $normalizedTimeframe, $candles);
+            return $candles;
         }
 
         $symbol = $this->resolveSymbol($symbolCode);
@@ -74,6 +86,22 @@ class TradingMarketService
         $normalizedTimeframe = $this->timeframes->normalize($timeframe);
 
         if ($this->isLiveContext($context)) {
+            if (($context['provider'] ?? 'binance') === 'binance') {
+                $redis = $this->prices->getLiveFeedSnapshot('binance_futures', strtoupper(trim($symbolCode)), 10);
+                if (($redis['fresh'] ?? false) === true && (float) ($redis['price'] ?? 0) > 0) {
+                    return [
+                        'symbol' => strtoupper(trim($symbolCode)),
+                        'price' => (float) $redis['price'],
+                        'bid' => (float) ($redis['price'] ?? 0),
+                        'ask' => (float) ($redis['price'] ?? 0),
+                        'volume' => 0.0,
+                        'occurred_at' => (string) ($redis['received_at'] ?? ''),
+                        'source' => 'redis_live_feed',
+                        'age_seconds' => $redis['age_seconds'] ?? null,
+                        'event_lag_ms' => $redis['event_lag_ms'] ?? null,
+                    ];
+                }
+            }
             $integration = $this->liveIntegration($context);
 
             return $this->providers
@@ -182,16 +210,25 @@ class TradingMarketService
             $low = min($open, $close) - (abs($bias) * 0.35) - max($open, 1) * 0.0003;
             $volume = 50 + (($i + abs(crc32($symbol->symbol))) % 80);
 
-            MarketCandle::create([
-                'id' => (string) Str::uuid(),
-                'symbol_id' => $symbol->id,
-                'timeframe' => $timeframe,
-                'opens_at' => $opensAt,
-                'open' => round($open, 8),
-                'high' => round($high, 8),
-                'low' => round(max(0.0001, $low), 8),
-                'close' => round($close, 8),
-                'volume' => $volume,
+            // Chart requests can arrive concurrently (polling, tab refresh,
+            // or symbol changes). Upsert against the real unique key so a
+            // second request cannot turn an existing candle into a 1062 error.
+            MarketCandle::upsert([
+                [
+                    'id' => (string) Str::uuid(),
+                    'symbol_id' => $symbol->id,
+                    'timeframe' => $timeframe,
+                    'opens_at' => $opensAt,
+                    'open' => round($open, 8),
+                    'high' => round($high, 8),
+                    'low' => round(max(0.0001, $low), 8),
+                    'close' => round($close, 8),
+                    'volume' => $volume,
+                    'updated_at' => now(),
+                    'created_at' => now(),
+                ],
+            ], ['symbol_id', 'timeframe', 'opens_at'], [
+                'open', 'high', 'low', 'close', 'volume', 'updated_at',
             ]);
 
             $price = $close;
