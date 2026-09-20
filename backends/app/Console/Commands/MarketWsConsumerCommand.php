@@ -566,15 +566,11 @@ class MarketWsConsumerCommand extends Command
         if (! in_array('bookticker', $lower, true)) {
             $normalized[] = 'bookTicker';
         }
-        if (! in_array('ticker', $lower, true)) {
-            $normalized[] = 'ticker';
-        }
-        if (strtolower($marketType) === 'futures' && ! in_array('markprice@1s', $lower, true)) {
-            $normalized[] = 'markPrice@1s';
-        }
-        if (strtolower($marketType) === 'futures' && ! in_array('!markprice@arr@1s', $lower, true)) {
-            $normalized[] = '!markPrice@arr@1s';
-        }
+        // Keep the shared socket limited to symbol-scoped streams.  The
+        // global futures mark-price array and ticker stream add traffic but
+        // do not improve the freshness guard; on long-lived combined sockets
+        // they also increase reconnect risk.  Futures mark price is already
+        // available through the symbol-scoped feed when explicitly requested.
 
         return $normalized;
     }
