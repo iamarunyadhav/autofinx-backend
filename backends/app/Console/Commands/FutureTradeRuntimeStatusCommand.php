@@ -373,9 +373,28 @@ class FutureTradeRuntimeStatusCommand extends Command
             'artisan future-trade:reconcile',
             'artisan future-trade:diagnostics',
         ];
+        // Ratio Bot owns a Supervisor-managed spot consumer with this exact
+        // command shape. It must remain running alongside Future Trade's
+        // separate live-feed process; only unknown/legacy consumers should
+        // be reported here.
+        $allowedManagedPatterns = [
+            'artisan market:ws-consume --market-type=spot --store-ohlc',
+        ];
 
         $matches = [];
         foreach (preg_split('/\R/', $output) ?: [] as $line) {
+            $isAllowedManagedProcess = false;
+            foreach ($allowedManagedPatterns as $pattern) {
+                if (str_contains($line, $pattern)) {
+                    $isAllowedManagedProcess = true;
+                    break;
+                }
+            }
+
+            if ($isAllowedManagedProcess) {
+                continue;
+            }
+
             foreach ($badPatterns as $pattern) {
                 if (str_contains($line, $pattern)) {
                     $matches[] = trim($line);
