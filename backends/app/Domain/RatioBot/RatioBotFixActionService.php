@@ -59,6 +59,7 @@ class RatioBotFixActionService
             ],
             'diagnostics_panel_manual_fix',
             $symbol,
+            $config->marketType(),
         );
 
         RatioBotEvent::create([

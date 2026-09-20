@@ -26,6 +26,7 @@ class Fast2XState extends BaseModel
         'trade_count_today' => 'integer',
         'latency_ms' => 'integer',
         'last_price_update_at' => 'datetime',
+        'last_heartbeat_at' => 'datetime',
         'cooldown_until' => 'datetime',
         'order_in_progress' => 'boolean',
         'runtime_meta' => 'array',

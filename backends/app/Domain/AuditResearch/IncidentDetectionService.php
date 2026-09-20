@@ -38,7 +38,7 @@ class IncidentDetectionService
     public function detectStaleFeedForBot(RatioBotConfig $config): ?AuditIncident
     {
         $symbol = $config->normalizedSymbol();
-        $state = $this->breakers->staleFeedState((string) $config->workspace_id, $symbol);
+        $state = $this->breakers->staleFeedState((string) $config->workspace_id, $symbol, $config->marketType());
         $active = (bool) ($state['active'] ?? false);
 
         return $this->evaluateSignal(

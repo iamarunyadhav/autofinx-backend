@@ -118,3 +118,99 @@ test('runtime health does not mark all required feed symbols healthy from one fr
         ->assertJsonPath('future_trade.live_feed', 'red')
         ->assertJsonPath('future_trade.live_feed_detail.reason', 'market_feed_stale_or_missing_required_symbol');
 });
+
+test('ratio_bot.live_feed is green when no ratio bot configs are enabled', function () {
+    $user = User::factory()->create();
+    $workspace = Workspace::factory()->create();
+    WorkspaceMember::create([
+        'id' => (string) Str::uuid(),
+        'workspace_id' => $workspace->id,
+        'user_id' => $user->id,
+        'role' => 'admin',
+    ]);
+
+    $this->actingAs($user)
+        ->getJson('/api/v1/runtime/health?workspace_id='.$workspace->id)
+        ->assertOk()
+        ->assertJsonPath('ratio_bot.live_feed', 'green')
+        ->assertJsonPath('ratio_bot.live_feed_detail.reason', 'no_enabled_feed_dependent_bots');
+});
+
+test('ratio_bot.live_feed goes red for an enabled spot bot with no fresh feed', function () {
+    $user = User::factory()->create();
+    $workspace = Workspace::factory()->create();
+    WorkspaceMember::create([
+        'id' => (string) Str::uuid(),
+        'workspace_id' => $workspace->id,
+        'user_id' => $user->id,
+        'role' => 'admin',
+    ]);
+
+    RatioBotConfig::create([
+        'workspace_id' => $workspace->id,
+        'symbol' => 'BTCUSDT',
+        'market_type' => 'spot',
+        'execution_mode' => 'sandbox',
+        'enabled' => true,
+        'sell_threshold_ratio' => 0.02,
+        'buy_threshold_ratio' => 0.01,
+    ]);
+
+    $this->actingAs($user)
+        ->getJson('/api/v1/runtime/health?workspace_id='.$workspace->id)
+        ->assertOk()
+        ->assertJsonPath('ratio_bot.live_feed', 'red')
+        ->assertJsonPath('ratio_bot.live_feed_detail.reason', 'market_feed_stale_or_missing_required_symbol');
+});
+
+test('ratio_bot.live_feed is green when the spot symbol has a fresh websocket redis tick', function () {
+    $user = User::factory()->create();
+    $workspace = Workspace::factory()->create();
+    WorkspaceMember::create([
+        'id' => (string) Str::uuid(),
+        'workspace_id' => $workspace->id,
+        'user_id' => $user->id,
+        'role' => 'admin',
+    ]);
+
+    RatioBotConfig::create([
+        'workspace_id' => $workspace->id,
+        'symbol' => 'BTCUSDT',
+        'market_type' => 'spot',
+        'execution_mode' => 'sandbox',
+        'enabled' => true,
+        'sell_threshold_ratio' => 0.02,
+        'buy_threshold_ratio' => 0.01,
+    ]);
+
+    app(\App\Domain\Market\RealtimeMarketFeedService::class)->ingest([
+        'stream' => 'btcusdt@trade',
+        'data' => [
+            'e' => 'trade',
+            's' => 'BTCUSDT',
+            'p' => '65000.50',
+            'E' => now()->getTimestampMs(),
+        ],
+    ], 'spot', false);
+
+    try {
+        $this->actingAs($user)
+            ->getJson('/api/v1/runtime/health?workspace_id='.$workspace->id)
+            ->assertOk()
+            ->assertJsonPath('ratio_bot.live_feed', 'green');
+    } finally {
+        foreach ([
+            'autofinx:market:binance:BTCUSDT:quote',
+            'autofinx:market:binance:BTCUSDT:health:QUOTE',
+            'market:live:BTCUSDT',
+            'live-feed:binance:BTCUSDT',
+            'price:binance:BTCUSDT',
+            'ts:binance:BTCUSDT',
+        ] as $key) {
+            try {
+                \Illuminate\Support\Facades\Redis::del($key);
+            } catch (\Throwable) {
+            }
+        }
+    }
+});

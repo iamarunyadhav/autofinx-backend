@@ -57,24 +57,38 @@ class OperationalBreakerService
      * to check/mutate a breaker scoped to just that symbol, so one stale
      * symbol in a workspace doesn't gate every other symbol trading in the
      * same workspace.
+     *
+     * $marketType discriminates the per-symbol key ('spot' vs 'futures')
+     * so the SAME symbol string (e.g. BTCUSDT) traded as a spot Ratio Bot
+     * and as a futures Future Trade/Ratio Bot bot in the same workspace
+     * never collide on one breaker entry -- a genuinely stale futures feed
+     * must never be masked by a fresh spot feed for the same symbol, or
+     * vice versa. Only meaningful when $symbol is provided; ignored for the
+     * workspace-wide key (no symbol) which intentionally stays a single
+     * coarse, market-type-agnostic advisory signal shared by every consumer
+     * that reads it without a symbol (unchanged from before this fix).
+     * Defaults to 'spot' to match every pre-existing caller's actual
+     * context (verified caller-by-caller, not an unverified guess) --
+     * every genuinely futures-context caller now passes 'futures'
+     * explicitly.
      */
-    public function staleFeedState(?string $workspaceId, ?string $symbol = null): array
+    public function staleFeedState(?string $workspaceId, ?string $symbol = null, string $marketType = 'spot'): array
     {
-        $key = $this->staleFeedKey($symbol);
+        $key = $this->staleFeedKey($symbol, $marketType);
 
         return $this->loadState($workspaceId, $key)
             ?? $this->loadState(null, $key)
             ?? $this->defaultStaleFeedState();
     }
 
-    public function isStaleFeedBreakerActive(?string $workspaceId, ?string $symbol = null): bool
+    public function isStaleFeedBreakerActive(?string $workspaceId, ?string $symbol = null, string $marketType = 'spot'): bool
     {
-        return (bool) ($this->staleFeedState($workspaceId, $symbol)['active'] ?? false);
+        return (bool) ($this->staleFeedState($workspaceId, $symbol, $marketType)['active'] ?? false);
     }
 
-    public function activateStaleFeedBreaker(?string $workspaceId, array $context = [], string $source = 'monitoring', ?string $symbol = null): array
+    public function activateStaleFeedBreaker(?string $workspaceId, array $context = [], string $source = 'monitoring', ?string $symbol = null, string $marketType = 'spot'): array
     {
-        $state = array_merge($this->staleFeedState($workspaceId, $symbol), [
+        $state = array_merge($this->staleFeedState($workspaceId, $symbol, $marketType), [
             'active' => true,
             'source' => $source,
             'activated_at' => now()->toIso8601String(),
@@ -82,30 +96,37 @@ class OperationalBreakerService
             'cleared_at' => null,
         ]);
 
-        $this->persistState($workspaceId, $this->staleFeedKey($symbol), $state);
+        $this->persistState($workspaceId, $this->staleFeedKey($symbol, $marketType), $state);
 
         return $state;
     }
 
-    public function clearStaleFeedBreaker(?string $workspaceId, array $context = [], string $source = 'monitoring', ?string $symbol = null): array
+    public function clearStaleFeedBreaker(?string $workspaceId, array $context = [], string $source = 'monitoring', ?string $symbol = null, string $marketType = 'spot'): array
     {
-        $state = array_merge($this->staleFeedState($workspaceId, $symbol), [
+        $state = array_merge($this->staleFeedState($workspaceId, $symbol, $marketType), [
             'active' => false,
             'source' => $source,
             'cleared_at' => now()->toIso8601String(),
             'context' => $context,
         ]);
 
-        $this->persistState($workspaceId, $this->staleFeedKey($symbol), $state);
+        $this->persistState($workspaceId, $this->staleFeedKey($symbol, $marketType), $state);
 
         return $state;
     }
 
-    private function staleFeedKey(?string $symbol): string
+    private function staleFeedKey(?string $symbol, string $marketType = 'spot'): string
     {
         $symbol = $symbol !== null ? strtoupper(trim($symbol)) : '';
 
-        return $symbol !== '' ? 'stale_feed_breaker:' . $symbol : 'stale_feed_breaker';
+        if ($symbol === '') {
+            return 'stale_feed_breaker';
+        }
+
+        $marketType = strtolower(trim($marketType));
+        $marketType = $marketType !== '' ? $marketType : 'spot';
+
+        return 'stale_feed_breaker:' . $marketType . ':' . $symbol;
     }
 
     public function streamState(ExchangeConnection $connection): array

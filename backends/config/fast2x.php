@@ -10,6 +10,17 @@ return [
     'max_trades_per_day' => (int) env('FAST2X_MAX_TRADES_PER_DAY', 20),
     'max_daily_loss_percent' => (float) env('FAST2X_MAX_DAILY_LOSS_PERCENT', 2),
 
+    // How stale (seconds) fast2x_states.last_heartbeat_at must be before
+    // fast2x:supervise (routes/console.php, every minute) treats a
+    // workspace's fast2x:run daemon as crashed/hung and restarts it.
+    'supervisor_stale_seconds' => (int) env('FAST2X_SUPERVISOR_STALE_SECONDS', 90),
+
+    // Absolute path to the PHP binary fast2x:supervise should use to spawn
+    // fast2x:run child processes. Leave blank to auto-detect (falls back to
+    // PHP_BINARY, then common cPanel ea-phpXX paths) -- see
+    // Fast2XDaemonManager::phpBinary().
+    'php_binary' => env('FAST2X_PHP_BINARY', ''),
+
     // All tradeable symbols available in the UI selector
     'available_symbols' => [
         'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT',

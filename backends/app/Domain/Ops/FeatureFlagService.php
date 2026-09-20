@@ -89,6 +89,12 @@ class FeatureFlagService
             'description' => 'Once-daily (05:15) native calibration refresh for Fast2X, driven by real fast2x_decision_logs/fast2x_trades outcomes. Read-only analysis job -- never called from Fast2XService\'s live tick-loop path.',
             'default_value' => true,
         ],
+        'scheduler.fast2x_supervisor' => [
+            'category' => 'scheduler',
+            'label' => 'Fast2X — Daemon Supervision (restart-on-crash)',
+            'description' => 'Every-minute check (fast2x:supervise) that restarts a workspace\'s fast2x:run process if its heartbeat has gone stale (crashed, hung, or never started after the daemon was last enabled). Fast2X has no static Supervisor entry because it is one process per workspace, not a single global daemon like Ratio Bot/Future Trade -- this is the substitute self-healing mechanism. Disabling it means a crashed Fast2X daemon stays down until someone restarts it manually.',
+            'default_value' => true,
+        ],
         'scheduler.forecast_readiness_evaluation' => [
             'category' => 'scheduler',
             'label' => 'Forecast Readiness Evaluation Sweep',

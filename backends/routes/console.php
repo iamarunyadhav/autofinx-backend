@@ -275,6 +275,23 @@ if ($schedulerEnabled && app(FeatureFlagService::class)->enabled('scheduler.fast
         ->after(fn () => $markRunEnd('fast2x:calibration-backtest'));
 }
 
+// Fast2X restart-on-crash/reboot supervision. Fast2X's daemon is per
+// workspace (fast2x:run {workspace_id}), unlike Ratio Bot/Future Trade's
+// single global feed daemon, so it cannot be covered by a static Supervisor
+// .conf enumerating a fixed process list -- this enumerates the actually
+// -Running workspaces from the DB every minute and restarts any whose
+// fast2x:run heartbeat has gone stale, mirroring runtime:repair's
+// self-healing style. See Fast2XSuperviseCommand's docblock for the full
+// design rationale.
+if ($schedulerEnabled && app(FeatureFlagService::class)->enabled('scheduler.fast2x_supervisor', true)) {
+    Schedule::command('fast2x:supervise')
+        ->everyMinute()
+        ->withoutOverlapping()
+        ->runInBackground()
+        ->before(fn () => $markRunStart('fast2x:supervise'))
+        ->after(fn () => $markRunEnd('fast2x:supervise'));
+}
+
 // Unified Forecast Engine -- automated readiness re-evaluation across all
 // four bot types (ratio_bot/quick_trade/robot_trade/future_trade), running
 // AFTER every backtest command above has refreshed its own bot type's data

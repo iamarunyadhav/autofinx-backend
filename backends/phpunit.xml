@@ -29,6 +29,13 @@
         <env name="MAIL_MAILER" value="array"/>
         <env name="QUEUE_CONNECTION" value="sync"/>
         <env name="SESSION_DRIVER" value="array"/>
+        <!-- Isolate the test suite's Redis keyspace from whatever a locally
+             running market:ws-consume/queue:work daemon is writing to on the
+             default DB index — without this, a live dev daemon continuously
+             re-populates market-feed keys the stale-feed tests just cleared,
+             making genuinely-stale scenarios look fresh. See
+             tests/TestCase.php for the per-test key cleanup this pairs with. -->
+        <env name="REDIS_DB" value="15"/>
         <env name="PULSE_ENABLED" value="false"/>
         <env name="TELESCOPE_ENABLED" value="false"/>
         <env name="NIGHTWATCH_ENABLED" value="false"/>

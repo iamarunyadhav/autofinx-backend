@@ -954,7 +954,7 @@ class RunRatioBotEvaluationJob implements ShouldQueue, ShouldBeUnique
         // BTCUSDT bot) in the same workspace. Every bot on the same symbol
         // correctly shares this same breaker, since they all consume the
         // same underlying price feed for that symbol.
-        $staleFeedState = $breakers->staleFeedState($workspaceId, $symbol);
+        $staleFeedState = $breakers->staleFeedState($workspaceId, $symbol, $config->marketType());
         if ((bool) ($staleFeedState['active'] ?? false)) {
             $snapshot = (array) data_get($pricePayload, 'quality.snapshot', []);
             if ((bool) ($snapshot['is_fresh'] ?? false)) {
@@ -963,7 +963,7 @@ class RunRatioBotEvaluationJob implements ShouldQueue, ShouldBeUnique
                     'received_at' => $snapshot['received_at'] ?? null,
                     'age_ms' => $snapshot['age_ms'] ?? null,
                     'reason' => 'selected_symbol_snapshot_fresh_before_evaluation',
-                ], 'ratio_bot_evaluation', $symbol);
+                ], 'ratio_bot_evaluation', $symbol, $config->marketType());
             } else {
                 return $this->healthBlock(
                     'STALE_FEED',

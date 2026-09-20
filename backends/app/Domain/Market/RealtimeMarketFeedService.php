@@ -562,7 +562,7 @@ class RealtimeMarketFeedService
             // below (this runs on every matching tick): skip entirely unless
             // either this symbol's own breaker or the workspace-wide one is
             // actually active for this workspace.
-            if (! $this->breakers->isStaleFeedBreakerActive((string) $workspaceId, $symbol)
+            if (! $this->breakers->isStaleFeedBreakerActive((string) $workspaceId, $symbol, $marketType)
                 && ! $this->breakers->isStaleFeedBreakerActive((string) $workspaceId)) {
                 continue;
             }
@@ -587,12 +587,12 @@ class RealtimeMarketFeedService
                 // Clear this symbol's own breaker independently of its
                 // siblings — a still-stale SOLUSDT bot in this workspace must
                 // never keep a healthy BTCUSDT bot's breaker stuck active.
-                if ($this->breakers->isStaleFeedBreakerActive((string) $workspaceId, $selectedSymbol)) {
+                if ($this->breakers->isStaleFeedBreakerActive((string) $workspaceId, $selectedSymbol, $marketType)) {
                     $this->breakers->clearStaleFeedBreaker((string) $workspaceId, [
                         'symbol' => $selectedSymbol,
                         'snapshot' => $snapshots[$selectedSymbol],
                         'reason' => 'fresh_websocket_event_recovered_this_symbol',
-                    ], 'market_feed_ingest', $selectedSymbol);
+                    ], 'market_feed_ingest', $selectedSymbol, $marketType);
                 }
             }
 

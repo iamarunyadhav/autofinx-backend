@@ -105,7 +105,7 @@ class RatioBotDiagnosticsService
     {
         $symbol = $config->normalizedSymbol();
         $workspaceId = (string) $config->workspace_id;
-        $active = $this->breakers->isStaleFeedBreakerActive($workspaceId, $symbol);
+        $active = $this->breakers->isStaleFeedBreakerActive($workspaceId, $symbol, $config->marketType());
         $fresh = (bool) ($feedStatus['fresh'] ?? false);
 
         if (! $active) {

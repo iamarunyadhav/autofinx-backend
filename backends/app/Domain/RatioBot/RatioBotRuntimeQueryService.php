@@ -451,14 +451,14 @@ class RatioBotRuntimeQueryService
         $snapshot = $this->snapshots->forRatioBot($config);
 
         if ((bool) ($snapshot['is_fresh'] ?? false)) {
-            $staleFeedState = $this->breakers->staleFeedState($workspaceId, $config->normalizedSymbol());
+            $staleFeedState = $this->breakers->staleFeedState($workspaceId, $config->normalizedSymbol(), $config->marketType());
             if ((bool) ($staleFeedState['active'] ?? false)) {
                 $this->breakers->clearStaleFeedBreaker($workspaceId, [
                     'symbol' => $config->normalizedSymbol(),
                     'received_at' => $snapshot['received_at'] ?? null,
                     'age_ms' => $snapshot['age_ms'] ?? null,
                     'reason' => 'selected_symbol_snapshot_fresh',
-                ], 'market_snapshot', $config->normalizedSymbol());
+                ], 'market_snapshot', $config->normalizedSymbol(), $config->marketType());
             }
 
             return $this->feedStatusResult(
@@ -486,7 +486,7 @@ class RatioBotRuntimeQueryService
             ],
         ]);
 
-        $staleFeedState = $this->breakers->staleFeedState($workspaceId, $config->normalizedSymbol());
+        $staleFeedState = $this->breakers->staleFeedState($workspaceId, $config->normalizedSymbol(), $config->marketType());
         if ((bool) ($staleFeedState['active'] ?? false)) {
             return $this->feedStatusResult('STALE_FEED', 'stale_feed_breaker_active', $state, $maxAge, ['breaker' => $staleFeedState, 'snapshot' => $snapshot]);
         }
@@ -517,7 +517,7 @@ class RatioBotRuntimeQueryService
             'max_age_seconds' => $maxAge,
             'connection_state' => $snapshot['connection_state'] ?? FeedState::STALE->value,
             'reason' => $snapshot['stale_reason'] ?? 'selected_symbol_snapshot_not_fresh',
-        ], 'market_snapshot', $config->normalizedSymbol());
+        ], 'market_snapshot', $config->normalizedSymbol(), $config->marketType());
 
         return $this->feedStatusResult(
             'STALE_FEED',

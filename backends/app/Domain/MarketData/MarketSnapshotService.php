@@ -21,10 +21,22 @@ class MarketSnapshotService
 
     public function forRatioBot(RatioBotConfig $config): array
     {
+        // Both the canonical provider (1st arg) AND the legacy exchange
+        // lookup (3rd arg) must be market-type-suffixed via
+        // RatioBotConfig::exchangeKey() (spot -> 'binance', futures ->
+        // 'binance_futures'), matching RealtimeMarketFeedService::ingest()'s
+        // own choice of canonical provider and the same fix already applied
+        // in DetectStaleFeedsJob. Previously this passed a bare
+        // strtolower($config->exchange ?: 'binance') for the 1st arg only,
+        // so a futures bot's freshness check silently fell back to (and
+        // could "find") the SPOT canonical quote for the same symbol,
+        // reporting a futures feed fresh when it never received a tick.
+        $exchangeKey = $config->exchangeKey();
+
         return $this->getLiveSnapshot(
-            strtolower((string) ($config->exchange ?: 'binance')),
+            $exchangeKey,
             $config->normalizedSymbol(),
-            $config->exchangeKey(),
+            $exchangeKey,
             $config->staleFeedWindowSeconds(),
         );
     }

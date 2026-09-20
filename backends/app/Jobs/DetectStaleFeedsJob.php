@@ -35,9 +35,9 @@ class DetectStaleFeedsJob implements ShouldQueue, ShouldBeUnique
     public function handle(OperationalBreakerService $breakers, MarketFreshnessService $freshness, MarketRecoveryManager $recovery, MarketSnapshotService $snapshots): void
     {
         $now = now();
-        $activeWorkspaceSymbols = $this->activeWorkspaceSymbols();
+        $activeWorkspaceEntries = $this->activeWorkspaceSymbols();
 
-        foreach ($activeWorkspaceSymbols as $workspaceId => $symbols) {
+        foreach ($activeWorkspaceEntries as $workspaceId => $entries) {
             $stale = [];
             $fresh = [];
             // Genuine freshness confirmations only — unlike $fresh (which
@@ -48,22 +48,51 @@ class DetectStaleFeedsJob implements ShouldQueue, ShouldBeUnique
             // must never be able to unlatch a breaker.
             $confirmedFreshForClear = [];
 
-            foreach ($symbols as $symbol) {
-                $snapshot = $snapshots->getLiveSnapshot('binance', $symbol, 'binance', $this->thresholdSeconds);
+            // Each entry is a (symbol, market_type) pair, never a bare
+            // symbol string: the SAME symbol (e.g. BTCUSDT) can appear here
+            // twice -- once for a spot Ratio Bot and once for a futures
+            // Future Trade/Ratio Bot bot in the same workspace -- and each
+            // must be checked against its own market's feed and latch its
+            // own, independently-tracked breaker. Merging them back into one
+            // undifferentiated symbol list here is exactly the bug this
+            // fixes: a stale futures feed must never be reported "fresh"
+            // because a same-symbol spot feed happened to be healthy (or
+            // vice versa).
+            foreach ($entries as $entry) {
+                $symbol = $entry['symbol'];
+                $marketType = $entry['market_type'];
+                // Both the canonical provider (1st arg) AND the legacy
+                // exchange lookup (3rd arg) must be market-type-suffixed,
+                // matching RealtimeMarketFeedService::ingest()'s own choice
+                // of canonical provider ($this->exchangeKey($marketType), not
+                // a hardcoded 'binance') -- verified empirically: passing a
+                // bare 'binance' provider for both markets (mirroring
+                // RatioBotConfig::forRatioBot()'s pattern) let a stale
+                // futures check silently fall back to and "find" the SPOT
+                // tick's canonical quote (same provider, same canonical
+                // instrument), reporting the futures feed fresh when it
+                // never received a tick at all. Using the market-type-aware
+                // provider for both arguments closes that fallback
+                // collision, not just the legacy-price one.
+                $exchangeKey = $marketType === 'futures' ? 'binance_futures' : 'binance';
+
+                $snapshot = $snapshots->getLiveSnapshot($exchangeKey, $symbol, $exchangeKey, $this->thresholdSeconds);
                 $health = (array) ($snapshot['health'] ?? []);
                 if (($health['state'] ?? null) === FeedState::MARKET_CLOSED->value) {
-                    $fresh[] = ['symbol' => $symbol, 'reason' => 'market_closed_not_stale'];
+                    $fresh[] = ['symbol' => $symbol, 'market_type' => $marketType, 'reason' => 'market_closed_not_stale'];
                     continue;
                 }
 
                 if ((bool) ($snapshot['is_fresh'] ?? false)) {
                     $fresh[] = [
                         'symbol' => $symbol,
+                        'market_type' => $marketType,
                         'received_at' => $snapshot['received_at'] ?? null,
                         'age_ms' => $snapshot['age_ms'] ?? null,
                     ];
                     $confirmedFreshForClear[] = [
                         'symbol' => $symbol,
+                        'market_type' => $marketType,
                         'received_at' => $snapshot['received_at'] ?? null,
                         'age_ms' => $snapshot['age_ms'] ?? null,
                     ];
@@ -75,13 +104,14 @@ class DetectStaleFeedsJob implements ShouldQueue, ShouldBeUnique
                     // (e.g. a transient delay that straddled a prior run
                     // before websocket ingest could clear it), self-heal it
                     // here rather than waiting on a live tick.
-                    if ($breakers->isStaleFeedBreakerActive((string) $workspaceId, $symbol)) {
+                    if ($breakers->isStaleFeedBreakerActive((string) $workspaceId, $symbol, $marketType)) {
                         $breakers->clearStaleFeedBreaker((string) $workspaceId, [
                             'symbol' => $symbol,
+                            'market_type' => $marketType,
                             'received_at' => $snapshot['received_at'] ?? null,
                             'age_ms' => $snapshot['age_ms'] ?? null,
                             'reason' => 'scheduled_detector_confirmed_fresh_safety_net',
-                        ], 'stale_feed_detector_safety_net', $symbol);
+                        ], 'stale_feed_detector_safety_net', $symbol, $marketType);
                     }
 
                     continue;
@@ -89,6 +119,7 @@ class DetectStaleFeedsJob implements ShouldQueue, ShouldBeUnique
 
                 $staleEntry = [
                     'symbol' => $symbol,
+                    'market_type' => $marketType,
                     'received_at' => $snapshot['received_at'] ?? null,
                     'age_ms' => $snapshot['age_ms'] ?? null,
                     'connection_state' => $snapshot['connection_state'] ?? null,
@@ -96,20 +127,25 @@ class DetectStaleFeedsJob implements ShouldQueue, ShouldBeUnique
                 ];
                 $stale[] = $staleEntry;
 
-                // Symbol-scoped breaker: only bots trading THIS symbol are
-                // gated. Kept alongside the workspace-wide breaker below
-                // (still activated for every other consumer of
-                // isStaleFeedBreakerActive()/staleFeedState() that isn't
-                // symbol-aware yet) so a stale SOLUSDT feed can no longer
-                // block a healthy BTCUSDT bot in the same workspace.
+                // Symbol-and-market-scoped breaker: only bots trading THIS
+                // symbol in THIS market are gated. Kept alongside the
+                // workspace-wide breaker below (still activated for every
+                // other consumer of isStaleFeedBreakerActive()/
+                // staleFeedState() that isn't symbol-aware yet) so a stale
+                // SOLUSDT feed can no longer block a healthy BTCUSDT bot in
+                // the same workspace, and a stale futures BTCUSDT feed can
+                // no longer block (or be masked by) a healthy spot BTCUSDT
+                // bot in the same workspace, or vice versa.
                 $breakers->activateStaleFeedBreaker((string) $workspaceId, [
                     'symbol' => $symbol,
+                    'market_type' => $marketType,
                     'threshold_seconds' => $this->thresholdSeconds,
                     'reason' => 'selected_symbol_stale',
-                ] + $staleEntry, 'monitoring', $symbol);
+                ] + $staleEntry, 'monitoring', $symbol, $marketType);
 
                 $recovery->requestRecovery('binance', $symbol, StreamType::QUOTE, 'scheduled_stale_feed_check', [
                     'workspace_id' => (string) $workspaceId,
+                    'market_type' => $marketType,
                     'threshold_seconds' => $this->thresholdSeconds,
                     'snapshot' => $snapshot,
                 ]);
@@ -117,7 +153,7 @@ class DetectStaleFeedsJob implements ShouldQueue, ShouldBeUnique
 
             if ($stale !== []) {
                 $breakers->activateStaleFeedBreaker((string) $workspaceId, [
-                    'symbols' => $symbols,
+                    'symbols' => $entries,
                     'stale_symbols' => $stale,
                     'fresh_symbols' => $fresh,
                     'threshold_seconds' => $this->thresholdSeconds,
@@ -141,15 +177,15 @@ class DetectStaleFeedsJob implements ShouldQueue, ShouldBeUnique
             // alone is not sufficient: a workspace whose only symbol was
             // market-closed this run also has $stale === [] with zero
             // genuine confirmations, so the workspace-wide clear additionally
-            // requires every selected symbol to have been confirmed fresh
-            // ($symbols !== [] guards the zero-symbols case defensively,
-            // matching the reference implementation's $allFresh = $symbols
-            // !== []; initialization).
-            $allSelectedSymbolsConfirmedFresh = $symbols !== [] && count($confirmedFreshForClear) === count($symbols);
+            // requires every selected (symbol, market_type) entry to have
+            // been confirmed fresh ($entries !== [] guards the zero-entries
+            // case defensively, matching the reference implementation's
+            // $allFresh = $symbols !== []; initialization).
+            $allSelectedSymbolsConfirmedFresh = $entries !== [] && count($confirmedFreshForClear) === count($entries);
 
             if ($allSelectedSymbolsConfirmedFresh && $breakers->isStaleFeedBreakerActive((string) $workspaceId)) {
                 $breakers->clearStaleFeedBreaker((string) $workspaceId, [
-                    'symbols' => $symbols,
+                    'symbols' => $entries,
                     'fresh_symbols' => $fresh,
                     'reason' => 'scheduled_detector_confirmed_all_fresh_safety_net',
                 ], 'stale_feed_detector_safety_net');
@@ -163,31 +199,44 @@ class DetectStaleFeedsJob implements ShouldQueue, ShouldBeUnique
     }
 
     /**
-     * @return array<string, string[]>
+     * Returns, per workspace, a deduplicated list of (symbol, market_type)
+     * pairs -- NEVER a bare symbol list. A RatioBotConfig can itself be
+     * market_type=spot or market_type=futures (see
+     * RatioBotConfig::marketType()), and FutureTradeBotConfig is always
+     * futures; a workspace running a spot Ratio Bot and a futures bot on the
+     * SAME symbol string must produce two independently-tracked entries
+     * here, never one collided one -- that collision (and the hardcoded
+     * spot-only 'binance' snapshot lookup that used to accompany it in
+     * handle()) was the actual bug.
+     *
+     * @return array<string, array<int, array{symbol: string, market_type: string}>>
      */
     private function activeWorkspaceSymbols(): array
     {
-        $workspaceSymbols = [];
+        $workspaceEntries = [];
 
         RatioBotConfig::query()
             ->where('enabled', true)
-            ->get(['workspace_id', 'symbol'])
-            ->each(function (RatioBotConfig $config) use (&$workspaceSymbols): void {
+            ->get(['workspace_id', 'symbol', 'market_type'])
+            ->each(function (RatioBotConfig $config) use (&$workspaceEntries): void {
                 $workspaceId = (string) $config->workspace_id;
-                $symbol = strtoupper(trim((string) $config->symbol));
+                $symbol = $config->normalizedSymbol();
 
                 if ($workspaceId === '' || $symbol === '') {
                     return;
                 }
 
-                $workspaceSymbols[$workspaceId][] = $symbol;
+                $workspaceEntries[$workspaceId][] = [
+                    'symbol' => $symbol,
+                    'market_type' => $config->marketType(),
+                ];
             });
 
         FutureTradeBotConfig::query()
             ->with('state')
             ->where('enabled', true)
             ->get()
-            ->each(function (FutureTradeBotConfig $config) use (&$workspaceSymbols): void {
+            ->each(function (FutureTradeBotConfig $config) use (&$workspaceEntries): void {
                 $workspaceId = (string) $config->workspace_id;
                 if ($workspaceId === '') {
                     return;
@@ -205,13 +254,26 @@ class DetectStaleFeedsJob implements ShouldQueue, ShouldBeUnique
                 }
 
                 foreach (array_filter($symbols) as $symbol) {
-                    $workspaceSymbols[$workspaceId][] = $symbol;
+                    // FutureTradeBotConfig has no exchange/market_type
+                    // column of its own -- it is always Binance futures.
+                    $workspaceEntries[$workspaceId][] = [
+                        'symbol' => $symbol,
+                        'market_type' => 'futures',
+                    ];
                 }
             });
 
-        return collect($workspaceSymbols)
-            ->map(fn (array $symbols) => array_values(array_unique(array_filter($symbols))))
-            ->filter(fn (array $symbols) => $symbols !== [])
+        return collect($workspaceEntries)
+            ->map(function (array $entries) {
+                $unique = [];
+                foreach ($entries as $entry) {
+                    $key = $entry['market_type'] . ':' . $entry['symbol'];
+                    $unique[$key] = $entry;
+                }
+
+                return array_values($unique);
+            })
+            ->filter(fn (array $entries) => $entries !== [])
             ->all();
     }
 

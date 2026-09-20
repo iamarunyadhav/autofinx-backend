@@ -35,6 +35,14 @@ class TradingRuntimeHealthService
         $futureReconcile = $this->scheduledCommand('future-trade:reconcile', 900);
         $futureUserStream = $this->futureUserStreamHealth($workspaceId, $supervisor['user_stream'] ?? 'UNKNOWN');
         $futureLiveFeed = $this->marketFeed($workspaceId);
+        // Ratio Bot's own spot feed (`market:ws-consume --market-type=spot`,
+        // Supervisor program `autofinx-ratio-feed`) can go stale while
+        // future_trade.live_feed above stays green off a healthy futures
+        // feed alone — that gap left a real stuck spot bot with no automated
+        // recovery, since RuntimeRepairCommand only ever watched
+        // future_trade.live_feed. This is scoped to spot symbols only so a
+        // stale futures feed alone never flips this key red.
+        $ratioBotLiveFeed = $this->marketFeed($workspaceId, 'spot');
         $executionQueue = $this->queue(['execution', 'critical', 'reconcile', 'monitoring']);
         $marketQueue = $this->queue(['market', 'signals', 'strategies', 'ratio_bot', 'ops']);
         $defaultQueue = $this->queue(['analytics', 'notifications', 'default', 'monitoring']);
@@ -78,6 +86,12 @@ class TradingRuntimeHealthService
             'daily_loss_lock' => $dailyLossLock,
         ];
 
+        $ratioBot = [
+            'live_feed' => $ratioBotLiveFeed['state'],
+            'live_feed_age_seconds' => $ratioBotLiveFeed['age_seconds'] ?? null,
+            'live_feed_detail' => $ratioBotLiveFeed,
+        ];
+
         $binance = [
             'rest' => 'yellow',
             'ws' => $futureLiveFeed['state'],
@@ -95,6 +109,12 @@ class TradingRuntimeHealthService
         $this->collectReasons('future_trade.user_stream', $futureTrade['user_stream'], $futureUserStream, $reasons);
         $this->collectReasons('future_trade.execution_queue', $futureTrade['execution_queue'], $executionQueue, $reasons);
         $this->collectReasons('future_trade.tick', $futureTrade['tick'], $futureTick, $reasons);
+        // Deliberately NOT folded into `reasons`/`overall`/liveAllowed(): those
+        // gate QuickTrade/Robot Trade/Future Trade live entries too (see
+        // QuickTradeService::place()'s require_green_for_live check), and a
+        // stale Ratio Bot spot feed has no bearing on those other engines'
+        // readiness. This key exists so RuntimeRepairCommand can react to it
+        // independently — see that command for the actual repair trigger.
 
         $overall = $this->worst([
             $quickTrade['settler'],
@@ -113,6 +133,7 @@ class TradingRuntimeHealthService
             'quick_trade' => $quickTrade,
             'robot_trade' => $robotTrade,
             'future_trade' => $futureTrade,
+            'ratio_bot' => $ratioBot,
             'binance' => $binance,
             'supervisor' => $supervisor,
             'reasons' => array_values(array_unique($reasons)),
@@ -335,10 +356,25 @@ class TradingRuntimeHealthService
             ->count();
     }
 
-    private function marketFeed(?string $workspaceId): array
+    /**
+     * @param 'all'|'spot'|'futures' $scope Restricts which required symbols
+     *   (and which exchange's DB/heartbeat fallback) this check considers.
+     *   'all' is future_trade.live_feed's existing behavior (spot + futures
+     *   combined, unchanged); 'spot' is ratio_bot.live_feed — Ratio Bot's own
+     *   spot feed (`market:ws-consume --market-type=spot`) can go stale while
+     *   the shared 'all' check stays green off a healthy futures feed alone,
+     *   which is exactly the gap that left a stuck spot bot with no
+     *   automated recovery (see RuntimeRepairCommand).
+     */
+    private function marketFeed(?string $workspaceId, string $scope = 'all'): array
     {
         $maxAge = app(RuntimeSafetySettingsService::class)->liveFeedMaxAgeSeconds($workspaceId);
         $symbols = $this->monitoredMarketSymbols($workspaceId);
+        $symbols = match ($scope) {
+            'spot' => ['spot' => $symbols['spot'], 'futures' => []],
+            'futures' => ['spot' => [], 'futures' => $symbols['futures']],
+            default => $symbols,
+        };
         $requiredFeeds = $this->requiredFeedSnapshots($symbols, $maxAge);
 
         if ($requiredFeeds === []) {
@@ -379,8 +415,14 @@ class TradingRuntimeHealthService
             ];
         }
 
+        $exchangesForScope = match ($scope) {
+            'spot' => ['binance'],
+            'futures' => ['binance_futures'],
+            default => ['binance', 'binance_futures'],
+        };
+
         if (! Schema::hasTable('market_feed_status')) {
-            return $this->heartbeatFeed($redisFeed);
+            return $this->demoteForMissingRequiredFeeds($this->heartbeatFeed($redisFeed, $scope), $missingOrStale, $requiredFeeds);
         }
 
         $query = MarketFeedStatus::query()->whereNotNull('last_tick_at');
@@ -388,28 +430,28 @@ class TradingRuntimeHealthService
             $query->where('workspace_id', $workspaceId);
         }
         if (Schema::hasColumn('market_feed_status', 'exchange')) {
-            $query->whereIn('exchange', ['binance', 'binance_futures']);
+            $query->whereIn('exchange', $exchangesForScope);
         }
 
         $row = $query->orderByDesc('last_tick_at')->first();
         if (! $row) {
-            return $this->heartbeatFeed($redisFeed);
+            return $this->demoteForMissingRequiredFeeds($this->heartbeatFeed($redisFeed, $scope), $missingOrStale, $requiredFeeds);
         }
 
         $age = $row->last_tick_at->diffInSeconds(now(), true);
-        $heartbeat = $this->heartbeatFeed($redisFeed);
+        $heartbeat = $this->heartbeatFeed($redisFeed, $scope);
         if (
             ($heartbeat['state'] ?? 'red') === 'green'
             && isset($heartbeat['age_seconds'])
             && (int) $heartbeat['age_seconds'] < $age
         ) {
-            return array_merge($heartbeat, [
+            return $this->demoteForMissingRequiredFeeds(array_merge($heartbeat, [
                 'reason' => 'ok_heartbeat_fallback_db_tick_stale',
                 'db_last_tick_at' => $row->last_tick_at->toIso8601String(),
                 'db_age_seconds' => $age,
                 'db_symbol' => (string) ($row->symbol ?? ''),
                 'db_source' => (string) ($row->source ?? ''),
-            ]);
+            ]), $missingOrStale, $requiredFeeds);
         }
 
         $state = $age <= $maxAge ? 'green' : ($age <= ($maxAge * 3) ? 'yellow' : 'red');
@@ -458,14 +500,50 @@ class TradingRuntimeHealthService
         return $feeds;
     }
 
-    private function heartbeatFeed(?array $redisFeed = null): array
+    /**
+     * The heartbeat file only proves a websocket process is alive and its
+     * MOST RECENT tick's symbol/age — it says nothing about whether every
+     * symbol this workspace's bots actually require is fresh (e.g. a
+     * futures-only heartbeat ticking BTCUSDT tells us nothing about a
+     * required ETHUSDT feed that's genuinely stale). Without this, both
+     * heartbeat-fallback branches above would report 'green' purely because
+     * SOME symbol is alive, silently masking a required symbol that
+     * requiredFeedSnapshots() already proved is missing or stale — the same
+     * safety check the plain DB-snapshot path below already applies.
+     *
+     * @param array<int, array<string, mixed>> $missingOrStale
+     * @param array<int, array<string, mixed>> $requiredFeeds
+     */
+    private function demoteForMissingRequiredFeeds(array $health, array $missingOrStale, array $requiredFeeds): array
     {
-        $heartbeat = $this->freshestHeartbeat([
-            storage_path('framework/autofinx-market-ws-heartbeat-spot.json'),
-            storage_path('framework/autofinx-market-ws-heartbeat-futures.json'),
-        ]);
+        if ($missingOrStale === [] || ($health['state'] ?? 'red') !== 'green') {
+            return $health;
+        }
 
-        $path = $heartbeat['path'] ?? storage_path('framework/autofinx-market-ws-heartbeat-spot.json');
+        $health['state'] = 'red';
+        $health['reason'] = 'market_feed_stale_or_missing_required_symbol';
+        $health['required_feeds'] = $requiredFeeds;
+        $health['missing_or_stale_feeds'] = $missingOrStale;
+
+        return $health;
+    }
+
+    /**
+     * @param 'all'|'spot'|'futures' $scope
+     */
+    private function heartbeatFeed(?array $redisFeed = null, string $scope = 'all'): array
+    {
+        $paths = match ($scope) {
+            'spot' => [storage_path('framework/autofinx-market-ws-heartbeat-spot.json')],
+            'futures' => [storage_path('framework/autofinx-market-ws-heartbeat-futures.json')],
+            default => [
+                storage_path('framework/autofinx-market-ws-heartbeat-spot.json'),
+                storage_path('framework/autofinx-market-ws-heartbeat-futures.json'),
+            ],
+        };
+        $heartbeat = $this->freshestHeartbeat($paths);
+
+        $path = $heartbeat['path'] ?? $paths[0];
         $data = $heartbeat['data'] ?? null;
         if (! file_exists($path)) {
             return [

@@ -27,6 +27,14 @@ class Fast2XRunCommand extends Command
         while (true) {
             $config = $config->fresh('state');
 
+            // Heartbeat written every loop iteration, regardless of whether
+            // this cycle actually fetched a tick — this is what
+            // `fast2x:supervise` (routes/console.php, every minute) reads to
+            // tell "process crashed/hung" apart from "process alive but the
+            // exchange feed is temporarily stale", which only touches
+            // last_price_update_at further down.
+            $config->state?->update(['last_heartbeat_at' => now()]);
+
             if (! $provider->isWebSocketConnected() && (time() - $lastWebSocketRetryAt) >= $websocketRetrySeconds) {
                 try {
                     $provider->configuredConnectWebSocket($config);
