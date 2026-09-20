@@ -365,7 +365,10 @@ class FutureTradeRuntimeStatusCommand extends Command
             ];
         }
 
-        $output = (string) shell_exec('ps -eo pid=,args= 2>/dev/null');
+        // Keep the full command line. Without -ww, ps truncates long
+        // Supervisor commands before the managed-process allowlist arguments
+        // (for example Ratio Bot's --market-type/--store-ohlc) are visible.
+        $output = (string) shell_exec('ps -ww -eo pid=,args= 2>/dev/null');
         $badPatterns = [
             'artisan queue:work --queue=critical,execution,reconcile,monitoring,market',
             'artisan market:ws-consume',
