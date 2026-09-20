@@ -6,6 +6,7 @@ use App\Domain\AuditResearch\AuditEventRecorder;
 use App\Domain\Market\MarketPriceCacheService;
 use App\Domain\Trading\LiveTimedTradeService;
 use App\Domain\Trading\QuickTradeService;
+use App\Domain\Trading\RuntimeSafetySettingsService;
 use App\Models\AuditEvent;
 use App\Models\QuickTrade;
 use Illuminate\Bus\Queueable;
@@ -51,6 +52,7 @@ class CheckQuickTradeStopLossJob implements ShouldQueue
         MarketPriceCacheService $prices,
         LiveTimedTradeService $liveTimedTrades,
         QuickTradeService $quickTrades,
+        RuntimeSafetySettingsService $runtimeSafety,
     ): void {
         $trades = QuickTrade::query()
             ->where('status', 'open')
@@ -59,12 +61,11 @@ class CheckQuickTradeStopLossJob implements ShouldQueue
                 $query->whereNotNull('stop_loss_pct')
                     ->orWhereNotNull('take_profit_pct');
             })
-            ->where('expires_at', '>', now())
             ->get();
 
         foreach ($trades as $trade) {
             try {
-                $this->checkTrade($trade, $prices, $liveTimedTrades, $quickTrades);
+                $this->checkTrade($trade, $prices, $liveTimedTrades, $quickTrades, $runtimeSafety);
             } catch (\Throwable $e) {
                 // One bad trade must never stop the tick from checking the
                 // rest, and must never bubble back into the command's loop.
@@ -82,6 +83,7 @@ class CheckQuickTradeStopLossJob implements ShouldQueue
         MarketPriceCacheService $prices,
         LiveTimedTradeService $liveTimedTrades,
         QuickTradeService $quickTrades,
+        RuntimeSafetySettingsService $runtimeSafety,
     ): void {
         $lock = Cache::lock('quick-trade-stop-loss:'.$trade->id, 15);
         if (! $lock->get()) {
@@ -101,7 +103,11 @@ class CheckQuickTradeStopLossJob implements ShouldQueue
                 return;
             }
 
-            $snapshot = $prices->getLiveFeedSnapshot('binance_futures', $fresh->symbol, 15);
+            // Use the workspace's configured live-feed guard, not a global
+            // hard-coded age. A stopped/late feed must never trigger an exit
+            // from an invented price; the next tick retries safely.
+            $maxAge = $runtimeSafety->liveFeedMaxAgeSeconds((string) $fresh->workspace_id);
+            $snapshot = $prices->getLiveFeedSnapshot('binance_futures', $fresh->symbol, $maxAge);
 
             // Never act on a missing or stale snapshot — skip this trade this
             // tick and log a warning rather than guessing at a price.
