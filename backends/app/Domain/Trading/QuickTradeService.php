@@ -3,6 +3,7 @@
 namespace App\Domain\Trading;
 
 use App\Domain\Market\MarketPriceCacheService;
+use App\Domain\Market\RealtimeMarketFeedService;
 use App\Domain\Ops\TradingEnvironmentGuard;
 use App\Domain\Ops\TradingRuntimeHealthService;
 use App\Domain\Risk\WorkspaceLiveRiskService;
@@ -39,6 +40,7 @@ class QuickTradeService
         private readonly TradingIntegrationResolver $integrations,
         private readonly TradingEnvironmentGuard $modeGuard,
         private readonly MarketPriceCacheService $prices,
+        private readonly RealtimeMarketFeedService $feeds,
         private readonly WorkspaceLiveRiskService $liveRisk,
     ) {
     }
@@ -573,6 +575,9 @@ class QuickTradeService
     public function chart(string $workspaceId, string $symbol, string $timeframe, string $chartType = 'area', array $indicatorSet = [], array $contextOverrides = []): array
     {
         $context = $this->executionContext($workspaceId, $contextOverrides, false);
+        if (($context['mode'] ?? '') === 'live' && ($context['provider'] ?? '') === 'binance') {
+            $this->feeds->requestFuturesSymbol($symbol);
+        }
         $candles = $this->market->candles($symbol, $timeframe, 120, $context);
         $series = $chartType === 'heikin_ashi'
             ? \App\Domain\Market\Indicators\Indicators::heikinAshi($candles)
@@ -662,6 +667,7 @@ class QuickTradeService
         }
 
         $maxAge = app(RuntimeSafetySettingsService::class)->liveFeedMaxAgeSeconds($workspaceId);
+        $this->feeds->requestFuturesSymbol($symbol);
         $feed = $this->prices->getLiveFeedSnapshot('binance_futures', $symbol, $maxAge);
 
         if (($feed['fresh'] ?? false) === true && (float) ($feed['price'] ?? 0) > 0) {

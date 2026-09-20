@@ -16,6 +16,7 @@ use App\Jobs\RunRatioBotEvaluationJob;
 use App\Models\FutureTradeBotConfig;
 use App\Models\MarketFeedStatus;
 use App\Models\MarketOhlc;
+use App\Models\QuickTrade;
 use App\Models\RatioBotConfig;
 use App\Models\RatioBotEvent;
 use App\Models\RobotSession;
@@ -28,6 +29,8 @@ use Illuminate\Support\Str;
 
 class RealtimeMarketFeedService
 {
+    private const FUTURES_ON_DEMAND_SYMBOLS_CACHE_KEY = 'autofinx:market-feed:futures:on-demand-symbols';
+
     /** Throttle DB writes for MarketFeedStatus: workspace:symbol:exchange:type → epoch second of last write */
     private static array $feedStatusWriteThrottle = [];
 
@@ -67,10 +70,11 @@ class RealtimeMarketFeedService
      */
     public function selectedSymbols(string $marketType = 'spot', ?string $workspaceId = null, ?string $botId = null): array
     {
+        $marketType = strtolower($marketType);
         $ratioSymbols = RatioBotConfig::query()
             ->when($botId, fn ($query) => $query->whereKey($botId))
             ->when($workspaceId, fn ($query) => $query->where('workspace_id', $workspaceId))
-            ->where('market_type', strtolower($marketType))
+            ->where('market_type', $marketType)
             ->where('enabled', true)
             ->orderBy('symbol')
             ->pluck('symbol')
@@ -81,7 +85,7 @@ class RealtimeMarketFeedService
             ->all();
 
         $futureTradeSymbols = [];
-        if ($botId === null || $botId === '') {
+        if ($marketType === 'futures' && ($botId === null || $botId === '')) {
             $futureTradeSymbols = FutureTradeBotConfig::query()
                 ->with('state')
                 ->when($workspaceId, fn ($query) => $query->where('workspace_id', $workspaceId))
@@ -107,7 +111,7 @@ class RealtimeMarketFeedService
         }
 
         $robotSessionSymbols = [];
-        if ($botId === null || $botId === '') {
+        if ($marketType === 'futures' && ($botId === null || $botId === '')) {
             $robotSessionSymbols = RobotSession::query()
                 ->when($workspaceId, fn ($query) => $query->where('workspace_id', $workspaceId))
                 ->whereIn('status', ['RUNNING', 'OPEN'])
@@ -120,11 +124,67 @@ class RealtimeMarketFeedService
                 ->all();
         }
 
-        return collect([...$ratioSymbols, ...$futureTradeSymbols, ...$robotSessionSymbols])
+        $onDemandSymbols = $marketType === 'futures' && ($botId === null || $botId === '')
+            ? $this->onDemandFuturesSymbols()
+            : [];
+
+        $openQuickTradeSymbols = [];
+        if ($marketType === 'futures' && ($botId === null || $botId === '')) {
+            $openQuickTradeSymbols = QuickTrade::query()
+                ->when($workspaceId, fn ($query) => $query->where('workspace_id', $workspaceId))
+                ->where('mode', 'live')
+                ->where('provider_key', 'binance')
+                ->where('status', 'open')
+                ->pluck('symbol')
+                ->map(fn (string $symbol) => strtoupper(trim($symbol)))
+                ->filter()
+                ->unique()
+                ->values()
+                ->all();
+        }
+
+        return collect([...$ratioSymbols, ...$futureTradeSymbols, ...$robotSessionSymbols, ...$openQuickTradeSymbols, ...$onDemandSymbols])
             ->filter()
             ->unique()
             ->values()
             ->all();
+    }
+
+    /**
+     * Keep a UI-selected Binance futures symbol subscribed long enough for the
+     * shared daemon to pick it up. This is intentionally cache-backed: market
+     * feed subscriptions are runtime state, not durable trading configuration.
+     */
+    public function requestFuturesSymbol(string $symbol): void
+    {
+        $symbol = strtoupper(trim($symbol));
+        if ($symbol === '') {
+            return;
+        }
+
+        try {
+            $demands = $this->onDemandFuturesSymbols();
+            $demands[] = $symbol;
+            Cache::put(self::FUTURES_ON_DEMAND_SYMBOLS_CACHE_KEY, array_values(array_unique($demands)), now()->addHours(2));
+        } catch (\Throwable) {
+            // An unavailable cache must never stop chart rendering or order
+            // validation. The live-entry freshness gate remains fail-closed.
+        }
+    }
+
+    /** @return string[] */
+    private function onDemandFuturesSymbols(): array
+    {
+        try {
+            return collect((array) Cache::get(self::FUTURES_ON_DEMAND_SYMBOLS_CACHE_KEY, []))
+                ->map(static fn ($symbol) => strtoupper(trim((string) $symbol)))
+                ->filter()
+                ->unique()
+                ->values()
+                ->all();
+        } catch (\Throwable) {
+            return [];
+        }
     }
 
     /**

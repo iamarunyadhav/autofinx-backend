@@ -2,6 +2,7 @@
 
 namespace App\Console\Commands;
 
+use App\Domain\Market\FutureTradeLiveFeedManager;
 use Illuminate\Console\Command;
 use App\Domain\Ops\TradingRuntimeHealthService;
 use Illuminate\Support\Facades\Artisan;
@@ -37,6 +38,23 @@ class RuntimeRepairCommand extends Command
         $health = app(TradingRuntimeHealthService::class)->snapshot();
         $liveFeedState = (string) ($health['future_trade']['live_feed'] ?? 'red');
 
+        if ($liveFeedState !== 'green') {
+            // Quick Trade's live Binance path reads `binance_futures` from
+            // the same shared feed as Future Trade. Restart that actual
+            // owner first; restarting only Ratio Bot workers and then doing
+            // a one-shot SPOT fetch cannot make a futures quote fresh.
+            try {
+                $this->line('$ restart shared futures live feed');
+                $feed = app(FutureTradeLiveFeedManager::class)->restart();
+                if (! (bool) ($feed['feedFresh'] ?? false)) {
+                    $this->warn('Shared futures feed restart requested, awaiting a fresh tick.');
+                }
+            } catch (Throwable $e) {
+                $failed = true;
+                $this->error('Shared futures feed restart failed: '.$e->getMessage());
+            }
+        }
+
         if ((bool) config('autofinx.runtime.supervisor', false) && $liveFeedState !== 'green') {
             foreach ([
                 'autofinx-ratio-feed',
@@ -68,7 +86,10 @@ class RuntimeRepairCommand extends Command
             ['future-trade:runtime-status', []],
         ];
         if ($liveFeedState !== 'green') {
-            $commands[] = ['market:ws-consume', ['--once' => true, '--market-type' => 'spot', '--store-ohlc' => true, '--no-dispatch' => true]];
+            // A bounded fallback improves diagnostics/recovery when no
+            // daemon manager is available. It must match the exchange
+            // namespace checked by QuickTradeService::assertFreshLiveFeedForEntry().
+            $commands[] = ['market:ws-consume', ['--once' => true, '--market-type' => 'futures', '--store-ohlc' => true, '--no-dispatch' => true]];
         }
 
         foreach ($commands as [$command, $args]) {

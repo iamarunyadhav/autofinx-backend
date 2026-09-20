@@ -2,7 +2,7 @@
 
 namespace App\Console\Commands;
 
-use App\Models\FutureTradeBotConfig;
+use App\Domain\Market\RealtimeMarketFeedService;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
@@ -81,15 +81,23 @@ class FutureTradeLiveFeedCommand extends Command
             if (! $this->heartbeatFresh($heartbeatPath)) {
                 @unlink($heartbeatPath);
             }
-            $exitCode = $this->call('market:ws-consume', [
+            $consumerOptions = [
                 '--market-type' => 'futures',
-                '--symbols' => implode(',', $symbols),
                 '--streams' => $streams,
                 '--reconnect-sleep' => (string) $this->option('reconnect-sleep'),
                 '--max-runtime' => (string) $maxRuntime,
                 '--testnet' => (bool) $this->option('testnet'),
                 '--no-dispatch' => true,
-            ]);
+            ];
+            // Default operation must retain symbol discovery. The downstream
+            // websocket consumer then rechecks the combined Future Trade,
+            // Robot Trade, open Quick Trade, and UI-requested set every 60s
+            // and reconnects only when that set changed. An explicit CLI
+            // --symbols remains deliberately pinned for diagnostics.
+            if (trim((string) $this->option('symbols')) !== '') {
+                $consumerOptions['--symbols'] = implode(',', $symbols);
+            }
+            $exitCode = $this->call('market:ws-consume', $consumerOptions);
             Log::info('[FT LIVE FEED EXIT]', [
                 'exitCode' => $exitCode,
                 'symbols' => $symbols,
@@ -128,25 +136,7 @@ class FutureTradeLiveFeedCommand extends Command
                 ->all();
         }
 
-        return FutureTradeBotConfig::query()
-            ->with('state')
-            ->get()
-            ->flatMap(function (FutureTradeBotConfig $config): array {
-                $settings = $config->mergedSettings();
-                $symbols = array_map(
-                    static fn ($symbol) => strtoupper(trim((string) $symbol)),
-                    (array) ($settings['symbols'] ?? config('future_trade.defaults.symbols', []))
-                );
-                $currentSymbol = strtoupper(trim((string) ($config->state?->current_symbol ?? '')));
-                if ($currentSymbol !== '') {
-                    $symbols[] = $currentSymbol;
-                }
-
-                return array_values(array_filter($symbols));
-            })
-            ->unique()
-            ->values()
-            ->all();
+        return app(RealtimeMarketFeedService::class)->selectedSymbols('futures');
     }
 
     private function heartbeatFresh(string $path): bool

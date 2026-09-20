@@ -3,7 +3,6 @@
 namespace App\Domain\Market;
 
 use App\Domain\Trading\RuntimeSafetySettingsService;
-use App\Models\FutureTradeBotConfig;
 use App\Models\MarketFeedStatus;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\File;
@@ -200,71 +199,11 @@ class FutureTradeLiveFeedManager
      */
     private function desiredSymbols(): array
     {
-        $symbols = FutureTradeBotConfig::query()
-            ->with('state')
-            ->get()
-            ->flatMap(function (FutureTradeBotConfig $config): array {
-                $settings = $config->mergedSettings();
-                $configured = array_map(
-                    static fn ($symbol) => strtoupper(trim((string) $symbol)),
-                    (array) ($settings['symbols'] ?? config('future_trade.defaults.symbols', []))
-                );
-                $primeDefaultSymbols = $this->usesPrimeDefaultSymbols($settings, $configured);
-                $configured = $this->normalizePrimeDefaultSymbols($settings, $configured);
-                $currentSymbol = strtoupper(trim((string) ($config->state?->current_symbol ?? '')));
-                if ($currentSymbol !== '' && (! $primeDefaultSymbols || in_array($currentSymbol, $configured, true))) {
-                    $configured[] = $currentSymbol;
-                }
-
-                return array_values(array_filter($configured));
-            })
-            ->unique()
-            ->values()
-            ->all();
+        $symbols = app(RealtimeMarketFeedService::class)->selectedSymbols('futures');
 
         return $symbols !== [] ? $symbols : ['BTCUSDT', 'ETHUSDT'];
     }
 
-    /**
-     * Existing configs can still contain the old broad experiment basket. When
-     * Prime v6.1.7 is the active crypto profile, the live-feed daemon should
-     * follow the validated default symbols unless the operator picked a custom
-     * set.
-     *
-     * @param  string[]  $symbols
-     * @return string[]
-     */
-    private function normalizePrimeDefaultSymbols(array $settings, array $symbols): array
-    {
-        if (! $this->usesPrimeDefaultSymbols($settings, $symbols)) {
-            return array_values(array_filter($symbols));
-        }
-
-        return ['ETHUSDT', 'BTCUSDT', 'SOLUSDT'];
-    }
-
-    /**
-     * @param  string[]  $symbols
-     */
-    private function usesPrimeDefaultSymbols(array $settings, array $symbols): bool
-    {
-        $profile = strtolower(trim((string) ($settings['signalProfile'] ?? config('future_trade.default_signal_profile', ''))));
-        $market = strtolower(trim((string) ($settings['marketProfile'] ?? 'crypto')));
-        if ($profile !== 'autofinx_prime_v6_1_7_crypto' || $market !== 'crypto') {
-            return false;
-        }
-
-        $legacyDefault = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'AVAXUSDT'];
-        $primeDefault = ['ETHUSDT', 'BTCUSDT', 'SOLUSDT'];
-        $sortedSymbols = array_values(array_unique(array_filter($symbols)));
-        $sortedLegacy = $legacyDefault;
-        $sortedPrime = $primeDefault;
-        sort($sortedSymbols);
-        sort($sortedLegacy);
-        sort($sortedPrime);
-
-        return $sortedSymbols === [] || $sortedSymbols === $sortedLegacy || $sortedSymbols === $sortedPrime;
-    }
 
     /**
      * @param  string[]  $symbols
@@ -306,7 +245,6 @@ class FutureTradeLiveFeedManager
         $args = [
             $artisan,
             'future-trade:live-feed',
-            '--symbols=' . implode(',', $symbols),
             '--streams=' . self::STREAMS,
             '--reconnect-sleep=2',
         ];
@@ -329,12 +267,14 @@ class FutureTradeLiveFeedManager
     {
         $php = escapeshellarg($this->phpBinary());
         $artisan = escapeshellarg(base_path('artisan'));
-        $symbolsArg = escapeshellarg(implode(',', $symbols));
         $outLog = escapeshellarg($this->outLogPath());
         $errLog = escapeshellarg($this->errLogPath());
         $cwd = escapeshellarg(base_path());
 
-        $shellCmd = "nohup {$php} {$artisan} future-trade:live-feed --symbols={$symbolsArg} --streams=" . escapeshellarg(self::STREAMS) . " --reconnect-sleep=2 >> {$outLog} 2>> {$errLog} & echo \$!";
+        // Do not pin --symbols here. The shared daemon re-resolves its active
+        // futures symbol set every minute, allowing Quick Trade and Robot
+        // Trade selections to join without a disruptive process restart.
+        $shellCmd = "nohup {$php} {$artisan} future-trade:live-feed --streams=" . escapeshellarg(self::STREAMS) . " --reconnect-sleep=2 >> {$outLog} 2>> {$errLog} & echo \$!";
 
         // Preferred: shell_exec with login shell (full PATH / env).
         if (\function_exists('shell_exec')) {
@@ -518,10 +458,9 @@ class FutureTradeLiveFeedManager
     private function commandLine(array $symbols): string
     {
         return trim(sprintf(
-            '%s %s future-trade:live-feed --symbols=%s --streams=%s --reconnect-sleep=2',
+            '%s %s future-trade:live-feed --streams=%s --reconnect-sleep=2',
             $this->phpBinary(),
             base_path('artisan'),
-            implode(',', $symbols),
             self::STREAMS
         ));
     }
@@ -536,11 +475,10 @@ class FutureTradeLiveFeedManager
         }
 
         return trim(sprintf(
-            'cd %s && nohup %s %s future-trade:live-feed --symbols=%s --streams=%s --reconnect-sleep=2 >> %s 2>> %s &',
+            'cd %s && nohup %s %s future-trade:live-feed --streams=%s --reconnect-sleep=2 >> %s 2>> %s &',
             base_path(),
             $this->phpBinary(),
             base_path('artisan'),
-            implode(',', $symbols),
             self::STREAMS,
             $this->outLogPath(),
             $this->errLogPath()
