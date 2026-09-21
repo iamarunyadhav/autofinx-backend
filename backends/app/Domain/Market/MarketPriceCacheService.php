@@ -158,6 +158,12 @@ class MarketPriceCacheService
         $ageSeconds = $receivedAtMs > 0
             ? max(0, (int) floor(((int) floor(microtime(true) * 1000) - $receivedAtMs) / 1000))
             : null;
+        $eventLagMs = (int) ($data['event_lag_ms'] ?? PHP_INT_MAX);
+        $maxEventLagMs = max(1000, (int) config('autofinx.runtime.live_feed_max_event_lag_ms', 10000));
+        $fresh = $ageSeconds !== null
+            && $ageSeconds <= $maxAgeSeconds
+            && $eventLagMs >= 0
+            && $eventLagMs <= $maxEventLagMs;
 
         return [
             'exchange' => $exchange,
@@ -167,14 +173,15 @@ class MarketPriceCacheService
             'received_at_ms' => $receivedAtMs,
             'received_at' => (string) ($data['received_at'] ?? ''),
             'age_seconds' => $ageSeconds,
-            'fresh' => $ageSeconds !== null && $ageSeconds <= $maxAgeSeconds,
+            'fresh' => $fresh,
             'max_age_seconds' => $maxAgeSeconds,
             'source' => 'redis_live_feed',
             'source_key' => $sourceKey,
             'stream' => (string) ($data['stream'] ?? ''),
             'event_type' => (string) ($data['event_type'] ?? ''),
             'market_type' => (string) ($data['market_type'] ?? ''),
-            'event_lag_ms' => (int) ($data['event_lag_ms'] ?? 0),
+            'event_lag_ms' => $eventLagMs,
+            'max_event_lag_ms' => $maxEventLagMs,
             'update_id' => $data['update_id'] ?? null,
         ];
     }

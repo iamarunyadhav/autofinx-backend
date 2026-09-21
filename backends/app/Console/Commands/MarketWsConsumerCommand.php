@@ -125,6 +125,7 @@ class MarketWsConsumerCommand extends Command
             $lastPingAt = 0;
             $lastSymbolResolutionAt = time();
             $perSymbolHeartbeat = [];
+            $consecutiveStaleFrames = 0;
             // Symbols are only an option override (--symbols=) when explicitly
             // set; otherwise they come from active ratio bot discovery and can
             // change while this daemon keeps running (a new bot on a new
@@ -180,6 +181,7 @@ class MarketWsConsumerCommand extends Command
                         $client->connect($wsUrl);
                         $connectedAt = time();
                         $stableConnectedSince = time();
+                        $consecutiveStaleFrames = 0;
                         $lastPingAt = time();
                         $this->writeWorkerMetadata($provider, $marketType, $workerId, $connectionId, $hostname, $startedAt, $symbols, $streams, 'CONNECTED_AWAITING_TICK', $reconnectCount);
                         $this->line(sprintf(
@@ -253,13 +255,22 @@ class MarketWsConsumerCommand extends Command
                                 continue;
                             }
 
-                            $feeds->ingest($payload, $marketType, $dispatchEvaluations, [
+                            $accepted = $feeds->ingest($payload, $marketType, $dispatchEvaluations, [
                                 'worker_id' => $workerId,
                                 'connection_id' => $connectionId,
                                 'pid' => getmypid(),
                                 'hostname' => $hostname,
                                 'subscriptions' => $symbols,
                             ]);
+                            if (! $accepted) {
+                                $consecutiveStaleFrames++;
+                                if ($consecutiveStaleFrames >= 3) {
+                                    throw new RuntimeException('Three consecutive stale/invalid market frames; reconnecting before accepting execution data.');
+                                }
+
+                                continue;
+                            }
+                            $consecutiveStaleFrames = 0;
                             $msgCount++;
 
                             // Reset backoff counter after 60 s of stable messages.

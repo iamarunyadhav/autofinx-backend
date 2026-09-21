@@ -136,7 +136,7 @@ PY
 clear_runtime_state() {
   log "clearing runtime heartbeat/cache locks"
   rm -f \
-    storage/framework/autofinx-live-feed-heartbeat.json \
+    storage/framework/autofinx-market-ws-heartbeat-futures.json \
     storage/framework/autofinx-user-stream-heartbeat.json \
     storage/framework/autofinx-account-sync-heartbeat.json \
     storage/framework/autofinx-runtime-master-live-feed-restart.at \
@@ -179,7 +179,7 @@ verify_runtime() {
   APP_DIR="$APP_DIR" PHP="$PHP_BIN" ./autofinx-runtime-master.sh once || true
 
   local live_age user_age account_age
-  live_age="$(age_from_json_epoch storage/framework/autofinx-live-feed-heartbeat.json last_message_epoch)"
+  live_age="$(age_from_json_epoch storage/framework/autofinx-market-ws-heartbeat-futures.json last_message_epoch)"
   user_age="$(age_from_json_epoch storage/framework/autofinx-user-stream-heartbeat.json heartbeat_epoch)"
   account_age="$(age_from_json_epoch storage/framework/autofinx-account-sync-heartbeat.json sync_epoch)"
 

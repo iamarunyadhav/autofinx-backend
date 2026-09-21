@@ -226,13 +226,21 @@ class RealtimeMarketFeedService
         return rtrim($baseUrl, '/') . '/stream?streams=' . implode('/', $streamParts);
     }
 
-    public function ingest(array $payload, string $marketType = 'spot', bool $dispatchEvaluations = true, array $workerContext = []): void
+    /**
+     * Ingest one realtime exchange frame.
+     *
+     * Returns false when the frame is too old for the execution path. Historical
+     * candles remain available through MarketOhlc/research services; they must
+     * never be promoted into live Redis state by this method.
+     */
+    public function ingest(array $payload, string $marketType = 'spot', bool $dispatchEvaluations = true, array $workerContext = []): bool
     {
         if (isset($payload['data']) && is_array($payload['data']) && array_is_list($payload['data'])) {
             $allowedSymbols = array_values(array_filter(array_map(
                 static fn ($symbol) => strtoupper(trim((string) $symbol)),
                 (array) ($workerContext['subscriptions'] ?? [])
             )));
+            $accepted = false;
             foreach ($payload['data'] as $row) {
                 if (! is_array($row)) {
                     continue;
@@ -245,10 +253,10 @@ class RealtimeMarketFeedService
                 $stream = $symbol !== ''
                     ? strtolower($symbol).'@markPrice@1s'
                     : (string) ($payload['stream'] ?? '');
-                $this->ingest(['stream' => $stream, 'data' => $row], $marketType, $dispatchEvaluations, $workerContext);
+                $accepted = $this->ingest(['stream' => $stream, 'data' => $row], $marketType, $dispatchEvaluations, $workerContext) || $accepted;
             }
 
-            return;
+            return $accepted;
         }
 
         $data = is_array($payload['data'] ?? null) ? (array) $payload['data'] : $payload;
@@ -257,7 +265,7 @@ class RealtimeMarketFeedService
 
         $symbol = strtoupper((string) ($data['s'] ?? $data['symbol'] ?? ''));
         if ($symbol === '') {
-            return;
+            return false;
         }
 
         $provider = $this->exchangeKey($marketType);
@@ -267,6 +275,21 @@ class RealtimeMarketFeedService
         $exchangeKey = $this->exchangeKey($marketType);
         $eventTimestampMs = (int) ($data['E'] ?? $data['T'] ?? $data['t'] ?? floor(microtime(true) * 1000));
         $eventLagMs = max(0, $receivedAtMs - $eventTimestampMs);
+        $maxEventLagMs = max(1000, (int) config('autofinx.runtime.live_feed_max_event_lag_ms', 10000));
+        if ($eventLagMs > $maxEventLagMs) {
+            Log::warning('[MarketData] Rejected stale realtime frame', [
+                'event' => 'stale_realtime_frame_rejected',
+                'market_type' => strtolower($marketType),
+                'symbol' => $symbol,
+                'stream' => $stream,
+                'event_lag_ms' => $eventLagMs,
+                'max_event_lag_ms' => $maxEventLagMs,
+                'worker_id' => $workerContext['worker_id'] ?? null,
+                'connection_id' => $workerContext['connection_id'] ?? null,
+            ]);
+
+            return false;
+        }
         $price = $this->extractPrice($eventType, $data, $stream);
         $closedKline = false;
         $timeframe = '1m';
@@ -437,6 +460,8 @@ class RealtimeMarketFeedService
 
             RunRatioBotEvaluationJob::dispatch((string) $config->id, false);
         }
+
+        return true;
     }
 
     /**

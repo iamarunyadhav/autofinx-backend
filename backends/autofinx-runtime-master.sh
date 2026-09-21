@@ -19,7 +19,7 @@ LOCK_DIR="$APP_DIR/storage/framework/autofinx-runtime-master.lock"
 RESTART_STAMP="$APP_DIR/storage/framework/autofinx-runtime-master-live-feed-restart.at"
 USER_STREAM_RESTART_STAMP="$APP_DIR/storage/framework/autofinx-runtime-master-user-stream-restart.at"
 ACCOUNT_SYNC_STAMP="$APP_DIR/storage/framework/autofinx-runtime-master-account-sync.at"
-HEARTBEAT_FILE="$APP_DIR/storage/framework/autofinx-live-feed-heartbeat.json"
+HEARTBEAT_FILE="$APP_DIR/storage/framework/autofinx-market-ws-heartbeat-futures.json"
 USER_STREAM_HEARTBEAT_FILE="$APP_DIR/storage/framework/autofinx-user-stream-heartbeat.json"
 ACCOUNT_SYNC_HEARTBEAT_FILE="$APP_DIR/storage/framework/autofinx-account-sync-heartbeat.json"
 
