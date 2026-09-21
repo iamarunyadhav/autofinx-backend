@@ -125,7 +125,6 @@ class MarketWsConsumerCommand extends Command
             $lastPingAt = 0;
             $lastSymbolResolutionAt = time();
             $perSymbolHeartbeat = [];
-            $consecutiveStaleFrames = 0;
             // Symbols are only an option override (--symbols=) when explicitly
             // set; otherwise they come from active ratio bot discovery and can
             // change while this daemon keeps running (a new bot on a new
@@ -181,7 +180,15 @@ class MarketWsConsumerCommand extends Command
                         $client->connect($wsUrl);
                         $connectedAt = time();
                         $stableConnectedSince = time();
-                        $consecutiveStaleFrames = 0;
+                        // Transport backlog frames are discarded by ingest().
+                        // Do not reconnect on a small run of discarded frames:
+                        // reconnecting against the same backlog creates a
+                        // reconnect storm and eventually triggers Binance's
+                        // connection-rate circuit breaker. Reconnect only if
+                        // no valid market frame has arrived for a sustained
+                        // interval on this socket.
+                        $lastAcceptedFrameAt = time();
+                        $staleFrameWarningAt = 0;
                         $lastPingAt = time();
                         $this->writeWorkerMetadata($provider, $marketType, $workerId, $connectionId, $hostname, $startedAt, $symbols, $streams, 'CONNECTED_AWAITING_TICK', $reconnectCount);
                         $this->line(sprintf(
@@ -263,14 +270,22 @@ class MarketWsConsumerCommand extends Command
                                 'subscriptions' => $symbols,
                             ]);
                             if (! $accepted) {
-                                $consecutiveStaleFrames++;
-                                if ($consecutiveStaleFrames >= 3) {
-                                    throw new RuntimeException('Three consecutive stale/invalid market frames; reconnecting before accepting execution data.');
+                                $staleAge = time() - $lastAcceptedFrameAt;
+                                if ($staleAge >= 30) {
+                                    throw new RuntimeException('No valid market frame accepted for 30 seconds; reconnecting before accepting execution data.');
+                                }
+
+                                if ($staleFrameWarningAt === 0 || (time() - $staleFrameWarningAt) >= 10) {
+                                    $staleFrameWarningAt = time();
+                                    $this->warn(sprintf(
+                                        '[WS] Discarding stale/invalid market frame; valid frame age=%ds.',
+                                        $staleAge
+                                    ));
                                 }
 
                                 continue;
                             }
-                            $consecutiveStaleFrames = 0;
+                            $lastAcceptedFrameAt = time();
                             $msgCount++;
 
                             // Reset backoff counter after 60 s of stable messages.
