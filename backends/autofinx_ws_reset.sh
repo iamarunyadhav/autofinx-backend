@@ -22,7 +22,7 @@ step 1 "Stopping live-feed and cleaning rogue processes..."
 supervisorctl stop autofinx-trading:live-feed 2>/dev/null && ok "live-feed stopped" || warn "live-feed was not running"
 
 # Kill the non-supervisor queue worker reported in health check
-pkill -f "artisan queue:work --queue=critical,execution,reconcile,monitoring,market,signals,strategies,ratio_bot,ops,intelligence,risk,billing,copytrading,analytics,notifications,default,monitoring_safe" 2>/dev/null \
+pkill -f "artisan queue:work --queue=critical,execution,reconcile,monitoring,market,signals,strategies,ratio_bot,ops,intelligence,risk,billing,copytrading,analytics,predictions,notifications,default,monitoring_safe" 2>/dev/null \
   && ok "Rogue queue worker killed" \
   || ok "No rogue queue worker found"
 

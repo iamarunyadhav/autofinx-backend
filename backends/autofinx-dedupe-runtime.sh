@@ -89,7 +89,7 @@ dedupe_supervised "tick-loop" "artisan future-trade:tick" "autofinx-trading:tick
 dedupe_supervised "user-stream-loop" "artisan future-trade:user-stream" "autofinx-trading:user-stream-loop"
 dedupe_supervised "queue-critical" "queue:work.*--queue=critical,execution,reconcile,monitoring" "autofinx-trading:queue-critical"
 dedupe_supervised "queue-market" "queue:work.*--queue=market,signals,strategies,ratio_bot,ops,intelligence,risk,billing,copytrading" "autofinx-trading:queue-market"
-dedupe_supervised "queue-safe" "queue:work.*--queue=analytics,notifications,default,monitoring_safe" "autofinx-trading:queue-safe"
+dedupe_supervised "queue-safe" "queue:work.*--queue=analytics,predictions,notifications,default,monitoring_safe" "autofinx-trading:queue-safe"
 dedupe_supervised "quick-settler" "autofinx-quick-settler.sh" "autofinx-quick-settler"
 dedupe_supervised "robot-evaluator" "autofinx-robot-evaluator.sh" "autofinx-robot-evaluator"
 dedupe_supervised "scheduler" "artisan schedule:work" "autofinx-scheduler"

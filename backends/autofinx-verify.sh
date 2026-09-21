@@ -208,7 +208,7 @@ fi
 section "3. Kill Legacy Or Duplicate Workers"
 if [ "$KILL_LEGACY" -eq 1 ]; then
   legacy_patterns=(
-    "artisan queue:work --queue=critical,execution,reconcile,monitoring,market,signals,strategies,ratio_bot,ops,intelligence,risk,billing,copytrading,analytics,notifications,default,monitoring_safe"
+    "artisan queue:work --queue=critical,execution,reconcile,monitoring,market,signals,strategies,ratio_bot,ops,intelligence,risk,billing,copytrading,analytics,predictions,notifications,default,monitoring_safe"
     "artisan metals:poll-prices"
   )
   # NOTE: "artisan market:ws-consume" intentionally removed from this list —

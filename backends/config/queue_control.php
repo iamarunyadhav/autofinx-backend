@@ -15,6 +15,7 @@ $queueCatalog = [
     'intelligence' => ['priority' => 50, 'purpose' => 'AI decision cycles and context building'],
     'risk' => ['priority' => 45, 'purpose' => 'Portfolio optimizer and risk analytics'],
     'analytics' => ['priority' => 35, 'purpose' => 'Reports, backfills, non-critical calculations'],
+    'predictions' => ['priority' => 35, 'purpose' => 'Short-lived async forecast and comparison calculations for trading UIs'],
     'copytrading' => ['priority' => 30, 'purpose' => 'Copy trading replication jobs'],
     'notifications' => ['priority' => 25, 'purpose' => 'Alerts, emails, webhooks'],
     'default' => ['priority' => 10, 'purpose' => 'Fallback queue for uncategorized jobs'],
@@ -41,7 +42,7 @@ $workerProfiles = [
     'worker_3_background' => [
         'label' => 'Worker 3 Background',
         'purpose' => 'Drain analytics, notifications, fallback jobs, and safe monitoring work.',
-        'queues' => ['analytics', 'notifications', 'default', 'monitoring_safe'],
+        'queues' => ['analytics', 'predictions', 'notifications', 'default', 'monitoring_safe'],
     ],
 ];
 
