@@ -35,7 +35,7 @@ class FutureTradeRuntimeStatusCommand extends Command
             'redis' => $this->redisStatus(),
             'database' => $this->dbStatus(),
             'binance_rest' => app(BinanceRestCircuitBreaker::class)->status(),
-            'live_feed' => $this->liveFeedStatus(),
+            'live_feed' => $this->liveFeedStatus($workspaceId),
             'user_stream' => $this->userStreamStatus($workspaceId),
             'account_sync' => $this->accountSyncStatus($workspaceId),
             'unexpected_processes' => $this->unexpectedProcessStatus(),
@@ -101,7 +101,7 @@ class FutureTradeRuntimeStatusCommand extends Command
         }
     }
 
-    private function liveFeedStatus(): array
+    private function liveFeedStatus(string $workspaceId = ''): array
     {
         $path = storage_path('framework/autofinx-market-ws-heartbeat-futures.json');
         if (! file_exists($path)) {
@@ -115,9 +115,35 @@ class FutureTradeRuntimeStatusCommand extends Command
 
         $raw = @file_get_contents($path);
         $data = $raw !== false ? @json_decode($raw, true) : null;
+
+        // Aggregate (top-level "whichever symbol ticked most recently across
+        // every stream this daemon subscribes to") fields — kept exactly as
+        // before, but no longer the sole signal once a specific futures
+        // symbol is actually required (see requiredSymbols below). A fresh
+        // unrelated symbol must never mask a genuinely stale required one,
+        // and a stale unrelated symbol must never flag a healthy required
+        // one either.
         $epoch = is_array($data) ? (int) ($data['last_message_epoch'] ?? 0) : 0;
         $age = $epoch > 0 ? (time() - $epoch) : null;
-        $stale = $age === null || $age > 20;
+        $aggregateStale = $age === null || $age > 20;
+
+        $perSymbolData = is_array($data) && is_array($data['per_symbol'] ?? null) ? $data['per_symbol'] : [];
+        $requiredSymbols = $this->requiredFuturesSymbols($workspaceId);
+        $perSymbolStatus = [];
+        foreach ($requiredSymbols as $symbol) {
+            $entry = $perSymbolData[$symbol] ?? null;
+            $entryEpoch = is_array($entry) ? (int) ($entry['last_message_epoch'] ?? 0) : 0;
+            $entryAge = $entryEpoch > 0 ? max(0, time() - $entryEpoch) : null;
+            $perSymbolStatus[$symbol] = [
+                'age_seconds' => $entryAge,
+                'stale' => $entryAge === null || $entryAge > 20,
+                'last_message_at' => is_array($entry) ? ($entry['last_message_at'] ?? null) : null,
+            ];
+        }
+
+        $stale = $perSymbolStatus !== []
+            ? collect($perSymbolStatus)->contains(static fn (array $status): bool => $status['stale'])
+            : $aggregateStale;
 
         return [
             'heartbeat_file' => true,
@@ -130,7 +156,44 @@ class FutureTradeRuntimeStatusCommand extends Command
             'message_count' => $data['message_count'] ?? null,
             'connected_at' => $data['connected_at'] ?? null,
             'market_type' => $data['market_type'] ?? null,
+            'required_symbols' => $requiredSymbols,
+            'per_symbol' => $perSymbolStatus,
         ];
+    }
+
+    /**
+     * Same "which symbols does an enabled Future Trade bot actually need"
+     * logic RealtimeMarketFeedService::selectedSymbols()/
+     * touchWorkspaceFeedStatuses() already use — mergedSettings() folds in
+     * config('future_trade.defaults.symbols') and per-bot presets, so a bot
+     * with no explicit settings->symbols override still targets the default
+     * list.
+     *
+     * @return string[]
+     */
+    private function requiredFuturesSymbols(string $workspaceId): array
+    {
+        return FutureTradeBotConfig::query()
+            ->with('state')
+            ->where('enabled', true)
+            ->when($workspaceId !== '', fn ($q) => $q->where('workspace_id', $workspaceId))
+            ->get()
+            ->flatMap(function (FutureTradeBotConfig $config): array {
+                $settings = $config->mergedSettings();
+                $symbols = array_map(
+                    static fn ($value) => strtoupper(trim((string) $value)),
+                    (array) ($settings['symbols'] ?? config('future_trade.defaults.symbols', []))
+                );
+                $currentSymbol = strtoupper(trim((string) ($config->state?->current_symbol ?? '')));
+                if ($currentSymbol !== '') {
+                    $symbols[] = $currentSymbol;
+                }
+
+                return array_values(array_filter($symbols));
+            })
+            ->unique()
+            ->values()
+            ->all();
     }
 
     private function userStreamStatus(string $workspaceId): array

@@ -10,6 +10,20 @@ return [
         // Frames older than this are transport backlog, not executable market
         // data. They must never refresh Redis, candles, health, or breakers.
         'live_feed_max_event_lag_ms' => (int) env('AUTOFINX_LIVE_FEED_MAX_EVENT_LAG_MS', 10000),
+        // Binance book-ticker/trade streams can produce thousands of frames per
+        // second. The websocket reader accepts every fresh frame, but Redis is
+        // deliberately updated with the newest one at this bounded cadence so
+        // PHP never falls behind and turns fresh transport data into stale data.
+        'live_quote_write_interval_ms' => (int) env('AUTOFINX_LIVE_QUOTE_WRITE_INTERVAL_MS', 100),
+        // DB status, breaker recovery, and bot-dispatch discovery are control
+        // plane work. They do not need to run on every price frame.
+        'live_feed_side_effect_interval_ms' => (int) env('AUTOFINX_LIVE_FEED_SIDE_EFFECT_INTERVAL_MS', 1000),
+        // Which workspaces care about a given symbol (RatioBotConfig /
+        // FutureTradeBotConfig / RobotSession) is cached in-process by
+        // RealtimeMarketFeedService and rebuilt at most this often, instead
+        // of being re-queried on every throttled side-effect pass above —
+        // see RealtimeMarketFeedService::refreshWorkspaceInterestCacheIfStale().
+        'live_feed_workspace_cache_ttl_ms' => (int) env('AUTOFINX_LIVE_FEED_WORKSPACE_CACHE_TTL_MS', 30000),
         'user_stream_max_age_seconds' => (int) env('AUTOFINX_USER_STREAM_MAX_AGE_SECONDS', 60),
         'queue_max_lag_seconds' => (int) env('AUTOFINX_QUEUE_MAX_LAG_SECONDS', 30),
         'price_drift_max_bps' => (float) env('AUTOFINX_PRICE_DRIFT_MAX_BPS', 10),

@@ -445,7 +445,7 @@ class TradingRuntimeHealthService
         };
 
         if (! Schema::hasTable('market_feed_status')) {
-            return $this->demoteForMissingRequiredFeeds($this->heartbeatFeed($redisFeed, $scope), $missingOrStale, $requiredFeeds);
+            return $this->demoteForMissingRequiredFeeds($this->heartbeatFeed($redisFeed, $scope, $requiredFeeds), $missingOrStale, $requiredFeeds);
         }
 
         $query = MarketFeedStatus::query()->whereNotNull('last_tick_at');
@@ -458,11 +458,11 @@ class TradingRuntimeHealthService
 
         $row = $query->orderByDesc('last_tick_at')->first();
         if (! $row) {
-            return $this->demoteForMissingRequiredFeeds($this->heartbeatFeed($redisFeed, $scope), $missingOrStale, $requiredFeeds);
+            return $this->demoteForMissingRequiredFeeds($this->heartbeatFeed($redisFeed, $scope, $requiredFeeds), $missingOrStale, $requiredFeeds);
         }
 
         $age = $row->last_tick_at->diffInSeconds(now(), true);
-        $heartbeat = $this->heartbeatFeed($redisFeed, $scope);
+        $heartbeat = $this->heartbeatFeed($redisFeed, $scope, $requiredFeeds);
         if (
             ($heartbeat['state'] ?? 'red') === 'green'
             && isset($heartbeat['age_seconds'])
@@ -553,8 +553,12 @@ class TradingRuntimeHealthService
 
     /**
      * @param 'all'|'spot'|'futures' $scope
+     * @param array<int, array<string, mixed>> $requiredFeeds Same shape as
+     *   requiredFeedSnapshots()'s return — used to prefer the specific
+     *   required symbol's own per_symbol[SYMBOL] heartbeat entry over the
+     *   file's top-level aggregate fields below.
      */
-    private function heartbeatFeed(?array $redisFeed = null, string $scope = 'all'): array
+    private function heartbeatFeed(?array $redisFeed = null, string $scope = 'all', array $requiredFeeds = []): array
     {
         $paths = match ($scope) {
             'spot' => [storage_path('framework/autofinx-market-ws-heartbeat-spot.json')],
@@ -577,9 +581,53 @@ class TradingRuntimeHealthService
             ];
         }
 
+        $maxAge = app(RuntimeSafetySettingsService::class)->liveFeedMaxAgeSeconds(null);
+
+        // The file's top-level last_message_epoch/symbol only prove SOME
+        // stream on this daemon ticked recently — it may be an on-demand
+        // chart symbol, a RobotSession symbol, or any other subscription,
+        // not necessarily one this workspace's bots actually require. Prefer
+        // the required symbol's own per_symbol[SYMBOL] entry (written by
+        // MarketWsConsumerCommand alongside the aggregate fields) whenever
+        // one is available, so a healthy unrelated symbol can never make a
+        // genuinely stale required symbol look fresh in this fallback path,
+        // and vice versa.
+        $perSymbolMatch = $this->matchedRequiredSymbolHeartbeat($data, $scope, $requiredFeeds);
+        if ($perSymbolMatch !== null) {
+            [$matchedSymbol, $entry] = $perSymbolMatch;
+            $epoch = (int) ($entry['last_message_epoch'] ?? 0);
+            $age = $epoch > 0 ? max(0, time() - $epoch) : null;
+
+            if ($age === null) {
+                return ['state' => 'red', 'reason' => 'live_feed_heartbeat_invalid'];
+            }
+
+            $state = $age <= $maxAge ? 'green' : ($age <= ($maxAge * 3) ? 'yellow' : 'red');
+
+            return [
+                'state' => $state,
+                'reason' => $state === 'green' ? 'ok_heartbeat_fallback_per_symbol' : 'live_feed_heartbeat_stale',
+                'last_tick_at' => isset($entry['last_message_at']) ? (string) $entry['last_message_at'] : null,
+                'age_seconds' => $age,
+                'max_age_seconds' => $maxAge,
+                'symbol' => $matchedSymbol,
+                'source' => 'heartbeat_file',
+                'market_type' => (string) ($data['market_type'] ?? ''),
+                'heartbeat_path' => $path,
+                'message_count' => (int) ($data['message_count'] ?? 0),
+                'reconnect_count' => (int) ($data['reconnect_count'] ?? 0),
+                'workspace_scoped' => false,
+                'redis_feed' => $redisFeed,
+                'truth_source' => 'heartbeat_file_per_symbol_fallback',
+            ];
+        }
+
+        // No per-symbol match (older heartbeat file without per_symbol data,
+        // wrong-scope file, or none of the required symbols have ticked on
+        // this daemon yet) — fall back to the file's own top-level
+        // aggregate, exactly as before this fix.
         $epoch = is_array($data) ? (int) ($data['last_message_epoch'] ?? 0) : 0;
         $age = $epoch > 0 ? max(0, time() - $epoch) : null;
-        $maxAge = app(RuntimeSafetySettingsService::class)->liveFeedMaxAgeSeconds(null);
 
         if ($age === null) {
             return ['state' => 'red', 'reason' => 'live_feed_heartbeat_invalid'];
@@ -603,6 +651,61 @@ class TradingRuntimeHealthService
             'redis_feed' => $redisFeed,
             'truth_source' => 'heartbeat_file_fallback',
         ];
+    }
+
+    /**
+     * @param 'all'|'spot'|'futures' $scope
+     * @param array<int, array<string, mixed>> $requiredFeeds
+     * @return array{0: string, 1: array<string, mixed>}|null [symbol, per_symbol entry] of the freshest required-symbol match, or null if none.
+     */
+    private function matchedRequiredSymbolHeartbeat(mixed $data, string $scope, array $requiredFeeds): ?array
+    {
+        if ($requiredFeeds === [] || ! is_array($data)) {
+            return null;
+        }
+
+        $perSymbol = is_array($data['per_symbol'] ?? null) ? $data['per_symbol'] : [];
+        if ($perSymbol === []) {
+            return null;
+        }
+
+        // This one heartbeat file belongs to a single market type (its own
+        // consumer process); only match required symbols whose market type
+        // agrees — a spot-required symbol can never be satisfied by the
+        // futures daemon's per_symbol map or vice versa. When scope is
+        // already 'spot'/'futures' this is redundant with $requiredFeeds
+        // already being pre-filtered by marketFeed(), but stays defensive
+        // for the shared 'all' scope where freshestHeartbeat() picked
+        // whichever single file (spot or futures) had the newer aggregate
+        // tick.
+        $fileMarketType = strtolower((string) ($data['market_type'] ?? ''));
+
+        $best = null;
+        $bestSymbol = null;
+        foreach ($requiredFeeds as $feed) {
+            $feedMarketType = strtolower((string) ($feed['market_type'] ?? ''));
+            if ($scope === 'all' && $fileMarketType !== '' && $feedMarketType !== '' && $feedMarketType !== $fileMarketType) {
+                continue;
+            }
+
+            $symbol = strtoupper(trim((string) ($feed['symbol'] ?? '')));
+            if ($symbol === '' || ! is_array($perSymbol[$symbol] ?? null)) {
+                continue;
+            }
+
+            $entry = $perSymbol[$symbol];
+            $epoch = (int) ($entry['last_message_epoch'] ?? 0);
+            if ($epoch <= 0) {
+                continue;
+            }
+
+            if ($best === null || $epoch > (int) ($best['last_message_epoch'] ?? 0)) {
+                $best = $entry;
+                $bestSymbol = $symbol;
+            }
+        }
+
+        return $best !== null && $bestSymbol !== null ? [$bestSymbol, $best] : null;
     }
 
     /**

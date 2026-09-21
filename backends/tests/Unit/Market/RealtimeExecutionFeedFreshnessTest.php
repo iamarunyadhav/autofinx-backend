@@ -10,6 +10,28 @@ use Tests\TestCase;
 
 class RealtimeExecutionFeedFreshnessTest extends TestCase
 {
+    public function test_fresh_depth_quotes_are_coalesced_without_being_marked_stale(): void
+    {
+        config()->set('autofinx.runtime.live_quote_write_interval_ms', 60_000);
+        $prices = Mockery::mock(MarketPriceCacheService::class);
+        $prices->shouldReceive('setLatestPrice')->once();
+        $feeds = new RealtimeMarketFeedService($prices);
+        $eventMs = (int) floor(microtime(true) * 1000);
+        $payload = [
+            'stream' => 'btcusdt@depth5@500ms',
+            'data' => [
+                'e' => 'depthUpdate',
+                'E' => $eventMs,
+                's' => 'BTCUSDT',
+                'b' => [['80000.00', '1.0']],
+                'a' => [['80001.00', '1.0']],
+            ],
+        ];
+
+        $this->assertTrue($feeds->ingest($payload, 'futures', false));
+        $this->assertTrue($feeds->ingest($payload, 'futures', false));
+    }
+
     public function test_stale_exchange_frame_never_enters_execution_cache_or_candles(): void
     {
         config()->set('autofinx.runtime.live_feed_max_event_lag_ms', 10000);

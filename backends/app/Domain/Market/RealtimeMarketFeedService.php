@@ -40,6 +40,43 @@ class RealtimeMarketFeedService
     /** In-process symbol ID cache to avoid repeated firstOrCreate DB hits */
     private static array $symbolIdCache = [];
 
+    /** Last Redis/live-state write by exchange:symbol, in monotonic wall-clock milliseconds. */
+    private static array $liveQuoteWriteThrottle = [];
+
+    /** Last control-plane pass by exchange:symbol, in monotonic wall-clock milliseconds. */
+    private static array $liveFeedSideEffectThrottle = [];
+
+    /**
+     * In-process cache of "which workspaces care about this symbol", keyed
+     * "{symbol}:{marketType}" => [workspace_id => true]. Built from
+     * RatioBotConfig (no `enabled` filter, matching the pre-cache query
+     * exactly). Rebuilt at most once per
+     * autofinx.runtime.live_feed_workspace_cache_ttl_ms — see
+     * refreshWorkspaceInterestCacheIfStale().
+     */
+    private static array $ratioBotWorkspaceCache = [];
+
+    /**
+     * In-process cache keyed by bare symbol (no market_type — the original
+     * per-call query never filtered RobotSession by market_type either) =>
+     * [workspace_id => true], for RUNNING/OPEN Binance robot sessions.
+     */
+    private static array $robotSessionWorkspaceCache = [];
+
+    /**
+     * In-process cache keyed by bare symbol => [workspace_id => true] for
+     * enabled Future Trade bots whose merged settings/current_symbol cover
+     * that symbol. Future Trade is futures-only and was never filtered by
+     * the caller's $marketType in the pre-cache code either, so this stays
+     * market-type-agnostic on purpose — only used by
+     * touchWorkspaceFeedStatuses(), never by clearRecoveredWorkspaceBreakers()
+     * (matching the original code's asymmetry exactly).
+     */
+    private static array $futureTradeWorkspaceCache = [];
+
+    /** Wall-clock ms the three workspace-interest caches above were last rebuilt (0 = never). */
+    private static int $workspaceInterestCacheBuiltAtMs = 0;
+
     private const FEED_STATUS_WRITE_INTERVAL_S = 12;
     private const RATIO_STATE_WRITE_INTERVAL_S  = 30;
 
@@ -193,7 +230,7 @@ class RealtimeMarketFeedService
      * @param  string[]  $symbols
      * @param  string[]  $streams
      */
-    public function buildStreamUrl(array $symbols, string $marketType = 'spot', array $streams = ['trade', 'kline_1m', 'miniTicker'], bool $testnet = false): string
+    public function buildStreamUrl(array $symbols, string $marketType = 'spot', array $streams = ['depth5@500ms', 'kline_1m'], bool $testnet = false): string
     {
         $symbols = array_values(array_filter(array_map(
             static fn (string $symbol) => strtolower(trim($symbol)),
@@ -294,6 +331,15 @@ class RealtimeMarketFeedService
         $closedKline = false;
         $timeframe = '1m';
         $streamType = $this->streamType($eventType, $stream);
+
+        // A fresh frame that was coalesced is still an accepted frame. This is
+        // important: the consumer's transport watchdog must not reconnect just
+        // because we intentionally keep only the newest quote during a burst.
+        // Klines are never coalesced because each update is needed to maintain
+        // the open candle and each closed kline is persisted for research.
+        if ($eventType !== 'kline' && ! $this->shouldPersistLiveQuote($exchangeKey, $symbol)) {
+            return true;
+        }
 
         if ($price !== null && $price > 0) {
             $this->prices->setLatestPrice($exchangeKey, $symbol, $price, $eventTimestampMs, [
@@ -411,6 +457,14 @@ class RealtimeMarketFeedService
             }
         }
 
+        // Market quote writes above are latency-sensitive. Everything below is
+        // control-plane work (DB lookups/status, breaker checks and job
+        // discovery), so run it at most once per symbol per configured interval
+        // for a live quote burst. Closed candles always take the full path.
+        if (! $closedKline && ! $this->shouldRunLiveFeedSideEffects($exchangeKey, $symbol)) {
+            return true;
+        }
+
         $this->touchWorkspaceFeedStatuses($symbol, $marketType, $price, $eventTimestampMs, $stream, $eventType, $closedKline, $eventLagMs);
         $this->clearRecoveredWorkspaceBreakers($symbol, $marketType);
 
@@ -526,33 +580,9 @@ class RealtimeMarketFeedService
         bool $closedKline,
         int $eventLagMs,
     ): void {
-        $workspaceIds = RatioBotConfig::query()
-            ->where('symbol', $symbol)
-            ->where('market_type', strtolower($marketType))
-            ->pluck('workspace_id')
-            ->merge(
-                FutureTradeBotConfig::query()
-                    ->with('state')
-                    ->where('enabled', true)
-                    ->get()
-                    ->filter(function (FutureTradeBotConfig $config) use ($symbol): bool {
-                        $settingsSymbols = array_map(
-                            static fn ($value) => strtoupper(trim((string) $value)),
-                            (array) ($config->mergedSettings()['symbols'] ?? config('future_trade.defaults.symbols', []))
-                        );
-                        $currentSymbol = strtoupper(trim((string) ($config->state?->current_symbol ?? '')));
-
-                        return in_array($symbol, $settingsSymbols, true) || $currentSymbol === $symbol;
-                    })
-                    ->pluck('workspace_id')
-            )
-            ->merge(
-                RobotSession::query()
-                    ->where('symbol', $symbol)
-                    ->whereIn('status', ['RUNNING', 'OPEN'])
-                    ->where('provider_key', 'binance')
-                    ->pluck('workspace_id')
-            )
+        $workspaceIds = collect($this->ratioBotWorkspaceIdsFor($symbol, $marketType))
+            ->merge($this->futureTradeWorkspaceIdsFor($symbol))
+            ->merge($this->robotSessionWorkspaceIdsFor($symbol))
             ->filter()
             ->unique()
             ->values();
@@ -578,17 +608,8 @@ class RealtimeMarketFeedService
 
     private function clearRecoveredWorkspaceBreakers(string $symbol, string $marketType): void
     {
-        $workspaceIds = RatioBotConfig::query()
-            ->where('symbol', strtoupper($symbol))
-            ->where('market_type', strtolower($marketType))
-            ->pluck('workspace_id')
-            ->merge(
-                RobotSession::query()
-                    ->where('symbol', strtoupper($symbol))
-                    ->whereIn('status', ['RUNNING', 'OPEN'])
-                    ->where('provider_key', 'binance')
-                    ->pluck('workspace_id')
-            )
+        $workspaceIds = collect($this->ratioBotWorkspaceIdsFor($symbol, $marketType))
+            ->merge($this->robotSessionWorkspaceIdsFor($symbol))
             ->filter()
             ->unique()
             ->values();
@@ -646,6 +667,115 @@ class RealtimeMarketFeedService
                 ], 'market_feed_ingest');
             }
         }
+    }
+
+    /**
+     * touchWorkspaceFeedStatuses() and clearRecoveredWorkspaceBreakers() both
+     * need "which workspaces care about this symbol" on every throttled
+     * side-effect pass. Before this cache, that meant a fresh
+     * RatioBotConfig/FutureTradeBotConfig/RobotSession query set on every
+     * single call — and the FutureTradeBotConfig query had no symbol filter
+     * at all, loading every enabled Future Trade bot config (with its state
+     * relation) across every workspace just to filter the result down in
+     * PHP afterward. mergedSettings() folds in config('future_trade.defaults')
+     * and per-bot presets, so a bot with no explicit settings->symbols
+     * override still targets the default symbol list — that fallback can't
+     * be replicated as a plain SQL WHERE without risking silently dropping
+     * bots that rely on it, so this rebuilds the exact same PHP-level
+     * membership test just deferred to a periodic timer instead of the
+     * frame-read hot path (matching the existing ~60s active-symbol
+     * re-resolution pattern in MarketWsConsumerCommand).
+     *
+     * A stale (up to TTL-old) membership list only ever delays a brand-new
+     * bot/session's first status ping or breaker-recovery check by that
+     * interval — it can never affect a trading decision, since
+     * RunRatioBotEvaluationJob always reloads its own RatioBotConfig fresh
+     * from the DB by id (and re-checks `enabled`) before acting. This is a
+     * pure timing change, not a behavior change.
+     */
+    private function refreshWorkspaceInterestCacheIfStale(): void
+    {
+        $intervalMs = max(1000, (int) config('autofinx.runtime.live_feed_workspace_cache_ttl_ms', 30000));
+        $nowMs = (int) floor(microtime(true) * 1000);
+        if (self::$workspaceInterestCacheBuiltAtMs > 0 && ($nowMs - self::$workspaceInterestCacheBuiltAtMs) < $intervalMs) {
+            return;
+        }
+
+        self::$workspaceInterestCacheBuiltAtMs = $nowMs;
+
+        $ratioBotMap = [];
+        RatioBotConfig::query()
+            ->select(['symbol', 'market_type', 'workspace_id'])
+            ->get()
+            ->each(function (RatioBotConfig $config) use (&$ratioBotMap): void {
+                $symbol = strtoupper(trim((string) $config->symbol));
+                if ($symbol === '') {
+                    return;
+                }
+                $key = $symbol . ':' . strtolower((string) $config->market_type);
+                $ratioBotMap[$key][(string) $config->workspace_id] = true;
+            });
+        self::$ratioBotWorkspaceCache = $ratioBotMap;
+
+        $robotSessionMap = [];
+        RobotSession::query()
+            ->select(['symbol', 'workspace_id'])
+            ->whereIn('status', ['RUNNING', 'OPEN'])
+            ->where('provider_key', 'binance')
+            ->get()
+            ->each(function (RobotSession $session) use (&$robotSessionMap): void {
+                $symbol = strtoupper(trim((string) $session->symbol));
+                if ($symbol === '') {
+                    return;
+                }
+                $robotSessionMap[$symbol][(string) $session->workspace_id] = true;
+            });
+        self::$robotSessionWorkspaceCache = $robotSessionMap;
+
+        $futureTradeMap = [];
+        FutureTradeBotConfig::query()
+            ->with('state')
+            ->where('enabled', true)
+            ->get()
+            ->each(function (FutureTradeBotConfig $config) use (&$futureTradeMap): void {
+                $settingsSymbols = array_map(
+                    static fn ($value) => strtoupper(trim((string) $value)),
+                    (array) ($config->mergedSettings()['symbols'] ?? config('future_trade.defaults.symbols', []))
+                );
+                $currentSymbol = strtoupper(trim((string) ($config->state?->current_symbol ?? '')));
+                if ($currentSymbol !== '') {
+                    $settingsSymbols[] = $currentSymbol;
+                }
+                foreach (array_unique(array_filter($settingsSymbols)) as $sym) {
+                    $futureTradeMap[$sym][(string) $config->workspace_id] = true;
+                }
+            });
+        self::$futureTradeWorkspaceCache = $futureTradeMap;
+    }
+
+    /** @return string[] */
+    private function ratioBotWorkspaceIdsFor(string $symbol, string $marketType): array
+    {
+        $this->refreshWorkspaceInterestCacheIfStale();
+        $key = strtoupper(trim($symbol)) . ':' . strtolower($marketType);
+
+        return array_keys(self::$ratioBotWorkspaceCache[$key] ?? []);
+    }
+
+    /** @return string[] */
+    private function robotSessionWorkspaceIdsFor(string $symbol): array
+    {
+        $this->refreshWorkspaceInterestCacheIfStale();
+
+        return array_keys(self::$robotSessionWorkspaceCache[strtoupper(trim($symbol))] ?? []);
+    }
+
+    /** @return string[] */
+    private function futureTradeWorkspaceIdsFor(string $symbol): array
+    {
+        $this->refreshWorkspaceInterestCacheIfStale();
+
+        return array_keys(self::$futureTradeWorkspaceCache[strtoupper(trim($symbol))] ?? []);
     }
 
     private function dispatchDeduplicationKey(
@@ -922,8 +1052,48 @@ class RealtimeMarketFeedService
         );
     }
 
+    private function shouldPersistLiveQuote(string $exchangeKey, string $symbol): bool
+    {
+        $intervalMs = max(20, (int) config('autofinx.runtime.live_quote_write_interval_ms', 100));
+        $key = strtolower($exchangeKey) . ':' . strtoupper($symbol);
+        $nowMs = (int) floor(microtime(true) * 1000);
+        $lastWriteMs = self::$liveQuoteWriteThrottle[$key] ?? 0;
+
+        if (($nowMs - $lastWriteMs) < $intervalMs) {
+            return false;
+        }
+
+        self::$liveQuoteWriteThrottle[$key] = $nowMs;
+
+        return true;
+    }
+
+    private function shouldRunLiveFeedSideEffects(string $exchangeKey, string $symbol): bool
+    {
+        $intervalMs = max(250, (int) config('autofinx.runtime.live_feed_side_effect_interval_ms', 1000));
+        $key = strtolower($exchangeKey) . ':' . strtoupper($symbol);
+        $nowMs = (int) floor(microtime(true) * 1000);
+        $lastRunMs = self::$liveFeedSideEffectThrottle[$key] ?? 0;
+
+        if (($nowMs - $lastRunMs) < $intervalMs) {
+            return false;
+        }
+
+        self::$liveFeedSideEffectThrottle[$key] = $nowMs;
+
+        return true;
+    }
+
     private function extractPrice(string $eventType, array $data, string $stream = ''): ?float
     {
+        if ($eventType === 'depthupdate' || str_contains(strtolower($stream), '@depth')) {
+            $bid = isset($data['b'][0][0]) ? (float) $data['b'][0][0] : 0.0;
+            $ask = isset($data['a'][0][0]) ? (float) $data['a'][0][0] : 0.0;
+            if ($bid > 0 && $ask > 0) {
+                return ($bid + $ask) / 2;
+            }
+        }
+
         if ($eventType === 'bookticker' || str_contains(strtolower($stream), 'bookticker')) {
             $bid = isset($data['b']) ? (float) $data['b'] : 0.0;
             $ask = isset($data['a']) ? (float) $data['a'] : 0.0;
@@ -950,7 +1120,7 @@ class RealtimeMarketFeedService
             return StreamType::CANDLE;
         }
 
-        if ($eventType === 'bookticker' || str_contains($stream, 'bookticker') || in_array($eventType, ['24hrminiticker', '24hrticker', 'markpriceupdate'], true) || str_contains($stream, 'miniticker') || str_contains($stream, 'ticker') || str_contains($stream, 'markprice')) {
+        if ($eventType === 'bookticker' || $eventType === 'depthupdate' || str_contains($stream, 'bookticker') || str_contains($stream, '@depth') || in_array($eventType, ['24hrminiticker', '24hrticker', 'markpriceupdate'], true) || str_contains($stream, 'miniticker') || str_contains($stream, 'ticker') || str_contains($stream, 'markprice')) {
             return StreamType::QUOTE;
         }
 

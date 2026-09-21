@@ -20,6 +20,19 @@ use Tests\TestCase;
  */
 class MarketWsConsumerSymbolDiffTest extends TestCase
 {
+    public function test_realtime_heartbeat_stream_does_not_silently_add_legacy_mini_ticker(): void
+    {
+        $method = new ReflectionMethod(MarketWsConsumerCommand::class, 'ensureRealtimeHeartbeatStream');
+        $method->setAccessible(true);
+        $command = new MarketWsConsumerCommand;
+
+        $streams = $method->invoke($command, ['depth5@500ms', 'kline_1m'], 'futures');
+
+        $this->assertSame(['depth5@500ms', 'kline_1m'], $streams);
+        $this->assertNotContains('miniTicker', $streams);
+        $this->assertNotContains('bookTicker', $streams);
+    }
+
     #[DataProvider('pairs')]
     public function test_symbols_differ(array $current, array $fresh, bool $expectedDiffer): void
     {

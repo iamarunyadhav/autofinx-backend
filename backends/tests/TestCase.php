@@ -28,12 +28,33 @@ abstract class TestCase extends BaseTestCase
         // miss, eventually surfacing as an unrelated null-pointer crash in
         // whatever test happens to run afterward.
         if (class_exists(\App\Domain\Market\RealtimeMarketFeedService::class)) {
-            foreach (['symbolIdCache', 'feedStatusWriteThrottle', 'ratioBotStateWriteThrottle'] as $property) {
+            // ratioBotWorkspaceCache/robotSessionWorkspaceCache/futureTradeWorkspaceCache
+            // (plus their builtAt timestamp) are the same kind of in-process,
+            // TTL-refreshed cache as the throttle arrays below — reset for the
+            // same reason: without this, a test creating a bot AFTER an
+            // earlier test already built the cache (well within the TTL,
+            // since a test run takes far less than 30s wall-clock) would
+            // silently miss it until the cache happens to go stale.
+            foreach ([
+                'symbolIdCache',
+                'feedStatusWriteThrottle',
+                'ratioBotStateWriteThrottle',
+                'liveQuoteWriteThrottle',
+                'liveFeedSideEffectThrottle',
+                'ratioBotWorkspaceCache',
+                'robotSessionWorkspaceCache',
+                'futureTradeWorkspaceCache',
+            ] as $property) {
                 if (property_exists(\App\Domain\Market\RealtimeMarketFeedService::class, $property)) {
                     $ref = new \ReflectionProperty(\App\Domain\Market\RealtimeMarketFeedService::class, $property);
                     $ref->setAccessible(true);
                     $ref->setValue(null, []);
                 }
+            }
+            if (property_exists(\App\Domain\Market\RealtimeMarketFeedService::class, 'workspaceInterestCacheBuiltAtMs')) {
+                $ref = new \ReflectionProperty(\App\Domain\Market\RealtimeMarketFeedService::class, 'workspaceInterestCacheBuiltAtMs');
+                $ref->setAccessible(true);
+                $ref->setValue(null, 0);
             }
         }
 

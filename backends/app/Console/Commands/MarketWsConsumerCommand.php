@@ -22,7 +22,7 @@ class MarketWsConsumerCommand extends Command
         {--workspace= : Limit active-bot symbol discovery to one workspace}
         {--bot= : Limit stream discovery to one ratio bot config id}
         {--symbols= : Comma-separated symbols; defaults to active ratio bot symbols}
-        {--streams=trade,kline_1m,miniTicker : Binance stream suffixes}
+        {--streams=depth5@500ms,kline_1m : Binance stream suffixes}
         {--sleep=1}
         {--max-runtime=0 : Max runtime in seconds (0 = infinite)}
         {--reconnect-sleep=3 : Reconnect delay in seconds}
@@ -571,9 +571,9 @@ class MarketWsConsumerCommand extends Command
     }
 
     /**
-     * Trade streams can be quiet for individual symbols; miniTicker gives each
-     * subscribed symbol a steady quote heartbeat so execution freshness does
-     * not flap STALE while the websocket itself is healthy.
+     * Execution needs a symbol-scoped bid/ask source, but it must not silently
+     * add a second high-volume quote stream. Operators may choose either
+     * bookTicker (real-time) or depth5@500ms (bounded-rate partial depth).
      *
      * @param string[] $streams
      * @return string[]
@@ -586,10 +586,14 @@ class MarketWsConsumerCommand extends Command
         )));
 
         $lower = array_map(static fn (string $stream) => strtolower($stream), $normalized);
-        if (! in_array('miniticker', $lower, true)) {
-            $normalized[] = 'miniTicker';
+        $hasQuoteStream = false;
+        foreach ($lower as $stream) {
+            if ($stream === 'bookticker' || str_starts_with($stream, 'depth')) {
+                $hasQuoteStream = true;
+                break;
+            }
         }
-        if (! in_array('bookticker', $lower, true)) {
+        if (! $hasQuoteStream) {
             $normalized[] = 'bookTicker';
         }
         // Keep the shared socket limited to symbol-scoped streams.  The
