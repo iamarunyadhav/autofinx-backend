@@ -178,6 +178,7 @@ Route::prefix('v1')->group(function () {
         Route::post('runtime/repair', [RuntimeHealthController::class, 'repair'])->middleware(['require.2fa', 'throttle:5,1']);
         Route::get('quick-trade/chart', [QuickTradeController::class, 'chart']);
         Route::get('quick-trade/candle-feed', [QuickTradeController::class, 'candleFeed']);
+        Route::get('quick-trade/candle-history', \App\Http\Controllers\Api\QuickTradeCandleHistoryController::class)->middleware('throttle:15,1');
         Route::get('quick-trade/technical-summary', [QuickTradeController::class, 'technicalSummary']);
         Route::post('quick-trade/forecast', [QuickTradeController::class, 'forecast']);
         Route::post('forecast/comparison', [QuickTradeController::class, 'forecastComparison']);
