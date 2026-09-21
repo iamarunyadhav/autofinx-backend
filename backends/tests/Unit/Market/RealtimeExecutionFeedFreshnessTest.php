@@ -32,6 +32,41 @@ class RealtimeExecutionFeedFreshnessTest extends TestCase
         $this->assertTrue($feeds->ingest($payload, 'futures', false));
     }
 
+    public function test_open_klines_are_coalesced_but_are_still_accepted_as_fresh_frames(): void
+    {
+        config()->set('autofinx.runtime.live_open_candle_write_interval_ms', 60_000);
+        $prices = Mockery::mock(MarketPriceCacheService::class);
+        $prices->shouldReceive('setLatestPrice')->once();
+        $feeds = new RealtimeMarketFeedService($prices);
+        $eventMs = (int) floor(microtime(true) * 1000);
+        $payload = [
+            'stream' => 'btcusdt@kline_1m',
+            'data' => [
+                'e' => 'kline',
+                'E' => $eventMs,
+                's' => 'BTCUSDT',
+                'k' => [
+                    't' => $eventMs - 10_000,
+                    'T' => $eventMs + 50_000,
+                    'i' => '1m',
+                    'o' => '80000',
+                    'h' => '80100',
+                    'l' => '79900',
+                    'c' => '80050',
+                    'v' => '1',
+                    'x' => false,
+                ],
+            ],
+        ];
+
+        try {
+            $this->assertTrue($feeds->ingest($payload, 'futures', false));
+            $this->assertTrue($feeds->ingest($payload, 'futures', false));
+        } finally {
+            Redis::del('live-candles:binance_futures:BTCUSDT:1m');
+        }
+    }
+
     public function test_stale_exchange_frame_never_enters_execution_cache_or_candles(): void
     {
         config()->set('autofinx.runtime.live_feed_max_event_lag_ms', 10000);

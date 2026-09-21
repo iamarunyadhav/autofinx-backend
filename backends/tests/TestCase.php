@@ -41,6 +41,7 @@ abstract class TestCase extends BaseTestCase
                 'ratioBotStateWriteThrottle',
                 'liveQuoteWriteThrottle',
                 'liveFeedSideEffectThrottle',
+                'liveOpenCandleWriteThrottle',
                 'ratioBotWorkspaceCache',
                 'robotSessionWorkspaceCache',
                 'futureTradeWorkspaceCache',

@@ -18,6 +18,10 @@ return [
         // DB status, breaker recovery, and bot-dispatch discovery are control
         // plane work. They do not need to run on every price frame.
         'live_feed_side_effect_interval_ms' => (int) env('AUTOFINX_LIVE_FEED_SIDE_EFFECT_INTERVAL_MS', 1000),
+        // Binance emits updates for an open kline several times per second.
+        // Charts need the current candle, not every intermediate mutation;
+        // closed candles always bypass this throttle and are persisted exactly.
+        'live_open_candle_write_interval_ms' => (int) env('AUTOFINX_LIVE_OPEN_CANDLE_WRITE_INTERVAL_MS', 1000),
         // Which workspaces care about a given symbol (RatioBotConfig /
         // FutureTradeBotConfig / RobotSession) is cached in-process by
         // RealtimeMarketFeedService and rebuilt at most this often, instead

@@ -46,6 +46,9 @@ class RealtimeMarketFeedService
     /** Last control-plane pass by exchange:symbol, in monotonic wall-clock milliseconds. */
     private static array $liveFeedSideEffectThrottle = [];
 
+    /** Last open-candle write by exchange:symbol:timeframe, in wall-clock milliseconds. */
+    private static array $liveOpenCandleWriteThrottle = [];
+
     /**
      * In-process cache of "which workspaces care about this symbol", keyed
      * "{symbol}:{marketType}" => [workspace_id => true]. Built from
@@ -328,8 +331,9 @@ class RealtimeMarketFeedService
             return false;
         }
         $price = $this->extractPrice($eventType, $data, $stream);
-        $closedKline = false;
-        $timeframe = '1m';
+        $kline = $eventType === 'kline' && is_array($data['k'] ?? null) ? (array) $data['k'] : null;
+        $closedKline = (bool) ($kline['x'] ?? false);
+        $timeframe = strtolower((string) ($kline['i'] ?? '1m'));
         $streamType = $this->streamType($eventType, $stream);
 
         // A fresh frame that was coalesced is still an accepted frame. This is
@@ -341,7 +345,15 @@ class RealtimeMarketFeedService
             return true;
         }
 
-        if ($price !== null && $price > 0) {
+        // An unclosed candle is UI/chart state. Coalesce it to a bounded rate
+        // while retaining every candle close for historical storage and model
+        // inputs. This prevents two kline streams from saturating the same
+        // synchronous Redis path as execution quotes.
+        if ($eventType === 'kline' && ! $closedKline && ! $this->shouldPersistOpenCandle($exchangeKey, $symbol, $timeframe)) {
+            return true;
+        }
+
+        if ($eventType !== 'kline' && $price !== null && $price > 0) {
             $this->prices->setLatestPrice($exchangeKey, $symbol, $price, $eventTimestampMs, [
                 'market_type' => strtolower($marketType),
                 'stream' => $stream,
@@ -377,10 +389,7 @@ class RealtimeMarketFeedService
             }
         }
 
-        if ($eventType === 'kline' && is_array($data['k'] ?? null)) {
-            $kline = (array) $data['k'];
-            $closedKline = (bool) ($kline['x'] ?? false);
-            $timeframe = strtolower((string) ($kline['i'] ?? '1m'));
+        if ($eventType === 'kline' && $kline !== null) {
             $openTs = Carbon::createFromTimestampMs((int) ($kline['t'] ?? $eventTimestampMs));
             $this->liveCandles->upsert($exchangeKey, $symbol, $timeframe, [
                 'timestamp' => (int) ($kline['t'] ?? $eventTimestampMs),
@@ -421,7 +430,11 @@ class RealtimeMarketFeedService
 
             if ((float) ($kline['c'] ?? 0) > 0) {
                 $price = (float) $kline['c'];
-                $this->prices->setLatestPrice($exchangeKey, $symbol, $price, (int) ($kline['T'] ?? $eventTimestampMs), [
+                // kline.T is the candle close time and is in the future while
+                // an open candle is still forming. Use Binance's event time
+                // for a live execution quote; otherwise a future timestamp
+                // can incorrectly pass/skip freshness validations.
+                $this->prices->setLatestPrice($exchangeKey, $symbol, $price, $eventTimestampMs, [
                     'market_type' => strtolower($marketType),
                     'stream' => $stream,
                     'event_type' => $eventType,
@@ -435,7 +448,7 @@ class RealtimeMarketFeedService
                     $symbol,
                     $marketCategory,
                     $price,
-                    (int) ($kline['T'] ?? $eventTimestampMs),
+                    $eventTimestampMs,
                     $receivedAtMs,
                     null,
                     'websocket',
@@ -1080,6 +1093,22 @@ class RealtimeMarketFeedService
         }
 
         self::$liveFeedSideEffectThrottle[$key] = $nowMs;
+
+        return true;
+    }
+
+    private function shouldPersistOpenCandle(string $exchangeKey, string $symbol, string $timeframe): bool
+    {
+        $intervalMs = max(250, (int) config('autofinx.runtime.live_open_candle_write_interval_ms', 1000));
+        $key = strtolower($exchangeKey) . ':' . strtoupper($symbol) . ':' . strtolower($timeframe);
+        $nowMs = (int) floor(microtime(true) * 1000);
+        $lastWriteMs = self::$liveOpenCandleWriteThrottle[$key] ?? 0;
+
+        if (($nowMs - $lastWriteMs) < $intervalMs) {
+            return false;
+        }
+
+        self::$liveOpenCandleWriteThrottle[$key] = $nowMs;
 
         return true;
     }
