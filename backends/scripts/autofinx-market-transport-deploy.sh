@@ -62,7 +62,15 @@ echo "== Preflight =="
 "$PHP_BIN" -l app/Domain/Market/MarketTransportCoalescer.php
 "$PHP_BIN" artisan market:transport-benchmark --events=50000 --symbols=4 --flush-ms=100 --no-interaction
 if [ "$RUN_TESTS" -eq 1 ]; then
-  "$PHP_BIN" artisan test --compact tests/Unit/Market/MarketTransportCoalescerTest.php tests/Unit/Market/AsyncTradeForecastTest.php
+  # Production deployments normally use Composer --no-dev, where PHPUnit/Pest
+  # and Laravel's `test` command are intentionally absent.  The release is
+  # already tested before upload; report the skipped optional gate instead of
+  # aborting before any deployment action.
+  if "$PHP_BIN" artisan list --raw --no-ansi 2>/dev/null | grep -qE '^test[[:space:]]'; then
+    "$PHP_BIN" artisan test --compact tests/Unit/Market/MarketTransportCoalescerTest.php tests/Unit/Market/AsyncTradeForecastTest.php
+  else
+    echo "INFO: php artisan test is unavailable (production --no-dev); skipping optional --test gate."
+  fi
 fi
 
 if [ "$APPLY" -eq 0 ]; then
