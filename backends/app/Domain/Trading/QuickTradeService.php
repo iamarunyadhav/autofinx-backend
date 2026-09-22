@@ -813,6 +813,13 @@ class QuickTradeService
                 );
                 $entryFee = round((float) ($execution['estimated_fee'] ?? $booked['order']->fee_amount ?? 0), 8);
                 $entrySlippage = $execution['slippage_pct'] ?? $booked['order']->slippage_pct ?? null;
+                // A live card can outlive the browser forecast that happened to
+                // be on screen at entry. Persist the same configured exit
+                // safety buffer used by TradeForecastService so its cost
+                // projection remains reproducible while the position is open.
+                // This is an estimate only; the actual close fill is captured
+                // separately during settlement and is never used for booking.
+                $exitSlippageBuffer = max(0.0, (float) config('robot_trade.live_slippage_buffer_pct', 0.04));
 
                 $quickTrade = QuickTrade::create([
                     'id' => (string) Str::uuid(),
@@ -854,7 +861,7 @@ class QuickTradeService
                             'gross_pnl' => 0,
                             'net_pnl' => 0,
                             'entry_slippage_pct' => $entrySlippage,
-                            'exit_slippage_pct' => null,
+                            'exit_slippage_pct' => $exitSlippageBuffer,
                             'entry_reference_price' => $execution['reference_price'] ?? null,
                             'entry_notional' => $execution['notional'] ?? null,
                             'exit_reference_price' => null,

@@ -159,6 +159,17 @@ test('malformed funding and a missing exit fee preserve the verified entry fee',
     expect((float) $settled->fees_total)->toEqualWithDelta(0.04005, 0.00000001);
 });
 
+test('a live trade persists its configured exit-slippage buffer at entry for an open-position cost projection', function () {
+    [$user, $workspace, $integration] = liveQuickTradeWorkspace();
+    config()->set('robot_trade.live_slippage_buffer_pct', 0.04);
+    fakeBinanceLive(fn (string $url) => null);
+
+    $trade = placeLiveEthQuickTrade($workspace->id, $integration->id, $user->id);
+
+    expect((float) data_get($trade->signal_payload, 'execution_cost.exit_slippage_pct'))
+        ->toEqualWithDelta(0.04, 0.0000001);
+});
+
 test('a live settlement with real commission and funding fee lookups uses real values and marks fee_source real', function () {
     [$user, $workspace, $integration] = liveQuickTradeWorkspace();
 
