@@ -2,6 +2,7 @@
 
 namespace App\Domain\Market;
 
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Redis;
 
 /**
@@ -94,11 +95,37 @@ class LiveCandleCacheService
         $rows = $this->candles($exchange, $symbol, $timeframe, self::MAX_CANDLES);
         $latest = $rows === [] ? null : $rows[array_key_last($rows)];
 
+        // Scan newest-first for the most recent open/closed event timestamps
+        // -- distinct from "latest row", since the newest row by candle
+        // timestamp can itself be either state depending on what has arrived
+        // most recently (e.g. the newest row is the still-open current
+        // candle, while the previous row was the last one to actually close).
+        $lastOpenEventMs = null;
+        $lastClosedEventMs = null;
+        for ($i = count($rows) - 1; $i >= 0; $i--) {
+            $row = $rows[$i];
+            $eventMs = (int) ($row['event_timestamp_ms'] ?? 0);
+            if ($eventMs <= 0) {
+                continue;
+            }
+            if (($row['is_closed'] ?? false) && $lastClosedEventMs === null) {
+                $lastClosedEventMs = $eventMs;
+            }
+            if (! ($row['is_closed'] ?? false) && $lastOpenEventMs === null) {
+                $lastOpenEventMs = $eventMs;
+            }
+            if ($lastOpenEventMs !== null && $lastClosedEventMs !== null) {
+                break;
+            }
+        }
+
         return [
             'size' => count($rows),
             'latest_timestamp' => $latest['timestamp'] ?? null,
             'latest_event_timestamp_ms' => $latest['event_timestamp_ms'] ?? null,
             'latest_is_closed' => $latest['is_closed'] ?? null,
+            'last_open_kline_at' => $lastOpenEventMs !== null ? Carbon::createFromTimestampMs($lastOpenEventMs)->toIso8601String() : null,
+            'last_closed_kline_at' => $lastClosedEventMs !== null ? Carbon::createFromTimestampMs($lastClosedEventMs)->toIso8601String() : null,
         ];
     }
 

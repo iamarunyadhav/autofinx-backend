@@ -3,6 +3,7 @@
 namespace App\Console\Commands;
 
 use App\Domain\Exchange\BinanceRestCircuitBreaker;
+use App\Domain\Market\BinanceFuturesStreamRouter;
 use App\Domain\Market\RealtimeMarketFeedService;
 use App\Domain\Market\MarketTransportCoalescer;
 use App\Support\WebSocket\SimpleWebSocketClient;
@@ -20,6 +21,7 @@ class MarketWsConsumerCommand extends Command
     protected $signature = 'market:ws-consume
         {--exchange=binance}
         {--market-type=spot : spot|futures}
+        {--lane= : Futures-only transport lane (public|market). See BinanceFuturesStreamRouter. Ignored for spot.}
         {--workspace= : Limit active-bot symbol discovery to one workspace}
         {--bot= : Limit stream discovery to one ratio bot config id}
         {--symbols= : Comma-separated symbols; defaults to active ratio bot symbols}
@@ -44,6 +46,20 @@ class MarketWsConsumerCommand extends Command
             return self::FAILURE;
         }
 
+        $lane = trim((string) $this->option('lane')) !== '' ? strtolower(trim((string) $this->option('lane'))) : null;
+        if ($lane !== null) {
+            if ($marketType !== 'futures') {
+                $this->error('--lane is only meaningful for --market-type=futures (see BinanceFuturesStreamRouter).');
+
+                return self::FAILURE;
+            }
+            if (! in_array($lane, BinanceFuturesStreamRouter::lanes(), true)) {
+                $this->error(sprintf('--lane must be one of: %s', implode('|', BinanceFuturesStreamRouter::lanes())));
+
+                return self::FAILURE;
+            }
+        }
+
         $symbols = $this->resolveSymbols($feeds, $marketType);
         if ($symbols === []) {
             $this->warn('No symbols resolved for market feed consumption.');
@@ -55,22 +71,44 @@ class MarketWsConsumerCommand extends Command
             static fn (string $stream) => trim($stream),
             explode(',', (string) $this->option('streams'))
         )));
+
+        if ($lane !== null) {
+            // Lane-aware invocation: the caller (normally
+            // FutureTradeLiveFeedCommand's orchestrator) passes the FULL
+            // configured futures stream superset; this process only ever
+            // handles the subset that belongs to its own lane. An unroutable
+            // stream family fails the whole process rather than silently
+            // dropping or misrouting it — see BinanceFuturesStreamRouter's
+            // docblock.
+            $streams = (new BinanceFuturesStreamRouter)->streamsForLane($streams, $lane);
+            if ($streams === []) {
+                $this->error(sprintf('No streams classified for lane=%s from --streams=%s.', $lane, (string) $this->option('streams')));
+
+                return self::FAILURE;
+            }
+        }
+
         $maxRuntime = max(0, (int) $this->option('max-runtime'));
-        if (! (bool) $this->option('once')) {
+        // Lane-aware runs are deliberately single-purpose (public carries its
+        // own depth stream, market carries only klines) — the combined-socket
+        // "always guarantee a quote stream" fallback below only applies to
+        // spot and any legacy non-lane futures invocation.
+        if (! (bool) $this->option('once') && $lane === null) {
             $streams = $this->ensureRealtimeHeartbeatStream($streams, $marketType);
         }
         $dispatchEvaluations = ! (bool) $this->option('no-dispatch');
         $provider = strtolower((string) $this->option('exchange') ?: 'binance');
         $workerId = (string) Str::uuid();
         $hostname = gethostname() ?: php_uname('n');
-        // Own heartbeat file, separate per market type — this must NOT share
-        // autofinx-live-feed-heartbeat.json with future-trade:live-feed. That
-        // daemon runs 24/7 and keeps its file permanently "fresh", so sharing
-        // it here caused market:ws-consume to see a false-positive "another
-        // consumer is active" forever and never take over the lock.
-        $heartbeatPath = storage_path("framework/autofinx-market-ws-heartbeat-{$marketType}.json");
+        // Own heartbeat file, separate per market type (and, for futures,
+        // per lane) — this must NOT share autofinx-live-feed-heartbeat.json
+        // with future-trade:live-feed. That daemon runs 24/7 and keeps its
+        // file permanently "fresh", so sharing it here caused
+        // market:ws-consume to see a false-positive "another consumer is
+        // active" forever and never take over the lock.
+        $heartbeatPath = self::heartbeatPathFor($marketType, $lane);
         $startedAt = time();
-        $lockKey = sprintf('autofinx:lock:market-feed:%s:%s', $provider, $marketType);
+        $lockKey = self::lockKeyFor($provider, $marketType, $lane);
         $lockTtl = (bool) $this->option('once')
             ? 120
             : ($maxRuntime > 0 ? $maxRuntime + 60 : 86400);
@@ -102,7 +140,7 @@ class MarketWsConsumerCommand extends Command
                 return $this->pollOnce($feeds, $symbols, $marketType, $dispatchEvaluations);
             }
 
-            $this->writeWorkerMetadata($provider, $marketType, $workerId, null, $hostname, $startedAt, $symbols, $streams, 'STARTING', 0);
+            $this->writeWorkerMetadata($provider, $marketType, $workerId, null, $hostname, $startedAt, $symbols, $streams, 'STARTING', 0, null, $lane);
             Log::info('[MarketData] Worker started', [
                 'event' => 'worker_started',
                 'provider' => $provider,
@@ -160,7 +198,7 @@ class MarketWsConsumerCommand extends Command
                     }
 
                     try {
-                        $wsUrl = $feeds->buildStreamUrl($symbols, $marketType, $streams, $testnet);
+                        $wsUrl = $feeds->buildStreamUrlForLane($symbols, $marketType, $streams, $lane, $testnet);
                         $this->line(sprintf(
                             '[WS] Connecting: market_type=%s symbols=%s streams=%s',
                             $marketType,
@@ -168,7 +206,7 @@ class MarketWsConsumerCommand extends Command
                             implode(',', $streams)
                         ));
                         $connectionId = (string) Str::uuid();
-                        $this->writeWorkerMetadata($provider, $marketType, $workerId, $connectionId, $hostname, $startedAt, $symbols, $streams, 'CONNECTING', $reconnectCount);
+                        $this->writeWorkerMetadata($provider, $marketType, $workerId, $connectionId, $hostname, $startedAt, $symbols, $streams, 'CONNECTING', $reconnectCount, null, $lane);
                         Log::info('[MarketData] Socket connecting', [
                             'event' => 'socket_connecting',
                             'provider' => $provider,
@@ -194,7 +232,7 @@ class MarketWsConsumerCommand extends Command
                         $lastAcceptedFrameAt = time();
                         $staleFrameWarningAt = 0;
                         $lastPingAt = time();
-                        $this->writeWorkerMetadata($provider, $marketType, $workerId, $connectionId, $hostname, $startedAt, $symbols, $streams, 'CONNECTED_AWAITING_TICK', $reconnectCount);
+                        $this->writeWorkerMetadata($provider, $marketType, $workerId, $connectionId, $hostname, $startedAt, $symbols, $streams, 'CONNECTED_AWAITING_TICK', $reconnectCount, null, $lane);
                         $this->line(sprintf(
                             '[WS] Connected to Binance market websocket. reconnect_count=%d',
                             $reconnectCount
@@ -324,13 +362,14 @@ class MarketWsConsumerCommand extends Command
                                         'exchange_to_backend_latency_ms' => $eventTimeMs > 0 ? max(0, (int) round((microtime(true) * 1000) - $eventTimeMs)) : null,
                                     ];
                                 }
-                                @file_put_contents($heartbeatPath, json_encode([
+                                $heartbeatSnapshot = [
                                     'server_now' => date('c', $now),
                                     'last_message_at' => date('c', $now),
                                     'last_message_epoch' => $now,
                                     'age_seconds' => 0,
                                     'symbol' => $symbolName,
                                     'stream' => $streamName,
+                                    'lane' => $lane,
                                     'reconnect_count' => $reconnectCount,
                                     'message_count' => $msgCount,
                                     'connected_at' => $connectedAt ? date('c', $connectedAt) : null,
@@ -340,13 +379,24 @@ class MarketWsConsumerCommand extends Command
                                     'pid' => getmypid(),
                                     'hostname' => $hostname,
                                     'symbols' => $symbols,
+                                    'streams' => $streams,
                                     'per_symbol' => $perSymbolHeartbeat,
                                     'last_exchange_event_time' => $eventTimeMs > 0 ? date('c', (int) floor($eventTimeMs / 1000)) : null,
                                     'exchange_to_backend_latency_ms' => $eventTimeMs > 0 ? max(0, (int) round((microtime(true) * 1000) - $eventTimeMs)) : null,
                                     'webhook_signal_latency_ms' => null,
                                     'transport' => $transport->stats(),
-                                ], JSON_UNESCAPED_SLASHES));
-                                $this->writeWorkerMetadata($provider, $marketType, $workerId, $connectionId, $hostname, $startedAt, $symbols, $streams, 'LIVE', $reconnectCount, $symbolName);
+                                ];
+                                @file_put_contents($heartbeatPath, json_encode($heartbeatSnapshot, JSON_UNESCAPED_SLASHES));
+                                if ($marketType === 'futures' && $lane !== null) {
+                                    // Compatibility shim: RobotSessionService, FutureTradeRuntimeConnectivityService,
+                                    // FutureTradeLiveFeedManager, TradingRuntimeHealthService, and
+                                    // FutureTradeRuntimeStatusCommand all still read the single combined
+                                    // autofinx-market-ws-heartbeat-futures.json file directly. Keep it alive
+                                    // and accurate (merged across both lanes) so none of those real
+                                    // consumers need to change or regress.
+                                    $this->writeFuturesAggregateHeartbeat($lane, $heartbeatSnapshot);
+                                }
+                                $this->writeWorkerMetadata($provider, $marketType, $workerId, $connectionId, $hostname, $startedAt, $symbols, $streams, 'LIVE', $reconnectCount, $symbolName, $lane);
                             }
                         }
                     } catch (\Throwable $e) {
@@ -363,7 +413,7 @@ class MarketWsConsumerCommand extends Command
                             $e->getMessage()
                         ));
                     } finally {
-                        $this->writeWorkerMetadata($provider, $marketType, $workerId, $connectionId ?? null, $hostname, $startedAt, $symbols, $streams, 'RECOVERING', $reconnectCount);
+                        $this->writeWorkerMetadata($provider, $marketType, $workerId, $connectionId ?? null, $hostname, $startedAt, $symbols, $streams, 'RECOVERING', $reconnectCount, null, $lane);
                         $client->close();
                         $connectedAt = null;
                     }
@@ -397,7 +447,7 @@ class MarketWsConsumerCommand extends Command
 
             return self::SUCCESS;
         } finally {
-            $this->writeWorkerMetadata($provider, $marketType, $workerId, null, $hostname, $startedAt, $symbols, $streams, 'STOPPING', 0);
+            $this->writeWorkerMetadata($provider, $marketType, $workerId, null, $hostname, $startedAt, $symbols, $streams, 'STOPPING', 0, null, $lane);
             optional($lock)->release();
         }
     }
@@ -664,9 +714,10 @@ class MarketWsConsumerCommand extends Command
         string $status,
         int $reconnectCount,
         ?string $lastSymbol = null,
+        ?string $lane = null,
     ): void {
         try {
-            Redis::setex(sprintf('autofinx:market-feed:%s:%s:worker', $provider, $marketType), 90, json_encode([
+            $payload = json_encode([
                 'worker_id' => $workerId,
                 'connection_id' => $connectionId,
                 'pid' => getmypid(),
@@ -675,12 +726,120 @@ class MarketWsConsumerCommand extends Command
                 'last_heartbeat_at' => now()->toIso8601String(),
                 'last_message_at' => $lastSymbol ? now()->toIso8601String() : null,
                 'last_symbol' => $lastSymbol,
+                'lane' => $lane,
                 'reconnect_count' => $reconnectCount,
                 'subscriptions' => array_values($symbols),
                 'streams' => array_values($streams),
                 'status' => $status,
-            ], JSON_UNESCAPED_SLASHES));
+            ], JSON_UNESCAPED_SLASHES);
+
+            // Legacy combined key, written unconditionally (including by
+            // each futures lane) so existing readers (AutoFinxRuntimeHealthCommand,
+            // AutoFinxMarketFeedCleanupCommand's wildcard sweep) keep working
+            // without modification -- it only ever needs to answer "is some
+            // futures worker alive", which both lanes independently satisfy.
+            Redis::setex(sprintf('autofinx:market-feed:%s:%s:worker', $provider, $marketType), 90, $payload);
+
+            if ($lane !== null) {
+                Redis::setex(sprintf('autofinx:market-feed:%s:%s:%s:worker', $provider, $marketType, $lane), 90, $payload);
+            }
         } catch (\Throwable) {
+        }
+    }
+
+    /**
+     * Single source of truth for the futures transport-lane singleton lock
+     * key. Spot (and any legacy non-lane futures invocation) keeps the
+     * original unsuffixed key exactly as before -- only a real --lane value
+     * appends a lane suffix, so two lanes can never collide with each other
+     * or with a legacy single-connection futures run.
+     */
+    public static function lockKeyFor(string $provider, string $marketType, ?string $lane = null): string
+    {
+        $key = sprintf('autofinx:lock:market-feed:%s:%s', strtolower($provider), strtolower($marketType));
+
+        return $lane !== null ? $key.':'.strtolower($lane) : $key;
+    }
+
+    /**
+     * Single source of truth for the per-lane heartbeat file path. Spot (and
+     * any legacy non-lane futures invocation) keeps the original filename
+     * exactly as before.
+     */
+    public static function heartbeatPathFor(string $marketType, ?string $lane = null): string
+    {
+        $marketType = strtolower($marketType);
+
+        return $lane !== null
+            ? storage_path("framework/autofinx-market-ws-heartbeat-{$marketType}-{$lane}.json")
+            : storage_path("framework/autofinx-market-ws-heartbeat-{$marketType}.json");
+    }
+
+    /**
+     * Merge this lane's just-written heartbeat snapshot into the single
+     * combined autofinx-market-ws-heartbeat-futures.json file that predates
+     * the two-lane split. Several real (non-diagnostic) consumers still read
+     * that exact path directly and were never touched by this change:
+     * RobotSessionService::freshLiveFeedHeartbeat(), FutureTradeRuntimeConnectivityService::marketHeartbeat(),
+     * FutureTradeLiveFeedManager::loadHeartbeat(), and TradingRuntimeHealthService::heartbeatFeed().
+     * None of them distinguish quote vs candle freshness today (that was
+     * already true before this change -- a depth-only tick already made the
+     * old combined file look "fresh" even while klines were silently stuck),
+     * so a "whichever lane ticked most recently, per-symbol data merged from
+     * both" aggregate is a faithful, non-regressing compatibility shim, not
+     * a behavior change for those consumers.
+     *
+     * @param  array<string, mixed>  $laneSnapshot
+     */
+    private function writeFuturesAggregateHeartbeat(string $lane, array $laneSnapshot): void
+    {
+        $aggregatePath = self::heartbeatPathFor('futures', null);
+
+        try {
+            $existingRaw = @file_get_contents($aggregatePath);
+            $existing = $existingRaw !== false ? json_decode($existingRaw, true) : null;
+            $existing = is_array($existing) ? $existing : [];
+
+            $existingPerSymbol = is_array($existing['per_symbol'] ?? null) ? $existing['per_symbol'] : [];
+            $lanePerSymbol = is_array($laneSnapshot['per_symbol'] ?? null) ? $laneSnapshot['per_symbol'] : [];
+            // This lane's own entries are the freshest data it has for its
+            // own symbols; the other lane's most recently known entries for
+            // symbols this lane doesn't cover (or hasn't ticked yet this
+            // second) are preserved rather than dropped.
+            $mergedPerSymbol = array_merge($existingPerSymbol, $lanePerSymbol);
+
+            $mergedSymbols = array_values(array_unique(array_merge(
+                (array) ($existing['symbols'] ?? []),
+                (array) ($laneSnapshot['symbols'] ?? [])
+            )));
+            $mergedStreams = array_values(array_unique(array_merge(
+                (array) ($existing['streams'] ?? []),
+                (array) ($laneSnapshot['streams'] ?? [])
+            )));
+
+            $existingEpoch = (int) ($existing['last_message_epoch'] ?? 0);
+            $laneEpoch = (int) ($laneSnapshot['last_message_epoch'] ?? 0);
+            $newestIsLane = $laneEpoch >= $existingEpoch;
+
+            $aggregate = $newestIsLane ? $laneSnapshot : $existing;
+            $aggregate['symbols'] = $mergedSymbols;
+            $aggregate['streams'] = $mergedStreams;
+            $aggregate['per_symbol'] = $mergedPerSymbol;
+            $aggregate['age_seconds'] = 0;
+            $aggregate['lanes'] = array_merge(
+                is_array($existing['lanes'] ?? null) ? $existing['lanes'] : [],
+                [$lane => $laneSnapshot]
+            );
+            // The combined file no longer represents one single connection --
+            // drop the single-connection-only field so nothing mistakes it
+            // for the lane's own connection id.
+            unset($aggregate['lane']);
+
+            @file_put_contents($aggregatePath, json_encode($aggregate, JSON_UNESCAPED_SLASHES));
+        } catch (\Throwable) {
+            // The lane-specific heartbeat file (already written above) is
+            // authoritative; a failed compatibility-merge write must never
+            // interrupt the live feed itself.
         }
     }
 }

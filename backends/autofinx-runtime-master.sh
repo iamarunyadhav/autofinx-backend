@@ -303,7 +303,17 @@ run_once() {
   dedupe_supervised "quick-settler" "autofinx-quick-settler.sh" "autofinx-quick-settler"
   dedupe_supervised "robot-evaluator" "autofinx-robot-evaluator.sh" "autofinx-robot-evaluator"
   dedupe_supervised "scheduler" "artisan schedule:work" "autofinx-scheduler"
-  dedupe_supervised "ratio-feed" "artisan market:ws-consume" "autofinx-ratio-feed"
+  # 2026-09-22 transport hotfix: "artisan market:ws-consume" alone used to
+  # only ever match the spot ratio-feed daemon, because the futures live-feed
+  # ran market:ws-consume in-process (Command::call()), never as its own OS
+  # process. future-trade:live-feed is now a two-lane orchestrator that spawns
+  # REAL market:ws-consume --market-type=futures --lane=public/--lane=market
+  # child processes under the separate autofinx-trading:live-feed supervised
+  # tree. An unscoped pattern here would treat those legitimate futures lane
+  # children as duplicate ratio-feed workers and kill them every run --
+  # scope this to --market-type=spot specifically, matching only what
+  # autofinx-ratio-feed actually runs (see AUTOFINX_LOCAL_RUNTIME.md).
+  dedupe_supervised "ratio-feed" "artisan market:ws-consume --market-type=spot" "autofinx-ratio-feed"
   dedupe_supervised "queue-ratio" "queue:work.*--queue=ratio_bot" "autofinx-queue-ratio"
   dedupe_pattern "schedule-run" "artisan schedule:run"
   cleanup_stale_schedule_run

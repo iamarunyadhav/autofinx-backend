@@ -2,6 +2,7 @@
 
 namespace App\Console\Commands;
 
+use App\Domain\Market\BinanceFuturesStreamRouter;
 use App\Domain\Ops\TradingRuntimeHealthService;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Artisan;
@@ -210,6 +211,10 @@ class DoctorCleanupCommand extends Command
             storage_path('framework/autofinx-live-feed-heartbeat.json'),
             storage_path('framework/autofinx-market-ws-heartbeat-spot.json'),
             storage_path('framework/autofinx-market-ws-heartbeat-futures.json'),
+            // 2026-09-22 transport hotfix: the futures public/market lane
+            // heartbeat files (MarketWsConsumerCommand::heartbeatPathFor()).
+            MarketWsConsumerCommand::heartbeatPathFor('futures', BinanceFuturesStreamRouter::LANE_PUBLIC),
+            MarketWsConsumerCommand::heartbeatPathFor('futures', BinanceFuturesStreamRouter::LANE_MARKET),
             storage_path('framework/future-trade-live-feed.json'),
             storage_path('app/runtime/future-trade-live-feed.json'),
         ] as $path) {

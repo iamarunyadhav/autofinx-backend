@@ -235,6 +235,21 @@ class RealtimeMarketFeedService
      */
     public function buildStreamUrl(array $symbols, string $marketType = 'spot', array $streams = ['depth5@500ms', 'kline_1m'], bool $testnet = false): string
     {
+        return $this->buildStreamUrlForLane($symbols, $marketType, $streams, null, $testnet);
+    }
+
+    /**
+     * Lane-aware URL builder. $lane is only meaningful for futures
+     * (BinanceFuturesStreamRouter::LANE_PUBLIC / LANE_MARKET); passing null
+     * reproduces buildStreamUrl()'s original single-endpoint behavior
+     * byte-for-byte, which is exactly what spot (and any non-lane-aware
+     * futures caller) still gets.
+     *
+     * @param  string[]  $symbols
+     * @param  string[]  $streams
+     */
+    public function buildStreamUrlForLane(array $symbols, string $marketType = 'spot', array $streams = ['depth5@500ms', 'kline_1m'], ?string $lane = null, bool $testnet = false): string
+    {
         $symbols = array_values(array_filter(array_map(
             static fn (string $symbol) => strtolower(trim($symbol)),
             $symbols
@@ -249,6 +264,10 @@ class RealtimeMarketFeedService
             $streams
         )));
 
+        if ($normalizedStreams === []) {
+            throw new \RuntimeException('At least one stream is required to build a market stream URL.');
+        }
+
         $streamParts = [];
         foreach ($normalizedStreams as $stream) {
             if (str_starts_with($stream, '!')) {
@@ -261,7 +280,7 @@ class RealtimeMarketFeedService
             }
         }
 
-        $baseUrl = $this->marketTypeBaseUrl($marketType, $testnet);
+        $baseUrl = $this->marketTypeBaseUrl($marketType, $testnet, $lane);
 
         return rtrim($baseUrl, '/') . '/stream?streams=' . implode('/', $streamParts);
     }
@@ -1192,12 +1211,25 @@ class RealtimeMarketFeedService
         return strtolower($marketType) === 'futures' ? 'binance_futures' : 'binance';
     }
 
-    private function marketTypeBaseUrl(string $marketType, bool $testnet): string
+    /**
+     * $lane is only consulted for real (non-testnet) futures connections --
+     * no production evidence exists that Binance's futures TESTNET host
+     * needs (or even supports) the same public/market split, so testnet
+     * keeps using the single combined testnet endpoint for every lane. Spot
+     * never receives a lane, so this is unchanged for spot.
+     */
+    private function marketTypeBaseUrl(string $marketType, bool $testnet, ?string $lane = null): string
     {
         if (strtolower($marketType) === 'futures') {
-            return $testnet
-                ? (string) config('services.binance.futures_testnet_ws_url', 'wss://stream.binancefuture.com')
-                : (string) config('services.binance.futures_ws_url', 'wss://fstream.binance.com');
+            if ($testnet) {
+                return (string) config('services.binance.futures_testnet_ws_url', 'wss://stream.binancefuture.com');
+            }
+
+            return match ($lane) {
+                BinanceFuturesStreamRouter::LANE_PUBLIC => (string) config('services.binance.futures_public_ws_url', 'wss://fstream.binance.com/public'),
+                BinanceFuturesStreamRouter::LANE_MARKET => (string) config('services.binance.futures_market_ws_url', 'wss://fstream.binance.com/market'),
+                default => (string) config('services.binance.futures_ws_url', 'wss://fstream.binance.com'),
+            };
         }
 
         return $testnet

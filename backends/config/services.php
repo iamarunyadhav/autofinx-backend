@@ -59,6 +59,16 @@ return [
         'testnet_ws_url' => env('BINANCE_TESTNET_WS_URL', 'wss://testnet.binance.vision'),
         'futures_api_url' => env('BINANCE_FUTURES_API_URL', 'https://fapi.binance.com'),
         'futures_ws_url' => env('BINANCE_FUTURES_WS_URL', 'wss://fstream.binance.com'),
+        // 2026-09-22 transport-routing hotfix (root cause: fstream.binance.com's
+        // root combined-stream endpoint only reliably delivers depthUpdate
+        // frames in production; kline frames never arrive on it). These two
+        // are lane-specific endpoints used ONLY by BinanceFuturesStreamRouter
+        // via RealtimeMarketFeedService::buildStreamUrlForLane() for the
+        // futures public-market-data websocket. futures_ws_url above is left
+        // untouched -- private/user-stream consumers (BinanceFuturesUserStreamService,
+        // FutureTradeUserStreamService, QuickTradeController) still read it directly.
+        'futures_public_ws_url' => env('BINANCE_FUTURES_PUBLIC_WS_URL', 'wss://fstream.binance.com/public'),
+        'futures_market_ws_url' => env('BINANCE_FUTURES_MARKET_WS_URL', 'wss://fstream.binance.com/market'),
         'futures_ws_api_url' => env('BINANCE_FUTURES_WS_API_URL', 'wss://ws-fapi.binance.com/ws-fapi/v1'),
         'futures_testnet_api_url' => env('BINANCE_FUTURES_TESTNET_API_URL', 'https://testnet.binancefuture.com'),
         'futures_testnet_ws_url' => env('BINANCE_FUTURES_TESTNET_WS_URL', 'wss://stream.binancefuture.com'),
