@@ -20,6 +20,8 @@ class MarketTransportCoalescer
     private int $coalesced = 0;
     private int $olderDropped = 0;
     private int $maxBuffered = 0;
+    /** @var array<string, int> */
+    private array $receivedByKind = [];
 
     public function __construct(private readonly int $flushIntervalMs = 100, ?int $startedAtMs = null)
     {
@@ -33,6 +35,8 @@ class MarketTransportCoalescer
         $this->received++;
         $data = is_array($payload['data'] ?? null) ? $payload['data'] : $payload;
         $kline = is_array($data['k'] ?? null) ? $data['k'] : null;
+        $kind = $this->frameKind($data, $kline);
+        $this->receivedByKind[$kind] = ($this->receivedByKind[$kind] ?? 0) + 1;
 
         // A close is durable market history and must never wait behind or be
         // replaced by a newer quote. Remove the corresponding open snapshot.
@@ -96,6 +100,7 @@ class MarketTransportCoalescer
             'buffered' => count($this->pending),
             'max_buffered' => $this->maxBuffered,
             'flush_interval_ms' => $this->flushIntervalMs,
+            'received_by_kind' => $this->receivedByKind,
         ];
     }
 
@@ -109,5 +114,16 @@ class MarketTransportCoalescer
             return 'candle:'.$symbol.':'.strtolower((string) ($kline['i'] ?? '1m'));
         }
         return 'quote:'.$symbol;
+    }
+
+    private function frameKind(array $data, ?array $kline): string
+    {
+        if ($kline !== null) {
+            return (bool) ($kline['x'] ?? false) ? 'closed_kline' : 'open_kline';
+        }
+
+        $event = strtolower((string) ($data['e'] ?? ''));
+
+        return $event !== '' ? $event : 'unknown';
     }
 }

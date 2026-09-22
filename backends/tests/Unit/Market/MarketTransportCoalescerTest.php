@@ -27,6 +27,7 @@ it('keeps only the newest quote per symbol until the bounded drain', function ()
     expect($frames)->toHaveCount(1)
         ->and($frames[0]['data']['b'])->toBe('101')
         ->and($buffer->stats()['coalesced'])->toBe(1)
+        ->and($buffer->stats()['received_by_kind'])->toBe(['bookticker' => 2])
         ->and($buffer->stats()['max_buffered'])->toBe(1);
 });
 
@@ -45,7 +46,11 @@ it('never buffers or drops a closed candle', function () {
     $closed = transportKline('BTCUSDT', 1020, true, '102');
 
     expect($buffer->offer($closed, 1020))->toBe([$closed])
-        ->and($buffer->stats()['buffered'])->toBe(0);
+        ->and($buffer->stats()['buffered'])->toBe(0)
+        ->and($buffer->stats()['received_by_kind'])->toBe([
+            'open_kline' => 1,
+            'closed_kline' => 1,
+        ]);
 });
 
 it('cannot let an older event replace a newer pending event', function () {
