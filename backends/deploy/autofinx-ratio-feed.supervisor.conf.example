@@ -1,0 +1,23 @@
+; Install this only when the existing autofinx-ratio-feed program is absent or
+; its command is not market:ws-consume.  Never install a second feed owner.
+; Replace __APP_DIR__, __PHP_BIN__, and __RUN_USER__ before copying it to the
+; server's Supervisor include directory.
+[program:autofinx-ratio-feed]
+process_name=%(program_name)s
+command=__PHP_BIN__ artisan market:ws-consume --exchange=binance --market-type=futures --streams=trade,kline_1m,kline_5m,bookTicker --reconnect-sleep=3
+directory=__APP_DIR__
+user=__RUN_USER__
+autostart=true
+autorestart=true
+startsecs=10
+startretries=10
+stopwaitsecs=30
+stopasgroup=true
+killasgroup=true
+redirect_stderr=false
+stdout_logfile=/var/log/autofinx/ratio-feed.out.log
+stdout_logfile_maxbytes=20MB
+stdout_logfile_backups=5
+stderr_logfile=/var/log/autofinx/ratio-feed.err.log
+stderr_logfile_maxbytes=20MB
+stderr_logfile_backups=5
