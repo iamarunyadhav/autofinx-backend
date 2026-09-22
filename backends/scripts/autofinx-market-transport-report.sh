@@ -44,9 +44,15 @@ done
   echo "Futures diagnostics:"
   cat "$REPORT_DIR/feed-diagnostics-futures.out"
   echo
+  echo "Spot diagnostics:"
+  cat "$REPORT_DIR/feed-diagnostics-spot.out"
+  echo
   echo "Analysis:"
   if ! grep -q 'autofinx-ratio-feed.*RUNNING' "$REPORT_DIR/supervisor-status.out"; then
     echo "FAIL: autofinx-ratio-feed is not RUNNING. Do not enable live trading."
+  fi
+  if ! grep -q 'autofinx-trading:live-feed.*RUNNING' "$REPORT_DIR/supervisor-status.out"; then
+    echo "FAIL: autofinx-trading:live-feed is not RUNNING. Do not enable futures live trading."
   fi
   if grep -Eqi 'BACKOFF|FATAL|STOPPED' "$REPORT_DIR/supervisor-status.out"; then
     echo "WARN: one or more Supervisor programs are unhealthy; inspect supervisor-status.out."
@@ -54,11 +60,22 @@ done
   if grep -Eqi '"quote_fresh"[[:space:]]*:[[:space:]]*false' "$REPORT_DIR/feed-diagnostics-futures.out"; then
     echo "FAIL: at least one futures quote is stale; do not enable live trading."
   fi
+  if grep -Eqi '"candle_health"[[:space:]]*:[[:space:]]*"(STALE|DEGRADED)"' "$REPORT_DIR/feed-diagnostics-futures.out"; then
+    echo "FAIL: futures quote/candle health diverged. Do not enable candle-based futures prediction or live entry."
+  fi
+  if grep -Eq '"transport"[[:space:]]*:[[:space:]]*null' "$REPORT_DIR/feed-diagnostics-futures.out"; then
+    echo "WARN: futures transport heartbeat is absent; verify the Supervisor worker loaded the current transport code."
+  fi
+  if ! grep -Eq '"open_kline"[[:space:]]*:[[:space:]]*[1-9][0-9]*' "$REPORT_DIR/feed-diagnostics-futures.out"; then
+    echo "WARN: no futures open_kline frame is recorded in this worker window; inspect the futures market lane before relying on a live candle."
+  fi
   if grep -Eqi '"candle_cache_size"[[:space:]]*:[[:space:]]*0' "$REPORT_DIR/feed-diagnostics-futures.out"; then
     echo "WARN: at least one subscribed symbol has no 1m candle cache."
   fi
-  if grep -Eqi 'Circuit breaker|No valid market frame accepted|WebSocket connection closed' "$REPORT_DIR/supervisor-autofinx-ratio-feed-tail.out"; then
-    echo "WARN: websocket reconnect/error evidence found; inspect ratio-feed tail before enabling live trading."
+  if grep -Eqi 'Circuit breaker|No valid market frame accepted|WebSocket connection closed|broken pipe|reconnect' \
+    "$REPORT_DIR/supervisor-autofinx-ratio-feed-tail.out" \
+    "$REPORT_DIR/supervisor-autofinx-trading-live-feed-tail.out"; then
+    echo "WARN: websocket reconnect/error evidence found; inspect the captured feed tails before enabling live trading."
   fi
   echo "Report files: $REPORT_DIR"
 } | tee "$REPORT_DIR/SUMMARY.txt"
