@@ -291,6 +291,11 @@ test('robot session blocks live entry when expected move cannot beat fees and sl
 });
 
 test('robot session blocks live entry when server websocket feed is stale', function () {
+    // Do not use ETHUSDT here: the local market websocket worker can honestly
+    // report a fresh ETHUSDT heartbeat while this test is asserting the
+    // no-fresh-server-feed path.  This symbol is intentionally absent from
+    // that worker's subscription list.
+    $symbol = 'ROBOTSTALEUSDT';
     $user = User::factory()->create();
     $workspace = Workspace::factory()->create();
     $integration = robotLiveIntegration($workspace->id);
@@ -331,7 +336,7 @@ test('robot session blocks live entry when server websocket feed is stale', func
 
     $session = app(RobotSessionService::class)->create($workspace->id, [
         'name' => 'ETH live robot',
-        'symbol' => 'ETHUSDT',
+        'symbol' => $symbol,
         'timeframe' => '1m',
         'expiry_seconds' => 60,
         'indicator_set' => ['MACD'],
@@ -343,8 +348,8 @@ test('robot session blocks live entry when server websocket feed is stale', func
     ], $user->id);
 
     $session = app(RobotSessionService::class)->start($session);
-    clearRobotLiveFeed('ETHUSDT');
-    seedRobotFeedStatus($workspace->id, 'ETHUSDT', 2000.00, now()->subSeconds(60));
+    clearRobotLiveFeed($symbol);
+    seedRobotFeedStatus($workspace->id, $symbol, 2000.00, now()->subSeconds(60));
 
     app(RobotSessionService::class)->evaluateSession($session);
     $result = app(RobotSessionService::class)->evaluateSession($session->fresh());
@@ -443,6 +448,11 @@ function seedRobotFeedStatus(string $workspaceId, string $symbol, float $price, 
 
 function seedRobotLiveFeed(string $symbol, float $price): void
 {
+    // RefreshDatabase does not flush Redis.  The live-candle cache is global
+    // per exchange/symbol/timeframe, so remove an earlier test/worker context
+    // before the first evaluation seeds the fixture's own REST candles.
+    clearRobotLiveCandles($symbol);
+
     app(MarketPriceCacheService::class)->setLatestPrice(
         'binance_futures',
         $symbol,
@@ -454,6 +464,14 @@ function seedRobotLiveFeed(string $symbol, float $price): void
             'market_type' => 'futures',
         ],
     );
+}
+
+function clearRobotLiveCandles(string $symbol): void
+{
+    try {
+        Redis::del('live-candles:binance_futures:'.strtoupper($symbol).':1m');
+    } catch (Throwable) {
+    }
 }
 
 function clearRobotLiveFeed(string $symbol): void

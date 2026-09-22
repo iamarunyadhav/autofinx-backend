@@ -86,6 +86,13 @@ function robotParityFeedStatus(string $workspaceId, string $symbol, float $price
 
 function robotParityLiveFeed(string $symbol, float $price): void
 {
+    // Redis is not reset by RefreshDatabase.  Keep the candle context owned by
+    // this fixture rather than accepting a previous test's global cache.
+    try {
+        \Illuminate\Support\Facades\Redis::del('live-candles:binance_futures:'.strtoupper($symbol).':1m');
+    } catch (Throwable) {
+    }
+
     app(MarketPriceCacheService::class)->setLatestPrice(
         'binance_futures',
         strtoupper($symbol),
