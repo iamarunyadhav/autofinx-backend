@@ -28,11 +28,19 @@ class QuickTradeForecastCalculator
         // null, not treated as stale (see TradeForecastService::forecast()).
         $liveFeed = null;
         $referencePrice = null;
-        if (! empty($data['symbol'])) {
+        $liveExchange = $this->liveFeedExchange($data['exchange'] ?? null);
+        if (! empty($data['symbol']) && $liveExchange !== null) {
             $maxAge = app(RuntimeSafetySettingsService::class)->liveFeedMaxAgeSeconds(null);
-            $snapshot = app(MarketPriceCacheService::class)->getLiveFeedSnapshot('binance_futures', (string) $data['symbol'], $maxAge);
+            $snapshot = app(MarketPriceCacheService::class)->getLiveFeedSnapshot($liveExchange, (string) $data['symbol'], $maxAge);
             if ($snapshot !== null) {
-                $liveFeed = ['fresh' => (bool) ($snapshot['fresh'] ?? false), 'age_seconds' => $snapshot['age_seconds'] ?? null];
+                $liveFeed = [
+                    'fresh' => (bool) ($snapshot['fresh'] ?? false),
+                    'age_seconds' => $snapshot['age_seconds'] ?? null,
+                    'event_lag_ms' => $snapshot['event_lag_ms'] ?? null,
+                    'max_age_seconds' => $snapshot['max_age_seconds'] ?? null,
+                    'max_event_lag_ms' => $snapshot['max_event_lag_ms'] ?? null,
+                    'market_type' => $snapshot['market_type'] ?? null,
+                ];
                 // Never trust a browser-supplied display quote for a forecast
                 // that may be shown beside a live-order control. Only the
                 // same server-side canonical quote that passed freshness can
@@ -60,6 +68,12 @@ class QuickTradeForecastCalculator
         // response always carry an identical $forecastResult -- the shadow
         // wiring's own test asserts response==audit-log-old byte-for-byte.
         $forecastResult['decision_source'] = 'internal';
+        // UI-only telemetry. This is intentionally copied from the exact
+        // server-side snapshot used as the reference above, so the browser
+        // can make clear whether the target is based on a fresh canonical
+        // quote or the candle-close fallback. It never becomes an execution
+        // authorization and contains no user-supplied price.
+        $forecastResult['live_feed'] = $liveFeed;
 
         // Unified Forecast Engine, Phase 5 -- SHADOW COMPARISON ONLY. This
         // block never changes $forecastResult/$netEdgeResult above (already
@@ -109,6 +123,19 @@ class QuickTradeForecastCalculator
             'forecast' => $forecastResult,
             'net_edge' => $netEdgeResult,
          ];
+    }
+
+    /** Returns the only canonical Redis namespaces supported by this preview. */
+    private function liveFeedExchange(mixed $exchange): ?string
+    {
+        return match (strtolower(trim((string) $exchange))) {
+            'binance' => 'binance',
+            'binance_futures' => 'binance_futures',
+            // Existing Quick Trade callers historically omitted exchange and
+            // represent Binance timed trades; retain that safe default.
+            '' => 'binance_futures',
+            default => null,
+        };
     }
 
     /**
