@@ -10,6 +10,9 @@ return [
         // Frames older than this are transport backlog, not executable market
         // data. They must never refresh Redis, candles, health, or breakers.
         'live_feed_max_event_lag_ms' => (int) env('AUTOFINX_LIVE_FEED_MAX_EVENT_LAG_MS', 10000),
+        // Socket-reader latest-value buffer. Closed candles bypass it. Keep
+        // this far below the execution freshness threshold.
+        'market_transport_flush_interval_ms' => (int) env('AUTOFINX_MARKET_TRANSPORT_FLUSH_INTERVAL_MS', 100),
         // Binance book-ticker/trade streams can produce thousands of frames per
         // second. The websocket reader accepts every fresh frame, but Redis is
         // deliberately updated with the newest one at this bounded cadence so

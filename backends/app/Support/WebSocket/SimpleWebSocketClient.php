@@ -110,7 +110,7 @@ class SimpleWebSocketClient
         $this->sendFrame($payload, 0x1);
     }
 
-    public function readFrame(int $timeoutSeconds = 1): ?array
+    public function readFrame(float $timeoutSeconds = 1.0): ?array
     {
         if (! is_resource($this->socket)) {
             throw new RuntimeException('WebSocket is not connected.');
@@ -218,7 +218,7 @@ class SimpleWebSocketClient
         fwrite($this->socket, $header . $mask . $maskedPayload);
     }
 
-    private function readBytes(int $length, int $timeoutSeconds): ?string
+    private function readBytes(int $length, float $timeoutSeconds): ?string
     {
         if (! is_resource($this->socket)) {
             throw new RuntimeException('WebSocket is not connected.');

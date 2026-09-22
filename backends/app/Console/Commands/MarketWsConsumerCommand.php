@@ -4,6 +4,7 @@ namespace App\Console\Commands;
 
 use App\Domain\Exchange\BinanceRestCircuitBreaker;
 use App\Domain\Market\RealtimeMarketFeedService;
+use App\Domain\Market\MarketTransportCoalescer;
 use App\Support\WebSocket\SimpleWebSocketClient;
 use Illuminate\Console\Command;
 use Illuminate\Http\Client\Response;
@@ -178,6 +179,9 @@ class MarketWsConsumerCommand extends Command
                             'streams' => $streams,
                         ]);
                         $client->connect($wsUrl);
+                        $transport = new MarketTransportCoalescer(
+                            max(10, (int) config('autofinx.runtime.market_transport_flush_interval_ms', 100))
+                        );
                         $connectedAt = time();
                         $stableConnectedSince = time();
                         // Transport backlog frames are discarded by ingest().
@@ -246,29 +250,37 @@ class MarketWsConsumerCommand extends Command
                                 $lastPingAt = $now;
                             }
 
-                            $frame = $client->readFrame(1);
+                            // A short idle poll lets the bounded coalescer flush
+                            // on time even for a quiet symbol. The websocket
+                            // client still uses its longer payload deadline once
+                            // a frame header has arrived.
+                            $frame = $client->readFrame(0.05);
+                            $payloads = [];
                             if ($frame === null) {
-                                continue;
-                            }
-                            if ($frame['type'] === 'close') {
+                                $payloads = $transport->drainIfDue();
+                            } elseif ($frame['type'] === 'close') {
                                 throw new RuntimeException('Remote websocket closed the market stream.');
+                            } elseif ($frame['type'] === 'text') {
+                                $decoded = json_decode((string) $frame['payload'], true);
+                                if (is_array($decoded)) {
+                                    $payloads = $transport->offer($decoded);
+                                }
                             }
-                            if ($frame['type'] !== 'text') {
+                            if ($payloads === []) {
                                 continue;
                             }
 
-                            $payload = json_decode((string) $frame['payload'], true);
-                            if (! is_array($payload)) {
-                                continue;
+                            $accepted = false;
+                            $payload = $payloads[array_key_last($payloads)];
+                            foreach ($payloads as $candidate) {
+                                $accepted = $feeds->ingest($candidate, $marketType, $dispatchEvaluations, [
+                                    'worker_id' => $workerId,
+                                    'connection_id' => $connectionId,
+                                    'pid' => getmypid(),
+                                    'hostname' => $hostname,
+                                    'subscriptions' => $symbols,
+                                ]) || $accepted;
                             }
-
-                            $accepted = $feeds->ingest($payload, $marketType, $dispatchEvaluations, [
-                                'worker_id' => $workerId,
-                                'connection_id' => $connectionId,
-                                'pid' => getmypid(),
-                                'hostname' => $hostname,
-                                'subscriptions' => $symbols,
-                            ]);
                             if (! $accepted) {
                                 $staleAge = time() - $lastAcceptedFrameAt;
                                 if ($staleAge >= 30) {
@@ -332,6 +344,7 @@ class MarketWsConsumerCommand extends Command
                                     'last_exchange_event_time' => $eventTimeMs > 0 ? date('c', (int) floor($eventTimeMs / 1000)) : null,
                                     'exchange_to_backend_latency_ms' => $eventTimeMs > 0 ? max(0, (int) round((microtime(true) * 1000) - $eventTimeMs)) : null,
                                     'webhook_signal_latency_ms' => null,
+                                    'transport' => $transport->stats(),
                                 ], JSON_UNESCAPED_SLASHES));
                                 $this->writeWorkerMetadata($provider, $marketType, $workerId, $connectionId, $hostname, $startedAt, $symbols, $streams, 'LIVE', $reconnectCount, $symbolName);
                             }

@@ -85,6 +85,19 @@ it('does not gate on a live-feed snapshot that was never resolved (null), only o
     expect($withFreshSnapshot['gate_reason'])->toBeNull();
 });
 
+it('uses a supplied fresh canonical quote as the reference without changing candle evidence', function () {
+    $candles = bullishCandles(40);
+    $quote = 177.25;
+
+    $result = app(TradeForecastService::class)->forecast(
+        $candles, '1m', 60, null, null,
+        ['fresh' => true, 'age_seconds' => 0], 'BTCUSDT', $quote,
+    );
+
+    expect($result['reference_price'])->toBe($quote);
+    expect($result['reference_price_source'])->toBe('fresh_canonical_quote');
+});
+
 it('surfaces a near_resistance caution when the predicted direction runs into a nearby real resistance level', function () {
     // Same steady uptrend fixture as the "healthy conditions" case above:
     // each candle's high (close + 0.2) sits just ahead of the next candle's

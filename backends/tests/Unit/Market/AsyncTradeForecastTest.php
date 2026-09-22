@@ -25,6 +25,19 @@ test('forecast requests deduplicate identical inputs and isolate actor symbol an
     Bus::assertDispatched(CalculateTradeForecast::class, fn ($job) => $job->connection === 'redis' && $job->queue === 'predictions');
 });
 
+test('rapid candle revisions share one pending worker for the same prediction scope', function () {
+    $service = app(AsyncTradeForecast::class);
+    $base = ['symbol' => 'BTCUSDT', 'exchange' => 'binance_futures', 'timeframe' => '1m', 'expiry_seconds' => 60,
+        'stake_amount' => 25, 'candles' => [['open' => 100, 'high' => 101, 'low' => 99, 'close' => 100]]];
+
+    expect($service->request('actor-a', 'forecast', $base)->getStatusCode())->toBe(202);
+    $newer = $base;
+    $newer['candles'][0]['close'] = 101;
+    expect($service->request('actor-a', 'forecast', $newer)->getStatusCode())->toBe(202);
+
+    Bus::assertDispatchedTimes(CalculateTradeForecast::class, 1);
+});
+
 test('worker publishes an exact-input result and request retrieves it without another job', function () {
     $service = app(AsyncTradeForecast::class);
     $input = ['symbol' => 'BTCUSDT', 'exchange' => 'binance_futures', 'timeframe' => '1m', 'expiry_seconds' => 60];
@@ -47,7 +60,7 @@ test('expired queued inputs are discarded and pending lock is released', functio
     $lock->get();
     $calculator = Mockery::mock(QuickTradeForecastCalculator::class);
     $calculator->shouldNotReceive('forecast');
-    $job = new CalculateTradeForecast('expired', $lock->owner(), 'forecast', [], time() - 21);
+    $job = new CalculateTradeForecast('expired', 'expired:pending', $lock->owner(), 'forecast', [], time() - 21);
     $job->handle($calculator, app(TradeForecastService::class));
     expect($cache->get('expired'))->toBeNull();
     $replacement = $cache->lock('expired:pending', 45);

@@ -53,10 +53,17 @@ class TradeForecastService
      *         forecast_stability window (see forecastStability()) to the right
      *         symbol+timeframe+horizon. Callers that don't pass it (existing callers,
      *         unchanged) simply get an 'UNKNOWN' stability label rather than a fabricated one.
+     * @param  float|null  $referencePrice  A server-validated current quote.
+     *         This changes the price from which the forecast is expressed, not
+     *         the candle-derived trend/pattern evidence. Callers must pass
+     *         null unless their own freshness gate has accepted the quote.
      */
-    public function forecast(array $candles, string $timeframe, int $horizonSeconds, ?array $decision = null, ?array $volatility = null, ?array $liveFeed = null, ?string $symbol = null): array
+    public function forecast(array $candles, string $timeframe, int $horizonSeconds, ?array $decision = null, ?array $volatility = null, ?array $liveFeed = null, ?string $symbol = null, ?float $referencePrice = null): array
     {
-        $currentPrice = (float) (end($candles)['close'] ?? 0);
+        $lastCandleClose = (float) (end($candles)['close'] ?? 0);
+        $currentPrice = $referencePrice !== null && $referencePrice > 0
+            ? $referencePrice
+            : $lastCandleClose;
 
         if (count($candles) < 10 || $currentPrice <= 0) {
             return [
@@ -201,6 +208,9 @@ class TradeForecastService
             'generated_at' => $generatedAt->toISOString(),
             'expiry_at' => $expiryAt->toISOString(),
             'reference_price' => round($currentPrice, 8),
+            'reference_price_source' => $referencePrice !== null && $referencePrice > 0
+                ? 'fresh_canonical_quote'
+                : 'latest_candle_close',
             'current_price' => round($currentPrice, 8),
             'predicted_expiry_price' => round($expectedMid, 8),
             'expected_mid_price' => round($expectedMid, 8),

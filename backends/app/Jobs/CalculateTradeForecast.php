@@ -19,6 +19,7 @@ class CalculateTradeForecast implements ShouldQueue
 
     public function __construct(
         public string $key,
+        public string $pendingKey,
         public string $lockOwner,
         public string $kind,
         public array $data,
@@ -28,6 +29,7 @@ class CalculateTradeForecast implements ShouldQueue
     public function handle(QuickTradeForecastCalculator $calculator, TradeForecastService $forecast): void
     {
         $cache = Cache::store('redis');
+        $startedAt = (int) floor(microtime(true) * 1000);
         try {
             // Expired inputs never become a newly generated trading signal.
             if (time() - $this->requestedAt >= 20) {
@@ -43,6 +45,8 @@ class CalculateTradeForecast implements ShouldQueue
                     'requested_at' => $this->requestedAt,
                     'generated_at' => time(),
                     'valid_until' => $this->requestedAt + 20,
+                    'queue_wait_ms' => max(0, $startedAt - ($this->requestedAt * 1000)),
+                    'compute_ms' => max(0, (int) floor(microtime(true) * 1000) - $startedAt),
                     'symbol' => $this->data['symbol'] ?? null,
                     'exchange' => $this->data['exchange'] ?? null,
                     'timeframe' => $this->data['timeframe'],
@@ -51,7 +55,7 @@ class CalculateTradeForecast implements ShouldQueue
                 $cache->put($this->key, $result, $remaining);
             }
         } finally {
-            $cache->restoreLock($this->key.':pending', $this->lockOwner)->release();
+            $cache->restoreLock($this->pendingKey, $this->lockOwner)->release();
         }
     }
 }

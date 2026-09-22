@@ -27,11 +27,19 @@ class QuickTradeForecastCalculator
         // symbol -- absence (e.g. no active WS subscription yet) is left
         // null, not treated as stale (see TradeForecastService::forecast()).
         $liveFeed = null;
+        $referencePrice = null;
         if (! empty($data['symbol'])) {
             $maxAge = app(RuntimeSafetySettingsService::class)->liveFeedMaxAgeSeconds(null);
             $snapshot = app(MarketPriceCacheService::class)->getLiveFeedSnapshot('binance_futures', (string) $data['symbol'], $maxAge);
             if ($snapshot !== null) {
                 $liveFeed = ['fresh' => (bool) ($snapshot['fresh'] ?? false), 'age_seconds' => $snapshot['age_seconds'] ?? null];
+                // Never trust a browser-supplied display quote for a forecast
+                // that may be shown beside a live-order control. Only the
+                // same server-side canonical quote that passed freshness can
+                // become the price reference.
+                if (($snapshot['fresh'] ?? false) && (float) ($snapshot['price'] ?? 0) > 0) {
+                    $referencePrice = (float) $snapshot['price'];
+                }
             }
         }
 
@@ -43,6 +51,7 @@ class QuickTradeForecastCalculator
             null,
             $liveFeed,
             ! empty($data['symbol']) ? (string) $data['symbol'] : null,
+            $referencePrice,
         );
         $netEdgeResult = $forecastSvc->netEdge($candles, (float) $data['stake_amount']);
 

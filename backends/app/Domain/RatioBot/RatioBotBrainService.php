@@ -2,6 +2,7 @@
 
 namespace App\Domain\RatioBot;
 
+use App\Domain\Market\LiveCandleCacheService;
 use App\Domain\Trading\SignalPreviewService;
 use App\Domain\Trading\TimeframeRegistry;
 use App\Domain\Trading\TradeForecastService;
@@ -29,6 +30,7 @@ class RatioBotBrainService
         private readonly SignalPreviewService $signals,
         private readonly TradeForecastService $forecast,
         private readonly TimeframeRegistry $timeframes,
+        private readonly LiveCandleCacheService $liveCandles,
     ) {
     }
 
@@ -93,6 +95,11 @@ class RatioBotBrainService
             return null;
         }
 
+        // `currentPrice` comes from the guarded canonical execution path.
+        // Keep the open candle in the analysis window, but make the forecast's
+        // reference explicitly current rather than the last persisted close.
+        $candles[array_key_last($candles)]['close'] = $currentPrice;
+
         $signal = $this->signals->preview($candles, $config->timeFrame(), []);
         $decision = $this->forecast->decisionFromSignalPreview($signal);
         $forecast = $this->forecast->forecast($candles, $config->timeFrame(), $horizonSeconds, $decision);
@@ -124,7 +131,7 @@ class RatioBotBrainService
      */
     private function fetchCandles(RatioBotConfig $config): array
     {
-        return MarketOhlc::query()
+        $closed = MarketOhlc::query()
             ->where('exchange', $config->exchangeKey())
             ->where('symbol', $config->normalizedSymbol())
             ->where('timeframe', $config->timeFrame())
@@ -134,6 +141,7 @@ class RatioBotBrainService
             ->reverse()
             ->values()
             ->map(fn ($candle) => [
+                'timestamp' => $candle->ts?->getTimestampMs(),
                 'open' => (float) $candle->open,
                 'high' => (float) $candle->high,
                 'low' => (float) $candle->low,
@@ -141,6 +149,32 @@ class RatioBotBrainService
                 'volume' => (float) $candle->volume,
             ])
             ->all();
+
+        // Redis only holds current transport state. Closed candles remain
+        // historical context from MarketOhlc and must never be rejected as
+        // "stale" merely because their close time is old.
+        $open = collect($this->liveCandles->candles(
+            $config->exchangeKey(),
+            $config->normalizedSymbol(),
+            $config->timeFrame(),
+            1,
+        ))->last(static fn (array $candle): bool => ! (bool) ($candle['is_closed'] ?? false));
+
+        if (! is_array($open)) {
+            return $closed;
+        }
+
+        $openTimestamp = (int) ($open['timestamp'] ?? 0);
+        // A cache can contain the just-closed candle briefly. Never duplicate
+        // it: replace the same timestamp, otherwise append the one open bar.
+        $index = array_key_last($closed);
+        if ($index !== null && (int) ($closed[$index]['timestamp'] ?? 0) === $openTimestamp) {
+            $closed[$index] = $open;
+        } else {
+            $closed[] = $open;
+        }
+
+        return $closed;
     }
 
     private function normalizeDirection(mixed $direction): string

@@ -88,6 +88,20 @@ class LiveCandleCacheService
         }
     }
 
+    /** Read-only bounded-cache telemetry for operator diagnostics. */
+    public function stats(string $exchange, string $symbol, string $timeframe): array
+    {
+        $rows = $this->candles($exchange, $symbol, $timeframe, self::MAX_CANDLES);
+        $latest = $rows === [] ? null : $rows[array_key_last($rows)];
+
+        return [
+            'size' => count($rows),
+            'latest_timestamp' => $latest['timestamp'] ?? null,
+            'latest_event_timestamp_ms' => $latest['event_timestamp_ms'] ?? null,
+            'latest_is_closed' => $latest['is_closed'] ?? null,
+        ];
+    }
+
     private function key(string $exchange, string $symbol, string $timeframe): string
     {
         return sprintf('live-candles:%s:%s:%s', strtolower($exchange), strtoupper($symbol), strtolower($timeframe));
