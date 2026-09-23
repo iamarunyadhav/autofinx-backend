@@ -23,6 +23,21 @@ class TradingModuleSettingsService
         return $this->mergedGroup('quick_trade', $workspaceId, [
             'default_duration' => 60,
             'default_timeframe' => '1m',
+            // LIVE-only fallback (2026-09-24, owner decision: enforce
+            // min_horizon_candles). `default_duration`/`default_timeframe`
+            // above stay untouched -- they remain the PAPER-mode fallback
+            // (and Robot Trade's own unrelated fallback in
+            // RobotSessionService::create()) so neither of those is affected
+            // by this change. A manual live placement that omits
+            // timeframe/expiry_seconds now falls back to the first
+            // `live_expiry_presets` entry in config/quick_trade.php (5m
+            // chart / 3600s expiry = 12 candles), which clears both the
+            // min_horizon_candles floor (3) and the cost-gate at realistic
+            // BTCUSDT volatility -- unlike the old 1m/60s fallback (1
+            // candle), which `enforce_min_horizon_candles` (now on by
+            // default) would immediately reject.
+            'default_live_timeframe' => '5m',
+            'default_live_duration' => 3600,
             'min_stake' => 10,
             'max_stake' => 500,
             'max_active_trades' => 5,

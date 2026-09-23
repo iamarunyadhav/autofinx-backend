@@ -130,7 +130,9 @@ function placeLiveQuickTradeWithStopLoss(
         'side' => 'buy',
         'stake_amount' => 20,
         'timeframe' => '1m',
-        'expiry_seconds' => 60,
+        // 5 candles -- these tests' subject is the stop-loss job, not the
+        // min-horizon-candles rule (which now ships enforced by default).
+        'expiry_seconds' => 300,
         'mode' => 'live',
         'provider' => 'binance',
         'integration_id' => $integrationId,

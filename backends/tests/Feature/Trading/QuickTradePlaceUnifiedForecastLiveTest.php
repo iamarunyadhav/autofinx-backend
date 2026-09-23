@@ -210,11 +210,17 @@ class QuickTradePlaceUnifiedForecastLiveTest extends TestCase
         $symbol = 'UFEE2EUSDT';
         $this->fakeBinance($symbol);
         $this->seedUptrend($symbol);
+        // 5 candles (300s) throughout -- the min-horizon-candles rule now
+        // ships enforced by default, so horizon_seconds must stay consistent
+        // between the seeded validated scope, the explicit evaluate() call,
+        // and the actual place() call below (all keyed on the same
+        // horizon_seconds); this test's subject is decision_source
+        // attribution, not the horizon rule itself.
         $botInstanceId = "binance:{$symbol}:1m";
-        $this->seedValidatedScope($botInstanceId, 60);
-        $this->seedWinningLiveTrades($symbol, '1m', 60);
+        $this->seedValidatedScope($botInstanceId, 300);
+        $this->seedWinningLiveTrades($symbol, '1m', 300);
 
-        $engineResult = app(UnifiedForecastEngine::class)->evaluate('quick_trade', $botInstanceId, 'binance', $symbol, '1m', 60);
+        $engineResult = app(UnifiedForecastEngine::class)->evaluate('quick_trade', $botInstanceId, 'binance', $symbol, '1m', 300);
         $this->assertSame('clear', $engineResult['status']);
         $this->assertSame('BUY', $engineResult['direction']);
 
@@ -234,7 +240,7 @@ class QuickTradePlaceUnifiedForecastLiveTest extends TestCase
             'side' => 'buy',
             'stake_amount' => 25,
             'timeframe' => '1m',
-            'expiry_seconds' => 60,
+            'expiry_seconds' => 300,
             'mode' => 'live',
             'provider' => 'binance',
             'integration_id' => $integration->id,
@@ -269,7 +275,7 @@ class QuickTradePlaceUnifiedForecastLiveTest extends TestCase
             'side' => 'buy',
             'stake_amount' => 25,
             'timeframe' => '1m',
-            'expiry_seconds' => 60,
+            'expiry_seconds' => 300,
             'mode' => 'live',
             'provider' => 'binance',
             'integration_id' => $integration->id,

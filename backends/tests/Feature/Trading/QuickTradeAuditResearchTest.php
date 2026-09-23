@@ -161,7 +161,10 @@ test('a duplicate-live-position block on a quick trade placement records a faile
         'side' => 'buy',
         'stake_amount' => 20,
         'timeframe' => '1m',
-        'expiry_seconds' => 60,
+        // 5 candles -- this test's subject is duplicate-live-position audit
+        // logging, not the min-horizon-candles rule (which now ships
+        // enforced by default).
+        'expiry_seconds' => 300,
         'mode' => 'live',
         'provider' => 'binance',
         'integration_id' => $integration->id,

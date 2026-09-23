@@ -49,12 +49,29 @@ class QuickTradeService
     {
         $workspaceId = (string) $payload['workspace_id'];
         $config = $this->settings->quickTradeConfig($workspaceId);
-        $timeframe = $this->timeframes->normalize((string) ($payload['timeframe'] ?? $config['default_timeframe'] ?? '1m'));
         $context = $this->executionContext($workspaceId, $payload, true);
         $mode = $context['mode'];
         $providerKey = $context['provider'];
         $integrationId = $context['integration_id'];
-        $expirySeconds = (int) ($payload['expiry_seconds'] ?? $config['default_duration'] ?? 60);
+        // The platform's own default timeframe/duration when a caller omits
+        // both (2026-09-24, owner decision: enforce min_horizon_candles).
+        // Mode-aware: PAPER (and Robot Trade's own separate fallback in
+        // RobotSessionService::create()) keep the original 1m/60s default
+        // byte-for-byte -- only a manual LIVE placement that omits both
+        // fields now falls back to `default_live_timeframe`/
+        // `default_live_duration` (5m/3600s, the first `live_expiry_presets`
+        // entry), which clears the min_horizon_candles floor. Resolved AFTER
+        // $mode is known, since which default applies depends on it.
+        $timeframe = $this->timeframes->normalize((string) ($payload['timeframe'] ?? (
+            $mode === 'live'
+                ? ($config['default_live_timeframe'] ?? $config['default_timeframe'] ?? '1m')
+                : ($config['default_timeframe'] ?? '1m')
+        )));
+        $expirySeconds = (int) ($payload['expiry_seconds'] ?? (
+            $mode === 'live'
+                ? ($config['default_live_duration'] ?? $config['default_duration'] ?? 60)
+                : ($config['default_duration'] ?? 60)
+        ));
         $stake = round((float) ($payload['stake_amount'] ?? 0), 8);
         $symbol = strtoupper((string) $payload['symbol']);
         $side = strtolower((string) $payload['side']);

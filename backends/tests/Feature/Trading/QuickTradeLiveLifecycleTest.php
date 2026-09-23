@@ -92,7 +92,10 @@ test('live quick trade opens on binance and settles on expiry using timed close'
         'side' => 'buy',
         'stake_amount' => 20,
         'timeframe' => '1m',
-        'expiry_seconds' => 60,
+        // 5 candles -- this test's subject is the live open/settle
+        // lifecycle itself, not the min-horizon-candles rule (which now
+        // ships enforced by default).
+        'expiry_seconds' => 300,
         'mode' => 'live',
         'provider' => 'binance',
         'integration_id' => $integration->id,
@@ -110,7 +113,9 @@ test('live quick trade opens on binance and settles on expiry using timed close'
         ->and((float) $wallet->available)->toBe(980.0)
         ->and((float) $wallet->locked_balance)->toBe(20.0);
 
-    CarbonImmutable::setTestNow(CarbonImmutable::parse('2026-03-10 11:01:05'));
+    // expiry_seconds is now 300 (not 60) -- advance past the real expiry
+    // (11:00:00 + 300s = 11:05:00) rather than the old 60s window.
+    CarbonImmutable::setTestNow(CarbonImmutable::parse('2026-03-10 11:05:05'));
 
     $this->postJson('/api/v1/quick-trade/settle-due', ['limit' => 10])->assertOk();
 
@@ -180,7 +185,7 @@ test('live quick trade rejects binance futures stake below minimum notional befo
         'side' => 'sell',
         'stake_amount' => 10,
         'timeframe' => '1m',
-        'expiry_seconds' => 60,
+        'expiry_seconds' => 300,
         'mode' => 'live',
         'provider' => 'binance',
         'integration_id' => $integration->id,
@@ -205,7 +210,7 @@ test('live quick trade is blocked when required settler runtime is unhealthy', f
         'side' => 'buy',
         'stake_amount' => 20,
         'timeframe' => '1m',
-        'expiry_seconds' => 60,
+        'expiry_seconds' => 300,
         'mode' => 'live',
         'provider' => 'binance',
         'integration_id' => $integration->id,
@@ -278,14 +283,16 @@ test('live quick trade sell settles with positive pnl when price falls', functio
         'side' => 'sell',
         'stake_amount' => 20,
         'timeframe' => '1m',
-        'expiry_seconds' => 60,
+        'expiry_seconds' => 300,
         'mode' => 'live',
         'provider' => 'binance',
         'integration_id' => $integration->id,
         'indicator_set' => ['MACD'],
     ])->assertCreated();
 
-    CarbonImmutable::setTestNow(CarbonImmutable::parse('2026-03-10 12:01:05'));
+    // expiry_seconds is now 300 (not 60) -- advance past the real expiry
+    // (12:00:00 + 300s = 12:05:00) rather than the old 60s window.
+    CarbonImmutable::setTestNow(CarbonImmutable::parse('2026-03-10 12:05:05'));
 
     $this->postJson('/api/v1/quick-trade/settle-due', ['limit' => 10])->assertOk();
 
@@ -357,7 +364,7 @@ test('live quick trade blocks duplicate same symbol open position', function () 
         'side' => 'buy',
         'stake_amount' => 20,
         'timeframe' => '1m',
-        'expiry_seconds' => 60,
+        'expiry_seconds' => 300,
         'mode' => 'live',
         'provider' => 'binance',
         'integration_id' => $integration->id,
@@ -397,7 +404,7 @@ test('live quick trade rejects stale binance websocket feed before placing order
         'side' => 'buy',
         'stake_amount' => 20,
         'timeframe' => '1m',
-        'expiry_seconds' => 60,
+        'expiry_seconds' => 300,
         'mode' => 'live',
         'provider' => 'binance',
         'integration_id' => $integration->id,

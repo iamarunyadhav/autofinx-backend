@@ -121,7 +121,10 @@ function placeMarginQuickTrade(Workspace $workspace, Integration $integration, a
         'side' => 'buy',
         'stake_amount' => 40,
         'timeframe' => '1m',
-        'expiry_seconds' => 60,
+        // 5 candles -- these tests' subject is margin/liquidation checks,
+        // not the min-horizon-candles rule (which now ships enforced by
+        // default).
+        'expiry_seconds' => 300,
         'mode' => 'live',
         'provider' => 'binance',
         'integration_id' => $integration->id,

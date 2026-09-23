@@ -61,27 +61,32 @@ return [
     'min_horizon_candles' => env('QUICK_TRADE_MIN_HORIZON_CANDLES', 3),
 
     /**
-     * !! OWNER DECISION REQUIRED -- ships OFF deliberately. !!
+     * !! OWNER DECISION MADE (2026-09-24): ships ON. !!
      *
-     * Turning this on enforces `min_horizon_candles` above (3) on manual LIVE
-     * placements. That is exactly what the spec asks for, and it is the right
-     * rule on the evidence. It is not enabled by default here because
-     * 1m chart / 60s expiry is currently the PLATFORM'S OWN DEFAULT live
-     * combination (TradingModuleSettingsService::quickTradeConfig():
-     * default_timeframe '1m', default_duration 60) -- 1 candle, which this
-     * rule rejects. Flipping the default would therefore silently stop the
-     * out-of-the-box live configuration from trading at all, which is a
-     * product decision, not a code detail.
+     * Enforces `min_horizon_candles` above (3) on manual LIVE placements.
+     * This used to ship OFF because 1m chart / 60s expiry was the
+     * PLATFORM'S OWN DEFAULT live combination (1 candle, which this rule
+     * rejects) -- flipping the default without also fixing that would have
+     * silently stopped the out-of-the-box live configuration from trading
+     * at all. Both are now fixed together:
+     *   - `TradingModuleSettingsService::quickTradeConfig()` now has a
+     *     LIVE-only fallback (`default_live_timeframe` '5m',
+     *     `default_live_duration` 3600s = 12 candles, matching the
+     *     recommended `live_expiry_presets` entry below) that
+     *     `QuickTradeService::place()` uses whenever a manual live
+     *     placement omits both fields. PAPER mode's fallback (1m/60s) and
+     *     Robot Trade's own separate fallback are untouched.
+     *   - Every existing test that used a manual live 1m/60s trade purely
+     *     as a vehicle for testing something else (stop-loss, take-profit,
+     *     leverage, margin/liquidation, fee settlement) was moved to a
+     *     live-valid combination (1m/300s = 5 candles).
      *
-     * To enable: set QUICK_TRADE_ENFORCE_MIN_HORIZON_CANDLES=true. Doing so
-     * also requires updating the 37 existing tests that place a manual live
-     * 1m/60s trade as the vehicle for testing something else entirely
-     * (stop-loss, take-profit, leverage, margin/liquidation, fee settlement)
-     * -- they need a live-valid combination such as 1m/300s. The guard itself
-     * is fully implemented and unit-tested either way; only its default is
-     * conservative.
+     * Production sets QUICK_TRADE_ENFORCE_MIN_HORIZON_CANDLES=true via
+     * .env; this default matches that so local dev/test runs the same rule
+     * production does. The guard itself has dedicated coverage in
+     * QuickTradeDecisionExecutionGuardTest regardless of this default.
      */
-    'enforce_min_horizon_candles' => env('QUICK_TRADE_ENFORCE_MIN_HORIZON_CANDLES', false),
+    'enforce_min_horizon_candles' => env('QUICK_TRADE_ENFORCE_MIN_HORIZON_CANDLES', true),
 
     /** Reject chart timeframe > expiry outright (both modes). */
     'reject_timeframe_above_expiry' => env('QUICK_TRADE_REJECT_TIMEFRAME_ABOVE_EXPIRY', true),

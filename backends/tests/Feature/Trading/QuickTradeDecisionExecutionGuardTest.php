@@ -123,7 +123,11 @@ function placeGuardedLiveTrade(array $overrides = []): \Illuminate\Testing\TestR
         'side' => 'buy',
         'stake_amount' => 20,
         'timeframe' => '1m',
-        'expiry_seconds' => 60,
+        // 5 candles -- the A5 tests below are about the decision-agreement
+        // guard, not the min-horizon-candles rule (which now ships on by
+        // default and has its own dedicated tests further down using an
+        // explicit 1m/60s override).
+        'expiry_seconds' => 300,
         'mode' => 'live',
         'provider' => 'binance',
         'integration_id' => $integration->id,
@@ -257,9 +261,15 @@ test('the min-horizon-candles guard allows a live 1m/300s combination when enabl
     placeGuardedLiveTrade(['timeframe' => '1m', 'expiry_seconds' => 300])->assertCreated();
 });
 
-test('the min-horizon-candles guard is inert by default so existing live combinations keep working', function () {
+test('the min-horizon-candles guard ships enabled by default so a live 1m/60s combination is rejected with no explicit config override', function () {
+    // 2026-09-24 owner decision: this rule is now ON out of the box (see
+    // config/quick_trade.php). This test used to prove the opposite (the
+    // rule was inert unless explicitly enabled) -- it now guards the new
+    // shipped default itself, distinct from the tests above/below that
+    // explicitly force the flag one way or the other.
     config()->set('quick_trade.block_live_against_decision', false);
 
-    expect(config('quick_trade.enforce_min_horizon_candles'))->toBeFalse();
-    placeGuardedLiveTrade(['timeframe' => '1m', 'expiry_seconds' => 60])->assertCreated();
+    expect(config('quick_trade.enforce_min_horizon_candles'))->toBeTrue();
+    $response = placeGuardedLiveTrade(['timeframe' => '1m', 'expiry_seconds' => 60])->assertStatus(422);
+    expect($response->json('message'))->toContain('require at least 3');
 });
