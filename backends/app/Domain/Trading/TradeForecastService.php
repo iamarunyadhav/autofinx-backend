@@ -134,7 +134,15 @@ class TradeForecastService
         $feeRate = max(0.0, (float) config('trading.binance_futures_taker_fee_rate', 0.0005));
         $slippageBufferPct = max(0.0, (float) config('robot_trade.live_slippage_buffer_pct', 0.04));
         $costPct = ($feeRate * 2 * 100) + $slippageBufferPct;
-        $decisionTrend = abs($displacementPct) <= max($costPct, $rangePct * 0.12)
+        // Same 2x round-trip-cost safety margin netEdge() already requires
+        // before calling a trade genuinely worth taking (see its docblock) --
+        // the BUY/SELL badge must never light up on a move netEdge() itself
+        // would reject as not clearing the live safety threshold. Reuses the
+        // exact same config key; the rangePct*0.12 volatility floor below is
+        // an orthogonal minimum-move-relative-to-range concept and is left
+        // untouched.
+        $decisionTrendCostPct = $costPct * (float) config('robot_trade.live_min_edge_cost_multiplier', 2.0);
+        $decisionTrend = abs($displacementPct) <= max($decisionTrendCostPct, $rangePct * 0.12)
             ? 'WAIT' : ($expectedMid > $currentPrice ? 'BUY' : 'SELL');
         // Keep the response stable for callers that compare shadow on/off
         // payloads byte-for-byte; sub-second clock noise is not forecast data.
