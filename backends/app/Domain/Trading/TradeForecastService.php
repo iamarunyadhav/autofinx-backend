@@ -57,8 +57,16 @@ class TradeForecastService
      *         This changes the price from which the forecast is expressed, not
      *         the candle-derived trend/pattern evidence. Callers must pass
      *         null unless their own freshness gate has accepted the quote.
+     * @param  array|null  $candleTiming  Optional, additive (Part B). The
+     *         `CandleCloseResolver::resolve()` result for the candles being
+     *         passed in. ONLY Quick Trade's own call sites supply it; every
+     *         other caller (Ratio Bot, Robot Trade, Future Trade) passes
+     *         null and gets byte-identical behaviour to before — no
+     *         candle_gap gate, no B3 timing fields. When supplied, it adds
+     *         the decision_candle_close_at/seconds_since_last_close fields
+     *         and enables the candle_gap WAIT gate.
      */
-    public function forecast(array $candles, string $timeframe, int $horizonSeconds, ?array $decision = null, ?array $volatility = null, ?array $liveFeed = null, ?string $symbol = null, ?float $referencePrice = null): array
+    public function forecast(array $candles, string $timeframe, int $horizonSeconds, ?array $decision = null, ?array $volatility = null, ?array $liveFeed = null, ?string $symbol = null, ?float $referencePrice = null, ?array $candleTiming = null): array
     {
         $lastCandleClose = (float) (end($candles)['close'] ?? 0);
         $currentPrice = $referencePrice !== null && $referencePrice > 0
@@ -178,6 +186,16 @@ class TradeForecastService
             $gateReason = 'low_volume';
         }
 
+        // B4 -- candle-gap gate. Only ever evaluated when the caller supplied
+        // real candle-close timing (Quick Trade's own paths); a caller that
+        // passed null is unaffected. Ordered AFTER the stale-quote gate so a
+        // genuinely stale feed keeps its more specific reason, and before the
+        // summary below so the user sees a numeric explanation.
+        if ($candleTiming !== null && ($candleTiming['candle_gap'] ?? false) === true && $gateReason === null) {
+            $decisionTrend = 'WAIT';
+            $gateReason = 'candle_gap';
+        }
+
         // Support/resistance rejection awareness: surfaced as a caution flag,
         // not a forced WAIT, based on the pre-gate direction (the direction
         // the prediction was actually heading before any gate above fired).
@@ -194,11 +212,44 @@ class TradeForecastService
         $summary = match (true) {
             $gateReason === 'stale_data' => 'Price data is stale; waiting for a fresh quote before showing a confident direction.',
             $gateReason === 'low_volume' => 'Trading volume is unusually low right now; waiting for volume to normalize before showing a confident direction.',
+            $gateReason === 'candle_gap' => 'The last closed candle is older than this chart\'s own candle interval allows; waiting for the feed to catch up before showing a confident direction.',
             $decisionTrend === 'WAIT' => 'Expiry move does not clear uncertainty and estimated costs; wait.',
             default => "{$currentTrend} is the current trend; {$decisionTrend} is derived from the predicted expiry price at {$expiryAt->format('H:i:s')}.",
         };
 
         $stability = $this->forecastStability($symbol, $timeframe, $horizonSeconds, $decisionTrend, $generatedAt);
+
+        // --- Part A1: the two honest, separate answers ----------------------
+        // Nothing new is computed here. `direction` restates the ALREADY
+        // computed, cost-blind $bias/$expiryScore/$displacementPct;
+        // `trade_decision` restates the ALREADY computed, cost-aware
+        // $decisionTrend plus the exact numbers that produced it. There is
+        // deliberately no second forecast engine: both blocks are views onto
+        // the same single evaluation above, which is why they can never
+        // disagree with the legacy `bias`/`decision_trend` fields (kept below
+        // unchanged for backward compatibility).
+        $costModel = app(QuickTradeCostModel::class);
+        $maxAchievableMovePct = $costModel->maxAchievableMovePct($atrPct, $horizonCandles);
+        $directionBlock = [
+            'value' => $bias,
+            'source' => 'bias (expiryScore >= 0.20 / <= -0.20)',
+            'expiry_score' => round($expiryScore, 4),
+            'expected_move_pct' => round($displacementPct, 4),
+            'fee_aware' => false,
+        ];
+        $tradeDecisionBlock = [
+            'value' => $decisionTrend,
+            'fee_aware' => true,
+            'required_move_pct' => round($decisionTrendCostPct, 4),
+            'max_achievable_move_pct' => round($maxAchievableMovePct, 4),
+            'cost_pct' => round($costPct, 4),
+            'gate_reason' => $gateReason,
+            // Additive context the UI needs so it never hardcodes a number.
+            'expected_move_pct' => round($displacementPct, 4),
+            'fee_model' => $costModel->costs()['fee_model'],
+            'fee_rate_source' => $costModel->costs()['fee_rate_source'],
+            'volatility_floor_pct' => round($rangePct * 0.12, 4),
+        ];
 
         return [
             'available' => true,
@@ -253,6 +304,19 @@ class TradeForecastService
             // change at all.
             'gate_reason' => $gateReason,
             'context_caution' => $contextCaution,
+            // Part A1 -- additive. Existing `bias`/`decision_trend` above are
+            // untouched; these are the explicitly-labelled, fee-aware-flagged
+            // pair the UI renders.
+            'direction' => $directionBlock,
+            'trade_decision' => $tradeDecisionBlock,
+            // Part B3 -- present only when the caller supplied candle timing
+            // (Quick Trade's own paths). Null, never fabricated, otherwise.
+            'input_candles_include_forming_bar' => $candleTiming === null
+                ? null
+                : (bool) ($candleTiming['include_forming_bar'] ?? true),
+            'decision_candle_close_at' => $candleTiming['decision_candle_close_at'] ?? null,
+            'seconds_since_last_close' => $candleTiming['seconds_since_last_close'] ?? null,
+            'next_close_in_seconds' => $candleTiming['next_close_in_seconds'] ?? null,
             'summary' => $summary,
         ];
     }
@@ -417,8 +481,14 @@ class TradeForecastService
      * profit estimate — the `_actual` fields use the real round-trip cost.
      *
      * @param  array<array{high:mixed,low:mixed,close:mixed}>  $candles
+     * @param  int|null  $horizonCandles  Optional, additive: how many chart
+     *         candles fit inside the trade expiry. Supplied only by Quick
+     *         Trade's own call sites so `max_achievable_move_pct` and the
+     *         C4 binding-constraint hint can be computed; existing callers
+     *         pass nothing and get null for those fields rather than a
+     *         fabricated value.
      */
-    public function netEdge(array $candles, float $stake): array
+    public function netEdge(array $candles, float $stake, ?int $horizonCandles = null): array
     {
         $atrPct = $this->computeAtrAvgPct($candles);
         $expectedMovePct = max(0.0, $atrPct * 0.35);
@@ -452,6 +522,27 @@ class TradeForecastService
             'actual_cost_usdt' => round($actualCostUsdt, 8),
             'expected_net_usdt_actual' => round($expectedNetUsdtActual, 8),
         ];
+
+        // Part C4 -- name the constraint that is ACTUALLY binding instead of
+        // the old "try a longer duration or a bigger stake" catch-all, which
+        // was misleading: fees and PnL both scale with notional, so a bigger
+        // stake can only ever clear the absolute min_expected_net_usdt floor,
+        // never the percentage cost gate. Additive fields only; `reason`
+        // below keeps its exact original wording for backward compatibility.
+        $costModel = app(QuickTradeCostModel::class);
+        $maxAchievableMovePct = $horizonCandles !== null
+            ? $costModel->maxAchievableMovePct($atrPct, $horizonCandles)
+            : null;
+        $binding = $costModel->bindingConstraint(
+            $maxAchievableMovePct ?? $expectedMovePct,
+            $expectedMovePct,
+            $expectedNetUsdt,
+        );
+        $result['max_achievable_move_pct'] = $maxAchievableMovePct !== null ? round($maxAchievableMovePct, 4) : null;
+        $result['binding_constraint'] = $binding['constraint'];
+        $result['binding_constraint_hint'] = $binding['hint'];
+        $result['fee_model'] = $costModel->costs()['fee_model'];
+        $result['fee_rate_source'] = $costModel->costs()['fee_rate_source'];
 
         if (! $result['tradeable']) {
             $result['reason'] = sprintf(

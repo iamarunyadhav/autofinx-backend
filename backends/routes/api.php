@@ -192,6 +192,8 @@ Route::prefix('v1')->group(function () {
         Route::post('workspaces/{workspace}/quick-trades/research/backtest', [\App\Http\Controllers\Api\QuickTradeResearchController::class, 'startBacktest'])->middleware('throttle:10,1');
         Route::post('workspaces/{workspace}/quick-trades/research/export', [\App\Http\Controllers\Api\QuickTradeResearchController::class, 'index'])->middleware('throttle:30,1');
         Route::get('workspaces/{workspace}/quick-trades/research/calibration', [\App\Http\Controllers\Api\QuickTradeResearchController::class, 'calibration'])->middleware('throttle:30,1');
+        // Part D1/D2/D3 -- bucketed accuracy, break-even and confidence reliability.
+        Route::get('workspaces/{workspace}/quick-trades/research/accuracy-report', [\App\Http\Controllers\Api\QuickTradeResearchController::class, 'accuracyReport'])->middleware('throttle:30,1');
         Route::get('workspaces/{workspace}/quick-trades/research/readiness', [\App\Http\Controllers\Api\QuickTradeResearchController::class, 'readiness'])->middleware('throttle:30,1');
         Route::get('workspaces/{workspace}/quick-trades/research/readiness-history', [\App\Http\Controllers\Api\QuickTradeResearchController::class, 'readinessHistory'])->middleware('throttle:30,1');
         Route::get('workspaces/{workspace}/quick-trades/research/compare', [\App\Http\Controllers\Api\QuickTradeResearchController::class, 'compare'])->middleware('throttle:30,1');

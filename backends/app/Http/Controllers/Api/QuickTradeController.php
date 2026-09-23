@@ -100,6 +100,13 @@ class QuickTradeController extends Controller
             // contextFeatures() compute real volume_ratio/volume_status
             // instead of always falling back to "unknown".
             'candles.*.volume' => 'nullable|numeric',
+            // Part B: the candle's OPEN time. Required for "closed candles
+            // only" to mean anything -- without it CandleCloseResolver
+            // cannot tell a closed bar from the forming one and honestly
+            // reports timestamps_available=false rather than guessing.
+            // Nullable so existing callers that omit it keep working.
+            'candles.*.timestamp' => 'nullable|numeric',
+            'candles.*.opens_at' => 'nullable|string|max:64',
             'signal' => 'nullable|array',
             'signal.direction' => 'nullable|string',
             'signal.confidence' => 'nullable|numeric',
@@ -113,6 +120,14 @@ class QuickTradeController extends Controller
             'symbol' => 'nullable|string|max:32',
             'exchange' => 'nullable|string|max:32',
             'market_context' => 'nullable|string|max:200',
+            // Part C2/C3: the duration options the picker is showing, so the
+            // backend can return each one's real max-achievable move and
+            // disabled reason at the CURRENT volatility. Purely additive --
+            // omit them and the response simply has no
+            // duration_availability block.
+            'mode' => 'nullable|string|in:paper,live',
+            'durations' => 'nullable|array|max:20',
+            'durations.*' => 'integer|min:5|max:3600',
         ]);
 
         if ($request->boolean('async')) {

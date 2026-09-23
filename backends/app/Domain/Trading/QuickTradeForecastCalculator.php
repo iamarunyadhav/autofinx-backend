@@ -8,6 +8,7 @@ use App\Domain\MarketIntelligence\UnifiedForecastEngine;
 use App\Domain\MarketIntelligence\UnifiedForecastLiveGate;
 use App\Domain\Ops\FeatureFlagService;
 use App\Models\AuditEvent;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 use Throwable;
 
@@ -16,7 +17,13 @@ class QuickTradeForecastCalculator
 {
     public function forecast(array $data, TradeForecastService $forecastSvc): array
     {
-        $candles = $data['candles'];
+        // --- Part B1: decisions are computed from CLOSED candles only -------
+        // The forming bar is still what supplies `current_price` (via the
+        // canonical live quote resolved below), it just never contributes to
+        // direction / trade decision / indicator evidence.
+        $rawCandles = $data['candles'];
+        $timing = app(CandleCloseResolver::class)->resolve($rawCandles, (string) $data['timeframe']);
+        $candles = $timing['candles'];
         $decision = isset($data['signal']) ? $forecastSvc->decisionFromSignalPreview($data['signal']) : null;
 
         // Optional, additive: reuse the same live-feed-freshness mechanism
@@ -60,8 +67,58 @@ class QuickTradeForecastCalculator
             $liveFeed,
             ! empty($data['symbol']) ? (string) $data['symbol'] : null,
             $referencePrice,
+            $timing,
         );
-        $netEdgeResult = $forecastSvc->netEdge($candles, (float) $data['stake_amount']);
+        $costModel = app(QuickTradeCostModel::class);
+        $horizonCandles = $costModel->horizonCandles((int) $data['expiry_seconds'], (int) $timing['timeframe_seconds']);
+        $netEdgeResult = $forecastSvc->netEdge($candles, (float) $data['stake_amount'], $horizonCandles);
+
+        // --- Part C2/C3: per-duration availability at the CURRENT volatility.
+        // Everything the duration picker renders (max achievable %, required
+        // %, the disabled reason, the shortest viable expiry) is computed
+        // here and sent down, so the UI never hardcodes a percentage.
+        $atrPct = (float) ($forecastResult['atr_pct'] ?? 0);
+        $mode = strtolower((string) ($data['mode'] ?? 'paper'));
+        $durations = array_values(array_filter(array_map(
+            static fn ($value) => (int) $value,
+            (array) ($data['durations'] ?? []),
+        ), static fn (int $value) => $value > 0));
+        if ($durations !== []) {
+            $forecastResult['duration_availability'] = $costModel->durationAvailability(
+                $durations,
+                $atrPct,
+                (int) $timing['timeframe_seconds'],
+                $mode,
+            );
+            $shortest = $costModel->shortestViableExpirySeconds($durations, $atrPct, (int) $timing['timeframe_seconds']);
+            $forecastResult['shortest_viable_expiry_seconds'] = $shortest;
+        }
+        $forecastResult['cost_model'] = $costModel->costs();
+        $forecastResult['candle_timing'] = [
+            'timeframe_seconds' => $timing['timeframe_seconds'],
+            'decision_candle_close_at' => $timing['decision_candle_close_at'],
+            'seconds_since_last_close' => $timing['seconds_since_last_close'],
+            'next_close_in_seconds' => $timing['next_close_in_seconds'],
+            'grace_ms' => $timing['grace_ms'],
+            'within_grace' => $timing['within_grace'],
+            'candle_gap' => $timing['candle_gap'],
+            'forming_bar_dropped' => $timing['forming_bar_dropped'],
+            'timestamps_available' => $timing['timestamps_available'],
+            'closed_candles_used' => count($candles),
+            'raw_candles_supplied' => count($rawCandles),
+        ];
+
+        // --- Part B2: close-anchored decision cache ------------------------
+        // The decision is recomputed once per CLOSED candle (plus a grace
+        // window that absorbs feed-delivery jitter) and reused until the next
+        // close, so the verdict on screen cannot flicker mid-candle. Only the
+        // DECISION fields are cached — price, live_feed and the candle
+        // countdown stay live on every call, because freezing a displayed
+        // price beside a live order button would be actively dangerous.
+        // Scoped to this Quick Trade calculator: TradeForecastService itself
+        // is untouched, so Ratio Bot / Robot Trade / Future Trade keep their
+        // existing every-call behaviour.
+        $forecastResult = $this->applyCloseAnchoredDecisionCache($forecastResult, $data, $timing);
 
         // Additive baseline set BEFORE the shadow block below so the
         // AuditEventRecorder 'old' snapshot it logs and the actual JSON
@@ -123,6 +180,89 @@ class QuickTradeForecastCalculator
             'forecast' => $forecastResult,
             'net_edge' => $netEdgeResult,
          ];
+    }
+
+    /**
+     * Fields that make up "the decision" for close-anchored caching (B2).
+     * Deliberately NOT including price/live_feed/candle_timing: those stay
+     * live on every call.
+     */
+    private const CACHED_DECISION_FIELDS = [
+        'bias', 'decision_trend', 'confidence', 'confidence_status',
+        'direction', 'trade_decision', 'gate_reason', 'context_caution',
+        'evidence', 'current_trend', 'summary', 'generated_at',
+        'forecast_stability', 'forecast_stability_flips', 'forecast_stability_window',
+    ];
+
+    /**
+     * @param  array<string,mixed>  $forecastResult
+     * @param  array<string,mixed>  $data
+     * @param  array<string,mixed>  $timing
+     * @return array<string,mixed>
+     */
+    private function applyCloseAnchoredDecisionCache(array $forecastResult, array $data, array $timing): array
+    {
+        if (! (bool) config('quick_trade.decision_close_anchored_cache', true)
+            || empty($data['symbol'])
+            || ($forecastResult['available'] ?? false) !== true
+            || ($timing['timestamps_available'] ?? false) !== true) {
+            $forecastResult['decision_cache'] = ['status' => 'not_applicable'];
+
+            return $forecastResult;
+        }
+
+        $resolver = app(CandleCloseResolver::class);
+        $closeMs = $timing['decision_candle_close_ms'] ?? null;
+        // Inside the grace window immediately after a close, the newly closed
+        // bar may not be fully delivered yet — keep serving the PREVIOUS
+        // candle's decision rather than deciding on a half-written bar.
+        $anchorMs = ($timing['within_grace'] ?? false) && $closeMs !== null
+            ? $closeMs - ((int) $timing['timeframe_seconds'] * 1000)
+            : $closeMs;
+
+        $key = $resolver->decisionCacheKey(
+            (string) $data['symbol'],
+            (string) $data['timeframe'],
+            (int) $data['expiry_seconds'],
+            $anchorMs,
+        );
+        if ($key === null) {
+            $forecastResult['decision_cache'] = ['status' => 'not_applicable'];
+
+            return $forecastResult;
+        }
+
+        $ttlSeconds = max(60, (int) $timing['timeframe_seconds'] * 3);
+        $cached = Cache::get($key);
+        if (is_array($cached)) {
+            foreach (self::CACHED_DECISION_FIELDS as $field) {
+                if (array_key_exists($field, $cached)) {
+                    $forecastResult[$field] = $cached[$field];
+                }
+            }
+            $forecastResult['decision_cache'] = [
+                'status' => 'reused',
+                'anchor_candle_close_ms' => $anchorMs,
+                'next_decision_in_seconds' => $timing['next_close_in_seconds'],
+            ];
+
+            return $forecastResult;
+        }
+
+        $snapshot = [];
+        foreach (self::CACHED_DECISION_FIELDS as $field) {
+            if (array_key_exists($field, $forecastResult)) {
+                $snapshot[$field] = $forecastResult[$field];
+            }
+        }
+        Cache::put($key, $snapshot, $ttlSeconds);
+        $forecastResult['decision_cache'] = [
+            'status' => 'computed',
+            'anchor_candle_close_ms' => $anchorMs,
+            'next_decision_in_seconds' => $timing['next_close_in_seconds'],
+        ];
+
+        return $forecastResult;
     }
 
     /** Returns the only canonical Redis namespaces supported by this preview. */

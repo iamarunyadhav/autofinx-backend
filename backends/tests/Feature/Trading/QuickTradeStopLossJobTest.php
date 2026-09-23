@@ -22,6 +22,16 @@ use Illuminate\Support\Str;
  */
 function stopLossWorkspace(string $symbol = 'ETHUSDT'): array
 {
+    // Part A5 (2026-09-24): these tests predate the fee-aware live execution
+    // guard and use a live placement purely as the vehicle for testing
+    // something else (stop-loss, take-profit, margin/liquidation, settlement).
+    // With `quick_trade.block_live_against_decision` at its real default of
+    // true, the genuine forecast for these synthetic candle series returns
+    // WAIT and would refuse the order before the behaviour under test is ever
+    // reached. Opting out here keeps each test focused on its own subject;
+    // the guard itself has dedicated coverage in
+    // QuickTradeDecisionExecutionGuardTest.
+    config()->set('quick_trade.block_live_against_decision', false);
     $user = User::factory()->create();
     $workspace = Workspace::factory()->create();
     $integration = Integration::create([

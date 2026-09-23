@@ -116,6 +116,46 @@ class QuickTradeService
         if (! in_array($expirySeconds, $this->settings->durationsForMode($workspaceId, $mode, $providerKey), true)) {
             throw new RuntimeException('Selected duration is not enabled for quick trading.');
         }
+        // --- Part B5: chart timeframe must never exceed the trade expiry ----
+        // A 15m chart with a 60s expiry cannot observe the move it is being
+        // asked to predict; the forecast already emitted a resolution_warning
+        // for exactly this case, which this turns into a hard rejection.
+        // Scoped to LIVE mode deliberately. The spec states this rule without
+        // qualifying the mode, but paper mode's own configured durations
+        // include 5s/15s/30s (TradingModuleSettingsService::quickTradeConfig()
+        // 'durations' => [5,15,30,60,300,900]) against a 1m minimum chart
+        // timeframe -- i.e. the product intentionally offers sub-timeframe
+        // paper practice trades. Enforcing this in paper would delete an
+        // existing, no-money-at-risk feature, which is outside this task's
+        // remit; the money-risk surface (live) is fully covered.
+        $timeframeSeconds = max(1, $this->timeframes->seconds($timeframe));
+        if ($mode === 'live' && (bool) config('quick_trade.reject_timeframe_above_expiry', true) && $timeframeSeconds > $expirySeconds) {
+            throw new RuntimeException(sprintf(
+                'Chart timeframe (%s = %ds) is longer than the %ds expiry. Choose a chart timeframe at or below the trade duration.',
+                $timeframe,
+                $timeframeSeconds,
+                $expirySeconds,
+            ));
+        }
+        // Scoped to LIVE + MANUAL placements. Robot Trade drives this same
+        // place() programmatically with its own session configuration
+        // (RobotSessionService) and is explicitly out of this task's scope --
+        // silently changing which combinations a running Robot Trade session
+        // may open would be a behaviour change nobody asked for.
+        $horizonCandles = app(QuickTradeCostModel::class)->horizonCandles($expirySeconds, $timeframeSeconds);
+        $minHorizonCandles = max(1, (int) config('quick_trade.min_horizon_candles', 3));
+        if ($mode === 'live'
+            && $source === 'manual_quick_trade'
+            && (bool) config('quick_trade.enforce_min_horizon_candles', false)
+            && $horizonCandles < $minHorizonCandles) {
+            throw new RuntimeException(sprintf(
+                'Only %d %s candle(s) fit inside a %ds expiry; live quick trades require at least %d. Use a shorter chart timeframe or a longer duration.',
+                $horizonCandles,
+                $timeframe,
+                $expirySeconds,
+                $minHorizonCandles,
+            ));
+        }
         if ($stopLossPct !== null && $stopLossPct >= 0) {
             throw new RuntimeException('stop_loss_pct must be a negative percentage (e.g. -2.00 for a 2% stop).');
         }
@@ -262,6 +302,16 @@ class QuickTradeService
         // prediction for this symbol/timeframe/expiry at the time of
         // entry", not a guess or stale value.
         $manualActionDisagreedWithPrediction = $this->manualActionDisagreedWithPrediction($signalPayload, $side);
+
+        // --- Part A5: server-side execution guard ---------------------------
+        // The confirmation dialog in the UI is a courtesy; THIS is the
+        // enforcement. Live only (the spec's "default true in live, false in
+        // paper" -- paper never reaches this branch). Reads the same fresh
+        // research snapshot captured moments ago, and refuses with the actual
+        // numbers rather than a generic message.
+        if ($mode === 'live') {
+            $this->assertOrderAgreesWithTradeDecision($workspaceId, $signalPayload, $side, $traceId, $robotSessionId, $symbol, $mode);
+        }
 
         $entryAt = CarbonImmutable::now();
         $walletAccountId = $payload['wallet_account_id'] ?? null;
@@ -701,6 +751,80 @@ class QuickTradeService
      * is purely additive metadata -- it is never read back into $side or
      * any order-routing decision.
      */
+    /**
+     * Part A5 -- refuse a LIVE order that disagrees with the fee-aware trade
+     * decision, when `quick_trade.block_live_against_decision` is on
+     * (workspace-overridable; platform default true).
+     *
+     * Deliberately conservative about what counts as a disagreement:
+     *  - a decision of WAIT blocks both sides;
+     *  - a decision of BUY blocks a sell and vice versa;
+     *  - anything else -- no research snapshot captured, forecast
+     *    unavailable, non-manual source -- is NOT a disagreement and never
+     *    blocks. A missing prediction must not become a trading outage.
+     *
+     * Throws RuntimeException, which QuickTradeController::place() already
+     * renders as a 422 carrying this exact message.
+     */
+    private function assertOrderAgreesWithTradeDecision(
+        string $workspaceId,
+        array $signalPayload,
+        string $side,
+        string $traceId,
+        ?string $robotSessionId,
+        string $symbol,
+        string $mode,
+    ): void {
+        $config = $this->settings->quickTradeConfig($workspaceId);
+        $blockEnabled = array_key_exists('block_live_against_decision', $config)
+            ? filter_var($config['block_live_against_decision'], FILTER_VALIDATE_BOOLEAN)
+            : (bool) config('quick_trade.block_live_against_decision', true);
+        if (! $blockEnabled) {
+            return;
+        }
+
+        $primary = (array) data_get($signalPayload, 'research.primary', []);
+        $decision = strtoupper((string) data_get($primary, 'trade_decision.value', data_get($primary, 'decision_trend', '')));
+        if (! in_array($decision, ['BUY', 'SELL', 'WAIT'], true)) {
+            return;
+        }
+        if ($decision !== 'WAIT' && strtolower($decision) === strtolower($side)) {
+            return;
+        }
+
+        $required = data_get($primary, 'trade_decision.required_move_pct');
+        $maxAchievable = data_get($primary, 'trade_decision.max_achievable_move_pct');
+        $expected = data_get($primary, 'trade_decision.expected_move_pct', data_get($primary, 'predicted_move_pct'));
+        $gateReason = data_get($primary, 'trade_decision.gate_reason');
+
+        $message = $decision === 'WAIT'
+            ? sprintf(
+                'quick_trade_blocked_against_decision: The fee-aware trade decision is WAIT, so a live %s was refused.%s Expected move %s%%, required %s%% after fees, max achievable at current volatility %s%%.',
+                strtoupper($side),
+                $gateReason !== null ? ' Gate: '.$gateReason.'.' : '',
+                $this->formatPct($expected),
+                $this->formatPct($required),
+                $this->formatPct($maxAchievable),
+            )
+            : sprintf(
+                'quick_trade_blocked_against_decision: The fee-aware trade decision is %s, so a live %s was refused. Expected move %s%%, required %s%% after fees, max achievable at current volatility %s%%.',
+                $decision,
+                strtoupper($side),
+                $this->formatPct($expected),
+                $this->formatPct($required),
+                $this->formatPct($maxAchievable),
+            );
+
+        $this->auditEntryGateFailure($traceId, $robotSessionId, $workspaceId, $symbol, $mode, 'against_trade_decision', $message);
+
+        throw new RuntimeException($message);
+    }
+
+    private function formatPct(mixed $value): string
+    {
+        return $value === null ? 'unknown' : number_format((float) $value, 3);
+    }
+
     private function manualActionDisagreedWithPrediction(array $signalPayload, string $side): ?bool
     {
         $decisionTrend = strtoupper((string) data_get($signalPayload, 'research.primary.decision_trend', ''));

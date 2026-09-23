@@ -156,7 +156,52 @@ class QuickTradeUnifiedForecastLiveTest extends TestCase
         // decode (2040) -- a JSON encoding artifact, not a real difference.
         $direct = json_decode(json_encode($direct), true);
 
-        $this->assertSame($direct, $response->json('forecast'));
+        $actual = $response->json('forecast');
+
+        // This test's real subject is the UNIFIED FORECAST FLAG: with it off,
+        // every field TradeForecastService itself produces must be identical
+        // to calling that service directly. It is deliberately NOT an
+        // assertion that the HTTP endpoint adds no fields of its own --
+        // QuickTradeForecastCalculator has always wrapped the service with
+        // presentation/telemetry fields the service cannot know about
+        // (`live_feed` is the long-standing example; Part B/C added the
+        // candle-timing, cost-model and duration-availability fields beside
+        // it). Those extras are enumerated explicitly below so a genuinely
+        // unexpected new field still fails this test.
+        $calculatorAdditiveFields = [
+            'live_feed',
+            'candle_timing',
+            'cost_model',
+            'decision_cache',
+            'duration_availability',
+            'shortest_viable_expiry_seconds',
+        ];
+
+        // Part B3 fields are null when forecast() is called WITHOUT candle
+        // timing (as this test's direct call deliberately is) and populated
+        // when Quick Trade's own calculator supplies it. That difference is
+        // the feature, not a flag effect, so they are compared for presence
+        // rather than for equality.
+        $candleTimingFields = [
+            'input_candles_include_forming_bar',
+            'decision_candle_close_at',
+            'seconds_since_last_close',
+            'next_close_in_seconds',
+        ];
+
+        foreach ($direct as $key => $value) {
+            $this->assertArrayHasKey($key, $actual, "Forecast field '{$key}' missing from the HTTP response.");
+            if (in_array($key, $candleTimingFields, true)) {
+                continue;
+            }
+            $this->assertSame($value, $actual[$key], "Forecast field '{$key}' differs with the unified-forecast flag off.");
+        }
+
+        $this->assertSame(
+            [],
+            array_values(array_diff(array_keys($actual), array_keys($direct), $calculatorAdditiveFields)),
+            'The forecast endpoint returned a field that neither TradeForecastService nor the known calculator wrapper produces.',
+        );
     }
 
     public function test_flag_off_never_calls_the_unified_forecast_engine(): void

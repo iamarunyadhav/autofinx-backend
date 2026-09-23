@@ -33,6 +33,14 @@ class TradingModuleSettingsService
             'allowed_indicators' => ['RSI', 'MACD', 'BOLLINGER', 'CCI', 'STOCHASTIC'],
             'chart_types' => ['area', 'candles', 'bars', 'heikin_ashi'],
             'durations' => [5, 15, 30, 60, 300, 900],
+            // Part A5 -- workspace-overridable execution guard. The platform
+            // default comes from config/quick_trade.php; a `settings` row in
+            // the `quick_trade` group overrides it per workspace. Only ever
+            // consulted for LIVE placements (see
+            // QuickTradeService::assertOrderAgreesWithTradeDecision()), which
+            // is what makes "true in live, false in paper" true by
+            // construction rather than needing two flags.
+            'block_live_against_decision' => (bool) config('quick_trade.block_live_against_decision', true),
             'allowed_symbols' => [
                 ['symbol' => 'GOLD', 'display' => 'Gold', 'asset_class' => 'METALS', 'payout_rate' => 0.88],
                 ['symbol' => 'GOLD_OTC', 'display' => 'Gold OTC', 'asset_class' => 'METALS', 'payout_rate' => 0.91],

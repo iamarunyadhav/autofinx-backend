@@ -410,6 +410,16 @@ test('live quick trade rejects stale binance websocket feed before placing order
 
 function seedLiveTradingSettings(string $workspaceId, string $integrationId): void
 {
+    // Part A5 (2026-09-24): these tests predate the fee-aware live execution
+    // guard and use a live placement purely as the vehicle for testing
+    // something else (stop-loss, take-profit, margin/liquidation, settlement).
+    // With `quick_trade.block_live_against_decision` at its real default of
+    // true, the genuine forecast for these synthetic candle series returns
+    // WAIT and would refuse the order before the behaviour under test is ever
+    // reached. Opting out here keeps each test focused on its own subject;
+    // the guard itself has dedicated coverage in
+    // QuickTradeDecisionExecutionGuardTest.
+    config()->set('quick_trade.block_live_against_decision', false);
     foreach ([
         'trading_mode' => 'live',
         'live_enabled' => true,

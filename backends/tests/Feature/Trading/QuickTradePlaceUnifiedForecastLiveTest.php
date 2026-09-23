@@ -33,6 +33,33 @@ class QuickTradePlaceUnifiedForecastLiveTest extends TestCase
 {
     use RefreshDatabase;
 
+    protected function setUp(): void
+    {
+        parent::setUp();
+        // Part A5 (2026-09-24): this test predates the fee-aware live
+        // execution guard and places a live trade purely to observe which
+        // decision_source the Unified Forecast wiring records. With
+        // `quick_trade.block_live_against_decision` at its real default of
+        // true, the genuine forecast for this synthetic candle series
+        // returns WAIT and would refuse the order before decision_source is
+        // ever written. The guard has its own dedicated coverage in
+        // QuickTradeDecisionExecutionGuardTest.
+        config()->set('quick_trade.block_live_against_decision', false);
+
+        // LiveCandleCacheService is Redis-backed with a 6 HOUR TTL, and the
+        // test Redis database (REDIS_DB=15) is shared across test processes
+        // AND across separate test runs -- unlike the SQLite/MySQL test
+        // database, nothing resets it between runs. This test's own symbols
+        // are fabricated and used nowhere else, so any cached rows for them
+        // are leftovers from a previous run of THIS test; left in place they
+        // are served ahead of the Http::fake()'d klines below and can carry
+        // timestamps from whenever that older run happened. Clearing them
+        // here makes the test depend only on its own fixtures.
+        foreach (['UFEE2EUSDT', 'UFEE2EOFFUSDT'] as $symbol) {
+            \Illuminate\Support\Facades\Redis::del("live-candles:binance_futures:{$symbol}:1m");
+        }
+    }
+
     private function integration(string $workspaceId): Integration
     {
         return Integration::create([
@@ -109,11 +136,17 @@ class QuickTradePlaceUnifiedForecastLiveTest extends TestCase
                 ]]], 200);
             }
             if (str_contains($url, '/fapi/v1/klines')) {
+                // Anchored to NOW, not a hardcoded 2023 epoch. Part B's
+                // candle-gap gate (correctly) refuses to produce a confident
+                // decision from candles that are years stale, so a fossilised
+                // timestamp here would gate the very decision this test is
+                // asserting on. The price series itself is unchanged.
                 $rows = [];
+                $firstOpenMs = (int) (now()->getTimestampMs() - (100 * 60000));
                 for ($i = 0; $i < 100; $i++) {
                     $open = 1701 + ($i * 3);
                     $close = $open + 2;
-                    $rows[] = [1700000000000 + ($i * 60000), (string) $open, (string) ($close + 20), (string) ($open - 20), (string) $close, '100'];
+                    $rows[] = [$firstOpenMs + ($i * 60000), (string) $open, (string) ($close + 20), (string) ($open - 20), (string) $close, '100'];
                 }
 
                 return Http::response($rows, 200);

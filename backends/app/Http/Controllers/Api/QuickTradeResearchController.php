@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Domain\Trading\QuickTradeAccuracyReport;
 use App\Domain\Trading\QuickTradeResearchService;
 use App\Http\Controllers\Controller;
 use App\Models\QuickTrade;
@@ -119,8 +120,57 @@ class QuickTradeResearchController extends Controller
             'net_profit_rate_pct' => $netRows->count() >= 30 ? round($netWins / $netRows->count() * 100, 2) : null,
             'net_pnl' => round((float) $rows->sum(fn ($row) => (float) ($row['net_pnl_booked'] ?? 0)), 8),
             'status' => $evaluated->count() >= 30 ? 'observed_sample' : 'insufficient_data',
+            // Part A3 -- fee-free direction accuracy, fee-aware trade-decision
+            // accuracy, and the WAIT saved/missed USDT totals, as their own
+            // separate block beside (never merged into) the existing metrics.
+            'audit_summary' => $research->auditSummary($rows),
             'note' => 'This is settled live-trade research, not a historical backtest and not a live model promotion signal.',
         ], $metrics->summarize($rows)))->header('Cache-Control', 'private, no-store');
+    }
+
+    /**
+     * Part D1/D2/D3 -- bucketed accuracy, break-even and confidence
+     * reliability. Extends the EXISTING research exporter: it reads exactly
+     * the rows QuickTradeResearchService::report() already produces (the same
+     * source summary()/index() above use), so there is no parallel pipeline
+     * and no recomputation of a trade that has already been evaluated.
+     *
+     * Same workspace-membership auth as every other method here.
+     */
+    public function accuracyReport(
+        Request $request,
+        string $workspace,
+        QuickTradeResearchService $research,
+        QuickTradeAccuracyReport $report,
+    ) {
+        abort_unless($request->user() && WorkspaceMember::where('workspace_id', $workspace)
+            ->where('user_id', $request->user()->id)->exists(), 403, 'You do not have access to this workspace.');
+        $data = $request->validate([
+            'symbol' => 'nullable|string|max:32', 'timeframe' => 'nullable|string|max:16',
+            'expiry_seconds' => 'nullable|integer|min:5|max:3600', 'mode' => 'nullable|in:live,paper',
+            'limit' => 'nullable|integer|min:1|max:2000',
+        ]);
+        $trades = QuickTrade::where('workspace_id', $workspace)->where('status', '!=', 'open')
+            ->whereNotNull('settled_at')
+            ->when($data['symbol'] ?? null, fn ($q, $v) => $q->where('symbol', strtoupper($v)))
+            ->when($data['timeframe'] ?? null, fn ($q, $v) => $q->where('timeframe', $v))
+            ->when($data['expiry_seconds'] ?? null, fn ($q, $v) => $q->where('expiry_seconds', $v))
+            ->when($data['mode'] ?? null, fn ($q, $v) => $q->where('mode', $v))
+            ->orderByDesc('settled_at')->limit((int) ($data['limit'] ?? 2000))->get();
+        $rows = $trades->map(fn ($trade) => $research->report($trade))
+            ->filter(fn ($row) => $row['execution_environment'] === 'live')
+            ->values()
+            ->all();
+
+        return response()->json(array_merge(
+            ['scope' => [
+                'symbol' => $data['symbol'] ?? null,
+                'timeframe' => $data['timeframe'] ?? null,
+                'expiry_seconds' => $data['expiry_seconds'] ?? null,
+            ]],
+            $report->generate($rows),
+            ['audit_summary' => $research->auditSummary($rows)],
+        ))->header('Cache-Control', 'private, no-store');
     }
 
     public function index(Request $request, string $workspace, QuickTradeResearchService $research)
@@ -161,6 +211,10 @@ class QuickTradeResearchController extends Controller
         return response()->json(['schema_version' => 1, 'as_of' => $asOf->toIso8601String(), 'rows' => $rows,
             'next_cursor' => $hasMore ? $page->last()->id : null, 'has_more' => $hasMore,
             'summary' => $summary, 'summary_scope' => 'this_page_live_trades_only',
+            // Part A3 -- same four aggregates as /summary, scoped to this page
+            // so the JSON export can carry a backend-computed audit_summary
+            // rather than one derived client-side.
+            'audit_summary' => $research->auditSummary($rows),
             'shadow_only' => true, 'sample_storage_ready' => Schema::hasTable('quick_trade_research_samples'),
             'collection_enabled' => (bool) config('quick_trade_research.enabled', true),
             'shadow_enabled' => app(\App\Domain\Ops\FeatureFlagService::class)->enabled('unified_forecast.quick_trade_shadow', true),
