@@ -27,8 +27,14 @@ return new class extends Migration
             $table->timestamp('decision_candle_close_at')->nullable();
             // The forecast's own generated_at: the moment the hypothetical
             // entry would have happened, and the anchor the horizon counts
-            // from (the same anchor ForecastOutcomeEvaluator uses).
-            $table->timestamp('reference_at');
+            // from (the same anchor ForecastOutcomeEvaluator uses). Always
+            // set explicitly by QuickTradeWaitShadowService at insert time --
+            // nullable() only to satisfy MySQL strict mode / ONLY_FULL_GROUP_BY's
+            // explicit_defaults_for_timestamp, which rejects a NOT NULL
+            // timestamp column with no explicit DEFAULT (SQLite, used by the
+            // test suite, does not enforce this, so it passed tests but
+            // failed against real MySQL).
+            $table->timestamp('reference_at')->nullable();
             $table->unsignedBigInteger('target_ms');
             $table->string('mode', 16)->nullable();
             $table->string('direction', 16)->nullable();
