@@ -670,6 +670,23 @@ class RobotSessionService
 
             return $preflightBlock;
         }
+
+        // Final gate (flag-scoped, default OFF): the canonical fee-aware
+        // trade_decision must agree with the side about to be opened.
+        $decisionGate = $this->canonicalTradeDecisionGate(
+            $session,
+            $candles,
+            (string) $signal['direction'],
+            $this->forecastSvc->decisionFromSignalPreview($signal),
+        );
+        if ($decisionGate['block'] !== null) {
+            $this->recordEntryBlock($session, $decisionGate['block']);
+
+            return $decisionGate['block'];
+        }
+        if ($decisionGate['snapshot'] !== null) {
+            $signal['trade_decision_gate'] = $decisionGate['snapshot'];
+        }
         $this->clearEntryBlock($session);
 
         $trade = $this->quickTrades->place([
@@ -999,6 +1016,24 @@ class RobotSessionService
 
                 return $preflightBlock;
             }
+
+            // Final gate (flag-scoped, default OFF) -- entries only; a CLOSE
+            // below is never gated, an exit must never be refused.
+            $decisionGate = $this->canonicalTradeDecisionGate(
+                $session,
+                $candles,
+                $openDirection,
+                ['action' => $action, 'confidence' => (float) ($decision['confidence'] ?? 0)],
+            );
+            if ($decisionGate['block'] !== null) {
+                $this->recordEntryBlock($session, $decisionGate['block']);
+
+                return $decisionGate['block'];
+            }
+            $entrySignalPayload = $decision['signal'] ?? $decision;
+            if ($decisionGate['snapshot'] !== null) {
+                $entrySignalPayload['trade_decision_gate'] = $decisionGate['snapshot'];
+            }
             $this->clearEntryBlock($session);
 
             $trade = $this->quickTrades->place([
@@ -1013,7 +1048,7 @@ class RobotSessionService
                 'mode' => strtolower((string) $session->mode),
                 'source' => 'robot_candle_direction',
                 'indicator_set' => (array) $session->indicator_set,
-                'signal_payload' => $decision['signal'] ?? $decision,
+                'signal_payload' => $entrySignalPayload,
                 'provider' => $session->provider_key,
                 'integration_id' => $session->integration_id,
                 'idempotency_key' => $this->robotSessionIdempotencyKey($session->id, $openDirection, 30),
@@ -1779,6 +1814,155 @@ class RobotSessionService
         $stakeAmount = $this->normalizeStake((float) ($stake ?: $session->base_stake), 2);
 
         return $this->forecastSvc->netEdge($candles, $stakeAmount);
+    }
+
+    /**
+     * Canonical fee-aware final entry gate (`robot_trade.block_live_against_decision`,
+     * default OFF, workspace-overridable via a `robot_trade` settings row).
+     *
+     * Robot Trade's own direction comes from SignalPreviewService / the candle
+     * bot, and its only pre-existing cost check is netEdge() above -- which
+     * reads the same fee/slippage/multiplier config but uses its own
+     * direction-blind, horizon-blind expected-move proxy (ATR x 0.35), so it
+     * can call a move "tradeable" that Quick Trade's fee-aware
+     * `trade_decision` says is WAIT, or pass a side the decision disagrees
+     * with. Quick Trade's own live guard never saw Robot orders:
+     * QuickTradeService::assertOrderAgreesWithTradeDecision() reads
+     * `signal_payload.research.primary`, which place() only captures for
+     * source === 'manual_quick_trade'.
+     *
+     * This does NOT re-implement any cost math. It feeds Robot's own real
+     * parameters (symbol candles, timeframe, expiry, signal side) through the
+     * exact call shape QuickTradeResearchService::capture() uses for Quick
+     * Trade's live guard: CandleCloseResolver (closed candles only + candle
+     * timing, enabling the candle_gap gate) -> TradeForecastService::forecast()
+     * with the signal adapted to {action, confidence}, no volatility override,
+     * no live-feed snapshot, no reference-price override. Symbol is passed as
+     * null deliberately: it only scopes forecast()'s display-only stability
+     * cache (key `quick_trade:forecast_stability:*`), and robot ticks must not
+     * write into Quick Trade's window; decision_trend never depends on it.
+     *
+     * Live only, matching Quick Trade's A5 scope. Fail-CLOSED: a decision that
+     * is unavailable or cannot be computed blocks (an autonomous entry must
+     * never proceed on "no answer"), unlike the manual guard which fails open.
+     *
+     * @param  array{action:string, confidence:float|int}  $decision
+     * @return array{block: array<string, mixed>|null, snapshot: array<string, mixed>|null}
+     */
+    private function canonicalTradeDecisionGate(RobotSession $session, array $candles, string $side, array $decision): array
+    {
+        if (strtolower((string) $session->mode) !== 'live' || ! $this->tradeDecisionGateEnabled((string) $session->workspace_id)) {
+            return ['block' => null, 'snapshot' => null];
+        }
+
+        $side = strtolower($side);
+        $timeframe = (string) $session->timeframe;
+        $horizonSeconds = (int) $session->expiry_seconds;
+        $timing = null;
+        $forecast = null;
+        $failure = null;
+
+        try {
+            $timing = app(CandleCloseResolver::class)->resolve($candles, $timeframe);
+            $forecast = $this->forecastSvc->forecast(
+                $timing['candles'],
+                $timeframe,
+                $horizonSeconds,
+                $decision,
+                null,
+                null,
+                null,
+                null,
+                $timing,
+            );
+        } catch (\Throwable $exception) {
+            $failure = $exception->getMessage();
+        }
+
+        $tradeDecision = is_array($forecast['trade_decision'] ?? null) ? $forecast['trade_decision'] : null;
+        $value = strtoupper((string) ($tradeDecision['value'] ?? ''));
+
+        $snapshot = [
+            'source' => 'TradeForecastService::forecast',
+            'side' => $side,
+            'value' => $value !== '' ? $value : null,
+            'agrees' => $value !== '' && $value === strtoupper($side),
+            'available' => (bool) ($forecast['available'] ?? false),
+            'trade_decision' => $tradeDecision,
+            'direction' => is_array($forecast['direction'] ?? null) ? $forecast['direction'] : null,
+            'timeframe' => $timeframe,
+            'horizon_seconds' => $forecast['horizon_seconds'] ?? $horizonSeconds,
+            'horizon_candles' => $forecast['horizon_candles'] ?? null,
+            'decision_candle_close_at' => $timing['decision_candle_close_at'] ?? null,
+            'candle_gap' => (bool) ($timing['candle_gap'] ?? false),
+            'model_version' => $forecast['model_version'] ?? null,
+            'evaluated_at' => now()->toIso8601String(),
+        ];
+
+        if ($snapshot['agrees']) {
+            return ['block' => null, 'snapshot' => $snapshot];
+        }
+
+        if (! in_array($value, ['BUY', 'SELL', 'WAIT'], true)) {
+            $message = sprintf(
+                'robot_trade_blocked_trade_decision_unavailable: No fee-aware trade decision could be computed for this %s / %ds entry (%s), so a live %s was refused.',
+                $timeframe,
+                $horizonSeconds,
+                $failure ?? (string) ($forecast['summary'] ?? 'forecast unavailable'),
+                strtoupper($side),
+            );
+        } else {
+            $gateReason = $tradeDecision['gate_reason'] ?? null;
+            $numbers = sprintf(
+                ' Expected move %s%%, required %s%% after fees, max achievable at current volatility %s%%.',
+                $this->formatGatePct($tradeDecision['expected_move_pct'] ?? null),
+                $this->formatGatePct($tradeDecision['required_move_pct'] ?? null),
+                $this->formatGatePct($tradeDecision['max_achievable_move_pct'] ?? null),
+            );
+            $message = $value === 'WAIT'
+                ? sprintf(
+                    'robot_trade_blocked_against_decision: The fee-aware trade decision is WAIT, so a live %s was refused.%s%s',
+                    strtoupper($side),
+                    $gateReason !== null ? ' Gate: '.$gateReason.'.' : '',
+                    $numbers,
+                )
+                : sprintf(
+                    'robot_trade_blocked_against_decision: The fee-aware trade decision is %s, so a live %s was refused.%s',
+                    $value,
+                    strtoupper($side),
+                    $numbers,
+                );
+        }
+
+        return [
+            'block' => [
+                'session_id' => $session->id,
+                'status' => 'trade_decision_block',
+                'action' => 'skipped',
+                'reason' => $message,
+                'symbol' => $session->symbol,
+                'side' => $side,
+                'trade_decision_gate' => $snapshot,
+            ],
+            'snapshot' => $snapshot,
+        ];
+    }
+
+    private function tradeDecisionGateEnabled(string $workspaceId): bool
+    {
+        $config = $this->settings->robotConfig($workspaceId);
+
+        return filter_var(
+            array_key_exists('block_live_against_decision', $config)
+                ? $config['block_live_against_decision']
+                : config('robot_trade.block_live_against_decision', false),
+            FILTER_VALIDATE_BOOLEAN,
+        );
+    }
+
+    private function formatGatePct(mixed $value): string
+    {
+        return $value === null ? 'unknown' : number_format((float) $value, 3);
     }
 
     /**
