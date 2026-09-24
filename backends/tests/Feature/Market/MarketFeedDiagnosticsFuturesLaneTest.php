@@ -18,11 +18,29 @@ use Tests\TestCase;
  */
 class MarketFeedDiagnosticsFuturesLaneTest extends TestCase
 {
+    private string $isolatedStorage;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+        // Isolation (Phase 1 item 3): the lane heartbeat files below are
+        // written/deleted in a private storage directory, never the real
+        // ones a locally running futures lane worker owns.
+        $this->isolatedStorage = sys_get_temp_dir().DIRECTORY_SEPARATOR.'afx-diag-lanes-'.\Illuminate\Support\Str::random(12);
+        mkdir($this->isolatedStorage.DIRECTORY_SEPARATOR.'framework', 0777, true);
+        $this->app->useStoragePath($this->isolatedStorage);
+    }
+
     protected function tearDown(): void
     {
         Redis::del('live-candles:binance_futures:DIAGUSDT:1m');
         @unlink(MarketWsConsumerCommand::heartbeatPathFor('futures', 'public'));
         @unlink(MarketWsConsumerCommand::heartbeatPathFor('futures', 'market'));
+        foreach (glob($this->isolatedStorage.DIRECTORY_SEPARATOR.'framework'.DIRECTORY_SEPARATOR.'*') ?: [] as $file) {
+            @unlink($file);
+        }
+        @rmdir($this->isolatedStorage.DIRECTORY_SEPARATOR.'framework');
+        @rmdir($this->isolatedStorage);
 
         parent::tearDown();
     }

@@ -23,18 +23,24 @@ function ftRuntimeStatusHeartbeatPath(): string
     return storage_path('framework/autofinx-market-ws-heartbeat-futures.json');
 }
 
+// Isolation (Phase 1 item 3): these tests used to back up, overwrite and
+// restore the REAL futures heartbeat file -- racing a locally running
+// market:ws-consume daemon that rewrites it every second (flaky), and
+// clobbering that daemon's live heartbeat afterwards. They now run against a
+// private, empty storage directory so the only heartbeat they see is the one
+// they write.
 beforeEach(function () {
-    $path = ftRuntimeStatusHeartbeatPath();
-    $this->ftHeartbeatBackup = file_exists($path) ? file_get_contents($path) : null;
+    $this->ftIsolatedStorage = sys_get_temp_dir().DIRECTORY_SEPARATOR.'afx-ft-runtime-status-'.\Illuminate\Support\Str::random(12);
+    mkdir($this->ftIsolatedStorage.DIRECTORY_SEPARATOR.'framework', 0777, true);
+    $this->app->useStoragePath($this->ftIsolatedStorage);
 });
 
 afterEach(function () {
-    $path = ftRuntimeStatusHeartbeatPath();
-    if ($this->ftHeartbeatBackup !== null) {
-        file_put_contents($path, $this->ftHeartbeatBackup);
-    } elseif (file_exists($path)) {
-        @unlink($path);
+    foreach (glob($this->ftIsolatedStorage.DIRECTORY_SEPARATOR.'framework'.DIRECTORY_SEPARATOR.'*') ?: [] as $file) {
+        @unlink($file);
     }
+    @rmdir($this->ftIsolatedStorage.DIRECTORY_SEPARATOR.'framework');
+    @rmdir($this->ftIsolatedStorage);
 });
 
 test('live_feed.stale is true when the required symbol is stale even though an unrelated symbol just ticked', function () {

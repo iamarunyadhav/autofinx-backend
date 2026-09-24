@@ -176,6 +176,24 @@ class QuickTradeService
         if ($stopLossPct !== null && $stopLossPct >= 0) {
             throw new RuntimeException('stop_loss_pct must be a negative percentage (e.g. -2.00 for a 2% stop).');
         }
+        // Gap-checklist N4 -- optional enforcement (default OFF) of a stop-loss
+        // on long live expiries. Same scope as the min-horizon rule above:
+        // LIVE + MANUAL only, so Robot Trade's own session placements are
+        // untouched. Never auto-sets a stop; it only refuses to open without
+        // one when the owner has turned enforcement on.
+        $stopLossMinExpiry = (int) config('quick_trade.require_stop_loss_min_expiry_seconds', 1800);
+        if ($mode === 'live'
+            && $source === 'manual_quick_trade'
+            && (bool) config('quick_trade.enforce_stop_loss_min_expiry', false)
+            && $stopLossMinExpiry > 0
+            && $expirySeconds >= $stopLossMinExpiry
+            && $stopLossPct === null) {
+            throw new RuntimeException(sprintf(
+                'stop_loss_required_for_long_expiry: live quick trades with an expiry of %ds or longer require a Stop Loss %% (this trade: %ds).',
+                $stopLossMinExpiry,
+                $expirySeconds,
+            ));
+        }
         if ($takeProfitPct !== null && $takeProfitPct <= 0) {
             throw new RuntimeException('take_profit_pct must be a positive percentage (e.g. 5.00 for a 5% target).');
         }

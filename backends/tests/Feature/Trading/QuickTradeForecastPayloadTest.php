@@ -103,6 +103,33 @@ class QuickTradeForecastPayloadTest extends TestCase
         $this->assertArrayHasKey('shortest_viable_expiry_seconds', $forecast);
     }
 
+    public function test_the_real_live_binance_duration_list_is_accepted_not_rejected_with_422(): void
+    {
+        // Regression: the frontend sends EVERY duration the picker offers.
+        // In live mode that is BinanceTimedFuturesProvider::capabilities()
+        // 'durations' -- which includes 4h and 24h. A `durations.*` cap of
+        // 3600 turned the whole forecast request into a 422, so the live
+        // Direction/Trade-decision card could never render.
+        $liveDurations = app(\App\Domain\Trading\Providers\BinanceTimedFuturesProvider::class)->capabilities()['durations'];
+        $this->assertContains(86400, $liveDurations);
+
+        $response = $this->actingAs(User::factory()->create())
+            ->postJson('/api/v1/quick-trade/forecast', [
+                'candles' => $this->candles(),
+                'timeframe' => '5m',
+                'expiry_seconds' => 3600,
+                'stake_amount' => 50,
+                'symbol' => 'BTCUSDT',
+                'exchange' => 'binance_futures',
+                'mode' => 'live',
+                'durations' => $liveDurations,
+            ])->assertOk();
+
+        $availability = collect($response->json('forecast.duration_availability'))->keyBy('expiry_seconds');
+        $this->assertCount(count($liveDurations), $availability);
+        $this->assertArrayHasKey(86400, $availability->all());
+    }
+
     public function test_net_edge_carries_the_binding_constraint_hint(): void
     {
         $response = $this->actingAs(User::factory()->create())

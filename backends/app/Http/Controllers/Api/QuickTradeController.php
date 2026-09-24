@@ -87,8 +87,11 @@ class QuickTradeController extends Controller
      * chart poll, so this never doubles the Binance REST calls that
      * feed the chart.
      */
-    public function forecast(Request $request, TradeForecastService $forecastSvc)
+    public function forecast(Request $request, TradeForecastService $forecastSvc, TradingModuleSettingsService $settings)
     {
+        // Same derived cap for expiry_seconds AND durations.* -- see
+        // TradingModuleSettingsService::maxExpirySeconds().
+        $maxExpiry = $settings->maxExpirySeconds();
         $data = $request->validate([
             'candles' => 'required|array|min:10|max:500',
             'candles.*.open' => 'required|numeric',
@@ -111,8 +114,16 @@ class QuickTradeController extends Controller
             'signal.direction' => 'nullable|string',
             'signal.confidence' => 'nullable|numeric',
             'timeframe' => 'required|string|max:16',
-            'expiry_seconds' => 'required|integer|min:5|max:3600',
+            'expiry_seconds' => 'required|integer|min:5|max:'.$maxExpiry,
             'stake_amount' => 'required|numeric|min:0.01',
+            // Gap-checklist N3 -- optional, additive: the order form's
+            // leverage, so net_edge's USDT figures and position_sizing are
+            // computed on the leveraged notional the order would actually
+            // carry (stake is MARGIN; notional = stake x leverage). Ignored
+            // in paper mode, exactly like QuickTradeService::place(). Omit it
+            // and the response is unchanged apart from the additive
+            // position_sizing block (leverage 1, rounding not_requested).
+            'leverage' => 'nullable|numeric|min:1|max:125',
             // Optional, additive: only used for the Unified Forecast Engine
             // shadow comparison below -- today's real callers don't send
             // these (see useQuickTrade.ts), and the response is byte-for-
@@ -127,7 +138,14 @@ class QuickTradeController extends Controller
             // duration_availability block.
             'mode' => 'nullable|string|in:paper,live',
             'durations' => 'nullable|array|max:20',
-            'durations.*' => 'integer|min:5|max:3600',
+            // The picker sends every duration it offers. In LIVE mode that is
+            // the provider catalog's list, which for Binance includes 14400
+            // (4h) and 86400 (24h) -- see BinanceTimedFuturesProvider::
+            // capabilities(). A 3600 cap here rejected the ENTIRE forecast
+            // request with a 422 in live mode. This list is informational
+            // only (duration_availability rows). Both this and
+            // `expiry_seconds` above now share one derived cap.
+            'durations.*' => 'integer|min:5|max:'.$maxExpiry,
         ]);
 
         if ($request->boolean('async')) {
@@ -140,12 +158,12 @@ class QuickTradeController extends Controller
     }
 
     /** Read-only normalized comparison for Quick/Robot/Future decision-support UIs. */
-    public function forecastComparison(Request $request, TradeForecastService $forecastSvc)
+    public function forecastComparison(Request $request, TradeForecastService $forecastSvc, TradingModuleSettingsService $settings)
     {
         $data = $request->validate([
             'bot_type' => 'required|string|in:quick_trade,robot_trade,future_trade',
             'symbol' => 'required|string|max:32', 'timeframe' => 'required|string|max:16',
-            'expiry_seconds' => 'required|integer|min:5|max:3600', 'candles' => 'required|array|min:10|max:500',
+            'expiry_seconds' => 'required|integer|min:5|max:'.$settings->maxExpirySeconds(), 'candles' => 'required|array|min:10|max:500',
             'candles.*.open' => 'required|numeric', 'candles.*.high' => 'required|numeric',
             'candles.*.low' => 'required|numeric', 'candles.*.close' => 'required|numeric',
             'signal' => 'nullable|array', 'exchange' => 'nullable|string|max:32',
@@ -331,7 +349,10 @@ class QuickTradeController extends Controller
             'side' => 'required|in:buy,sell',
             'stake_amount' => 'required|numeric|min:0.01',
             'timeframe' => 'required|string|max:16',
-            'expiry_seconds' => 'required|integer|min:5|max:3600',
+            // Derived cap (was a hardcoded max:3600 that 422'd the live
+            // catalog's own 14400/86400). place() still enforces the exact
+            // per-mode list via durationsForMode().
+            'expiry_seconds' => 'required|integer|min:5|max:'.$settings->maxExpirySeconds($request->input('workspace_id')),
             'mode' => 'nullable|string|in:paper,live',
             'provider' => 'nullable|string|max:32',
             'integration_id' => 'nullable|uuid',

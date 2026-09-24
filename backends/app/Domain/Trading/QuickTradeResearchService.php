@@ -160,6 +160,96 @@ class QuickTradeResearchService
     }
 
     /**
+     * Part A4 -- hypothetical net P&L of following the cost-blind DIRECTION
+     * from $base to the realised $actual expiry price, charged the same
+     * round-trip cost_pct the live decision gate uses, on $stake USDT of
+     * position. Extracted verbatim from
+     * EvaluateQuickTradeForecastOutcomeJob::waitShadow() (traded rows, where
+     * $stake is the trade's own stake) so the untraded-WAIT shadow evaluator
+     * (QuickTradeWaitShadowService, where $stake is the configured reference
+     * notional) runs the identical rule rather than a second copy.
+     *
+     * Honest-by-construction: 'unavailable' when direction/prices/stake are
+     * missing; a NEUTRAL direction is 'not_applicable', never a loss; only a
+     * WAIT decision can save or miss money.
+     *
+     * @return array<string,mixed>
+     */
+    public function hypotheticalWaitOutcome(
+        ?string $directionValue,
+        ?string $decisionValue,
+        float $base,
+        ?float $actual,
+        float $stake,
+        ?string $feeModel,
+    ): array {
+        $result = [
+            'evaluated_at' => now()->toIso8601String(),
+            'direction' => $directionValue,
+            'trade_decision' => $decisionValue,
+            'reference_price' => $base > 0 ? $base : null,
+            'expiry_price' => $actual !== null ? (float) $actual : null,
+            'stake' => $stake,
+            'status' => 'unavailable',
+            'gross_move_pct' => null,
+            'hypothetical_gross_usdt' => null,
+            'hypothetical_cost_usdt' => null,
+            'hypothetical_net_usdt' => null,
+            'would_have_profited' => null,
+            'wait_saved_usdt' => null,
+            'wait_missed_usdt' => null,
+        ];
+
+        if ($directionValue === 'NEUTRAL') {
+            $result['status'] = 'not_applicable';
+
+            return $result;
+        }
+        if (! in_array($directionValue, ['BUY', 'SELL'], true) || $base <= 0 || $actual === null || $stake <= 0) {
+            return $result;
+        }
+
+        $costs = app(QuickTradeCostModel::class)->costs($feeModel);
+        $signedMovePct = (((float) $actual - $base) / $base) * 100 * ($directionValue === 'SELL' ? -1 : 1);
+        $grossUsdt = $stake * ($signedMovePct / 100);
+        $costUsdt = $stake * ($costs['cost_pct'] / 100);
+        $netUsdt = $grossUsdt - $costUsdt;
+
+        $result['status'] = 'evaluated';
+        $result['gross_move_pct'] = round($signedMovePct, 6);
+        $result['cost_pct'] = $costs['cost_pct'];
+        $result['fee_model'] = $costs['fee_model'];
+        $result['hypothetical_gross_usdt'] = round($grossUsdt, 8);
+        $result['hypothetical_cost_usdt'] = round($costUsdt, 8);
+        $result['hypothetical_net_usdt'] = round($netUsdt, 8);
+        $result['would_have_profited'] = $netUsdt > 0;
+
+        // Only a WAIT decision can save or miss money by not trading.
+        if ($decisionValue === 'WAIT') {
+            $result['wait_saved_usdt'] = $netUsdt < 0 ? round(abs($netUsdt), 8) : 0.0;
+            $result['wait_missed_usdt'] = $netUsdt > 0 ? round($netUsdt, 8) : 0.0;
+        }
+
+        return $result;
+    }
+
+    /**
+     * Gap-checklist Phase 1 item 4 -- aggregate of UNTRADED WAIT shadow rows
+     * (QuickTradeWaitShadowService), reported as its own block and never
+     * merged into the traded-WAIT `wait_decision_*` totals above it: those
+     * are this workspace's settled trades on their real stakes, these are
+     * market-level decisions nobody traded, quoted on a fixed reference
+     * notional.
+     *
+     * @param  array{symbol?:string|null, timeframe?:string|null, expiry_seconds?:int|string|null}  $scope
+     * @return array<string,mixed>
+     */
+    public function untradedWaitShadowSummary(array $scope = []): array
+    {
+        return app(QuickTradeWaitShadowService::class)->summary($scope);
+    }
+
+    /**
      * Part A3 -- post-settlement evaluation of the TWO predictions,
      * separately and honestly.
      *

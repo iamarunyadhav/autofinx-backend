@@ -53,6 +53,21 @@ class SampleQuickTradeResearchCommand extends Command
             }
         }
         $this->info('Saved '.$count.' new quote observations.');
+
+        // Phase 1 item 4 -- untraded WAIT shadows ride on this same existing
+        // 5s scheduler entry (no new schedule): evaluate the ones whose
+        // expiry has arrived from the same cached futures quote, then prune
+        // by retention (throttled to hourly). No-op unless
+        // quick_trade.shadow_untraded_waits is on and the table exists;
+        // never throws.
+        $shadows = app(\App\Domain\Trading\QuickTradeWaitShadowService::class);
+        if ($shadows->enabled()) {
+            $result = $shadows->evaluateDue($prices);
+            $pruned = $shadows->pruneExpired();
+            $this->info(sprintf('Untraded WAIT shadows: %d evaluated, %d missing expiry price, %d pruned.',
+                $result['evaluated'], $result['missing'], $pruned));
+        }
+
         return self::SUCCESS;
     }
 }

@@ -91,6 +91,24 @@ return [
     /** Reject chart timeframe > expiry outright (both modes). */
     'reject_timeframe_above_expiry' => env('QUICK_TRADE_REJECT_TIMEFRAME_ABOVE_EXPIRY', true),
 
+    // ---- Gap-checklist N4: stop-loss on long live expiries ---------------
+    /**
+     * A LIVE quick trade whose expiry is at or above this many seconds is a
+     * long, unattended position. The UI ALWAYS shows a warning when such a
+     * trade is about to be placed with Stop Loss off (published to the
+     * frontend via TradingModuleSettingsService::metadata()). No value is
+     * ever auto-filled -- the user sets their own stop.
+     */
+    'require_stop_loss_min_expiry_seconds' => (int) env('QUICK_TRADE_REQUIRE_STOP_LOSS_MIN_EXPIRY_SECONDS', 1800),
+
+    /**
+     * When true, QuickTradeService::place() REJECTS (422) a manual live
+     * placement at/above the expiry above that has no stop_loss_pct. Ships
+     * OFF: the warning above is the default behaviour; enforcement is an
+     * owner opt-in. Robot Trade's programmatic placements are not affected.
+     */
+    'enforce_stop_loss_min_expiry' => env('QUICK_TRADE_ENFORCE_STOP_LOSS_MIN_EXPIRY', false),
+
     // ---- Part C: fee economics ------------------------------------------
     /**
      * Live-mode expiry presets, longest-viable-first. The first entry is the
@@ -137,4 +155,22 @@ return [
 
     /** Minimum evaluated samples before a confidence figure stops being labelled "uncalibrated score". */
     'calibration_min_samples' => 150,
+
+    // ---- Phase 1 item 4: untraded WAIT shadow records --------------------
+    /**
+     * When true, every fee-aware WAIT the LIVE Quick Trade forecast shows is
+     * recorded once per symbol/timeframe/expiry/decision candle close
+     * (table quick_trade_wait_shadows) and evaluated at expiry with the same
+     * hypothetical net-after-costs rule used for traded WAITs, feeding the
+     * separate `untraded_wait_shadow` block of the research audit summary.
+     * OBSERVATION ONLY -- never places, blocks or alters a trade. Ships OFF
+     * (new behaviour defaults off); requires the 2026_09_30_000000 migration.
+     */
+    'shadow_untraded_waits' => env('QUICK_TRADE_SHADOW_UNTRADED_WAITS', false),
+
+    /** Hypothetical position size (USDT notional) untraded-WAIT outcomes are quoted on. */
+    'shadow_untraded_waits_reference_notional_usdt' => (float) env('QUICK_TRADE_SHADOW_UNTRADED_WAITS_REFERENCE_NOTIONAL_USDT', 100),
+
+    /** Rows older than this are pruned by quick-trades:sample-research (at most once an hour). */
+    'shadow_untraded_waits_retention_days' => (int) env('QUICK_TRADE_SHADOW_UNTRADED_WAITS_RETENTION_DAYS', 30),
 ];

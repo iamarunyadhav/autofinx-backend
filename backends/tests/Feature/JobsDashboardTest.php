@@ -55,6 +55,31 @@ test('jobs dashboard shows blocked backlog and per queue counts', function () {
         ->assertJsonPath('worker.profiles.0.key', 'worker_1_live');
 });
 
+test('jobs dashboard exposes predictions-queue p50/p95 latency and the 20s drop count', function () {
+    config(['cache.stores.redis' => ['driver' => 'array', 'serialize' => false]]);
+    \Illuminate\Support\Facades\Cache::forgetDriver('redis');
+    $metrics = app(\App\Domain\Ops\PredictionQueueLatencyMetrics::class);
+    foreach ([100, 200, 300, 400] as $wait) {
+        $metrics->record(\App\Domain\Ops\PredictionQueueLatencyMetrics::OUTCOME_PUBLISHED, $wait, $wait / 10);
+    }
+    $metrics->record(\App\Domain\Ops\PredictionQueueLatencyMetrics::OUTCOME_DROPPED_BEFORE_COMPUTE, 22000, null);
+
+    $this->actingAs(User::factory()->create())
+        ->getJson('/api/v1/jobs/dashboard')
+        ->assertOk()
+        ->assertJsonPath('prediction_worker_latency.available', true)
+        ->assertJsonPath('prediction_worker_latency.queue', 'predictions')
+        ->assertJsonPath('prediction_worker_latency.published', 4)
+        ->assertJsonPath('prediction_worker_latency.dropped_total', 1)
+        ->assertJsonPath('prediction_worker_latency.dropped_expired_before_compute', 1)
+        // queue wait over 100,200,300,400,22000 -> p50 3rd = 300, p95 5th = 22000
+        ->assertJsonPath('prediction_worker_latency.queue_wait_ms.p50', 300)
+        ->assertJsonPath('prediction_worker_latency.queue_wait_ms.p95', 22000)
+        // compute over 10,20,30,40 -> p50 2nd = 20, p95 4th = 40
+        ->assertJsonPath('prediction_worker_latency.compute_ms.p50', 20)
+        ->assertJsonPath('prediction_worker_latency.compute_ms.p95', 40);
+});
+
 test('jobs dashboard can clear a specific pending queue', function () {
     $user = User::factory()->create();
     foreach (['execution', 'signals'] as $queue) {

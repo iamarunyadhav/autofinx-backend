@@ -71,7 +71,14 @@ class QuickTradeForecastCalculator
         );
         $costModel = app(QuickTradeCostModel::class);
         $horizonCandles = $costModel->horizonCandles((int) $data['expiry_seconds'], (int) $timing['timeframe_seconds']);
-        $netEdgeResult = $forecastSvc->netEdge($candles, (float) $data['stake_amount'], $horizonCandles);
+        // Gap-checklist N3 -- stake is MARGIN; the USDT cost/PnL estimate must
+        // be computed on the notional the order would really carry (margin x
+        // leverage, after the exchange qty-step rounding placement applies).
+        // Percent gates (required_move_pct, cost_pct, the trade_decision
+        // block) are leverage-independent and are NOT touched here.
+        $positionSizing = $this->positionSizing($data, $forecastResult);
+        $netEdgeResult = $forecastSvc->netEdge($candles, (float) $positionSizing['cost_basis_notional'], $horizonCandles);
+        $netEdgeResult = $this->withMarginView($netEdgeResult, $positionSizing);
 
         // --- Part C2/C3: per-duration availability at the CURRENT volatility.
         // Everything the duration picker renders (max achievable %, required
@@ -176,10 +183,120 @@ class QuickTradeForecastCalculator
             $forecastResult = $this->applyUnifiedForecastLiveDecision($forecastResult, $liveDecision);
         }
 
+        // Gap-checklist N4-shadow -- untraded WAIT shadow capture. Observation
+        // only (never influences the response above), flag-gated (default
+        // OFF), one row per symbol/timeframe/expiry/decision-candle-close,
+        // and fail-safe: QuickTradeWaitShadowService never throws.
+        app(QuickTradeWaitShadowService::class)->captureFromForecast($data, $forecastResult);
+
         return [
             'forecast' => $forecastResult,
             'net_edge' => $netEdgeResult,
+            'position_sizing' => $positionSizing,
          ];
+    }
+
+    /**
+     * Gap-checklist N3 -- the single, explicit statement of what the order
+     * would be: margin (stake), leverage, target notional and -- when the
+     * exchange's qty-step rule is available -- the rounded quantity and the
+     * REAL notional placement would produce. The UI renders these verbatim
+     * rather than guessing.
+     *
+     * Leverage is honoured in LIVE mode only (paper trades are payout-style
+     * and QuickTradeService::place() silently ignores leverage for them).
+     * Rounding is only attempted when the caller actually sent `leverage`
+     * (today's order form always does in live mode) for a Binance symbol, so
+     * callers that omit it keep today's exact net_edge numbers.
+     *
+     * `cost_basis_notional` is what net_edge's USDT fields are computed on:
+     * the rounded notional when known and non-zero, otherwise the unrounded
+     * target (and `rounding` says so).
+     *
+     * @param  array<string,mixed>  $data
+     * @param  array<string,mixed>  $forecastResult
+     * @return array<string,mixed>
+     */
+    private function positionSizing(array $data, array $forecastResult): array
+    {
+        $stake = max(0.0, (float) $data['stake_amount']);
+        $mode = strtolower((string) ($data['mode'] ?? 'paper'));
+        $leverageRequested = array_key_exists('leverage', $data) && $data['leverage'] !== null;
+        $leverage = $mode === 'live' && $leverageRequested ? max(1.0, (float) $data['leverage']) : 1.0;
+        $notionalTarget = round($stake * $leverage, 8);
+        $referencePrice = (float) ($forecastResult['reference_price'] ?? $forecastResult['current_price'] ?? 0);
+
+        $sizing = [
+            'mode' => $mode,
+            'stake_margin' => round($stake, 8),
+            'leverage' => $leverage,
+            'leverage_applied' => $mode === 'live' && $leverageRequested,
+            'notional_target' => $notionalTarget,
+            'reference_price' => $referencePrice > 0 ? round($referencePrice, 8) : null,
+            'rounding' => $mode !== 'live' ? 'not_applicable_paper' : 'not_requested',
+            'rounding_source' => null,
+            'step_size' => null,
+            'min_qty' => null,
+            'min_notional' => null,
+            'quantity' => null,
+            'notional' => $notionalTarget,
+            'below_exchange_minimum' => null,
+            'cost_basis_notional' => $notionalTarget,
+        ];
+
+        $liveExchange = $this->liveFeedExchange($data['exchange'] ?? null);
+        if ($mode !== 'live' || ! $leverageRequested || empty($data['symbol']) || $liveExchange !== 'binance_futures') {
+            return $sizing;
+        }
+
+        $estimate = app(Providers\BinanceTimedFuturesProvider::class)
+            ->sizingEstimate((string) $data['symbol'], $notionalTarget, $referencePrice);
+        $sizing = array_merge($sizing, [
+            'rounding' => $estimate['rounding'],
+            'rounding_source' => $estimate['rounding'] === 'exchange_step' ? 'binance_futures_exchange_info' : null,
+            'step_size' => $estimate['step_size'],
+            'min_qty' => $estimate['min_qty'],
+            'min_notional' => $estimate['min_notional'],
+            'quantity' => $estimate['quantity'],
+            'below_exchange_minimum' => $estimate['below_exchange_minimum'],
+        ]);
+        if ($estimate['rounding'] === 'exchange_step') {
+            $sizing['notional'] = (float) $estimate['notional'];
+            if ((float) $estimate['notional'] > 0) {
+                $sizing['cost_basis_notional'] = (float) $estimate['notional'];
+            }
+        }
+
+        return $sizing;
+    }
+
+    /**
+     * Adds the margin-relative view of net_edge's (notional-based) USDT
+     * figures, so a 10x trade visibly costs ~1% of stake round trip. Purely
+     * additive; `stake` keeps meaning "the amount the percentages were
+     * applied to" -- restated explicitly as `notional` beside
+     * `stake_margin` so nothing downstream has to infer which it is.
+     *
+     * @param  array<string,mixed>  $netEdge
+     * @param  array<string,mixed>  $sizing
+     * @return array<string,mixed>
+     */
+    private function withMarginView(array $netEdge, array $sizing): array
+    {
+        $margin = (float) $sizing['stake_margin'];
+        $notional = (float) $sizing['cost_basis_notional'];
+        $roundTripFeeUsdt = $notional * ((float) ($netEdge['round_trip_fee_pct'] ?? 0) / 100);
+        $pctOfMargin = static fn (float $usdt): ?float => $margin > 0 ? round($usdt / $margin * 100, 6) : null;
+
+        return array_merge($netEdge, [
+            'stake_margin' => round($margin, 8),
+            'notional' => round($notional, 8),
+            'leverage' => $sizing['leverage'],
+            'notional_rounding' => $sizing['rounding'],
+            'round_trip_fee_usdt' => round($roundTripFeeUsdt, 8),
+            'round_trip_fee_pct_of_margin' => $pctOfMargin($roundTripFeeUsdt),
+            'actual_cost_pct_of_margin' => $pctOfMargin((float) ($netEdge['actual_cost_usdt'] ?? 0)),
+        ]);
     }
 
     /**

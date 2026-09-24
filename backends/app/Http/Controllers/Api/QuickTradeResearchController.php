@@ -28,7 +28,7 @@ class QuickTradeResearchController extends Controller
             ->where('user_id', $request->user()->id)->exists(), 403, 'You do not have access to this workspace.');
         $data = $request->validate([
             'symbol' => 'required|string|max:32', 'timeframe' => 'required|string|max:16',
-            'expiry_seconds' => 'required|integer|min:5|max:3600',
+            'expiry_seconds' => 'required|integer|min:5|max:'.$this->maxExpirySeconds($workspace),
             'exchange' => 'nullable|string|in:binance,binance_futures',
             'candle_limit' => 'nullable|integer|min:30|max:1000',
         ]);
@@ -52,7 +52,7 @@ class QuickTradeResearchController extends Controller
             ->where('user_id', $request->user()->id)->exists(), 403, 'You do not have access to this workspace.');
         $data = $request->validate([
             'symbol' => 'nullable|string|max:32', 'timeframe' => 'nullable|string|max:16',
-            'expiry_seconds' => 'nullable|integer|min:5|max:3600',
+            'expiry_seconds' => 'nullable|integer|min:5|max:'.$this->maxExpirySeconds($workspace),
         ]);
         $prefix = $data['symbol'] ? '%:' . strtoupper($data['symbol']) . ':' . ($data['timeframe'] ?? '%') : '%';
         $rows = RatioBotForecastBacktest::query()
@@ -94,7 +94,7 @@ class QuickTradeResearchController extends Controller
             ->where('user_id', $request->user()->id)->exists(), 403, 'You do not have access to this workspace.');
         $data = $request->validate([
             'symbol' => 'nullable|string|max:32', 'timeframe' => 'nullable|string|max:16',
-            'expiry_seconds' => 'nullable|integer|min:5|max:3600', 'mode' => 'nullable|in:live,paper',
+            'expiry_seconds' => 'nullable|integer|min:5|max:'.$this->maxExpirySeconds($workspace), 'mode' => 'nullable|in:live,paper',
             'limit' => 'nullable|integer|min:1|max:1000',
         ]);
         $trades = QuickTrade::where('workspace_id', $workspace)->where('status', '!=', 'open')
@@ -123,7 +123,11 @@ class QuickTradeResearchController extends Controller
             // Part A3 -- fee-free direction accuracy, fee-aware trade-decision
             // accuracy, and the WAIT saved/missed USDT totals, as their own
             // separate block beside (never merged into) the existing metrics.
-            'audit_summary' => $research->auditSummary($rows),
+            // Phase 1 item 4: `untraded_wait_shadow` is its own nested block
+            // -- market-level WAITs nobody traded -- kept apart from the
+            // traded-WAIT wait_decision_* totals.
+            'audit_summary' => array_merge($research->auditSummary($rows),
+                ['untraded_wait_shadow' => $research->untradedWaitShadowSummary($data)]),
             'note' => 'This is settled live-trade research, not a historical backtest and not a live model promotion signal.',
         ], $metrics->summarize($rows)))->header('Cache-Control', 'private, no-store');
     }
@@ -147,7 +151,7 @@ class QuickTradeResearchController extends Controller
             ->where('user_id', $request->user()->id)->exists(), 403, 'You do not have access to this workspace.');
         $data = $request->validate([
             'symbol' => 'nullable|string|max:32', 'timeframe' => 'nullable|string|max:16',
-            'expiry_seconds' => 'nullable|integer|min:5|max:3600', 'mode' => 'nullable|in:live,paper',
+            'expiry_seconds' => 'nullable|integer|min:5|max:'.$this->maxExpirySeconds($workspace), 'mode' => 'nullable|in:live,paper',
             'limit' => 'nullable|integer|min:1|max:2000',
         ]);
         $trades = QuickTrade::where('workspace_id', $workspace)->where('status', '!=', 'open')
@@ -169,7 +173,8 @@ class QuickTradeResearchController extends Controller
                 'expiry_seconds' => $data['expiry_seconds'] ?? null,
             ]],
             $report->generate($rows),
-            ['audit_summary' => $research->auditSummary($rows)],
+            ['audit_summary' => array_merge($research->auditSummary($rows),
+                ['untraded_wait_shadow' => $research->untradedWaitShadowSummary($data)])],
         ))->header('Cache-Control', 'private, no-store');
     }
 
@@ -392,6 +397,16 @@ class QuickTradeResearchController extends Controller
         $result = $comparison->compare($scopeA, $scopeB, $summaryA, $summaryB);
 
         return response()->json(['schema_version' => 1] + $result)->header('Cache-Control', 'private, no-store');
+    }
+
+    /**
+     * Same derived cap QuickTradeController uses for `expiry_seconds`
+     * (TradingModuleSettingsService::maxExpirySeconds()), so a research
+     * filter/backtest for a live 4h/24h duration no longer 422s.
+     */
+    private function maxExpirySeconds(string $workspace): int
+    {
+        return app(\App\Domain\Trading\TradingModuleSettingsService::class)->maxExpirySeconds($workspace);
     }
 
     /**

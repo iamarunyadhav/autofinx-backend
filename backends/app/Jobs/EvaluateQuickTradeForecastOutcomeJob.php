@@ -92,7 +92,6 @@ class EvaluateQuickTradeForecastOutcomeJob implements ShouldQueue
     private function waitShadow(array $snapshot, array $primary, QuickTrade $trade): array
     {
         $research = app(\App\Domain\Trading\QuickTradeResearchService::class);
-        $costModel = app(\App\Domain\Trading\QuickTradeCostModel::class);
 
         $direction = is_array($snapshot['direction_prediction'] ?? null)
             ? $snapshot['direction_prediction']
@@ -101,59 +100,19 @@ class EvaluateQuickTradeForecastOutcomeJob implements ShouldQueue
             ? $snapshot['trade_decision_prediction']
             : $research->tradeDecisionPrediction($snapshot['primary'] ?? null);
 
-        $directionValue = $direction['value'] ?? null;
-        $decisionValue = $decision['value'] ?? null;
         $base = (float) ($snapshot['primary']['reference_price'] ?? $snapshot['primary']['current_price'] ?? 0);
         $actual = $primary['actual_price'] ?? null;
-        $stake = (float) $trade->stake_amount;
 
-        $result = [
-            'evaluated_at' => now()->toIso8601String(),
-            'direction' => $directionValue,
-            'trade_decision' => $decisionValue,
-            'reference_price' => $base > 0 ? $base : null,
-            'expiry_price' => $actual !== null ? (float) $actual : null,
-            'stake' => $stake,
-            'status' => 'unavailable',
-            'gross_move_pct' => null,
-            'hypothetical_gross_usdt' => null,
-            'hypothetical_cost_usdt' => null,
-            'hypothetical_net_usdt' => null,
-            'would_have_profited' => null,
-            'wait_saved_usdt' => null,
-            'wait_missed_usdt' => null,
-        ];
-
-        if ($directionValue === 'NEUTRAL') {
-            $result['status'] = 'not_applicable';
-
-            return $result;
-        }
-        if (! in_array($directionValue, ['BUY', 'SELL'], true) || $base <= 0 || $actual === null || $stake <= 0) {
-            return $result;
-        }
-
-        $costs = $costModel->costs($decision['fee_model'] ?? null);
-        $signedMovePct = (((float) $actual - $base) / $base) * 100 * ($directionValue === 'SELL' ? -1 : 1);
-        $grossUsdt = $stake * ($signedMovePct / 100);
-        $costUsdt = $stake * ($costs['cost_pct'] / 100);
-        $netUsdt = $grossUsdt - $costUsdt;
-
-        $result['status'] = 'evaluated';
-        $result['gross_move_pct'] = round($signedMovePct, 6);
-        $result['cost_pct'] = $costs['cost_pct'];
-        $result['fee_model'] = $costs['fee_model'];
-        $result['hypothetical_gross_usdt'] = round($grossUsdt, 8);
-        $result['hypothetical_cost_usdt'] = round($costUsdt, 8);
-        $result['hypothetical_net_usdt'] = round($netUsdt, 8);
-        $result['would_have_profited'] = $netUsdt > 0;
-
-        // Only a WAIT decision can save or miss money by not trading.
-        if ($decisionValue === 'WAIT') {
-            $result['wait_saved_usdt'] = $netUsdt < 0 ? round(abs($netUsdt), 8) : 0.0;
-            $result['wait_missed_usdt'] = $netUsdt > 0 ? round($netUsdt, 8) : 0.0;
-        }
-
-        return $result;
+        // The A4 math itself now lives in QuickTradeResearchService so the
+        // untraded-WAIT shadow evaluator reuses it verbatim (same output
+        // keys, same cost model, same saved/missed rule).
+        return $research->hypotheticalWaitOutcome(
+            $direction['value'] ?? null,
+            $decision['value'] ?? null,
+            $base,
+            $actual !== null ? (float) $actual : null,
+            (float) $trade->stake_amount,
+            $decision['fee_model'] ?? null,
+        );
     }
 }

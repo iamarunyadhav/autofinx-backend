@@ -11,6 +11,71 @@ use Illuminate\Support\Str;
 
 uses(RefreshDatabase::class);
 
+/*
+ * Isolation (Phase 1 item 3). TradingRuntimeHealthService reads the market
+ * websocket heartbeat FILES under storage_path('framework/...') and the
+ * quick-settler/robot-evaluator runtime heartbeat files next to them. On a
+ * dev machine with a real `market:ws-consume` running, those files are
+ * fresh; in a clean sandbox they are missing or stale -- so the same test
+ * asserted a different reason depending on the machine. (Redis is already
+ * isolated: phpunit.xml pins REDIS_DB=15 and Tests\TestCase clears the
+ * market-feed keys after every test.)
+ *
+ * Every test here now runs against an empty, private storage directory, so
+ * the ONLY heartbeat state a test sees is the one it writes itself.
+ */
+beforeEach(function () {
+    $this->isolatedStorage = sys_get_temp_dir().DIRECTORY_SEPARATOR.'afx-runtime-health-'.Str::random(12);
+    mkdir($this->isolatedStorage.DIRECTORY_SEPARATOR.'framework', 0777, true);
+    $this->app->useStoragePath($this->isolatedStorage);
+});
+
+afterEach(function () {
+    foreach (glob($this->isolatedStorage.DIRECTORY_SEPARATOR.'framework'.DIRECTORY_SEPARATOR.'*') ?: [] as $file) {
+        @unlink($file);
+    }
+    @rmdir($this->isolatedStorage.DIRECTORY_SEPARATOR.'framework');
+    @rmdir($this->isolatedStorage);
+});
+
+/** Writes a spot market-ws heartbeat file into the isolated storage dir. */
+function writeSpotMarketHeartbeat(int $epoch, array $perSymbol = []): void
+{
+    file_put_contents(storage_path('framework/autofinx-market-ws-heartbeat-spot.json'), json_encode([
+        'last_message_epoch' => $epoch,
+        'last_message_at' => date('c', $epoch),
+        'symbol' => array_key_first($perSymbol) ?? 'SOLUSDT',
+        'market_type' => 'spot',
+        'message_count' => 10,
+        'reconnect_count' => 0,
+        'per_symbol' => $perSymbol,
+    ]));
+}
+
+function enabledSpotRatioBotWorkspace(): array
+{
+    $user = User::factory()->create();
+    $workspace = Workspace::factory()->create();
+    WorkspaceMember::create([
+        'id' => (string) Str::uuid(),
+        'workspace_id' => $workspace->id,
+        'user_id' => $user->id,
+        'role' => 'admin',
+    ]);
+
+    RatioBotConfig::create([
+        'workspace_id' => $workspace->id,
+        'symbol' => 'BTCUSDT',
+        'market_type' => 'spot',
+        'execution_mode' => 'sandbox',
+        'enabled' => true,
+        'sell_threshold_ratio' => 0.02,
+        'buy_threshold_ratio' => 0.01,
+    ]);
+
+    return [$user, $workspace];
+}
+
 test('runtime health endpoint returns trading module traffic light status', function () {
     $user = User::factory()->create();
     $workspace = Workspace::factory()->create();
@@ -136,25 +201,38 @@ test('ratio_bot.live_feed is green when no ratio bot configs are enabled', funct
         ->assertJsonPath('ratio_bot.live_feed_detail.reason', 'no_enabled_feed_dependent_bots');
 });
 
-test('ratio_bot.live_feed goes red for an enabled spot bot with no fresh feed', function () {
-    $user = User::factory()->create();
-    $workspace = Workspace::factory()->create();
-    WorkspaceMember::create([
-        'id' => (string) Str::uuid(),
-        'workspace_id' => $workspace->id,
-        'user_id' => $user->id,
-        'role' => 'admin',
-    ]);
+// The three honest "no fresh feed" states for a required spot symbol. The
+// service evaluates the heartbeat file BEFORE demoting for a missing
+// required symbol (TradingRuntimeHealthService::marketFeed ->
+// heartbeatFeed -> demoteForMissingRequiredFeeds), so each state has its
+// own, more specific reason; all three are red.
 
-    RatioBotConfig::create([
-        'workspace_id' => $workspace->id,
-        'symbol' => 'BTCUSDT',
-        'market_type' => 'spot',
-        'execution_mode' => 'sandbox',
-        'enabled' => true,
-        'sell_threshold_ratio' => 0.02,
-        'buy_threshold_ratio' => 0.01,
-    ]);
+test('ratio_bot.live_feed goes red with no_market_feed_tick when no spot websocket worker has ever written a heartbeat', function () {
+    [$user, $workspace] = enabledSpotRatioBotWorkspace();
+
+    $this->actingAs($user)
+        ->getJson('/api/v1/runtime/health?workspace_id='.$workspace->id)
+        ->assertOk()
+        ->assertJsonPath('ratio_bot.live_feed', 'red')
+        ->assertJsonPath('ratio_bot.live_feed_detail.reason', 'no_market_feed_tick');
+});
+
+test('ratio_bot.live_feed goes red with live_feed_heartbeat_stale when the spot worker heartbeat is stale', function () {
+    [$user, $workspace] = enabledSpotRatioBotWorkspace();
+    writeSpotMarketHeartbeat(time() - 3600, ['BTCUSDT' => ['last_message_epoch' => time() - 3600, 'last_message_at' => date('c', time() - 3600)]]);
+
+    $this->actingAs($user)
+        ->getJson('/api/v1/runtime/health?workspace_id='.$workspace->id)
+        ->assertOk()
+        ->assertJsonPath('ratio_bot.live_feed', 'red')
+        ->assertJsonPath('ratio_bot.live_feed_detail.reason', 'live_feed_heartbeat_stale');
+});
+
+test('ratio_bot.live_feed goes red for an enabled spot bot with no fresh feed even while the worker is alive for another symbol', function () {
+    [$user, $workspace] = enabledSpotRatioBotWorkspace();
+    // Worker alive (fresh aggregate) but BTCUSDT -- the required symbol --
+    // has no fresh Redis tick and no per-symbol heartbeat entry.
+    writeSpotMarketHeartbeat(time(), ['SOLUSDT' => ['last_message_epoch' => time(), 'last_message_at' => date('c')]]);
 
     $this->actingAs($user)
         ->getJson('/api/v1/runtime/health?workspace_id='.$workspace->id)

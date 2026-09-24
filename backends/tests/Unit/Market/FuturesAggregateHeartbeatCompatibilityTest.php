@@ -22,16 +22,28 @@ class FuturesAggregateHeartbeatCompatibilityTest extends TestCase
 {
     private string $aggregatePath;
 
+    private string $isolatedStorage;
+
     protected function setUp(): void
     {
         parent::setUp();
+        // Isolation (Phase 1 item 3): never unlink/overwrite the REAL
+        // aggregate heartbeat a locally running daemon owns (and never race
+        // it) -- work in a private, empty storage directory instead.
+        $this->isolatedStorage = sys_get_temp_dir().DIRECTORY_SEPARATOR.'afx-agg-heartbeat-'.\Illuminate\Support\Str::random(12);
+        mkdir($this->isolatedStorage.DIRECTORY_SEPARATOR.'framework', 0777, true);
+        $this->app->useStoragePath($this->isolatedStorage);
         $this->aggregatePath = MarketWsConsumerCommand::heartbeatPathFor('futures', null);
         @unlink($this->aggregatePath);
     }
 
     protected function tearDown(): void
     {
-        @unlink($this->aggregatePath);
+        foreach (glob($this->isolatedStorage.DIRECTORY_SEPARATOR.'framework'.DIRECTORY_SEPARATOR.'*') ?: [] as $file) {
+            @unlink($file);
+        }
+        @rmdir($this->isolatedStorage.DIRECTORY_SEPARATOR.'framework');
+        @rmdir($this->isolatedStorage);
         parent::tearDown();
     }
 

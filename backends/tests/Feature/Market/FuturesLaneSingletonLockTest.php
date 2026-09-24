@@ -16,6 +16,29 @@ use Tests\TestCase;
  */
 class FuturesLaneSingletonLockTest extends TestCase
 {
+    private string $isolatedStorage;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+        // Isolation (Phase 1 item 3): the "existing worker" heartbeat below
+        // is written/deleted in a private storage directory, never over the
+        // real lane heartbeat a locally running futures worker owns.
+        $this->isolatedStorage = sys_get_temp_dir().DIRECTORY_SEPARATOR.'afx-lane-lock-'.\Illuminate\Support\Str::random(12);
+        mkdir($this->isolatedStorage.DIRECTORY_SEPARATOR.'framework', 0777, true);
+        $this->app->useStoragePath($this->isolatedStorage);
+    }
+
+    protected function tearDown(): void
+    {
+        foreach (glob($this->isolatedStorage.DIRECTORY_SEPARATOR.'framework'.DIRECTORY_SEPARATOR.'*') ?: [] as $file) {
+            @unlink($file);
+        }
+        @rmdir($this->isolatedStorage.DIRECTORY_SEPARATOR.'framework');
+        @rmdir($this->isolatedStorage);
+        parent::tearDown();
+    }
+
     public function test_duplicate_public_lane_worker_is_rejected(): void
     {
         $this->assertDuplicateLaneWorkerRejected('public');

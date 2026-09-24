@@ -127,6 +127,17 @@ class TradingModuleSettingsService
                     ? max((float) ($quick['min_stake'] ?? 10), FuturesOrderSizingService::BINANCE_MIN_OPEN_NOTIONAL)
                     : (float) ($quick['min_stake'] ?? 10),
                 'paper_only' => true,
+                // Gap-checklist N4 -- the UI's "Stop Loss is off on a long live
+                // expiry" warning reads its threshold from here rather than
+                // hardcoding 1800. Enforcement itself lives server-side in
+                // QuickTradeService::place().
+                'require_stop_loss_min_expiry_seconds' => (int) config('quick_trade.require_stop_loss_min_expiry_seconds', 1800),
+                'enforce_stop_loss_min_expiry' => (bool) config('quick_trade.enforce_stop_loss_min_expiry', false),
+                // Part C1 -- the live expiry presets from config/quick_trade.php,
+                // restricted to combinations the selected provider actually
+                // offers (a preset the picker cannot select would be a lie).
+                'live_expiry_presets' => $this->liveExpiryPresets($providerProfile),
+                'min_horizon_candles' => max(1, (int) config('quick_trade.min_horizon_candles', 3)),
             ]),
             'robot_trade' => $this->robotConfig($workspaceId),
             'trading_state' => $state,
@@ -237,6 +248,30 @@ class TradingModuleSettingsService
         return (array) Arr::get($state, "provider_catalog.{$provider}.durations", [60, 300, 900]);
     }
 
+    /**
+     * Upper bound for any request's `expiry_seconds` validation rule, derived
+     * from the SAME sources durationsForMode() enforces exactly: the paper
+     * duration list (workspace-overridable) plus every live provider
+     * catalog's durations (BinanceTimedFuturesProvider::capabilities() for
+     * Binance: up to 86400). This is only a coarse request-shape cap --
+     * QuickTradeService::place() still rejects any value not in the exact
+     * list for the resolved mode/provider -- but it can no longer 422 a
+     * duration the live catalog itself offers (the old hardcoded max:3600
+     * rejected Binance's 14400/86400 before the service ever saw them).
+     */
+    public function maxExpirySeconds(?string $workspaceId = null): int
+    {
+        $durations = array_map('intval', (array) ($this->quickTradeConfig($workspaceId)['durations'] ?? []));
+        foreach ($this->providers->catalog() as $profile) {
+            foreach ((array) ($profile['durations'] ?? []) as $seconds) {
+                $durations[] = (int) $seconds;
+            }
+        }
+        $durations = array_filter($durations, static fn (int $seconds) => $seconds > 0);
+
+        return $durations === [] ? 3600 : max($durations);
+    }
+
     public function timeframesForMode(?string $workspaceId, string $mode, ?string $provider = null): array
     {
         if (strtolower($mode) !== 'live') {
@@ -279,6 +314,32 @@ class TradingModuleSettingsService
         }
 
         return array_replace_recursive($defaults, $global, $workspace);
+    }
+
+    /**
+     * Part C1 -- `quick_trade.live_expiry_presets`, filtered to the
+     * timeframe/duration pairs the given provider really supports in live
+     * mode, each labelled for display. Order (recommended first) is preserved.
+     *
+     * @return array<int, array{timeframe:string, expiry_seconds:int, recommended:bool, label:string}>
+     */
+    private function liveExpiryPresets(?array $providerProfile): array
+    {
+        $timeframes = array_map('strval', (array) ($providerProfile['timeframes'] ?? ['1m', '5m', '15m']));
+        $durations = array_map('intval', (array) ($providerProfile['durations'] ?? [60, 300, 900]));
+
+        return collect((array) config('quick_trade.live_expiry_presets', []))
+            ->filter(fn ($preset) => is_array($preset)
+                && in_array((string) ($preset['timeframe'] ?? ''), $timeframes, true)
+                && in_array((int) ($preset['expiry_seconds'] ?? 0), $durations, true))
+            ->map(fn (array $preset) => [
+                'timeframe' => (string) $preset['timeframe'],
+                'expiry_seconds' => (int) $preset['expiry_seconds'],
+                'recommended' => (bool) ($preset['recommended'] ?? false),
+                'label' => sprintf('%s chart / %s', $preset['timeframe'], $this->durationLabel((int) $preset['expiry_seconds'])),
+            ])
+            ->values()
+            ->all();
     }
 
     private function durationLabel(int $seconds): string

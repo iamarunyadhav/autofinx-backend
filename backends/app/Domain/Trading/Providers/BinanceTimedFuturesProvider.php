@@ -7,6 +7,7 @@ use App\Domain\Trading\FuturesOrderSizingService;
 use App\Domain\Trading\LeverageValidationService;
 use App\Models\Integration;
 use Illuminate\Http\Client\Response;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
@@ -599,17 +600,7 @@ class BinanceTimedFuturesProvider implements LiveTradeProviderInterface
         $this->assertSuccess($exchangeInfo, 'Failed to fetch Binance futures exchange info.');
 
         $symbolRow = collect((array) $exchangeInfo->json('symbols'))->first();
-        $filters = collect((array) ($symbolRow['filters'] ?? []))
-            ->mapWithKeys(fn (array $filter) => [strtoupper((string) ($filter['filterType'] ?? '')) => $filter]);
-
-        $marketLot = $filters->get('MARKET_LOT_SIZE') ?: $filters->get('LOT_SIZE') ?: [];
-        $stepSize = (float) ($marketLot['stepSize'] ?? 0.001);
-        $minQty = (float) ($marketLot['minQty'] ?? $stepSize);
-        $minNotionalFilter = $filters->get('MIN_NOTIONAL') ?: $filters->get('NOTIONAL') ?: [];
-        $minNotional = max(
-            FuturesOrderSizingService::BINANCE_MIN_OPEN_NOTIONAL,
-            (float) ($minNotionalFilter['notional'] ?? $minNotionalFilter['minNotional'] ?? 0)
-        );
+        ['stepSize' => $stepSize, 'minQty' => $minQty, 'minNotional' => $minNotional] = $this->lotFilters((array) $symbolRow);
 
         if ($quantity < $minQty) {
             if ($priceForError !== null) {
@@ -622,9 +613,7 @@ class BinanceTimedFuturesProvider implements LiveTradeProviderInterface
             return 0.0;
         }
 
-        $steps = floor($quantity / $stepSize);
-        $normalized = $steps * $stepSize;
-        $normalized = round($normalized, 8);
+        $normalized = self::floorToStep($quantity, $stepSize);
 
         if ($priceForError !== null && $minNotional > 0 && ($normalized * $priceForError) < $minNotional) {
             $requiredQty = $this->ceilToStep($minNotional / max($priceForError, 0.00000001), $stepSize);
@@ -636,6 +625,117 @@ class BinanceTimedFuturesProvider implements LiveTradeProviderInterface
         }
 
         return $normalized;
+    }
+
+    /**
+     * The exact qty-step rounding openTimedTrade() applies before an order is
+     * sent (extracted verbatim from normalizeQuantity(): floor to a whole
+     * number of steps, then round to 8 dp). Public + static so the Quick
+     * Trade forecast's position_sizing estimate uses THIS rule rather than a
+     * second implementation that could drift from real placement.
+     */
+    public static function floorToStep(float $quantity, float $stepSize): float
+    {
+        $steps = floor($quantity / $stepSize);
+
+        return round($steps * $stepSize, 8);
+    }
+
+    /**
+     * Lot-size / min-notional filters for one exchangeInfo symbol row --
+     * extracted verbatim from normalizeQuantity() so the display estimate
+     * (sizingEstimate()) and real placement parse the filters identically.
+     *
+     * @return array{stepSize: float, minQty: float, minNotional: float}
+     */
+    private function lotFilters(array $symbolRow): array
+    {
+        $filters = collect((array) ($symbolRow['filters'] ?? []))
+            ->mapWithKeys(fn (array $filter) => [strtoupper((string) ($filter['filterType'] ?? '')) => $filter]);
+
+        $marketLot = $filters->get('MARKET_LOT_SIZE') ?: $filters->get('LOT_SIZE') ?: [];
+        $stepSize = (float) ($marketLot['stepSize'] ?? 0.001);
+        $minQty = (float) ($marketLot['minQty'] ?? $stepSize);
+        $minNotionalFilter = $filters->get('MIN_NOTIONAL') ?: $filters->get('NOTIONAL') ?: [];
+        $minNotional = max(
+            FuturesOrderSizingService::BINANCE_MIN_OPEN_NOTIONAL,
+            (float) ($minNotionalFilter['notional'] ?? $minNotionalFilter['minNotional'] ?? 0)
+        );
+
+        return ['stepSize' => $stepSize, 'minQty' => $minQty, 'minNotional' => $minNotional];
+    }
+
+    /**
+     * Gap-checklist N3 -- DISPLAY/COST-ESTIMATION ONLY. What quantity and
+     * real notional would openTimedTrade() produce for this margin x
+     * leverage at this reference price? Mirrors its sizing exactly
+     * (notionalTarget / max(price, 1e-8), then floorToStep() with the same
+     * parsed filters) but never places, never throws and never touches the
+     * account: it reads only the PUBLIC exchangeInfo endpoint (production
+     * base URL -- filters are symbol metadata), cached for an hour, with a
+     * short negative cache so an outage cannot add a network timeout to
+     * every forecast poll. On any failure it returns rounding=unavailable
+     * and the caller falls back to the unrounded target, labelled as such.
+     *
+     * @return array<string, mixed>
+     */
+    public function sizingEstimate(string $symbol, float $notionalTarget, float $referencePrice): array
+    {
+        $symbol = strtoupper(trim($symbol));
+        $unavailable = [
+            'rounding' => 'unavailable',
+            'step_size' => null,
+            'min_qty' => null,
+            'min_notional' => null,
+            'quantity' => null,
+            'notional' => null,
+            'below_exchange_minimum' => null,
+        ];
+        if ($symbol === '' || $referencePrice <= 0 || $notionalTarget <= 0) {
+            return $unavailable;
+        }
+
+        try {
+            $cacheKey = 'quick_trade:binance_futures:lot_filters:v1:'.$symbol;
+            $filters = Cache::get($cacheKey);
+            if (! is_array($filters)) {
+                $response = Http::timeout(3)->get($this->baseUrl(null).'/fapi/v1/exchangeInfo', ['symbol' => $symbol]);
+                $row = $response->successful()
+                    ? collect((array) $response->json('symbols'))->first(fn ($r) => strtoupper((string) ($r['symbol'] ?? '')) === $symbol)
+                    : null;
+                if (! is_array($row)) {
+                    Cache::put($cacheKey, ['unavailable' => true], 60);
+
+                    return $unavailable;
+                }
+                $filters = $this->lotFilters($row);
+                Cache::put($cacheKey, $filters, 3600);
+            }
+            if (($filters['unavailable'] ?? false) === true || (float) ($filters['stepSize'] ?? 0) <= 0) {
+                return $unavailable;
+            }
+
+            $rawQuantity = $notionalTarget / max($referencePrice, 0.00000001);
+            $quantity = $rawQuantity < (float) $filters['minQty'] ? 0.0 : self::floorToStep($rawQuantity, (float) $filters['stepSize']);
+            $notional = round($quantity * $referencePrice, 8);
+
+            return [
+                'rounding' => 'exchange_step',
+                'step_size' => (float) $filters['stepSize'],
+                'min_qty' => (float) $filters['minQty'],
+                'min_notional' => (float) $filters['minNotional'],
+                'quantity' => $quantity,
+                'notional' => $notional,
+                // Exactly the two conditions normalizeQuantity() rejects with
+                // "Stake too small" at placement time.
+                'below_exchange_minimum' => $rawQuantity < (float) $filters['minQty']
+                    || ((float) $filters['minNotional'] > 0 && $notional < (float) $filters['minNotional']),
+            ];
+        } catch (Throwable $e) {
+            Log::warning('quick_trade_sizing_estimate_unavailable', ['symbol' => $symbol, 'error' => $e->getMessage()]);
+
+            return $unavailable;
+        }
     }
 
     private function ceilToStep(float $quantity, float $stepSize): float

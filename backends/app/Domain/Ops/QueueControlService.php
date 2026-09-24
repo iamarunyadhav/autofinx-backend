@@ -75,6 +75,10 @@ class QueueControlService
                 ->get(['id', 'command', 'status', 'started_at', 'finished_at', 'duration_ms'])
                 ->values(),
             'recommendations' => $this->recommendations($state, $connection, $blockingBacklog, $failed),
+            // N2 -- p50/p95 queue wait + compute time for the `predictions`
+            // queue, and how many forecast jobs the 20s validity rule dropped.
+            // Additive key; summary() never throws (returns available=false).
+            'prediction_worker_latency' => app(PredictionQueueLatencyMetrics::class)->summary(),
             'generated_at' => now()->toIso8601String(),
         ];
     }

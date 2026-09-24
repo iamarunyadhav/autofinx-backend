@@ -273,3 +273,69 @@ test('the min-horizon-candles guard ships enabled by default so a live 1m/60s co
     $response = placeGuardedLiveTrade(['timeframe' => '1m', 'expiry_seconds' => 60])->assertStatus(422);
     expect($response->json('message'))->toContain('require at least 3');
 });
+
+// ── Gap-checklist N4: stop-loss on long live expiries ────────────────────
+
+test('N4 ships with a 1800s long-expiry threshold and enforcement OFF, so a long live trade without a stop still opens', function () {
+    config()->set('quick_trade.block_live_against_decision', false);
+
+    expect(config('quick_trade.require_stop_loss_min_expiry_seconds'))->toBe(1800)
+        ->and(config('quick_trade.enforce_stop_loss_min_expiry'))->toBeFalse();
+
+    placeGuardedLiveTrade(['timeframe' => '1m', 'expiry_seconds' => 3600])->assertCreated();
+    expect(QuickTrade::first()->stop_loss_pct)->toBeNull();
+});
+
+test('N4 enforcement, when enabled, rejects a live trade at or above the threshold with Stop Loss off', function () {
+    config()->set('quick_trade.block_live_against_decision', false);
+    config()->set('quick_trade.enforce_stop_loss_min_expiry', true);
+    config()->set('quick_trade.require_stop_loss_min_expiry_seconds', 1800);
+
+    $response = placeGuardedLiveTrade(['timeframe' => '1m', 'expiry_seconds' => 3600])->assertStatus(422);
+
+    expect($response->json('message'))->toContain('stop_loss_required_for_long_expiry')
+        ->and($response->json('message'))->toContain('1800s');
+    expect(QuickTrade::count())->toBe(0);
+});
+
+test('N4 enforcement allows the same long live trade once a Stop Loss is set, and never invents one', function () {
+    config()->set('quick_trade.block_live_against_decision', false);
+    config()->set('quick_trade.enforce_stop_loss_min_expiry', true);
+    config()->set('quick_trade.require_stop_loss_min_expiry_seconds', 1800);
+
+    placeGuardedLiveTrade(['timeframe' => '1m', 'expiry_seconds' => 3600, 'stop_loss_pct' => -2])->assertCreated();
+    expect((float) QuickTrade::first()->stop_loss_pct)->toBe(-2.0);
+});
+
+test('N4 enforcement does not touch live expiries below the threshold', function () {
+    config()->set('quick_trade.block_live_against_decision', false);
+    config()->set('quick_trade.enforce_stop_loss_min_expiry', true);
+    config()->set('quick_trade.require_stop_loss_min_expiry_seconds', 1800);
+
+    placeGuardedLiveTrade(['timeframe' => '1m', 'expiry_seconds' => 900])->assertCreated();
+});
+
+test('quick trade metadata publishes the N4 threshold and only the C1 live presets the provider really offers', function () {
+    [$user, $workspace] = decisionGuardLiveWorkspace();
+
+    $response = $this->actingAs($user)
+        ->getJson('/api/v1/quick-trade/metadata?workspace_id='.$workspace->id)
+        ->assertOk();
+
+    expect($response->json('quick_trade.require_stop_loss_min_expiry_seconds'))->toBe(1800)
+        ->and($response->json('quick_trade.enforce_stop_loss_min_expiry'))->toBeFalse()
+        ->and($response->json('quick_trade.min_horizon_candles'))->toBe(3);
+
+    // config/quick_trade.php lists 5m/3600 (recommended), 5m/1800, 15m/3600.
+    // Binance's live duration catalog (BinanceTimedFuturesProvider::
+    // capabilities()) has no 1800s option, so that preset could never be
+    // selected -- it is filtered out rather than shown as a dead button.
+    $liveDurations = app(\App\Domain\Trading\Providers\BinanceTimedFuturesProvider::class)->capabilities()['durations'];
+    expect($liveDurations)->not->toContain(1800);
+
+    $presets = $response->json('quick_trade.live_expiry_presets');
+    expect($presets)->toHaveCount(2)
+        ->and($presets[0])->toMatchArray(['timeframe' => '5m', 'expiry_seconds' => 3600, 'recommended' => true, 'label' => '5m chart / 60m'])
+        ->and($presets[1])->toMatchArray(['timeframe' => '15m', 'expiry_seconds' => 3600, 'recommended' => false])
+        ->and(collect($presets)->pluck('expiry_seconds')->all())->not->toContain(1800);
+});
