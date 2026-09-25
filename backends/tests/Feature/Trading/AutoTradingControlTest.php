@@ -6,6 +6,7 @@ use App\Models\Bot;
 use App\Models\Setting;
 use App\Models\User;
 use App\Models\Workspace;
+use App\Models\WorkspaceMember;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Str;
 
@@ -46,6 +47,11 @@ test('bots evaluation pauses running bots when auto trading is disabled', functi
 test('bot start is blocked when auto trading is disabled', function () {
     $user = User::factory()->create();
     $workspace = Workspace::factory()->create();
+    WorkspaceMember::create([
+        'workspace_id' => $workspace->id,
+        'user_id' => $user->id,
+        'role' => 'owner',
+    ]);
     seedAutoTradingSetting($workspace->id, false);
 
     $bot = Bot::create([

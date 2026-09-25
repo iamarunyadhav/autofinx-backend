@@ -215,6 +215,10 @@ class OpsController extends Controller
             'reason' => 'nullable|string|max:240',
         ]);
 
+        // Body workspace_id: the caller must be a member, otherwise anyone
+        // could halt (or re-enable) another workspace's live trading.
+        $this->assertWorkspaceAccess((string) $data['workspace_id'], $request->user()?->id);
+
         $service = app(KillSwitchService::class);
         $reason = trim((string) ($data['reason'] ?? 'manual'));
         $state = $data['enabled']
@@ -241,6 +245,13 @@ class OpsController extends Controller
         $reason = trim((string) ($data['reason'] ?? 'manual'));
         $workspaceId = isset($data['workspace_id']) ? (string) $data['workspace_id'] : null;
         $provider = strtolower((string) $data['provider']);
+
+        // A workspace-scoped breaker is that workspace's own control. (The
+        // workspace-less, platform-wide variant has no owning workspace to
+        // check against -- see the platform-admin note in the audit report.)
+        if ($workspaceId !== null) {
+            $this->assertWorkspaceAccess($workspaceId, $request->user()?->id);
+        }
 
         $state = $data['enabled']
             ? $breakers->activateProviderOutage($workspaceId, $provider, $reason, 'manual')

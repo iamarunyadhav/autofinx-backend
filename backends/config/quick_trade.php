@@ -49,6 +49,20 @@ return [
     'decision_close_anchored_cache' => env('QUICK_TRADE_DECISION_CLOSE_ANCHORED_CACHE', true),
 
     /**
+     * `closed_candles_only` above trimmed the forming bar from forecast()'s
+     * own candles, but the INDICATOR VOTE fed into it (SignalPreviewService::
+     * preview(), the 25% signal weight) was still computed on candles that
+     * included the forming bar -- at /quick-trade/chart (whose
+     * signal_preview the page sends back as the forecast `signal`) and at
+     * live placement (the vote behind the A5 guard's research forecast).
+     * When true, both votes are computed on CandleCloseResolver's closed
+     * candles. The chart's `candles` series is untouched (the forming bar is
+     * still drawn). The trim itself is CandleCloseResolver's, so it is also
+     * a no-op while `closed_candles_only` is false.
+     */
+    'indicator_vote_closed_candles_only' => env('QUICK_TRADE_INDICATOR_VOTE_CLOSED_CANDLES_ONLY', true),
+
+    /**
      * Trade decision becomes WAIT with gate_reason=candle_gap when the last
      * CLOSED candle is older than this multiple of the chart timeframe.
      */
@@ -145,6 +159,18 @@ return [
 
     /** maker_entry is never allowed to drive a live decision. */
     'allow_maker_entry_in_live' => env('QUICK_TRADE_ALLOW_MAKER_ENTRY_IN_LIVE', false),
+
+    /**
+     * LIVE Binance only: price the fee-aware decision off the connected
+     * account's real USDⓈ-M taker commission (signed GET
+     * /fapi/v1/commissionRate, cached 1h per integration+symbol) instead of
+     * `trading.binance_futures_taker_fee_rate`. Any lookup failure falls back
+     * to the config rate; `fee_rate_source` says which was used. Applies to
+     * the /quick-trade/forecast preview (when the request names a workspace
+     * the caller belongs to) and the placement-time decision behind the A5
+     * guard. Ships OFF: it has not been verified against a real account.
+     */
+    'use_account_fee_rate' => env('QUICK_TRADE_USE_ACCOUNT_FEE_RATE', false),
 
     // ---- Part D: accuracy & confidence reliability -----------------------
     /** Minimum n before an accuracy bucket is reported rather than `insufficient`. */

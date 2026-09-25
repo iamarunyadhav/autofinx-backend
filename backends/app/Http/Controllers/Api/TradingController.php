@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Domain\Execution\ExecutionEngine;
 use App\Http\Controllers\Controller;
+use App\Http\Controllers\Concerns\AssertsWorkspaceMembership;
 use App\Models\Ledger;
 use App\Models\LedgerTransaction;
 use App\Models\Order;
@@ -17,25 +18,39 @@ use Illuminate\Support\Str;
 use App\Support\RiskGuardService;
 use Symfony\Component\HttpKernel\Exception\HttpExceptionInterface;
 
+/**
+ * Orders/trades/positions/ledger and paper order placement. Every action
+ * asserts workspace membership (RatioBotController pattern).
+ */
 class TradingController extends Controller
 {
+    use AssertsWorkspaceMembership;
+
     public function orders(Request $request, string $workspaceId)
     {
+        $this->assertWorkspaceMembership($request, $workspaceId);
+
         return Order::where('workspace_id', $workspaceId)->with('symbol')->latest()->get();
     }
 
     public function trades(Request $request, string $workspaceId)
     {
+        $this->assertWorkspaceMembership($request, $workspaceId);
+
         return Trade::where('workspace_id', $workspaceId)->latest('executed_at')->get();
     }
 
     public function positions(Request $request, string $workspaceId)
     {
+        $this->assertWorkspaceMembership($request, $workspaceId);
+
         return Position::where('workspace_id', $workspaceId)->with('symbol')->get();
     }
 
     public function ledger(Request $request, string $workspaceId)
     {
+        $this->assertWorkspaceMembership($request, $workspaceId);
+
         $ledger = Ledger::firstOrCreate(
             ['workspace_id' => $workspaceId],
             ['id' => (string) Str::uuid(), 'balance' => 0, 'meta' => ['currency' => 'USD']]
@@ -45,6 +60,8 @@ class TradingController extends Controller
 
     public function exportLedger(Request $request, string $workspaceId)
     {
+        $this->assertWorkspaceMembership($request, $workspaceId);
+
         $transactions = LedgerTransaction::whereHas('ledger', fn ($q) => $q->where('workspace_id', $workspaceId))->get();
         $csv = "type,amount,occurred_at,meta\n";
         foreach ($transactions as $t) {
@@ -69,6 +86,8 @@ class TradingController extends Controller
             'price' => 'required|numeric',
             'idempotency_key' => 'nullable|string',
         ]);
+
+        $this->assertWorkspaceMembership($request, (string) $data['workspace_id']);
 
         if (($data['mode'] ?? 'paper') !== 'paper') {
             return response()->json([

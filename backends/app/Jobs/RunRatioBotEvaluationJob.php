@@ -202,6 +202,12 @@ class RunRatioBotEvaluationJob implements ShouldQueue, ShouldBeUnique
             ]);
 
             $alerts->checkAndNotify($config);
+
+            // Trade-level accuracy tracking -- observation only. Runs AFTER
+            // this tick's decision/execution, gated by
+            // ratio_bot_outcomes.evaluate_in_loop, throttled per bot and
+            // batch-capped; never throws (RatioBotTradeOutcomeService).
+            app(\App\Domain\RatioBot\RatioBotTradeOutcomeService::class)->evaluateDueForConfig($config);
         } finally {
             $lock->release();
         }

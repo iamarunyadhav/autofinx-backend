@@ -6,6 +6,7 @@ use App\Domain\Exchange\BinanceSpotHealthService;
 use App\Domain\Ops\OperationalBreakerService;
 use App\Domain\Trading\BinanceOrderSyncService;
 use App\Http\Controllers\Controller;
+use App\Http\Controllers\Concerns\AssertsWorkspaceMembership;
 use App\Models\LiveExecutionEvent;
 use App\Models\Order;
 use App\Models\OrderFill;
@@ -16,8 +17,12 @@ use Illuminate\Support\Str;
 
 class LiveExecutionController extends Controller
 {
+    use AssertsWorkspaceMembership;
+
     public function index(Request $request, string $workspaceId)
     {
+        $this->assertWorkspaceMembership($request, $workspaceId);
+
         $data = $request->validate([
             'status' => 'nullable|string',
             'symbol' => 'nullable|string',
@@ -40,6 +45,8 @@ class LiveExecutionController extends Controller
 
     public function show(Request $request, Order $order)
     {
+        $this->assertWorkspaceMembership($request, (string) $order->workspace_id);
+
         abort_unless($this->isLiveOrder($order), 404);
 
         $order->load(['fills', 'executionAttempts', 'executionEvents']);
@@ -54,6 +61,8 @@ class LiveExecutionController extends Controller
 
     public function fills(Request $request, string $workspaceId)
     {
+        $this->assertWorkspaceMembership($request, $workspaceId);
+
         $data = $request->validate([
             'order_id' => 'nullable|uuid',
             'symbol' => 'nullable|string',
@@ -81,6 +90,8 @@ class LiveExecutionController extends Controller
 
     public function events(Request $request, string $workspaceId)
     {
+        $this->assertWorkspaceMembership($request, $workspaceId);
+
         $data = $request->validate([
             'order_id' => 'nullable|uuid',
             'event_type' => 'nullable|string',
@@ -100,6 +111,8 @@ class LiveExecutionController extends Controller
 
     public function anomalies(Request $request, string $workspaceId)
     {
+        $this->assertWorkspaceMembership($request, $workspaceId);
+
         $data = $request->validate([
             'limit' => 'nullable|integer|min:1|max:200',
         ]);
@@ -119,8 +132,10 @@ class LiveExecutionController extends Controller
         return response()->json($anomalies);
     }
 
-    public function health(string $workspaceId, OperationalBreakerService $breakers, BinanceSpotHealthService $health)
+    public function health(Request $request, string $workspaceId, OperationalBreakerService $breakers, BinanceSpotHealthService $health)
     {
+        $this->assertWorkspaceMembership($request, $workspaceId);
+
         $openStatuses = [Order::STATUS_PENDING_PROVIDER, Order::STATUS_NEW, Order::STATUS_PARTIAL, Order::STATUS_UNCERTAIN];
         $openOrders = Order::query()
             ->where('workspace_id', $workspaceId)
@@ -168,6 +183,7 @@ class LiveExecutionController extends Controller
             'workspace_id' => 'required|uuid',
         ]);
 
+        $this->assertWorkspaceMembership($request, (string) $order->workspace_id);
         abort_unless((string) $order->workspace_id === (string) $data['workspace_id'] && $this->isLiveOrder($order), 404);
 
         try {
@@ -183,6 +199,8 @@ class LiveExecutionController extends Controller
 
     public function syncWorkspace(Request $request, string $workspaceId, BinanceOrderSyncService $sync)
     {
+        $this->assertWorkspaceMembership($request, $workspaceId);
+
         $data = $request->validate([
             'symbol' => 'nullable|string',
             'integration_id' => 'nullable|uuid',

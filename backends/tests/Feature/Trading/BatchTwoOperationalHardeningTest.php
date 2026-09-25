@@ -21,6 +21,7 @@ use App\Models\Setting;
 use App\Models\Symbol;
 use App\Models\User;
 use App\Models\Workspace;
+use App\Models\WorkspaceMember;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
@@ -93,6 +94,11 @@ function createOperationalIntegration(string $workspaceId, string $environment =
 test('live orders are blocked by the provider outage breaker', function () {
     $user = User::factory()->create();
     $workspace = Workspace::factory()->create();
+    WorkspaceMember::create([
+        'workspace_id' => $workspace->id,
+        'user_id' => $user->id,
+        'role' => 'owner',
+    ]);
     enableOperationalLiveMode($workspace->id);
     $integration = createOperationalIntegration($workspace->id);
 
@@ -119,6 +125,11 @@ test('live orders are blocked by the provider outage breaker', function () {
 test('detect stale feeds activates breaker and blocks live orders', function () {
     $user = User::factory()->create();
     $workspace = Workspace::factory()->create();
+    WorkspaceMember::create([
+        'workspace_id' => $workspace->id,
+        'user_id' => $user->id,
+        'role' => 'owner',
+    ]);
     enableOperationalLiveMode($workspace->id);
     $integration = createOperationalIntegration($workspace->id);
 
@@ -191,6 +202,11 @@ test('detect stale feeds activates breaker and blocks live orders', function () 
 test('live cancel route cancels orders through the canonical backend path', function () {
     $user = User::factory()->create();
     $workspace = Workspace::factory()->create();
+    WorkspaceMember::create([
+        'workspace_id' => $workspace->id,
+        'user_id' => $user->id,
+        'role' => 'owner',
+    ]);
     $integration = createOperationalIntegration($workspace->id);
     $symbol = Symbol::create([
         'id' => (string) Str::uuid(),

@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Http\Controllers\Concerns\AssertsWorkspaceMembership;
 use App\Models\AssistantSession;
 use App\Models\AuditLog;
 use App\Models\BrokerConnection;
@@ -26,8 +27,28 @@ use App\Models\Workspace;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
 
+/**
+ * Generic table proxy (the Supabase-shim `/table/{table}` endpoint).
+ *
+ * Every verb is scoped to workspaces the caller is a real member of (the
+ * RatioBotController membership rule): reads/updates/deletes only ever touch
+ * rows inside those workspaces, and every inserted row must name one of them.
+ * Previously an empty filter set read, updated or deleted EVERY workspace's
+ * rows (orders, exchange_connections, payments, ...).
+ */
 class TableController extends Controller
 {
+    use AssertsWorkspaceMembership;
+
+    /**
+     * Tables with no workspace_id column. market_candles/strategies are
+     * shared catalogs: readable, never writable through this proxy.
+     * strategy_params is scoped through its strategy instance; workspaces
+     * through its own id and is read-only here (WorkspaceController owns
+     * workspace/membership changes with its owner/admin rule).
+     */
+    private const READ_ONLY_SHARED_TABLES = ['market_candles', 'strategies'];
+
     protected array $map = [
         'assistant_sessions' => AssistantSession::class,
         'audit_logs' => AuditLog::class,
@@ -75,6 +96,29 @@ class TableController extends Controller
         }
 
         $query = $modelClass::query();
+        $memberWorkspaceIds = $this->memberWorkspaceIds($request);
+        $isRead = $request->isMethod('get');
+
+        if (in_array($table, self::READ_ONLY_SHARED_TABLES, true)) {
+            if (! $isRead) {
+                abort(403, 'You do not have access to this workspace.');
+            }
+        } elseif ($table === 'workspaces') {
+            if (! $isRead) {
+                abort(403, 'You do not have access to this workspace.');
+            }
+            $query->whereIn('id', $memberWorkspaceIds);
+        } elseif ($table === 'strategy_params') {
+            $memberInstanceIds = StrategyInstance::query()
+                ->whereIn('workspace_id', $memberWorkspaceIds)
+                ->pluck('id')
+                ->map(fn ($id) => (string) $id)
+                ->all();
+            $query->whereIn('instance_id', $memberInstanceIds);
+        } else {
+            $query->whereIn('workspace_id', $memberWorkspaceIds);
+        }
+
         foreach ($filters as $column => $value) {
             $query->where($column, $value);
         }
@@ -92,6 +136,10 @@ class TableController extends Controller
         }
 
         if ($request->isMethod('post')) {
+            $rows = isset($data[0]) ? $data : [$data];
+            foreach ($rows as $row) {
+                $this->assertRowWritable($request, $table, is_array($row) ? $row : []);
+            }
             if (isset($data[0])) {
                 $created = [];
                 foreach ($data as $row) {
@@ -104,6 +152,11 @@ class TableController extends Controller
         }
 
         if ($request->isMethod('put') || $request->isMethod('patch')) {
+            // An update may not move rows into a workspace/instance the
+            // caller is not a member of.
+            if (is_array($data) && (array_key_exists('workspace_id', $data) || array_key_exists('instance_id', $data))) {
+                $this->assertRowWritable($request, $table, $data);
+            }
             $query->update($data);
             return response()->json($query->get()->first());
         }
@@ -114,6 +167,19 @@ class TableController extends Controller
         }
 
         return response()->json(['error' => 'Method not allowed'], 405);
+    }
+
+    /** A written row must belong to a workspace (or instance) the caller is a member of. */
+    private function assertRowWritable(Request $request, string $table, array $row): void
+    {
+        if ($table === 'strategy_params') {
+            $instance = StrategyInstance::query()->find((string) ($row['instance_id'] ?? ''));
+            $this->assertWorkspaceMembership($request, $instance ? (string) $instance->workspace_id : null);
+
+            return;
+        }
+
+        $this->assertWorkspaceMembership($request, isset($row['workspace_id']) ? (string) $row['workspace_id'] : null);
     }
 
     private function withId(array $data): array

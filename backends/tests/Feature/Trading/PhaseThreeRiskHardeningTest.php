@@ -11,6 +11,7 @@ use App\Models\Setting;
 use App\Models\Symbol;
 use App\Models\User;
 use App\Models\Workspace;
+use App\Models\WorkspaceMember;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Str;
 
@@ -76,6 +77,11 @@ function createPhaseThreeIntegration(string $workspaceId): Integration
 test('live manual orders are blocked by default risk profile blocked symbols', function () {
     $user = User::factory()->create();
     $workspace = Workspace::factory()->create();
+    WorkspaceMember::create([
+        'workspace_id' => $workspace->id,
+        'user_id' => $user->id,
+        'role' => 'owner',
+    ]);
     enablePhaseThreeLiveMode($workspace->id);
     $integration = createPhaseThreeIntegration($workspace->id);
 
@@ -110,6 +116,11 @@ test('live manual orders are blocked by default risk profile blocked symbols', f
 test('live manual orders are blocked after daily max orders reached', function () {
     $user = User::factory()->create();
     $workspace = Workspace::factory()->create();
+    WorkspaceMember::create([
+        'workspace_id' => $workspace->id,
+        'user_id' => $user->id,
+        'role' => 'owner',
+    ]);
     enablePhaseThreeLiveMode($workspace->id);
     $integration = createPhaseThreeIntegration($workspace->id);
     $symbol = Symbol::create([
@@ -172,6 +183,11 @@ test('live manual orders are blocked after daily max orders reached', function (
 test('live manual orders are blocked by duplicate pending order protection', function () {
     $user = User::factory()->create();
     $workspace = Workspace::factory()->create();
+    WorkspaceMember::create([
+        'workspace_id' => $workspace->id,
+        'user_id' => $user->id,
+        'role' => 'owner',
+    ]);
     enablePhaseThreeLiveMode($workspace->id);
     $integration = createPhaseThreeIntegration($workspace->id);
     $symbol = Symbol::create([
@@ -231,6 +247,11 @@ test('live manual orders are blocked by duplicate pending order protection', fun
 test('risk profile create and update accept flat ui fields and persist canonical rules', function () {
     $user = User::factory()->create();
     $workspace = Workspace::factory()->create();
+    WorkspaceMember::create([
+        'workspace_id' => $workspace->id,
+        'user_id' => $user->id,
+        'role' => 'owner',
+    ]);
 
     $create = $this->actingAs($user)->postJson("/api/v1/workspaces/{$workspace->id}/risk-profiles", [
         'name' => 'UI Profile',
@@ -273,6 +294,11 @@ test('risk profile create and update accept flat ui fields and persist canonical
 test('guardrails max open orders acts as a stricter workspace wide live cap', function () {
     $user = User::factory()->create();
     $workspace = Workspace::factory()->create();
+    WorkspaceMember::create([
+        'workspace_id' => $workspace->id,
+        'user_id' => $user->id,
+        'role' => 'owner',
+    ]);
     enablePhaseThreeLiveMode($workspace->id);
     $integration = createPhaseThreeIntegration($workspace->id);
     $symbol = Symbol::create([

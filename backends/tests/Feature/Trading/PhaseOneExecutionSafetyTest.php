@@ -22,6 +22,7 @@ use App\Models\StrategyParam;
 use App\Models\TradeSignal;
 use App\Models\User;
 use App\Models\Workspace;
+use App\Models\WorkspaceMember;
 use App\Support\Clock\FrozenClock;
 use App\Support\Clock\Clock;
 use App\Jobs\EvaluateStrategyInstanceJob;
@@ -112,6 +113,11 @@ function createLiveIntegration(string $workspaceId): Integration
 test('paper order route is explicit and still books through paper execution', function () {
     $user = User::factory()->create();
     $workspace = Workspace::factory()->create();
+    WorkspaceMember::create([
+        'workspace_id' => $workspace->id,
+        'user_id' => $user->id,
+        'role' => 'owner',
+    ]);
 
     Ledger::create([
         'id' => (string) Str::uuid(),
@@ -138,6 +144,11 @@ test('paper order route is explicit and still books through paper execution', fu
 test('live orders are blocked when kill switch is active', function () {
     $user = User::factory()->create();
     $workspace = Workspace::factory()->create();
+    WorkspaceMember::create([
+        'workspace_id' => $workspace->id,
+        'user_id' => $user->id,
+        'role' => 'owner',
+    ]);
     enableWorkspaceLiveMode($workspace->id);
     $integration = createLiveIntegration($workspace->id);
 
@@ -166,6 +177,11 @@ test('live orders are blocked when kill switch is active', function () {
 test('live orders are blocked when workspace is not in live mode', function () {
     $user = User::factory()->create();
     $workspace = Workspace::factory()->create();
+    WorkspaceMember::create([
+        'workspace_id' => $workspace->id,
+        'user_id' => $user->id,
+        'role' => 'owner',
+    ]);
     $integration = createLiveIntegration($workspace->id);
 
     Ledger::create([
@@ -190,6 +206,11 @@ test('live orders are blocked when workspace is not in live mode', function () {
 test('live manual order submissions are idempotent', function () {
     $user = User::factory()->create();
     $workspace = Workspace::factory()->create();
+    WorkspaceMember::create([
+        'workspace_id' => $workspace->id,
+        'user_id' => $user->id,
+        'role' => 'owner',
+    ]);
     enableWorkspaceLiveMode($workspace->id);
     $integration = createLiveIntegration($workspace->id);
 
@@ -231,6 +252,11 @@ test('live manual order submissions are idempotent', function () {
 test('live quick trades require a live-ready workspace', function () {
     $user = User::factory()->create();
     $workspace = Workspace::factory()->create();
+    WorkspaceMember::create([
+        'workspace_id' => $workspace->id,
+        'user_id' => $user->id,
+        'role' => 'owner',
+    ]);
 
     $this->actingAs($user)->postJson('/api/v1/quick-trade/place', [
         'workspace_id' => $workspace->id,
@@ -247,6 +273,11 @@ test('live quick trades require a live-ready workspace', function () {
 test('kill switch api persists state and pauses live automation', function () {
     $user = User::factory()->create();
     $workspace = Workspace::factory()->create();
+    WorkspaceMember::create([
+        'workspace_id' => $workspace->id,
+        'user_id' => $user->id,
+        'role' => 'owner',
+    ]);
 
     StrategyInstance::create([
         'id' => (string) Str::uuid(),
@@ -363,6 +394,11 @@ test('strategy instance live execution is paused instead of using legacy live pa
 test('live signal execution is cancelled when kill switch is active', function () {
     $user = User::factory()->create();
     $workspace = Workspace::factory()->create();
+    WorkspaceMember::create([
+        'workspace_id' => $workspace->id,
+        'user_id' => $user->id,
+        'role' => 'owner',
+    ]);
     enableWorkspaceLiveMode($workspace->id);
 
     Ledger::create([

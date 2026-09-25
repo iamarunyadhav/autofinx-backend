@@ -3,14 +3,19 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Http\Controllers\Concerns\AssertsWorkspaceMembership;
 use App\Models\StakingPosition;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
 
 class StakingController extends Controller
 {
-    public function index(string $workspaceId)
+    use AssertsWorkspaceMembership;
+
+    public function index(Request $request, string $workspaceId)
     {
+        $this->assertWorkspaceMembership($request, $workspaceId);
+
         return response()->json(
             StakingPosition::where('workspace_id', $workspaceId)
                 ->orderByDesc('created_at')
@@ -20,6 +25,8 @@ class StakingController extends Controller
 
     public function simulate(Request $request, string $workspaceId)
     {
+        $this->assertWorkspaceMembership($request, $workspaceId);
+
         $data = $request->validate([
             'asset' => 'required|string',
             'principal' => 'required|numeric|min:0.0001',
@@ -44,6 +51,8 @@ class StakingController extends Controller
 
     public function start(Request $request, string $workspaceId)
     {
+        $this->assertWorkspaceMembership($request, $workspaceId);
+
         $data = $request->validate([
             'asset' => 'required|string',
             'principal' => 'required|numeric|min:0.0001',

@@ -134,6 +134,7 @@ class QuickTradeCostModel
      *
      * @param  float  $maxAchievableMovePct  from maxAchievableMovePct()
      * @param  float|null  $expectedNetUsdt   netEdge()'s expected_net_usdt, when known
+     * @param  float|null  $accountFeeRate    optional, additive: see costs()
      * @return array{constraint:string, hint:string}
      */
     public function bindingConstraint(
@@ -141,8 +142,9 @@ class QuickTradeCostModel
         float $expectedMovePct,
         ?float $expectedNetUsdt = null,
         ?string $feeModel = null,
+        ?float $accountFeeRate = null,
     ): array {
-        $costs = $this->costs($feeModel);
+        $costs = $this->costs($feeModel, $accountFeeRate);
         $required = $costs['required_move_pct'];
 
         if ($maxAchievableMovePct < $required) {
@@ -196,8 +198,9 @@ class QuickTradeCostModel
         int $timeframeSeconds,
         string $mode,
         ?string $feeModel = null,
+        ?float $accountFeeRate = null,
     ): array {
-        $costs = $this->costs($feeModel);
+        $costs = $this->costs($feeModel, $accountFeeRate);
         $required = $costs['required_move_pct'];
         $isLive = strtolower($mode) === 'live';
         $allowShort = (bool) config('quick_trade.allow_short_live_expiry', false);
@@ -246,9 +249,9 @@ class QuickTradeCostModel
      * capable of clearing the cost gate at this volatility. Null when none
      * is (an honest "nothing here works right now", never a guess).
      */
-    public function shortestViableExpirySeconds(array $durationSeconds, float $atrPct, int $timeframeSeconds, ?string $feeModel = null): ?int
+    public function shortestViableExpirySeconds(array $durationSeconds, float $atrPct, int $timeframeSeconds, ?string $feeModel = null, ?float $accountFeeRate = null): ?int
     {
-        $required = $this->costs($feeModel)['required_move_pct'];
+        $required = $this->costs($feeModel, $accountFeeRate)['required_move_pct'];
         $viable = [];
         foreach ($durationSeconds as $seconds) {
             $seconds = (int) $seconds;

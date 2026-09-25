@@ -62,4 +62,64 @@ return [
 
     'block_live_against_decision' => env('ROBOT_TRADE_BLOCK_LIVE_AGAINST_DECISION', false),
 
+    /*
+    |--------------------------------------------------------------------------
+    | Indicator vote on closed candles only (timed_expiry sessions)
+    |--------------------------------------------------------------------------
+    |
+    | Robot Trade's timed_expiry evaluation runs SignalPreviewService::preview()
+    | on candles that include the still-forming bar. That signal is BOTH the
+    | robot's entry trigger (direction + confidence threshold + 2-tick streak)
+    | and the vote the canonical gate above passes into forecast(). When true,
+    | the preview is computed on CandleCloseResolver's closed candles (the same
+    | trim the gate already applies to its own forecast input). Volatility,
+    | net-edge and stake-sizing inputs are unchanged. candle_direction sessions
+    | are unaffected (their entry comes from CandleDirectionBotService, not an
+    | indicator vote).
+    |
+    | Default OFF: this changes WHEN a live robot enters. Note that with it on,
+    | two evaluation ticks inside the same candle see the same closed bars, so
+    | the 2-consecutive-tick stability rule can be satisfied within one candle.
+    |
+    */
+
+    'indicator_vote_closed_candles_only' => env('ROBOT_TRADE_INDICATOR_VOTE_CLOSED_CANDLES_ONLY', false),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Real account fee rate for the canonical gate (LIVE Binance only)
+    |--------------------------------------------------------------------------
+    |
+    | Same lookup as `quick_trade.use_account_fee_rate`: the gate's forecast()
+    | is priced off the session integration's real USDⓈ-M taker commission
+    | (signed GET /fapi/v1/commissionRate, cached 1h per integration+symbol),
+    | falling back to the config rate on any failure. Only the gate reads it;
+    | Robot's own netEdge() preflight keeps the config rate. Default OFF (not
+    | verified against a real account).
+    |
+    */
+
+    'use_account_fee_rate' => env('ROBOT_TRADE_USE_ACCOUNT_FEE_RATE', false),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Default chart timeframe / expiry for NEW live robot sessions
+    |--------------------------------------------------------------------------
+    |
+    | The old default (1m chart / 60s expiry = ONE horizon candle) can almost
+    | never clear the fee-aware gate above. New LIVE sessions now default to
+    | 5m / 3600s (12 candles), the same pair as Quick Trade's
+    | `default_live_timeframe`/`default_live_duration`, used only when the
+    | provider's live catalog offers both (Binance does; Robot's API caps
+    | expiry_seconds at 3600). Paper sessions keep 1m / Quick Trade's
+    | default_duration. Existing sessions keep their stored settings. Served to
+    | the Robot page via metadata `robot_trade.default_live_*`; set these to
+    | 1m / 60 to restore the old default.
+    |
+    */
+
+    'default_live_timeframe' => env('ROBOT_TRADE_DEFAULT_LIVE_TIMEFRAME', '5m'),
+
+    'default_live_duration' => (int) env('ROBOT_TRADE_DEFAULT_LIVE_DURATION', 3600),
+
 ];

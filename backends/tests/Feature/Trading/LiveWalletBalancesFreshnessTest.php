@@ -4,6 +4,7 @@ use App\Models\Integration;
 use App\Models\User;
 use App\Models\WalletAccount;
 use App\Models\Workspace;
+use App\Models\WorkspaceMember;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
@@ -11,6 +12,11 @@ use Illuminate\Support\Str;
 test('live wallet balances endpoint refreshes a stale account from the real provider', function () {
     $user = User::factory()->create();
     $workspace = Workspace::factory()->create();
+    WorkspaceMember::create([
+        'workspace_id' => $workspace->id,
+        'user_id' => $user->id,
+        'role' => 'owner',
+    ]);
     $integration = liveWalletIntegration($workspace->id);
     $account = liveWalletAccount($workspace->id, $integration->id, [
         'balance' => 100,
@@ -50,6 +56,11 @@ test('live wallet balances endpoint refreshes a stale account from the real prov
 test('live wallet balances endpoint does not re-fetch an account refreshed within the rate-limit window', function () {
     $user = User::factory()->create();
     $workspace = Workspace::factory()->create();
+    WorkspaceMember::create([
+        'workspace_id' => $workspace->id,
+        'user_id' => $user->id,
+        'role' => 'owner',
+    ]);
     $integration = liveWalletIntegration($workspace->id);
     liveWalletAccount($workspace->id, $integration->id, [
         'balance' => 100,
@@ -80,6 +91,11 @@ test('live wallet balances endpoint does not re-fetch an account refreshed withi
 test('live wallet balances endpoint leaves accounts with no integration_id untouched', function () {
     $user = User::factory()->create();
     $workspace = Workspace::factory()->create();
+    WorkspaceMember::create([
+        'workspace_id' => $workspace->id,
+        'user_id' => $user->id,
+        'role' => 'owner',
+    ]);
 
     $account = WalletAccount::create([
         'id' => (string) Str::uuid(),
@@ -113,6 +129,11 @@ test('live wallet balances endpoint leaves accounts with no integration_id untou
 test('live wallet balances endpoint returns last-known values for an account whose provider call fails, without breaking other accounts', function () {
     $user = User::factory()->create();
     $workspace = Workspace::factory()->create();
+    WorkspaceMember::create([
+        'workspace_id' => $workspace->id,
+        'user_id' => $user->id,
+        'role' => 'owner',
+    ]);
     $integration = liveWalletIntegration($workspace->id);
 
     $failingAccount = liveWalletAccount($workspace->id, $integration->id, [
@@ -162,6 +183,11 @@ test('live wallet balances endpoint returns last-known values for an account who
 test('live wallet balances endpoint bootstraps an untagged account via the workspace active integration when the workspace is in live mode', function () {
     $user = User::factory()->create();
     $workspace = Workspace::factory()->create();
+    WorkspaceMember::create([
+        'workspace_id' => $workspace->id,
+        'user_id' => $user->id,
+        'role' => 'owner',
+    ]);
     $integration = liveWalletIntegration($workspace->id);
     seedLiveWalletTradingSettings($workspace->id, $integration->id);
 
@@ -212,6 +238,11 @@ test('live wallet balances endpoint bootstraps an untagged account via the works
 test('live wallet balances endpoint leaves an untagged account alone when the workspace is in paper mode', function () {
     $user = User::factory()->create();
     $workspace = Workspace::factory()->create();
+    WorkspaceMember::create([
+        'workspace_id' => $workspace->id,
+        'user_id' => $user->id,
+        'role' => 'owner',
+    ]);
 
     // No trading-mode Setting seeded at all -> tradingState() falls back to
     // the app default, which is paper. An untagged account here has no real

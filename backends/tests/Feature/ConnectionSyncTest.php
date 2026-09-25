@@ -3,6 +3,7 @@
 use App\Models\ExchangeConnection;
 use App\Models\User;
 use App\Models\Workspace;
+use App\Models\WorkspaceMember;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
 
@@ -19,6 +20,11 @@ uses(RefreshDatabase::class);
 it('syncs real balances from the exchange for a binance connection', function () {
     $user = User::factory()->create();
     $workspace = Workspace::factory()->create();
+    WorkspaceMember::create([
+        'workspace_id' => $workspace->id,
+        'user_id' => $user->id,
+        'role' => 'owner',
+    ]);
 
     $this->actingAs($user)->postJson("/api/v1/workspaces/{$workspace->id}/connections", [
         'name' => 'Binance Testnet',
@@ -62,6 +68,11 @@ it('syncs real balances from the exchange for a binance connection', function ()
 it('rejects sync for a provider without balance-sync support', function () {
     $user = User::factory()->create();
     $workspace = Workspace::factory()->create();
+    WorkspaceMember::create([
+        'workspace_id' => $workspace->id,
+        'user_id' => $user->id,
+        'role' => 'owner',
+    ]);
 
     $this->actingAs($user)->postJson("/api/v1/workspaces/{$workspace->id}/connections", [
         'name' => 'Coinbase',

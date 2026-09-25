@@ -438,6 +438,10 @@ class RatioBotStateService
             'reserve_tranches_remaining' => $tranchesRemaining,
         ]);
 
+        // Trade-level accuracy tracking -- observation only, never throws,
+        // never read by any trading decision (RatioBotTradeOutcomeService).
+        app(RatioBotTradeOutcomeService::class)->captureBuyFill($config, $decision, $executedPrice, $executedQty, $orderId);
+
         return $state->refresh();
     }
 
@@ -473,6 +477,13 @@ class RatioBotStateService
         }
         $realizedPnlThisStage = $realizedPnlFromLots['value'] ?? ($costBasisPrice > 0 ? ($executedPrice - $costBasisPrice) * $executedQty : 0.0);
         $realizedPnlTotal = (float) ($state->realized_pnl ?? 0) + $realizedPnlThisStage;
+
+        // Trade-level accuracy tracking -- observation only, never throws,
+        // never read by any trading decision (RatioBotTradeOutcomeService).
+        // Placed after applySellFill() so the lots' sell_fills for this
+        // decision (its exact cost basis) already exist; covers both the
+        // partial and the full-exit branch below.
+        app(RatioBotTradeOutcomeService::class)->captureSellFill($config, $decision, $executedPrice, $executedQty, $orderId, $costBasisPrice);
 
         if ($realizedPnlThisStage > 0 && $config->recoverySlotEnabled()) {
             app(RatioBotRecoverySlotService::class)->skim($config, $realizedPnlThisStage, 'quote', [

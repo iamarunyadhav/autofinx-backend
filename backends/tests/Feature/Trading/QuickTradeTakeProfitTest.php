@@ -9,6 +9,7 @@ use App\Models\QuickTrade;
 use App\Models\Setting;
 use App\Models\User;
 use App\Models\Workspace;
+use App\Models\WorkspaceMember;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
@@ -33,6 +34,11 @@ function takeProfitLiveWorkspace(string $symbol = 'ETHUSDT'): array
     config()->set('quick_trade.block_live_against_decision', false);
     $user = User::factory()->create();
     $workspace = Workspace::factory()->create();
+    WorkspaceMember::create([
+        'workspace_id' => $workspace->id,
+        'user_id' => $user->id,
+        'role' => 'owner',
+    ]);
     $integration = Integration::create([
         'id' => (string) Str::uuid(),
         'workspace_id' => $workspace->id,
@@ -231,6 +237,11 @@ test('a negative or zero take_profit_pct is rejected as invalid', function () {
 test('paper-mode quick trades never store a take_profit_pct even if one is submitted', function () {
     $user = User::factory()->create();
     $workspace = Workspace::factory()->create();
+    WorkspaceMember::create([
+        'workspace_id' => $workspace->id,
+        'user_id' => $user->id,
+        'role' => 'owner',
+    ]);
     $this->actingAs($user);
 
     $response = $this->postJson('/api/v1/quick-trade/place', [

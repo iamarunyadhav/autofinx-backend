@@ -3,15 +3,22 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Http\Controllers\Concerns\AssertsWorkspaceMembership;
 use App\Models\ExchangeConnection;
 use Illuminate\Http\Request;
+use Illuminate\Validation\Rule;
 use Illuminate\Support\Str;
 use Services\ExecutionService\Adapters\ExchangeAdapterFactory;
 
 class ArbitrageController extends Controller
 {
+    use AssertsWorkspaceMembership;
+
     public function opportunities(Request $request, string $workspaceId)
     {
+        // Probes every enabled connection of the workspace with its own keys.
+        $this->assertWorkspaceMembership($request, $workspaceId);
+
         $symbols = $request->input('symbols', ['BTCUSDT', 'ETHUSDT']);
         $connections = ExchangeConnection::where('workspace_id', $workspaceId)
             ->where('is_enabled', true)
@@ -64,10 +71,12 @@ class ArbitrageController extends Controller
 
     public function execute(Request $request, string $workspaceId)
     {
+        $this->assertWorkspaceMembership($request, $workspaceId);
+
         $data = $request->validate([
             'symbol' => 'required|string',
-            'buy_connection_id' => 'required|uuid|exists:exchange_connections,id',
-            'sell_connection_id' => 'required|uuid|exists:exchange_connections,id',
+            'buy_connection_id' => ['required', 'uuid', Rule::exists('exchange_connections', 'id')->where('workspace_id', $workspaceId)],
+            'sell_connection_id' => ['required', 'uuid', Rule::exists('exchange_connections', 'id')->where('workspace_id', $workspaceId)],
             'quantity' => 'required|numeric|min:0.0001',
         ]);
 

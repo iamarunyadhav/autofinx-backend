@@ -4,16 +4,26 @@ namespace App\Http\Controllers\Api;
 
 use App\Domain\Billing\AutoWithdrawalService;
 use App\Http\Controllers\Controller;
+use App\Http\Controllers\Concerns\AssertsWorkspaceMembership;
 use App\Models\WithdrawalSchedule;
 use Illuminate\Http\Request;
 
+/**
+ * Auto-withdrawal schedules. Every action asserts workspace membership
+ * (RatioBotController pattern) for the body workspace_id or the bound
+ * schedule's own workspace_id.
+ */
 class WithdrawalScheduleController extends Controller
 {
+    use AssertsWorkspaceMembership;
+
     public function index(Request $request)
     {
         $data = $request->validate([
             'workspace_id' => 'required|uuid',
         ]);
+
+        $this->assertWorkspaceMembership($request, (string) $data['workspace_id']);
 
         $rows = WithdrawalSchedule::where('workspace_id', $data['workspace_id'])
             ->orderByDesc('created_at')
@@ -43,6 +53,8 @@ class WithdrawalScheduleController extends Controller
             'is_active' => 'nullable|boolean',
         ]);
 
+        $this->assertWorkspaceMembership($request, (string) $data['workspace_id']);
+
         $schedule = $service->create($data, $request->user()?->id);
 
         return response()->json($schedule, 201);
@@ -50,6 +62,8 @@ class WithdrawalScheduleController extends Controller
 
     public function update(Request $request, WithdrawalSchedule $schedule, AutoWithdrawalService $service)
     {
+        $this->assertWorkspaceMembership($request, (string) $schedule->workspace_id);
+
         $data = $request->validate([
             'name' => 'sometimes|string|max:120',
             'currency' => 'sometimes|string|max:10',
@@ -73,14 +87,18 @@ class WithdrawalScheduleController extends Controller
         return response()->json($updated);
     }
 
-    public function destroy(WithdrawalSchedule $schedule)
+    public function destroy(Request $request, WithdrawalSchedule $schedule)
     {
+        $this->assertWorkspaceMembership($request, (string) $schedule->workspace_id);
+
         $schedule->delete();
         return response()->json(['ok' => true]);
     }
 
-    public function runNow(WithdrawalSchedule $schedule, AutoWithdrawalService $service)
+    public function runNow(Request $request, WithdrawalSchedule $schedule, AutoWithdrawalService $service)
     {
+        $this->assertWorkspaceMembership($request, (string) $schedule->workspace_id);
+
         $result = $service->runOne($schedule, true);
         return response()->json($result);
     }

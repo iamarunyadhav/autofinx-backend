@@ -3,6 +3,7 @@
 use App\Models\Payment;
 use App\Models\WalletAccount;
 use App\Models\Workspace;
+use App\Models\WorkspaceMember;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Str;
 
@@ -28,6 +29,11 @@ it('disables legacy wallet topup route', function () {
 it('creates deposit intent without immediately crediting wallet balance', function () {
     $workspace = Workspace::factory()->create();
     $user = \App\Models\User::factory()->create();
+    WorkspaceMember::create([
+        'workspace_id' => $workspace->id,
+        'user_id' => $user->id,
+        'role' => 'owner',
+    ]);
 
     $this->actingAs($user)->postJson('/api/v1/wallet/deposit/intent', [
         'workspace_id' => $workspace->id,
@@ -47,6 +53,11 @@ it('creates deposit intent without immediately crediting wallet balance', functi
 it('creates withdrawals as under review without trusting client kyc flags', function () {
     $workspace = Workspace::factory()->create();
     $user = \App\Models\User::factory()->create();
+    WorkspaceMember::create([
+        'workspace_id' => $workspace->id,
+        'user_id' => $user->id,
+        'role' => 'owner',
+    ]);
 
     WalletAccount::create([
         'id' => (string) Str::uuid(),

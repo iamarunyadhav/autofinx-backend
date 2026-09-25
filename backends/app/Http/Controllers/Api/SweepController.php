@@ -4,13 +4,22 @@ namespace App\Http\Controllers\Api;
 
 use App\Domain\Trading\ProviderToCashSweepService;
 use App\Http\Controllers\Controller;
+use App\Http\Controllers\Concerns\AssertsWorkspaceMembership;
 use App\Models\WalletSweepRule;
 use App\Models\WalletSweepRun;
 use Illuminate\Http\Request;
+use Illuminate\Validation\Rule;
 use Illuminate\Support\Str;
 
+/**
+ * Wallet sweep rules/runs. Every action asserts workspace membership
+ * (RatioBotController pattern) for the body workspace_id or the bound
+ * rule's own workspace_id; a rule's bot_id must be in the same workspace.
+ */
 class SweepController extends Controller
 {
+    use AssertsWorkspaceMembership;
+
     public function rules(Request $request, ProviderToCashSweepService $sweeps)
     {
         $data = $request->validate([
@@ -18,6 +27,8 @@ class SweepController extends Controller
             'provider' => 'nullable|string|max:32',
             'currency' => 'nullable|string|max:10',
         ]);
+
+        $this->assertWorkspaceMembership($request, (string) $data['workspace_id']);
 
         $query = $sweeps->queryRules((string) $data['workspace_id']);
         if (! empty($data['provider'])) {
@@ -32,10 +43,12 @@ class SweepController extends Controller
 
     public function storeRule(Request $request)
     {
+        $this->assertWorkspaceMembership($request, is_string($request->input('workspace_id')) ? $request->input('workspace_id') : null);
+
         $data = $request->validate([
             'workspace_id' => 'required|uuid',
             'name' => 'nullable|string|max:120',
-            'bot_id' => 'nullable|uuid|exists:bots,id',
+            'bot_id' => ['nullable', 'uuid', Rule::exists('bots', 'id')->where('workspace_id', (string) $request->input('workspace_id'))],
             'provider' => 'required|string|max:32',
             'asset_class' => 'nullable|string|in:CRYPTO,METALS,crypto,metals',
             'asset_code' => 'nullable|string|max:32',
@@ -67,9 +80,11 @@ class SweepController extends Controller
 
     public function updateRule(Request $request, WalletSweepRule $rule)
     {
+        $this->assertWorkspaceMembership($request, (string) $rule->workspace_id);
+
         $data = $request->validate([
             'name' => 'sometimes|string|max:120',
-            'bot_id' => 'nullable|uuid|exists:bots,id',
+            'bot_id' => ['nullable', 'uuid', Rule::exists('bots', 'id')->where('workspace_id', (string) $rule->workspace_id)],
             'provider' => 'sometimes|string|max:32',
             'asset_class' => 'nullable|string|in:CRYPTO,METALS,crypto,metals',
             'asset_code' => 'nullable|string|max:32',
@@ -99,8 +114,10 @@ class SweepController extends Controller
         return response()->json($rule->fresh());
     }
 
-    public function destroyRule(WalletSweepRule $rule)
+    public function destroyRule(Request $request, WalletSweepRule $rule)
     {
+        $this->assertWorkspaceMembership($request, (string) $rule->workspace_id);
+
         $rule->delete();
 
         return response()->json(['ok' => true]);
@@ -114,6 +131,9 @@ class SweepController extends Controller
             'provider' => 'nullable|string|max:32',
             'currency' => 'nullable|string|max:10',
         ]);
+
+        // runManual() already scopes rule_id to this workspace.
+        $this->assertWorkspaceMembership($request, (string) $data['workspace_id']);
 
         $result = $sweeps->runManual(
             workspaceId: (string) $data['workspace_id'],
@@ -134,6 +154,8 @@ class SweepController extends Controller
             'status' => 'nullable|string|max:32',
             'limit' => 'nullable|integer|min:1|max:500',
         ]);
+
+        $this->assertWorkspaceMembership($request, (string) $data['workspace_id']);
 
         $query = WalletSweepRun::where('workspace_id', (string) $data['workspace_id'])
             ->orderByDesc('created_at');

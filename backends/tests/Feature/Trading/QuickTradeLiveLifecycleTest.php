@@ -9,6 +9,7 @@ use App\Models\Trade;
 use App\Models\User;
 use App\Models\WalletAccount;
 use App\Models\Workspace;
+use App\Models\WorkspaceMember;
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Http;
@@ -18,6 +19,11 @@ use Illuminate\Support\Str;
 test('live quick trade opens on binance and settles on expiry using timed close', function () {
     $user = User::factory()->create();
     $workspace = Workspace::factory()->create();
+    WorkspaceMember::create([
+        'workspace_id' => $workspace->id,
+        'user_id' => $user->id,
+        'role' => 'owner',
+    ]);
     $integration = liveTradingIntegration($workspace->id);
 
     $this->actingAs($user);
@@ -138,6 +144,11 @@ test('live quick trade opens on binance and settles on expiry using timed close'
 test('live quick trade rejects binance futures stake below minimum notional before placing order', function () {
     $user = User::factory()->create();
     $workspace = Workspace::factory()->create();
+    WorkspaceMember::create([
+        'workspace_id' => $workspace->id,
+        'user_id' => $user->id,
+        'role' => 'owner',
+    ]);
     $integration = liveTradingIntegration($workspace->id);
 
     $this->actingAs($user);
@@ -199,6 +210,11 @@ test('live quick trade is blocked when required settler runtime is unhealthy', f
 
     $user = User::factory()->create();
     $workspace = Workspace::factory()->create();
+    WorkspaceMember::create([
+        'workspace_id' => $workspace->id,
+        'user_id' => $user->id,
+        'role' => 'owner',
+    ]);
     $integration = liveTradingIntegration($workspace->id);
 
     $this->actingAs($user);
@@ -222,6 +238,11 @@ test('live quick trade is blocked when required settler runtime is unhealthy', f
 test('live quick trade sell settles with positive pnl when price falls', function () {
     $user = User::factory()->create();
     $workspace = Workspace::factory()->create();
+    WorkspaceMember::create([
+        'workspace_id' => $workspace->id,
+        'user_id' => $user->id,
+        'role' => 'owner',
+    ]);
     $integration = liveTradingIntegration($workspace->id);
 
     $this->actingAs($user);
@@ -309,6 +330,11 @@ test('live quick trade sell settles with positive pnl when price falls', functio
 test('live quick trade blocks duplicate same symbol open position', function () {
     $user = User::factory()->create();
     $workspace = Workspace::factory()->create();
+    WorkspaceMember::create([
+        'workspace_id' => $workspace->id,
+        'user_id' => $user->id,
+        'role' => 'owner',
+    ]);
     $integration = liveTradingIntegration($workspace->id);
 
     $this->actingAs($user);
@@ -384,6 +410,11 @@ test('live quick trade blocks duplicate same symbol open position', function () 
 test('live quick trade rejects stale binance websocket feed before placing order', function () {
     $user = User::factory()->create();
     $workspace = Workspace::factory()->create();
+    WorkspaceMember::create([
+        'workspace_id' => $workspace->id,
+        'user_id' => $user->id,
+        'role' => 'owner',
+    ]);
     $integration = liveTradingIntegration($workspace->id);
 
     $this->actingAs($user);

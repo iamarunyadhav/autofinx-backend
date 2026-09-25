@@ -3,6 +3,7 @@
 use App\Models\ExchangeConnection;
 use App\Models\User;
 use App\Models\Workspace;
+use App\Models\WorkspaceMember;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 
 uses(RefreshDatabase::class);
@@ -10,6 +11,11 @@ uses(RefreshDatabase::class);
 it('returns arbitrage opportunities when multiple connections exist', function () {
     $user = User::factory()->create();
     $workspace = Workspace::factory()->create();
+    WorkspaceMember::create([
+        'workspace_id' => $workspace->id,
+        'user_id' => $user->id,
+        'role' => 'owner',
+    ]);
     ExchangeConnection::factory()->create([
         'workspace_id' => $workspace->id,
         'provider' => 'binance',

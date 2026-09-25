@@ -15,6 +15,7 @@ use App\Models\RatioBotForecastBacktest;
 use App\Models\Setting;
 use App\Models\User;
 use App\Models\Workspace;
+use App\Models\WorkspaceMember;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
@@ -273,6 +274,11 @@ test('a Robot Trade session with no quick_trade_stop_loss_pct configured opens a
 test('creating a Robot Trade session rejects a positive or out-of-range quick_trade_stop_loss_pct, same as Quick Trade', function () {
     $user = User::factory()->create();
     $workspace = Workspace::factory()->create();
+    WorkspaceMember::create([
+        'workspace_id' => $workspace->id,
+        'user_id' => $user->id,
+        'role' => 'owner',
+    ]);
 
     $response = $this->actingAs($user)->postJson("/api/v1/workspaces/{$workspace->id}/robot-sessions", [
         'name' => 'Bad config robot',

@@ -51,21 +51,38 @@ function rtdgKlines(string $shape, bool $fresh): array
             $close = $open + 2;
             $high = $close + 20;
             $low = $open - 20;
+        } elseif ($shape === 'forming_drop') {
+            // The uptrend above, except the still-forming (last) bar is a
+            // 40-point drop: MACD on all 100 bars votes SELL (76), MACD on
+            // the 99 closed bars votes BUY (57).
+            $open = 1701 + ($i * 3);
+            $close = $i === 99 ? $open - 40 : $open + 2;
+            $high = max($open, $close) + 20;
+            $low = min($open, $close) - 20;
         } elseif ($shape === 'downtrend') {
             $open = 2297 - ($i * 3);
             $close = $open - 2;
             $high = $open + 15;
             $low = $close - 15;
         } else {
-            // 'divergent': a steady, calm uptrend whose OLDEST bars were
-            // volatile. Robot's netEdge() reads the oldest 20 true ranges and
-            // calls it tradeable; the canonical forecast reads the recent
-            // window and says the move cannot clear fees (WAIT).
-            $open = 1950 + ($i * 0.5);
-            $close = $open + 0.4;
-            $wick = $i < 30 ? 15.0 : 1.5;
-            $high = $close + $wick;
-            $low = $open - $wick;
+            // 'divergent': a slow uptrend of long-wick doji bars. The wide
+            // ranges give an ATR (~1.55%) where Robot's direction-blind,
+            // horizon-blind netEdge() proxy (ATR x 0.35 = ~0.54%) clears the
+            // 0.28% cost floor and calls it tradeable, while the canonical
+            // forecast sees no candle-body trend (dojis are NEUTRAL) and a
+            // tiny drift, so its expected 1-candle move (~0.23%) cannot clear
+            // fees (WAIT). Previously this fixture relied on the old
+            // oldest-20-bars ATR bug (volatile OLD bars, calm recent ones);
+            // with `trading_forecast.atr_latest_bars` on, both reads see the
+            // same recent bars and the divergence is purely model-driven.
+            // The +/-1.0 close zigzag (latest bar up) keeps Robot's own
+            // Bollinger-width volatility gate open and its MACD vote BUY
+            // without adding any candle-body trend.
+            $open = 1950 + ($i * 0.1);
+            $close = $open + 0.4 + ($i % 2 === 1 ? 1.0 : -1.0);
+            $wick = 15.0;
+            $high = max($open, $close) + $wick;
+            $low = min($open, $close) - $wick;
         }
 
         $rows[] = [$openTime, (string) $open, (string) $high, (string) $low, (string) $close, '100'];
@@ -87,11 +104,14 @@ function rtdgCandles(array $rows): array
     ], $rows);
 }
 
-function rtdgFakeBinance(array $klines): void
+function rtdgFakeBinance(array $klines, ?array $commission = null): void
 {
-    Http::fake(function (\Illuminate\Http\Client\Request $request) use ($klines) {
+    Http::fake(function (\Illuminate\Http\Client\Request $request) use ($klines, $commission) {
         $url = $request->url();
 
+        if ($commission !== null && str_contains($url, '/fapi/v1/commissionRate')) {
+            return Http::response($commission, 200);
+        }
         if (str_contains($url, '/fapi/v1/userTrades') || str_contains($url, '/fapi/v1/income')) {
             return Http::response([], 200);
         }
@@ -175,7 +195,7 @@ function rtdgLiveWorkspace(string $symbol, bool $freshFeed = true): array
     return [$user, $workspace, $integration];
 }
 
-function rtdgStartSession(string $symbol, string $botMode = 'timed_expiry', bool $freshFeed = true): RobotSession
+function rtdgStartSession(string $symbol, string $botMode = 'timed_expiry', bool $freshFeed = true, float $baseStake = 20): RobotSession
 {
     [$user, $workspace, $integration] = rtdgLiveWorkspace($symbol, $freshFeed);
 
@@ -187,7 +207,7 @@ function rtdgStartSession(string $symbol, string $botMode = 'timed_expiry', bool
         'expiry_seconds' => 60,
         'indicator_set' => ['MACD'],
         'strategy_profile' => 'balanced',
-        'base_stake' => 20,
+        'base_stake' => $baseStake,
         'confidence_threshold' => 50,
         'provider' => 'binance',
         'integration_id' => $integration->id,
@@ -312,7 +332,10 @@ test('the gate uses the multiplier from config, so raising it moves the required
     $symbol = 'RTDGMULTUSDT';
     rtdgFakeBinance(rtdgKlines('divergent', true));
 
-    $result = rtdgEvaluateTwice(rtdgStartSession($symbol));
+    // A 3x multiplier also raises Robot's own netEdge() floor (0.42%); at the
+    // default 20 USDT stake its absolute 0.03 USDT net floor would then block
+    // first, so this test uses a larger stake to reach the gate itself.
+    $result = rtdgEvaluateTwice(rtdgStartSession($symbol, 'timed_expiry', true, 40));
 
     expect($result['status'])->toBe('trade_decision_block')
         ->and($result['trade_decision_gate']['trade_decision']['required_move_pct'])->toBe(0.42)
@@ -525,4 +548,138 @@ test('paper robot sessions are never gated and never compute the canonical decis
     $result = $gate->invoke($service, $session, rtdgCandles(rtdgKlines('divergent', true)), 'buy', ['action' => 'BUY', 'confidence' => 100]);
 
     expect($result)->toBe(['block' => null, 'snapshot' => null]);
+});
+
+// ── Gate snapshot surfaced for the Robot page ───────────────────────────
+
+test('with the gate on, a blocking gate decision is persisted and served by live-stats and status', function () {
+    config()->set('robot_trade.block_live_against_decision', true);
+    $service = app(RobotSessionService::class);
+
+    rtdgFakeBinance(rtdgKlines('divergent', true));
+    $blocked = rtdgStartSession('RTDGSNAPWAITUSDT');
+    rtdgEvaluateTwice($blocked);
+    $stored = RobotSession::findOrFail($blocked->id);
+    expect(data_get($stored->runtime_json, 'latest_trade_decision_gate.value'))->toBe('WAIT')
+        ->and(data_get($stored->runtime_json, 'latest_trade_decision_gate.agrees'))->toBeFalse()
+        ->and(data_get($service->liveStats($stored), 'trade_decision_gate.value'))->toBe('WAIT')
+        ->and(data_get($service->statusPayload($stored), 'session.runtime_json.latest_trade_decision_gate.value'))->toBe('WAIT');
+});
+
+test('with the gate on, a passing gate decision is persisted and served by live-stats', function () {
+    config()->set('robot_trade.block_live_against_decision', true);
+    $service = app(RobotSessionService::class);
+
+    rtdgFakeBinance(rtdgKlines('uptrend', true));
+    $passed = rtdgStartSession('RTDGSNAPBUYUSDT');
+    expect(rtdgEvaluateTwice($passed)['status'])->toBe('placed');
+    $stored = RobotSession::findOrFail($passed->id);
+    expect(data_get($stored->runtime_json, 'latest_trade_decision_gate.value'))->toBe('BUY')
+        ->and(data_get($stored->runtime_json, 'latest_trade_decision_gate.agrees'))->toBeTrue()
+        ->and(data_get($service->liveStats($stored), 'trade_decision_gate.trade_decision.fee_aware'))->toBeTrue();
+});
+
+test('with the gate off nothing is persisted and live-stats reports no gate decision', function () {
+    rtdgFakeBinance(rtdgKlines('divergent', true));
+    $session = rtdgStartSession('RTDGSNAPOFFUSDT');
+    rtdgEvaluateTwice($session);
+
+    $stored = RobotSession::findOrFail($session->id);
+    expect(array_key_exists('latest_trade_decision_gate', (array) $stored->runtime_json))->toBeFalse()
+        ->and(app(RobotSessionService::class)->liveStats($stored)['trade_decision_gate'])->toBeNull();
+});
+
+// ── Candle-count parity with Quick Trade ────────────────────────────────
+
+test('the gate decides on trading_forecast.decision_candle_count candles, the same count Quick Trade placement fetches', function () {
+    config()->set('robot_trade.block_live_against_decision', true);
+    expect(config('trading_forecast.decision_candle_count'))->toBe(80);
+    rtdgFakeBinance(rtdgKlines('divergent', true));
+
+    $result = rtdgEvaluateTwice(rtdgStartSession('RTDGCOUNTUSDT'));
+
+    // The robot still fetches 100 (its own signal/volatility/net-edge inputs
+    // are unchanged); only the gate's copy is trimmed to the shared count.
+    expect($result['trade_decision_gate']['candles_supplied'])->toBe(80);
+
+    config()->set('trading_forecast.decision_candle_count', 60);
+    $result = rtdgEvaluateTwice(rtdgStartSession('RTDGCOUNTSIXTYUSDT'));
+    expect($result['trade_decision_gate']['candles_supplied'])->toBe(60);
+});
+
+// ── Real account fee in the gate ────────────────────────────────────────
+
+test('with the fee flag on the gate is priced off the account taker rate, which can turn a WAIT into an agreeing BUY', function () {
+    config()->set('robot_trade.block_live_against_decision', true);
+    config()->set('robot_trade.use_account_fee_rate', true);
+    rtdgFakeBinance(rtdgKlines('divergent', true), [
+        'symbol' => 'RTDGFEEUSDT', 'makerCommissionRate' => '0.0001', 'takerCommissionRate' => '0.0002',
+    ]);
+
+    $session = rtdgStartSession('RTDGFEEUSDT');
+    $result = rtdgEvaluateTwice($session);
+
+    // Same 'divergent' market that is WAIT at the config 0.05% taker
+    // (required 0.28%): at 0.02% the round trip is 0.04 + 0.04 = 0.08%,
+    // required 0.16%, which the ~0.22% expected move clears.
+    expect($result['status'])->toBe('placed');
+    $gate = data_get(QuickTrade::where('robot_session_id', $session->id)->firstOrFail()->signal_payload, 'trade_decision_gate');
+    expect($gate['value'])->toBe('BUY')
+        ->and($gate['fee_rate_source'])->toBe('account')
+        ->and($gate['trade_decision']['fee_rate_source'])->toBe('account')
+        ->and($gate['trade_decision']['cost_pct'])->toEqual(0.08)
+        ->and($gate['trade_decision']['required_move_pct'])->toEqual(0.16)
+        ->and($gate['account_fee_rate']['taker_rate'])->toEqual(0.0002);
+});
+
+test('with the fee flag on a failed lookup keeps the config rate and the gate still blocks', function () {
+    config()->set('robot_trade.block_live_against_decision', true);
+    config()->set('robot_trade.use_account_fee_rate', true);
+    // No commission route: the fake's catch-all returns [] -> malformed.
+    rtdgFakeBinance(rtdgKlines('divergent', true));
+
+    $result = rtdgEvaluateTwice(rtdgStartSession('RTDGFEEFAILUSDT'));
+
+    expect($result['status'])->toBe('trade_decision_block')
+        ->and($result['trade_decision_gate']['fee_rate_source'])->toBe('config')
+        ->and($result['trade_decision_gate']['trade_decision']['required_move_pct'])->toEqual(0.28)
+        ->and($result['trade_decision_gate']['account_fee_rate']['reason'])->toBe('malformed_response');
+    rtdgNoOrderSent();
+});
+
+test('with the fee flag off the gate never calls commissionRate', function () {
+    config()->set('robot_trade.block_live_against_decision', true);
+    rtdgFakeBinance(rtdgKlines('divergent', true), ['symbol' => 'RTDGFEEOFFUSDT', 'takerCommissionRate' => '0.0002']);
+
+    $result = rtdgEvaluateTwice(rtdgStartSession('RTDGFEEOFFUSDT'));
+
+    expect($result['trade_decision_gate']['fee_rate_source'])->toBe('config')
+        ->and($result['trade_decision_gate']['account_fee_rate'])->toBeNull();
+    Http::assertNotSent(fn ($request) => str_contains($request->url(), '/fapi/v1/commissionRate'));
+});
+
+// ── Robot indicator vote on closed candles (default OFF) ────────────────
+
+test('by default the timed_expiry indicator vote still includes the forming bar (unchanged)', function () {
+    expect(config('robot_trade.indicator_vote_closed_candles_only'))->toBeFalse();
+    rtdgFakeBinance(rtdgKlines('forming_drop', true));
+
+    $session = rtdgStartSession('RTDGVOTEOFFUSDT');
+    app(RobotSessionService::class)->evaluateSession($session);
+
+    $signal = data_get(RobotSession::findOrFail($session->id)->runtime_json, 'latest_signal');
+    expect($signal['direction'])->toBe('sell')
+        ->and(array_key_exists('vote_input', $signal))->toBeFalse();
+});
+
+test('with robot_trade.indicator_vote_closed_candles_only on the vote ignores the forming bar', function () {
+    config()->set('robot_trade.indicator_vote_closed_candles_only', true);
+    rtdgFakeBinance(rtdgKlines('forming_drop', true));
+
+    $session = rtdgStartSession('RTDGVOTEONUSDT');
+    app(RobotSessionService::class)->evaluateSession($session);
+
+    $signal = data_get(RobotSession::findOrFail($session->id)->runtime_json, 'latest_signal');
+    expect($signal['direction'])->toBe('buy')
+        ->and($signal['vote_input'])->toBe(['closed_candles_only' => true, 'candles_used' => 99, 'candles_fetched' => 100]);
 });

@@ -8,12 +8,18 @@ use App\Models\Trade;
 use App\Models\User;
 use App\Models\WalletAccount;
 use App\Models\Workspace;
+use App\Models\WorkspaceMember;
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Str;
 
 test('manual quick trade settles on expiry and credits wallet and ledger', function () {
     $user = User::factory()->create();
     $workspace = Workspace::factory()->create();
+    WorkspaceMember::create([
+        'workspace_id' => $workspace->id,
+        'user_id' => $user->id,
+        'role' => 'owner',
+    ]);
 
     $this->actingAs($user);
 

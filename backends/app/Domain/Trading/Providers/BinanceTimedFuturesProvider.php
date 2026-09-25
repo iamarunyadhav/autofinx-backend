@@ -389,7 +389,7 @@ class BinanceTimedFuturesProvider implements LiveTradeProviderInterface
             Log::warning('binance_futures_real_fee_lookup_failed', [
                 'symbol' => $symbol,
                 'order_id' => $orderId,
-                'error' => $e->getMessage(),
+                'error' => $this->redact($e->getMessage()),
             ]);
 
             return null;
@@ -478,7 +478,7 @@ class BinanceTimedFuturesProvider implements LiveTradeProviderInterface
                 'symbol' => $symbol,
                 'from' => $from->format(DATE_ATOM),
                 'to' => $to->format(DATE_ATOM),
-                'error' => $e->getMessage(),
+                'error' => $this->redact($e->getMessage()),
             ]);
 
             return null;
@@ -789,7 +789,46 @@ class BinanceTimedFuturesProvider implements LiveTradeProviderInterface
         return new BinanceFuturesClient($apiKey, $apiSecret, $this->baseUrl($integration), 'quick_trade');
     }
 
-    private function signedRequest(Integration $integration, string $method, string $path, array $params): Response
+    /**
+     * The account's real USDⓈ-M commission for one symbol:
+     * `GET /fapi/v1/commissionRate` (USER_DATA, signed, param `symbol`),
+     * documented response `{"symbol":"BTCUSDT","makerCommissionRate":"0.0002",
+     * "takerCommissionRate":"0.0004"}`. Goes through the same signedRequest()
+     * every other signed call here uses, with a short timeout because the
+     * caller (AccountFeeRateService) sits on a decision path.
+     *
+     * Throws on transport/HTTP failure, exactly like the other signed calls;
+     * the only caller catches everything and falls back to the config rate.
+     * Returns the decoded body unvalidated -- validation is the caller's job.
+     *
+     * @return array<string, mixed>
+     */
+    public function commissionRate(Integration $integration, string $symbol, int $timeoutSeconds = 3): array
+    {
+        $response = $this->signedRequest($integration, 'GET', '/fapi/v1/commissionRate', [
+            'symbol' => strtoupper($symbol),
+        ], $timeoutSeconds);
+        $body = $response->json();
+
+        return is_array($body) ? $body : [];
+    }
+
+    /**
+     * Cache-key scope for per-account data: the integration row plus its
+     * environment, so a testnet and a live integration never share a value.
+     */
+    public function environmentFor(?Integration $integration): string
+    {
+        $config = (array) ($integration?->config_json ?? []);
+
+        return strtolower((string) ($config['environment'] ?? 'live')) === 'testnet' ? 'testnet' : 'live';
+    }
+
+    /**
+     * @param  int|null  $timeoutSeconds  Optional, additive: every pre-existing
+     *         caller passes nothing and keeps the HTTP client's default timeout.
+     */
+    private function signedRequest(Integration $integration, string $method, string $path, array $params, ?int $timeoutSeconds = null): Response
     {
         $credentials = $integration->secrets_encrypted
             ? (json_decode(Crypt::decryptString($integration->secrets_encrypted), true) ?? [])
@@ -810,9 +849,14 @@ class BinanceTimedFuturesProvider implements LiveTradeProviderInterface
         $query = http_build_query($payload, '', '&');
         $payload['signature'] = hash_hmac('sha256', $query, $apiSecret);
 
+        $http = Http::withHeaders(['X-MBX-APIKEY' => $apiKey]);
+        if ($timeoutSeconds !== null) {
+            $http = $http->connectTimeout(max(1, $timeoutSeconds))->timeout(max(1, $timeoutSeconds));
+        }
+
         $response = match (strtoupper($method)) {
-            'GET' => Http::withHeaders(['X-MBX-APIKEY' => $apiKey])->get($this->baseUrl($integration) . $path, $payload),
-            default => Http::withHeaders(['X-MBX-APIKEY' => $apiKey])->asForm()->post($this->baseUrl($integration) . $path, $payload),
+            'GET' => $http->get($this->baseUrl($integration) . $path, $payload),
+            default => $http->asForm()->post($this->baseUrl($integration) . $path, $payload),
         };
 
         $this->assertSuccess($response, 'Binance futures request failed.');
@@ -845,5 +889,20 @@ class BinanceTimedFuturesProvider implements LiveTradeProviderInterface
         $trimmed = rtrim(rtrim($raw, '0'), '.');
 
         return $trimmed === '' ? '0' : $trimmed;
+    }
+
+    /**
+     * Strips signed-URL parameters so a key/signature can never reach a log
+     * line -- same redaction contract as AccountFeeRateService::redact(),
+     * needed here because realFeeForOrder()/realFundingFee() call the same
+     * signed Binance endpoints and a transport-level failure's exception
+     * message can otherwise include the full request URL (query string,
+     * `signature=` included).
+     */
+    private function redact(string $message): string
+    {
+        $message = (string) preg_replace('/(signature|X-MBX-APIKEY|api_key|api_secret|apiKey|secret)([=:]\s*)[^&\s"\']+/i', '$1$2[redacted]', $message);
+
+        return mb_substr($message, 0, 300);
     }
 }

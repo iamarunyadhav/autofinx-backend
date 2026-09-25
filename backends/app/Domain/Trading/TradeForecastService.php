@@ -65,8 +65,13 @@ class TradeForecastService
      *         candle_gap gate, no B3 timing fields. When supplied, it adds
      *         the decision_candle_close_at/seconds_since_last_close fields
      *         and enables the candle_gap WAIT gate.
+     * @param  float|null  $accountTakerFeeRate  Optional, additive: the
+     *         connected account's real taker rate (AccountFeeRateService),
+     *         supplied only by the live Quick Trade / Robot gate call sites
+     *         when their `use_account_fee_rate` flag is on and the lookup
+     *         succeeded. Null (every other caller) keeps the config rate.
      */
-    public function forecast(array $candles, string $timeframe, int $horizonSeconds, ?array $decision = null, ?array $volatility = null, ?array $liveFeed = null, ?string $symbol = null, ?float $referencePrice = null, ?array $candleTiming = null): array
+    public function forecast(array $candles, string $timeframe, int $horizonSeconds, ?array $decision = null, ?array $volatility = null, ?array $liveFeed = null, ?string $symbol = null, ?float $referencePrice = null, ?array $candleTiming = null, ?float $accountTakerFeeRate = null): array
     {
         $lastCandleClose = (float) (end($candles)['close'] ?? 0);
         $currentPrice = $referencePrice !== null && $referencePrice > 0
@@ -139,7 +144,8 @@ class TradeForecastService
         $quality = min(95, max(35, 45 + abs($expiryScore) * 38 + min(15, $confidencePct / 6)));
         $displacementPct = $expiryScore * $rangePct * 0.55;
         $expectedMid = $currentPrice * (1 + $displacementPct / 100);
-        $feeRate = max(0.0, (float) config('trading.binance_futures_taker_fee_rate', 0.0005));
+        $accountTakerFeeRate = $accountTakerFeeRate !== null && $accountTakerFeeRate >= 0.0 ? $accountTakerFeeRate : null;
+        $feeRate = $accountTakerFeeRate ?? max(0.0, (float) config('trading.binance_futures_taker_fee_rate', 0.0005));
         $slippageBufferPct = max(0.0, (float) config('robot_trade.live_slippage_buffer_pct', 0.04));
         $costPct = ($feeRate * 2 * 100) + $slippageBufferPct;
         // Same 2x round-trip-cost safety margin netEdge() already requires
@@ -246,8 +252,8 @@ class TradeForecastService
             'gate_reason' => $gateReason,
             // Additive context the UI needs so it never hardcodes a number.
             'expected_move_pct' => round($displacementPct, 4),
-            'fee_model' => $costModel->costs()['fee_model'],
-            'fee_rate_source' => $costModel->costs()['fee_rate_source'],
+            'fee_model' => $costModel->costs(null, $accountTakerFeeRate)['fee_model'],
+            'fee_rate_source' => $costModel->costs(null, $accountTakerFeeRate)['fee_rate_source'],
             'volatility_floor_pct' => round($rangePct * 0.12, 4),
         ];
 
@@ -487,13 +493,16 @@ class TradeForecastService
      *         C4 binding-constraint hint can be computed; existing callers
      *         pass nothing and get null for those fields rather than a
      *         fabricated value.
+     * @param  float|null  $accountTakerFeeRate  Optional, additive -- same
+     *         meaning as forecast()'s; null keeps the config rate.
      */
-    public function netEdge(array $candles, float $stake, ?int $horizonCandles = null): array
+    public function netEdge(array $candles, float $stake, ?int $horizonCandles = null, ?float $accountTakerFeeRate = null): array
     {
         $atrPct = $this->computeAtrAvgPct($candles);
         $expectedMovePct = max(0.0, $atrPct * 0.35);
 
-        $feeRate = max(0.0, (float) config('trading.binance_futures_taker_fee_rate', 0.0005));
+        $accountTakerFeeRate = $accountTakerFeeRate !== null && $accountTakerFeeRate >= 0.0 ? $accountTakerFeeRate : null;
+        $feeRate = $accountTakerFeeRate ?? max(0.0, (float) config('trading.binance_futures_taker_fee_rate', 0.0005));
         $slippageBufferPct = max(0.0, (float) config('robot_trade.live_slippage_buffer_pct', 0.04));
         $costPct = ($feeRate * 2 * 100) + $slippageBufferPct;
         $requiredMovePct = $costPct * max(1.0, (float) config('robot_trade.live_min_edge_cost_multiplier', 2.0));
@@ -537,12 +546,14 @@ class TradeForecastService
             $maxAchievableMovePct ?? $expectedMovePct,
             $expectedMovePct,
             $expectedNetUsdt,
+            null,
+            $accountTakerFeeRate,
         );
         $result['max_achievable_move_pct'] = $maxAchievableMovePct !== null ? round($maxAchievableMovePct, 4) : null;
         $result['binding_constraint'] = $binding['constraint'];
         $result['binding_constraint_hint'] = $binding['hint'];
-        $result['fee_model'] = $costModel->costs()['fee_model'];
-        $result['fee_rate_source'] = $costModel->costs()['fee_rate_source'];
+        $result['fee_model'] = $costModel->costs(null, $accountTakerFeeRate)['fee_model'];
+        $result['fee_rate_source'] = $costModel->costs(null, $accountTakerFeeRate)['fee_rate_source'];
 
         if (! $result['tradeable']) {
             $result['reason'] = sprintf(
@@ -560,10 +571,21 @@ class TradeForecastService
     /**
      * Average ATR as % of price over the last 20 periods.
      *
+     * `trading_forecast.atr_latest_bars` (default true) makes that docblock
+     * true: only the latest 21 candles (20 true ranges) are read. With it
+     * false the legacy behaviour is kept byte-for-byte -- the loop below
+     * then reads bars 1..20 of the whole array, i.e. the OLDEST 20 true
+     * ranges of a longer window, while still dividing by the latest close.
+     * Inputs of <= 21 candles are identical either way.
+     *
      * @param  array<array{high:mixed,low:mixed,close:mixed}>  $candles
      */
     public function computeAtrAvgPct(array $candles): float
     {
+        if ((bool) config('trading_forecast.atr_latest_bars', true) && count($candles) > 21) {
+            $candles = array_values(array_slice($candles, -21));
+        }
+
         $highs  = array_column($candles, 'high');
         $lows   = array_column($candles, 'low');
         $closes = array_column($candles, 'close');

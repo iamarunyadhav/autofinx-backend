@@ -3,6 +3,7 @@
 use App\Models\ExchangeConnection;
 use App\Models\User;
 use App\Models\Workspace;
+use App\Models\WorkspaceMember;
 use App\Support\ExchangeSecretVault;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 
@@ -11,6 +12,11 @@ uses(RefreshDatabase::class);
 it('encrypts and masks exchange secrets', function () {
     $user = User::factory()->create();
     $workspace = Workspace::factory()->create();
+    WorkspaceMember::create([
+        'workspace_id' => $workspace->id,
+        'user_id' => $user->id,
+        'role' => 'owner',
+    ]);
     $vault = app(ExchangeSecretVault::class);
 
     $this->actingAs($user)->postJson("/api/v1/workspaces/{$workspace->id}/connections", [

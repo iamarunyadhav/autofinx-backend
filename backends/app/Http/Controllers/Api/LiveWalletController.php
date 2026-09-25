@@ -7,6 +7,7 @@ use App\Domain\Trading\Providers\LiveTradeProviderRegistry;
 use App\Domain\Trading\TradingIntegrationResolver;
 use App\Domain\Trading\TradingModuleSettingsService;
 use App\Http\Controllers\Controller;
+use App\Http\Controllers\Concerns\AssertsWorkspaceMembership;
 use App\Models\Integration;
 use App\Models\Payment;
 use App\Models\Setting;
@@ -20,8 +21,15 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
+/**
+ * Authenticated wallet actions assert workspace membership (RatioBotController
+ * pattern) for the route or body workspace_id. The provider webhooks below
+ * are unauthenticated by design and keep their own signature/token checks.
+ */
 class LiveWalletController extends Controller
 {
+    use AssertsWorkspaceMembership;
+
     /**
      * Minimum time between live provider balance refreshes for a single
      * wallet account. The frontend's balances poll (useBalances()) hits this
@@ -33,11 +41,14 @@ class LiveWalletController extends Controller
     private const PROVIDER_REFRESH_MIN_INTERVAL_SECONDS = 5;
 
     public function balances(
+        Request $request,
         string $workspaceId,
         LiveWalletService $liveWallet,
         TradingModuleSettingsService $settings,
         TradingIntegrationResolver $integrations,
     ) {
+        $this->assertWorkspaceMembership($request, $workspaceId);
+
         $accounts = WalletAccount::where('workspace_id', $workspaceId)
             ->orderBy('currency')
             ->get();
@@ -111,6 +122,8 @@ class LiveWalletController extends Controller
         TradingIntegrationResolver $integrations,
         LiveTradeProviderRegistry $providers,
     ) {
+        $this->assertWorkspaceMembership($request, $workspaceId);
+
         $asset = strtoupper(trim((string) $request->query('asset', 'USDT'))) ?: 'USDT';
         $state = $settings->tradingState($workspaceId);
 
@@ -160,6 +173,8 @@ class LiveWalletController extends Controller
             'gateway' => 'nullable|string|in:payhere,stripe,bank_transfer,bank,paypal,payoneer,card,credit_card,debit_card',
             'environment' => 'nullable|string|in:sandbox,live',
         ]);
+
+        $this->assertWorkspaceMembership($request, (string) $data['workspace_id']);
 
         $provider = $this->normalizePayoutMethod((string) ($data['gateway'] ?? 'payhere'));
         $currency = strtoupper((string) $data['currency']);
@@ -366,6 +381,10 @@ class LiveWalletController extends Controller
             'method' => 'nullable|string|in:bank,bank_transfer,payhere,stripe,paypal,payoneer,manual',
             'destination_meta' => 'required|array',
         ]);
+
+        // Body workspace_id: without this anyone could lock another
+        // workspace's cash balance into a withdrawal to their own destination.
+        $this->assertWorkspaceMembership($request, (string) $data['workspace_id']);
 
         $currency = strtoupper((string) $data['currency']);
         $amount = (float) $data['amount'];

@@ -5,12 +5,15 @@ namespace App\Http\Controllers\Api;
 use App\Domain\Trading\LiveExecutionService;
 use App\Domain\Trading\UncertainLiveOrderException;
 use App\Http\Controllers\Controller;
+use App\Http\Controllers\Concerns\AssertsWorkspaceMembership;
 use App\Models\Order;
 use Illuminate\Http\Request;
 use Symfony\Component\HttpKernel\Exception\HttpExceptionInterface;
 
 class LiveOrderController extends Controller
 {
+    use AssertsWorkspaceMembership;
+
     public function store(Request $request, LiveExecutionService $service)
     {
         $data = $request->validate([
@@ -24,6 +27,9 @@ class LiveOrderController extends Controller
             'instance_id' => 'uuid|nullable',
             'idempotency_key' => 'string|nullable',
         ]);
+
+        // Body workspace_id selects whose live integration places the order.
+        $this->assertWorkspaceMembership($request, (string) $data['workspace_id']);
 
         try {
             $order = $service->placeOrder($data);
@@ -50,6 +56,10 @@ class LiveOrderController extends Controller
         $data = $request->validate([
             'workspace_id' => 'required|uuid',
         ]);
+
+        // The body workspace_id must be the caller's, and must own the order.
+        $this->assertWorkspaceMembership($request, (string) $data['workspace_id']);
+        $this->assertWorkspaceMembership($request, (string) $order->workspace_id);
 
         try {
             $order = $service->cancelOrder((string) $data['workspace_id'], $order);

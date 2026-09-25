@@ -58,6 +58,13 @@ class QuickTradeForecastCalculator
             }
         }
 
+        // `quick_trade.use_account_fee_rate` (default OFF): LIVE Binance only,
+        // and only when the request named a workspace (membership is
+        // enforced by QuickTradeController::forecast() before this runs).
+        // Null => the config rate, exactly as before.
+        $accountFee = $this->accountFeeRate($data, $liveExchange);
+        $accountTakerFeeRate = $accountFee['taker_rate'] ?? null;
+
         $forecastResult = $forecastSvc->forecast(
             $candles,
             (string) $data['timeframe'],
@@ -68,6 +75,7 @@ class QuickTradeForecastCalculator
             ! empty($data['symbol']) ? (string) $data['symbol'] : null,
             $referencePrice,
             $timing,
+            $accountTakerFeeRate,
         );
         $costModel = app(QuickTradeCostModel::class);
         $horizonCandles = $costModel->horizonCandles((int) $data['expiry_seconds'], (int) $timing['timeframe_seconds']);
@@ -77,7 +85,7 @@ class QuickTradeForecastCalculator
         // Percent gates (required_move_pct, cost_pct, the trade_decision
         // block) are leverage-independent and are NOT touched here.
         $positionSizing = $this->positionSizing($data, $forecastResult);
-        $netEdgeResult = $forecastSvc->netEdge($candles, (float) $positionSizing['cost_basis_notional'], $horizonCandles);
+        $netEdgeResult = $forecastSvc->netEdge($candles, (float) $positionSizing['cost_basis_notional'], $horizonCandles, $accountTakerFeeRate);
         $netEdgeResult = $this->withMarginView($netEdgeResult, $positionSizing);
 
         // --- Part C2/C3: per-duration availability at the CURRENT volatility.
@@ -96,11 +104,18 @@ class QuickTradeForecastCalculator
                 $atrPct,
                 (int) $timing['timeframe_seconds'],
                 $mode,
+                null,
+                $accountTakerFeeRate,
             );
-            $shortest = $costModel->shortestViableExpirySeconds($durations, $atrPct, (int) $timing['timeframe_seconds']);
+            $shortest = $costModel->shortestViableExpirySeconds($durations, $atrPct, (int) $timing['timeframe_seconds'], null, $accountTakerFeeRate);
             $forecastResult['shortest_viable_expiry_seconds'] = $shortest;
         }
-        $forecastResult['cost_model'] = $costModel->costs();
+        $forecastResult['cost_model'] = $costModel->costs(null, $accountTakerFeeRate);
+        if ($accountFee !== null) {
+            // Only present when the flag was on for this live request: which
+            // rate priced the decision, and why when it fell back.
+            $forecastResult['account_fee_rate'] = $accountFee;
+        }
         $forecastResult['candle_timing'] = [
             'timeframe_seconds' => $timing['timeframe_seconds'],
             'decision_candle_close_at' => $timing['decision_candle_close_at'],
@@ -125,7 +140,7 @@ class QuickTradeForecastCalculator
         // Scoped to this Quick Trade calculator: TradeForecastService itself
         // is untouched, so Ratio Bot / Robot Trade / Future Trade keep their
         // existing every-call behaviour.
-        $forecastResult = $this->applyCloseAnchoredDecisionCache($forecastResult, $data, $timing);
+        $forecastResult = $this->applyCloseAnchoredDecisionCache($forecastResult, $data, $timing, $accountTakerFeeRate);
 
         // Additive baseline set BEFORE the shadow block below so the
         // AuditEventRecorder 'old' snapshot it logs and the actual JSON
@@ -315,9 +330,13 @@ class QuickTradeForecastCalculator
      * @param  array<string,mixed>  $forecastResult
      * @param  array<string,mixed>  $data
      * @param  array<string,mixed>  $timing
+     * @param  float|null  $accountTakerFeeRate  when an account rate priced
+     *         this decision, it is part of the cache scope: the cache is
+     *         shared across workspaces, and a decision priced at one account's
+     *         fee must never be served to another account within the candle.
      * @return array<string,mixed>
      */
-    private function applyCloseAnchoredDecisionCache(array $forecastResult, array $data, array $timing): array
+    private function applyCloseAnchoredDecisionCache(array $forecastResult, array $data, array $timing, ?float $accountTakerFeeRate = null): array
     {
         if (! (bool) config('quick_trade.decision_close_anchored_cache', true)
             || empty($data['symbol'])
@@ -347,6 +366,9 @@ class QuickTradeForecastCalculator
             $forecastResult['decision_cache'] = ['status' => 'not_applicable'];
 
             return $forecastResult;
+        }
+        if ($accountTakerFeeRate !== null) {
+            $key .= ':fee:'.number_format($accountTakerFeeRate, 8, '.', '');
         }
 
         $ttlSeconds = max(60, (int) $timing['timeframe_seconds'] * 3);
@@ -380,6 +402,33 @@ class QuickTradeForecastCalculator
         ];
 
         return $forecastResult;
+    }
+
+    /**
+     * `quick_trade.use_account_fee_rate` -- null (feature not applicable: flag
+     * off, paper mode, non-Binance-futures, or no workspace named) versus an
+     * AccountFeeRateService result (which itself never throws and reports
+     * `source: config` on any failure).
+     *
+     * @param  array<string,mixed>  $data
+     * @return array<string,mixed>|null
+     */
+    private function accountFeeRate(array $data, ?string $liveExchange): ?array
+    {
+        if (! (bool) config('quick_trade.use_account_fee_rate', false)
+            || strtolower((string) ($data['mode'] ?? 'paper')) !== 'live'
+            || $liveExchange !== 'binance_futures'
+            || empty($data['workspace_id'])
+            || empty($data['symbol'])) {
+            return null;
+        }
+
+        return app(AccountFeeRateService::class)->resolveForWorkspace(
+            (string) $data['workspace_id'],
+            'binance',
+            isset($data['integration_id']) ? (string) $data['integration_id'] : null,
+            (string) $data['symbol'],
+        );
     }
 
     /** Returns the only canonical Redis namespaces supported by this preview. */

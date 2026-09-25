@@ -5,6 +5,7 @@ namespace Tests\Feature;
 use App\Models\Ledger;
 use App\Models\User;
 use App\Models\Workspace;
+use App\Models\WorkspaceMember;
 use Illuminate\Support\Str;
 use Tests\TestCase;
 
@@ -17,6 +18,12 @@ class OrderFlowTest extends TestCase
             'id' => (string) Str::uuid(),
             'name' => 'Test WS',
             'timezone' => 'Asia/Colombo',
+        ]);
+
+        WorkspaceMember::create([
+            'workspace_id' => $workspace->id,
+            'user_id' => $user->id,
+            'role' => 'owner',
         ]);
 
         $token = $user->createToken('auth')->plainTextToken;

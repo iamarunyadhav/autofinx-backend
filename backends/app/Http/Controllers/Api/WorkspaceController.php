@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Http\Controllers\Concerns\AssertsWorkspaceMembership;
 use App\Models\User;
 use App\Models\Workspace;
 use App\Models\WorkspaceMember;
@@ -12,8 +13,17 @@ use App\Models\RoutingPolicy;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
 
+/**
+ * show()/members() require membership. update()/destroy()/addMember() manage
+ * the workspace itself and its membership table -- the table every other
+ * controller's membership check trusts -- so they require owner/admin; with
+ * "any member" (or, before this, no check at all) anyone could add
+ * themselves to any workspace as owner and bypass every other check.
+ */
 class WorkspaceController extends Controller
 {
+    use AssertsWorkspaceMembership;
+
     public function index(Request $request)
     {
         $workspaces = Workspace::with('members')
@@ -48,14 +58,18 @@ class WorkspaceController extends Controller
         return response()->json($workspace, 201);
     }
 
-    public function show(Workspace $workspace)
+    public function show(Request $request, Workspace $workspace)
     {
+        $this->assertWorkspaceMembership($request, (string) $workspace->id);
+
         $workspace->load('members');
         return response()->json($workspace);
     }
 
     public function update(Request $request, Workspace $workspace)
     {
+        $this->assertWorkspaceRole($request, (string) $workspace->id);
+
         $data = $request->validate([
             'name' => 'sometimes|string|max:255',
             'timezone' => 'sometimes|string',
@@ -68,15 +82,19 @@ class WorkspaceController extends Controller
         return response()->json($workspace);
     }
 
-    public function destroy(Workspace $workspace)
+    public function destroy(Request $request, Workspace $workspace)
     {
+        $this->assertWorkspaceRole($request, (string) $workspace->id);
+
         $workspace->delete();
 
         return response()->json(['message' => 'Workspace deleted']);
     }
 
-    public function members(Workspace $workspace)
+    public function members(Request $request, Workspace $workspace)
     {
+        $this->assertWorkspaceMembership($request, (string) $workspace->id);
+
         return response()->json(
             $workspace->members()->with('user')->get()
         );
@@ -84,6 +102,8 @@ class WorkspaceController extends Controller
 
     public function addMember(Request $request, Workspace $workspace)
     {
+        $this->assertWorkspaceRole($request, (string) $workspace->id);
+
         $data = $request->validate([
             'email' => 'required|email',
             'role' => 'required|string',

@@ -485,6 +485,9 @@ Route::prefix('v1')->group(function () {
         Route::get('ratio-bots/{ratioBot}/candle-feed', [RatioBotController::class, 'candleFeed']);
         Route::get('ratio-bots/{ratioBot}/snapshot', [RatioBotController::class, 'snapshot']);
         Route::get('ratio-bots/{ratioBot}/brain-snapshot', [RatioBotController::class, 'brainSnapshot']);
+        // Trade-level accuracy tracking (read-only, observation only)
+        Route::get('ratio-bots/{ratioBot}/trade-accuracy', [\App\Http\Controllers\Api\RatioBotTradeOutcomeController::class, 'forBot']);
+        Route::get('workspaces/{workspace}/ratio-bots/trade-accuracy', [\App\Http\Controllers\Api\RatioBotTradeOutcomeController::class, 'forWorkspace']);
         Route::get('ratio-bots/{ratioBot}/lots', [RatioBotController::class, 'lots']);
         Route::get('ratio-bots/{ratioBot}/wallet', [RatioBotController::class, 'wallet']);
         Route::get('ratio-bots/{ratioBot}/readiness', [RatioBotController::class, 'readiness']);

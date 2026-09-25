@@ -1,6 +1,7 @@
 <?php
 
 use App\Models\Workspace;
+use App\Models\WorkspaceMember;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 
@@ -9,6 +10,11 @@ uses(RefreshDatabase::class);
 it('simulates and starts staking position', function () {
     $user = User::factory()->create();
     $workspace = Workspace::factory()->create();
+    WorkspaceMember::create([
+        'workspace_id' => $workspace->id,
+        'user_id' => $user->id,
+        'role' => 'owner',
+    ]);
 
     $simulate = $this->actingAs($user)->postJson("/api/v1/workspaces/{$workspace->id}/staking/simulate", [
         'asset' => 'USDT',

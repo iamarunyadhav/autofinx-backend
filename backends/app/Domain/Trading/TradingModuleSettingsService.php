@@ -75,6 +75,11 @@ class TradingModuleSettingsService
             'max_active_trades' => 2,
             'cooldown_seconds' => 15,
             'confidence_threshold' => 70,
+            // LIVE-only defaults for NEW robot sessions (config/robot_trade.php;
+            // RobotSessionService::newSessionDefaults(), and the Robot page's
+            // initial form values). Paper keeps 1m / quick_trade default_duration.
+            'default_live_timeframe' => (string) config('robot_trade.default_live_timeframe', '5m'),
+            'default_live_duration' => (int) config('robot_trade.default_live_duration', 3600),
             'strategy_profiles' => [
                 ['key' => 'conservative', 'label' => 'Conservative', 'max_active_trades' => 1, 'confidence_threshold' => 70],
                 ['key' => 'balanced', 'label' => 'Balanced', 'max_active_trades' => 2, 'confidence_threshold' => 60],

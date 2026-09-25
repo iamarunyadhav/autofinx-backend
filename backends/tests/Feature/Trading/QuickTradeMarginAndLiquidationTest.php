@@ -6,6 +6,7 @@ use App\Models\QuickTrade;
 use App\Models\Setting;
 use App\Models\User;
 use App\Models\Workspace;
+use App\Models\WorkspaceMember;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
@@ -32,6 +33,11 @@ function marginTestWorkspace(string $availableBalance, array $brackets = []): ar
     config()->set('quick_trade.block_live_against_decision', false);
     $user = User::factory()->create();
     $workspace = Workspace::factory()->create();
+    WorkspaceMember::create([
+        'workspace_id' => $workspace->id,
+        'user_id' => $user->id,
+        'role' => 'owner',
+    ]);
     $integration = Integration::create([
         'id' => (string) Str::uuid(),
         'workspace_id' => $workspace->id,

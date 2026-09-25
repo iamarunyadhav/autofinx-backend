@@ -5,16 +5,27 @@ namespace App\Http\Controllers\Api;
 use App\Domain\Trading\QuickTradeService;
 use App\Domain\Trading\RobotSessionService;
 use App\Domain\Trading\TradingMarketService;
+use App\Http\Controllers\Concerns\AssertsWorkspaceMembership;
 use App\Models\RobotSession;
 use Illuminate\Http\Request;
 use App\Http\Controllers\Controller;
 use RuntimeException;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
+/**
+ * Every action asserts real workspace membership first (the
+ * RatioBotController IDOR pattern): {workspace} routes check the route
+ * workspace, {robotSession} routes check the bound session's own
+ * workspace_id. Any member may read or mutate, exactly like Ratio Bot.
+ */
 class RobotSessionController extends Controller
 {
+    use AssertsWorkspaceMembership;
+
     public function index(string $workspaceId, Request $request)
     {
+        $this->assertWorkspaceMembership($request, $workspaceId);
+
         $limit = max(1, min(200, (int) $request->integer('limit', 100)));
 
         return response()->json(
@@ -27,6 +38,8 @@ class RobotSessionController extends Controller
 
     public function store(Request $request, string $workspaceId, RobotSessionService $sessions)
     {
+        $this->assertWorkspaceMembership($request, $workspaceId);
+
         $payload = $request->validate([
             'name' => 'required|string|max:120',
             'wallet_account_id' => 'nullable|uuid',
@@ -77,6 +90,8 @@ class RobotSessionController extends Controller
 
     public function update(Request $request, RobotSession $robotSession, RobotSessionService $sessions)
     {
+        $this->assertSessionAccess($request, $robotSession);
+
         $payload = $request->validate([
             'name' => 'sometimes|string|max:120',
             'wallet_account_id' => 'nullable|uuid',
@@ -111,8 +126,10 @@ class RobotSessionController extends Controller
         return response()->json($sessions->update($robotSession, $payload));
     }
 
-    public function start(RobotSession $robotSession, RobotSessionService $sessions)
+    public function start(Request $request, RobotSession $robotSession, RobotSessionService $sessions)
     {
+        $this->assertSessionAccess($request, $robotSession);
+
         try {
             return response()->json($sessions->start($robotSession));
         } catch (RuntimeException $e) {
@@ -122,28 +139,38 @@ class RobotSessionController extends Controller
         }
     }
 
-    public function pause(RobotSession $robotSession, RobotSessionService $sessions)
+    public function pause(Request $request, RobotSession $robotSession, RobotSessionService $sessions)
     {
+        $this->assertSessionAccess($request, $robotSession);
+
         return response()->json($sessions->pause($robotSession));
     }
 
-    public function stop(RobotSession $robotSession, RobotSessionService $sessions)
+    public function stop(Request $request, RobotSession $robotSession, RobotSessionService $sessions)
     {
+        $this->assertSessionAccess($request, $robotSession);
+
         return response()->json($sessions->stop($robotSession));
     }
 
-    public function evaluate(RobotSession $robotSession, RobotSessionService $sessions)
+    public function evaluate(Request $request, RobotSession $robotSession, RobotSessionService $sessions)
     {
+        $this->assertSessionAccess($request, $robotSession);
+
         return response()->json($sessions->evaluateSession($robotSession));
     }
 
-    public function status(RobotSession $robotSession, RobotSessionService $sessions)
+    public function status(Request $request, RobotSession $robotSession, RobotSessionService $sessions)
     {
+        $this->assertSessionAccess($request, $robotSession);
+
         return response()->json($sessions->statusPayload($robotSession));
     }
 
-    public function history(RobotSession $robotSession, QuickTradeService $quickTrades)
+    public function history(Request $request, RobotSession $robotSession, QuickTradeService $quickTrades)
     {
+        $this->assertSessionAccess($request, $robotSession);
+
         return response()->json($quickTrades->history(
             $robotSession->workspace_id,
             'robot_trade',
@@ -152,28 +179,38 @@ class RobotSessionController extends Controller
         ));
     }
 
-    public function destroy(RobotSession $robotSession, RobotSessionService $sessions)
+    public function destroy(Request $request, RobotSession $robotSession, RobotSessionService $sessions)
     {
+        $this->assertSessionAccess($request, $robotSession);
+
         return response()->json($sessions->delete($robotSession));
     }
 
-    public function reset(RobotSession $robotSession, RobotSessionService $sessions)
+    public function reset(Request $request, RobotSession $robotSession, RobotSessionService $sessions)
     {
+        $this->assertSessionAccess($request, $robotSession);
+
         return response()->json($sessions->reset($robotSession));
     }
 
-    public function resetDailyLoss(RobotSession $robotSession, RobotSessionService $sessions)
+    public function resetDailyLoss(Request $request, RobotSession $robotSession, RobotSessionService $sessions)
     {
+        $this->assertSessionAccess($request, $robotSession);
+
         return response()->json($sessions->resetDailyLoss($robotSession));
     }
 
-    public function liveStats(RobotSession $robotSession, RobotSessionService $sessions)
+    public function liveStats(Request $request, RobotSession $robotSession, RobotSessionService $sessions)
     {
+        $this->assertSessionAccess($request, $robotSession);
+
         return response()->json($sessions->liveStats($robotSession));
     }
 
-    public function forceClose(RobotSession $robotSession, RobotSessionService $sessions)
+    public function forceClose(Request $request, RobotSession $robotSession, RobotSessionService $sessions)
     {
+        $this->assertSessionAccess($request, $robotSession);
+
         return response()->json($sessions->forceClose($robotSession));
     }
 
@@ -184,6 +221,8 @@ class RobotSessionController extends Controller
      */
     public function candleFeed(Request $request, RobotSession $robotSession, TradingMarketService $market): StreamedResponse
     {
+        $this->assertSessionAccess($request, $robotSession);
+
         $iterations = (int) min(60, max(1, (int) $request->query('iterations', 30)));
         $intervalSeconds = (int) min(10, max(1, (int) $request->query('interval', 2)));
 
@@ -229,8 +268,10 @@ class RobotSessionController extends Controller
         ]);
     }
 
-    public function performance(RobotSession $robotSession, RobotSessionService $sessions)
+    public function performance(Request $request, RobotSession $robotSession, RobotSessionService $sessions)
     {
+        $this->assertSessionAccess($request, $robotSession);
+
         $payload = $sessions->statusPayload($robotSession);
 
         return response()->json([
@@ -244,5 +285,10 @@ class RobotSessionController extends Controller
                 'consecutive_losses' => (int) $payload['session']->consecutive_losses,
             ],
         ]);
+    }
+
+    private function assertSessionAccess(Request $request, RobotSession $robotSession): void
+    {
+        $this->assertWorkspaceMembership($request, (string) $robotSession->workspace_id);
     }
 }

@@ -37,7 +37,8 @@ class RobotSessionService
     {
         $config = $this->settings->robotConfig($workspaceId);
         $state = $this->settings->tradingState($workspaceId);
-        $timeframe = $this->timeframes->normalize((string) ($payload['timeframe'] ?? '1m'));
+        [$defaultTimeframe, $defaultExpirySeconds] = $this->newSessionDefaults($workspaceId, $config, $state, $payload);
+        $timeframe = $this->timeframes->normalize((string) ($payload['timeframe'] ?? $defaultTimeframe));
         $symbol = strtoupper((string) ($payload['symbol'] ?? ''));
         $baseStake = $this->normalizeStake((float) ($payload['base_stake'] ?? 0));
         if ($symbol === '' || $baseStake <= 0) {
@@ -59,7 +60,7 @@ class RobotSessionService
                 (string) ($payload['provider'] ?? ($state['preferred_provider'] ?? 'binance'))
             )['asset_class'] ?? 'METALS')),
             'timeframe' => $timeframe,
-            'expiry_seconds' => (int) ($payload['expiry_seconds'] ?? $this->settings->quickTradeConfig($workspaceId)['default_duration'] ?? 60),
+            'expiry_seconds' => (int) ($payload['expiry_seconds'] ?? $defaultExpirySeconds),
             'indicator_set' => collect($payload['indicator_set'] ?? $config['default_indicators'] ?? ['RSI', 'MACD'])
                 ->map(fn ($row) => strtoupper((string) $row))
                 ->unique()
@@ -116,6 +117,50 @@ class RobotSessionService
                 'execution_model' => ($state['mode'] ?? 'paper') === 'live' ? 'timed_futures' : 'paper_expiry',
             ],
         ]);
+    }
+
+    /**
+     * Fallback timeframe/expiry for a NEW session whose caller omitted them.
+     * Existing sessions are never touched (update() only writes fields the
+     * caller sends).
+     *
+     * PAPER: byte-for-byte the historical default -- 1m and Quick Trade's
+     * `default_duration` (60s unless a workspace overrides it).
+     * LIVE: `robot_trade.default_live_timeframe`/`default_live_duration`
+     * (5m / 3600s = 12 horizon candles; workspace-overridable through the
+     * `robot_trade` settings group), but only when the session's provider
+     * catalog actually offers both in live mode -- otherwise the historical
+     * default, so a provider without 5m/3600 never gets a session its own
+     * placement path would reject.
+     *
+     * @param  array<string, mixed>  $config  robotConfig()
+     * @param  array<string, mixed>  $state  tradingState()
+     * @param  array<string, mixed>  $payload
+     * @return array{0: string, 1: int}
+     */
+    private function newSessionDefaults(string $workspaceId, array $config, array $state, array $payload): array
+    {
+        $paperTimeframe = '1m';
+        $paperExpiry = (int) ($this->settings->quickTradeConfig($workspaceId)['default_duration'] ?? 60);
+
+        if (strtolower((string) ($state['mode'] ?? 'paper')) !== 'live') {
+            return [$paperTimeframe, $paperExpiry];
+        }
+
+        try {
+            $liveTimeframe = $this->timeframes->normalize((string) ($config['default_live_timeframe'] ?? '5m'));
+        } catch (\InvalidArgumentException) {
+            // A mistyped ROBOT_TRADE_DEFAULT_LIVE_TIMEFRAME must never break
+            // session creation -- fall back to the historical default.
+            return [$paperTimeframe, $paperExpiry];
+        }
+        $liveExpiry = (int) ($config['default_live_duration'] ?? 3600);
+        $provider = strtolower((string) ($payload['provider'] ?? ($state['preferred_provider'] ?? 'binance')));
+        $catalog = (array) data_get($state, "provider_catalog.{$provider}", []);
+        $offered = in_array($liveTimeframe, array_map('strval', (array) ($catalog['timeframes'] ?? [])), true)
+            && in_array($liveExpiry, array_map('intval', (array) ($catalog['durations'] ?? [])), true);
+
+        return $offered ? [$liveTimeframe, $liveExpiry] : [$paperTimeframe, $paperExpiry];
     }
 
     public function update(RobotSession $session, array $payload): RobotSession
@@ -558,7 +603,22 @@ class RobotSessionService
             return ['session_id' => $session->id, 'status' => 'volatility_block', 'action' => 'skipped', 'reason' => $volatility['reason']];
         }
 
-        $signal = $this->signals->preview($candles, $session->timeframe, (array) $session->indicator_set);
+        // `robot_trade.indicator_vote_closed_candles_only` (default OFF): the
+        // indicator vote -- which is also this robot's entry trigger -- is
+        // computed on closed candles only. Every other input below keeps the
+        // full $candles. The flag-off payload is byte-identical to before.
+        $voteClosedOnly = (bool) config('robot_trade.indicator_vote_closed_candles_only', false);
+        $voteCandles = $voteClosedOnly
+            ? app(CandleCloseResolver::class)->resolve($candles, (string) $session->timeframe)['candles']
+            : $candles;
+        $signal = $this->signals->preview($voteCandles, $session->timeframe, (array) $session->indicator_set);
+        if ($voteClosedOnly) {
+            $signal['vote_input'] = [
+                'closed_candles_only' => true,
+                'candles_used' => count($voteCandles),
+                'candles_fetched' => count($candles),
+            ];
+        }
         $session->last_signal_at = now();
 
         // Unified Forecast Engine -- SHADOW COMPARISON ONLY, mirrors Quick
@@ -1307,6 +1367,12 @@ class RobotSessionService
             'market_feed' => $feedHealth,
             'trust_chain' => $this->robotTrustChain($session, $feedHealth, $lastDecision, $lastEntryBlock, $volatility),
             'forecast' => $this->robotForecast($session, $candles, $currentPrice, $lastDecision, $volatility),
+            // The canonical gate's own last decision (null until the gate has
+            // evaluated a live entry). Unlike `forecast` above -- which reads
+            // the forming bar, the 14-period volatility-gate ATR and
+            // latest_decision -- this is the exact number that allowed or
+            // blocked the most recent live entry attempt.
+            'trade_decision_gate' => ((array) $session->runtime_json)['latest_trade_decision_gate'] ?? null,
             'signal_streak' => (int) $session->signal_streak,
             'as_of' => now()->toIso8601String(),
         ];
@@ -1861,9 +1927,24 @@ class RobotSessionService
         $timing = null;
         $forecast = null;
         $failure = null;
+        // Same input size as Quick Trade's live placement guard
+        // (`trading_forecast.decision_candle_count`), so both gates decide on
+        // comparable candles. Only the gate's copy is trimmed.
+        $gateCandles = array_slice($candles, -max(30, (int) config('trading_forecast.decision_candle_count', 80)));
+        // `robot_trade.use_account_fee_rate` (default OFF): real account fee
+        // for this gate only. AccountFeeRateService never throws; null keeps
+        // the config rate.
+        $accountFee = strtolower((string) $session->provider_key) === 'binance' && $this->robotFlag((string) $session->workspace_id, 'use_account_fee_rate', false)
+            ? app(AccountFeeRateService::class)->resolveForWorkspace(
+                (string) $session->workspace_id,
+                'binance',
+                $session->integration_id !== null ? (string) $session->integration_id : null,
+                (string) $session->symbol,
+            )
+            : null;
 
         try {
-            $timing = app(CandleCloseResolver::class)->resolve($candles, $timeframe);
+            $timing = app(CandleCloseResolver::class)->resolve($gateCandles, $timeframe);
             $forecast = $this->forecastSvc->forecast(
                 $timing['candles'],
                 $timeframe,
@@ -1874,6 +1955,7 @@ class RobotSessionService
                 null,
                 null,
                 $timing,
+                isset($accountFee['taker_rate']) ? (float) $accountFee['taker_rate'] : null,
             );
         } catch (\Throwable $exception) {
             $failure = $exception->getMessage();
@@ -1895,9 +1977,17 @@ class RobotSessionService
             'horizon_candles' => $forecast['horizon_candles'] ?? null,
             'decision_candle_close_at' => $timing['decision_candle_close_at'] ?? null,
             'candle_gap' => (bool) ($timing['candle_gap'] ?? false),
+            'candles_supplied' => count($gateCandles),
+            'fee_rate_source' => $tradeDecision['fee_rate_source'] ?? AccountFeeRateService::SOURCE_CONFIG,
+            'account_fee_rate' => $accountFee,
             'model_version' => $forecast['model_version'] ?? null,
             'evaluated_at' => now()->toIso8601String(),
         ];
+        // Surfaced on the Robot page (status -> session.runtime_json, and
+        // live-stats `trade_decision_gate`) as the number that actually
+        // allowed/blocked this entry -- the page's forecast card uses
+        // different inputs and is not this decision.
+        $this->rememberTradeDecisionGate($session, $snapshot);
 
         if ($snapshot['agrees']) {
             return ['block' => null, 'snapshot' => $snapshot];
@@ -1950,14 +2040,32 @@ class RobotSessionService
 
     private function tradeDecisionGateEnabled(string $workspaceId): bool
     {
+        return $this->robotFlag($workspaceId, 'block_live_against_decision', false);
+    }
+
+    /**
+     * A `robot_trade` settings row for the workspace wins; otherwise the
+     * platform default from config/robot_trade.php.
+     */
+    private function robotFlag(string $workspaceId, string $key, bool $default): bool
+    {
         $config = $this->settings->robotConfig($workspaceId);
 
         return filter_var(
-            array_key_exists('block_live_against_decision', $config)
-                ? $config['block_live_against_decision']
-                : config('robot_trade.block_live_against_decision', false),
+            array_key_exists($key, $config)
+                ? $config[$key]
+                : config('robot_trade.'.$key, $default),
             FILTER_VALIDATE_BOOLEAN,
         );
+    }
+
+    /** Persists the latest gate snapshot for the Robot page (pass or block). */
+    private function rememberTradeDecisionGate(RobotSession $session, array $snapshot): void
+    {
+        $session->runtime_json = array_merge((array) $session->runtime_json, [
+            'latest_trade_decision_gate' => $snapshot,
+        ]);
+        $session->save();
     }
 
     private function formatGatePct(mixed $value): string

@@ -7,6 +7,7 @@ use App\Domain\Integrations\IntegrationManager;
 use App\Domain\Trading\Providers\LiveTradeProviderRegistry;
 use App\Domain\Venue\TradingVenueClientFactory;
 use App\Http\Controllers\Controller;
+use App\Http\Controllers\Concerns\AssertsWorkspaceMembership;
 use App\Models\AuditLog;
 use App\Models\ExchangeConnection;
 use App\Models\Integration;
@@ -17,10 +18,19 @@ use App\Support\SecurityNotifier;
 use App\Support\ExchangeSecretVault;
 use Illuminate\Support\Facades\Log;
 
+/**
+ * Exchange credentials. Every action asserts workspace membership
+ * (RatioBotController pattern) against the route workspace or the bound
+ * connection's own workspace_id.
+ */
 class ConnectionController extends Controller
 {
-    public function index(string $workspaceId)
+    use AssertsWorkspaceMembership;
+
+    public function index(Request $request, string $workspaceId)
     {
+        $this->assertWorkspaceMembership($request, $workspaceId);
+
         $vault = app(ExchangeSecretVault::class);
         $connections = ExchangeConnection::where('workspace_id', $workspaceId)
             ->orderByDesc('created_at')
@@ -52,6 +62,8 @@ class ConnectionController extends Controller
 
     public function store(Request $request, string $workspaceId)
     {
+        $this->assertWorkspaceMembership($request, $workspaceId);
+
         $vault = app(ExchangeSecretVault::class);
         $data = $request->validate([
             'name' => 'required|string',
@@ -97,6 +109,8 @@ class ConnectionController extends Controller
 
     public function update(Request $request, ExchangeConnection $connection)
     {
+        $this->assertWorkspaceMembership($request, (string) $connection->workspace_id);
+
         $vault = app(ExchangeSecretVault::class);
         $data = $request->validate([
             'name' => 'sometimes|string',
@@ -148,8 +162,10 @@ class ConnectionController extends Controller
         return response()->json($connection);
     }
 
-    public function destroy(ExchangeConnection $connection)
+    public function destroy(Request $request, ExchangeConnection $connection)
     {
+        $this->assertWorkspaceMembership($request, (string) $connection->workspace_id);
+
         $workspaceId = $connection->workspace_id;
         $providerKey = strtolower((string) $connection->provider);
         $environment = $connection->is_testnet ? 'testnet' : 'live';
@@ -248,11 +264,14 @@ class ConnectionController extends Controller
     }
 
     public function test(
+        Request $request,
         ExchangeConnection $connection,
         ExchangeClientFactory $clients,
         TradingVenueClientFactory $venues,
     )
     {
+        $this->assertWorkspaceMembership($request, (string) $connection->workspace_id);
+
         try {
             $provider = strtolower((string) ($connection->exchange ?: $connection->provider));
             if ($provider === 'metals') {
@@ -328,8 +347,10 @@ class ConnectionController extends Controller
      * reports what the exchange says, it does not credit any internal
      * ledger.
      */
-    public function sync(ExchangeConnection $connection, ExchangeClientFactory $clients)
+    public function sync(Request $request, ExchangeConnection $connection, ExchangeClientFactory $clients)
     {
+        $this->assertWorkspaceMembership($request, (string) $connection->workspace_id);
+
         $provider = strtolower((string) ($connection->exchange ?: $connection->provider));
 
         if ($provider !== 'binance') {
@@ -381,6 +402,8 @@ class ConnectionController extends Controller
 
     public function toggle(ExchangeConnection $connection, Request $request)
     {
+        $this->assertWorkspaceMembership($request, (string) $connection->workspace_id);
+
         $connection->update(['is_enabled' => $request->boolean('enabled', true)]);
         $connection->is_active = $connection->is_enabled;
         $connection->save();
@@ -390,6 +413,8 @@ class ConnectionController extends Controller
 
     public function rotate(ExchangeConnection $connection, Request $request)
     {
+        $this->assertWorkspaceMembership($request, (string) $connection->workspace_id);
+
         $vault = app(ExchangeSecretVault::class);
 
         $connection->api_key_encrypted = $vault->rotate($connection->api_key_encrypted);

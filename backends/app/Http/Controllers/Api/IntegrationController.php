@@ -5,17 +5,32 @@ namespace App\Http\Controllers\Api;
 use App\Domain\Integrations\IntegrationManager;
 use App\Domain\Trading\Providers\LiveTradeProviderRegistry;
 use App\Http\Controllers\Controller;
+use App\Http\Controllers\Concerns\AssertsWorkspaceMembership;
 use App\Models\Integration;
 use App\Support\RiskGuardService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
 
+/**
+ * Trading integrations (live exchange credentials). Every action asserts
+ * workspace membership (RatioBotController pattern); index() without a
+ * workspace_id is limited to the caller's own workspaces instead of
+ * returning every workspace's integrations.
+ */
 class IntegrationController extends Controller
 {
+    use AssertsWorkspaceMembership;
+
     public function index(Request $request)
     {
         $workspaceId = $request->query('workspace_id');
-        return Integration::when($workspaceId, fn ($q) => $q->where('workspace_id', $workspaceId))->get();
+        if ($workspaceId) {
+            $this->assertWorkspaceMembership($request, is_string($workspaceId) ? $workspaceId : null);
+        }
+
+        return Integration::when($workspaceId, fn ($q) => $q->where('workspace_id', $workspaceId))
+            ->whereIn('workspace_id', $this->memberWorkspaceIds($request))
+            ->get();
     }
 
     public function store(Request $request, IntegrationManager $manager, LiveTradeProviderRegistry $providers, RiskGuardService $riskGuard)
@@ -28,6 +43,7 @@ class IntegrationController extends Controller
             'config_json' => 'array|nullable',
             'secrets' => 'array|nullable',
         ]);
+        $this->assertWorkspaceMembership($request, (string) $data['workspace_id']);
         $data['status'] = 'active';
         $data['environment'] = strtolower((string) ($data['config_json']['environment'] ?? 'live'));
         $integration = $manager->upsert($data, (string) Str::uuid());
@@ -58,6 +74,8 @@ class IntegrationController extends Controller
 
     public function update(Request $request, Integration $integration, IntegrationManager $manager)
     {
+        $this->assertWorkspaceMembership($request, (string) $integration->workspace_id);
+
         $data = $request->validate([
             'config_json' => 'array|nullable',
             'status' => 'string|nullable',
@@ -70,6 +88,8 @@ class IntegrationController extends Controller
 
     public function rotate(Request $request, Integration $integration, IntegrationManager $manager)
     {
+        $this->assertWorkspaceMembership($request, (string) $integration->workspace_id);
+
         $data = $request->validate([
             'secrets' => 'required|array',
         ]);
@@ -77,8 +97,10 @@ class IntegrationController extends Controller
         return response()->json(['ok' => true]);
     }
 
-    public function health(Integration $integration, IntegrationManager $manager)
+    public function health(Request $request, Integration $integration, IntegrationManager $manager)
     {
+        $this->assertWorkspaceMembership($request, (string) $integration->workspace_id);
+
         $status = $manager->health($integration);
         return response()->json(['status' => $status]);
     }

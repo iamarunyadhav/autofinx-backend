@@ -10,6 +10,7 @@ use App\Models\QuickTrade;
 use App\Models\Setting;
 use App\Models\User;
 use App\Models\Workspace;
+use App\Models\WorkspaceMember;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
@@ -257,6 +258,11 @@ test('a Robot Trade session with no quick_trade_take_profit_pct configured opens
 test('creating a Robot Trade session rejects a negative or out-of-range quick_trade_take_profit_pct, same as Quick Trade', function () {
     $user = User::factory()->create();
     $workspace = Workspace::factory()->create();
+    WorkspaceMember::create([
+        'workspace_id' => $workspace->id,
+        'user_id' => $user->id,
+        'role' => 'owner',
+    ]);
 
     $response = $this->actingAs($user)->postJson("/api/v1/workspaces/{$workspace->id}/robot-sessions", [
         'name' => 'Bad TP config robot',

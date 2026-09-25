@@ -314,18 +314,40 @@ class QuickTradeService
 
         $symbolMeta = $this->settings->symbolMeta($workspaceId, $symbol, $mode, $providerKey);
         $marketPayload = $this->market->latestQuote($symbol, $timeframe, $context);
-        $signalCandles = isset($payload['signal_payload']) ? [] : $this->market->candles($symbol, $timeframe, 80, $context);
+        // `trading_forecast.decision_candle_count` (default 80 -- the literal
+        // this line used before) is shared with Robot Trade's canonical gate
+        // so the two decisions are made on comparable inputs.
+        $signalCandles = isset($payload['signal_payload']) ? [] : $this->market->candles(
+            $symbol,
+            $timeframe,
+            max(30, min(500, (int) config('trading_forecast.decision_candle_count', 80))),
+            $context,
+        );
+        // `quick_trade.indicator_vote_closed_candles_only` (default true): the
+        // indicator vote is computed on the same closed candles the research
+        // forecast below decides on. $signalCandles itself is still handed
+        // to capture() untrimmed -- it runs CandleCloseResolver itself.
+        $voteCandles = $signalCandles;
+        if (! isset($payload['signal_payload']) && (bool) config('quick_trade.indicator_vote_closed_candles_only', true)) {
+            $voteCandles = app(CandleCloseResolver::class)->resolve($signalCandles, $timeframe)['candles'];
+        }
         $signalPayload = $payload['signal_payload'] ?? $this->signals->preview(
-            $signalCandles,
+            $voteCandles,
             $timeframe,
             (array) ($payload['indicator_set'] ?? [])
         );
         // Fail-safe, pre-entry research snapshot. It has no decision authority.
         if ($source === 'manual_quick_trade' && config('quick_trade_research.enabled', true)) {
             try {
+                // `quick_trade.use_account_fee_rate` (default OFF): price the
+                // decision the A5 guard enforces off the real account fee.
+                // AccountFeeRateService never throws; null keeps config.
+                $accountFee = $mode === 'live' && $providerKey === 'binance' && (bool) config('quick_trade.use_account_fee_rate', false)
+                    ? app(AccountFeeRateService::class)->resolveForWorkspace($workspaceId, $providerKey, $integrationId, $symbol)
+                    : null;
                 $signalPayload['research'] = app(QuickTradeResearchService::class)->capture($signalCandles, $signalPayload,
                     array_merge($payload, ['symbol' => $symbol, 'timeframe' => $timeframe,
-                        'expiry_seconds' => $expirySeconds, 'mode' => $mode, 'provider' => $providerKey]));
+                        'expiry_seconds' => $expirySeconds, 'mode' => $mode, 'provider' => $providerKey]), $accountFee);
             } catch (\Throwable $e) {
                 \Illuminate\Support\Facades\Log::warning('Quick Trade research capture unavailable', ['symbol' => $symbol]);
             }
@@ -664,10 +686,27 @@ class QuickTradeService
             $this->feeds->requestFuturesSymbol($symbol);
         }
         $candles = $this->market->candles($symbol, $timeframe, 120, $context);
+        // DISPLAY: the full series, forming bar included, exactly as before
+        // (this endpoint also feeds the Robot Trade page's chart).
         $series = $chartType === 'heikin_ashi'
             ? \App\Domain\Market\Indicators\Indicators::heikinAshi($candles)
             : $candles;
-        $signal = $this->signals->preview($candles, $timeframe, $indicatorSet);
+        // VOTE: `signal_preview` is what the Quick Trade page sends back to
+        // /quick-trade/forecast as the 25%-weight `signal`, so with
+        // `quick_trade.indicator_vote_closed_candles_only` on it is computed
+        // on closed candles only, matching the forecast's own input.
+        $voteCandles = $candles;
+        $voteInput = ['closed_candles_only' => false, 'forming_bar_dropped' => false];
+        if ((bool) config('quick_trade.indicator_vote_closed_candles_only', true)) {
+            $voteTiming = app(CandleCloseResolver::class)->resolve($candles, $timeframe);
+            $voteCandles = $voteTiming['candles'];
+            $voteInput = [
+                'closed_candles_only' => ! $voteTiming['include_forming_bar'],
+                'forming_bar_dropped' => $voteTiming['forming_bar_dropped'],
+            ];
+        }
+        $voteInput['candles_used'] = count($voteCandles);
+        $signal = $this->signals->preview($voteCandles, $timeframe, $indicatorSet);
 
         return [
             'symbol' => $symbol,
@@ -676,6 +715,7 @@ class QuickTradeService
             'candles' => $series,
             'quote' => $this->market->latestQuote($symbol, $timeframe, $context),
             'signal_preview' => $signal,
+            'signal_preview_input' => $voteInput,
             'settings' => array_merge($this->settings->quickTradeConfig($workspaceId), [
                 'trading_state' => $this->settings->tradingState($workspaceId),
             ]),

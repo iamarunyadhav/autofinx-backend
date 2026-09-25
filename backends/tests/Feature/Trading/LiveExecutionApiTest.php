@@ -12,6 +12,7 @@ use App\Models\Setting;
 use App\Models\Symbol;
 use App\Models\User;
 use App\Models\Workspace;
+use App\Models\WorkspaceMember;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
@@ -75,6 +76,11 @@ function createLiveExecutionApiIntegration(string $workspaceId): Integration
 test('live execution apis expose orders detail fills events and anomalies', function () {
     $user = User::factory()->create();
     $workspace = Workspace::factory()->create();
+    WorkspaceMember::create([
+        'workspace_id' => $workspace->id,
+        'user_id' => $user->id,
+        'role' => 'owner',
+    ]);
     $integration = createLiveExecutionApiIntegration($workspace->id);
     $symbol = Symbol::create([
         'id' => (string) Str::uuid(),
@@ -194,6 +200,11 @@ test('live execution apis expose orders detail fills events and anomalies', func
 test('manual reconcile api repairs live order state and health api exposes the result', function () {
     $user = User::factory()->create();
     $workspace = Workspace::factory()->create();
+    WorkspaceMember::create([
+        'workspace_id' => $workspace->id,
+        'user_id' => $user->id,
+        'role' => 'owner',
+    ]);
     enableLiveExecutionApiLiveMode($workspace->id);
     $integration = createLiveExecutionApiIntegration($workspace->id);
     $symbol = Symbol::create([

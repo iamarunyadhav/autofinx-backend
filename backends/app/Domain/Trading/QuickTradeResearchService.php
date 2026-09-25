@@ -15,7 +15,14 @@ use Throwable;
 /** Observational only: no trading decisions, settlement or model promotion. */
 class QuickTradeResearchService
 {
-    public function capture(array $candles, array $signal, array $payload): array
+    /**
+     * @param  array<string,mixed>|null  $accountFee  Optional, additive: an
+     *         AccountFeeRateService result, supplied by QuickTradeService::place()
+     *         only for live Binance placements with `quick_trade.use_account_fee_rate`
+     *         on. Its taker rate (when the lookup succeeded) prices the primary
+     *         forecast -- the decision the A5 guard enforces.
+     */
+    public function capture(array $candles, array $signal, array $payload, ?array $accountFee = null): array
     {
         $captured = now()->toIso8601String();
         $result = ['schema_version' => 1, 'captured_at' => $captured, 'origin' => 'server_pre_entry',
@@ -33,7 +40,11 @@ class QuickTradeResearchService
             $decisionCandles = $timing['candles'];
             $result['primary'] = $forecasts->forecast($decisionCandles, $payload['timeframe'],
                 (int) $payload['expiry_seconds'], $forecasts->decisionFromSignalPreview($signal),
-                null, null, isset($payload['symbol']) ? (string) $payload['symbol'] : null, null, $timing);
+                null, null, isset($payload['symbol']) ? (string) $payload['symbol'] : null, null, $timing,
+                isset($accountFee['taker_rate']) ? (float) $accountFee['taker_rate'] : null);
+            if ($accountFee !== null) {
+                $result['account_fee_rate'] = $accountFee;
+            }
             $result['input_candles'] = array_map(fn ($row) => Arr::only($row,
                 ['timestamp', 'time', 'opens_at', 'open', 'high', 'low', 'close', 'volume']), array_slice($decisionCandles, -100));
             $result['input_candles_include_forming_bar'] = (bool) ($timing['include_forming_bar'] ?? true);

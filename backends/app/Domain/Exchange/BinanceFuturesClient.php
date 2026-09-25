@@ -375,7 +375,7 @@ class BinanceFuturesClient
             Log::warning('binance_futures_client_real_fee_lookup_failed', [
                 'symbol' => $symbol,
                 'order_id' => $orderId,
-                'error' => $e->getMessage(),
+                'error' => $this->redact($e->getMessage()),
             ]);
 
             return null;
@@ -447,7 +447,7 @@ class BinanceFuturesClient
                 'symbol' => $symbol,
                 'from' => $from->format(DATE_ATOM),
                 'to' => $to->format(DATE_ATOM),
-                'error' => $e->getMessage(),
+                'error' => $this->redact($e->getMessage()),
             ]);
 
             return null;
@@ -870,5 +870,21 @@ class BinanceFuturesClient
         }
 
         return false;
+    }
+
+    /**
+     * Strips signed-URL parameters so a key/signature can never reach a log
+     * line -- same redaction contract as
+     * AccountFeeRateService::redact()/BinanceTimedFuturesProvider::redact(),
+     * needed here because realFeeForOrder()/realFundingFee() call the same
+     * signed Binance endpoints and a transport-level failure's exception
+     * message can otherwise include the full request URL (query string,
+     * `signature=` included).
+     */
+    private function redact(string $message): string
+    {
+        $message = (string) preg_replace('/(signature|X-MBX-APIKEY|api_key|api_secret|apiKey|secret)([=:]\s*)[^&\s"\']+/i', '$1$2[redacted]', $message);
+
+        return mb_substr($message, 0, 300);
     }
 }

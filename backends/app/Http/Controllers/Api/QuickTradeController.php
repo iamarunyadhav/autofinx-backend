@@ -12,8 +12,10 @@ use App\Domain\Trading\QuickTradeService;
 use App\Domain\Trading\RuntimeSafetySettingsService;
 use App\Domain\Trading\TradeForecastService;
 use App\Domain\Trading\TradingModuleSettingsService;
+use App\Http\Controllers\Concerns\AssertsWorkspaceMembership;
 use App\Http\Controllers\Controller;
 use App\Models\AuditEvent;
+use App\Models\RobotSession;
 use App\Support\WebSocket\SimpleWebSocketClient;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
@@ -23,8 +25,15 @@ use Throwable;
 
 class QuickTradeController extends Controller
 {
+    use AssertsWorkspaceMembership;
+
     public function metadata(Request $request, TradingModuleSettingsService $settings)
     {
+        // Naming a workspace returns that workspace's trading state (mode,
+        // preferred integration...), so it must be the caller's own. Without
+        // one this stays the generic, workspace-less catalog it always was.
+        $this->assertOptionalWorkspaceMembership($request, $request->query('workspace_id'));
+
         return response()->json($settings->metadata($request->query('workspace_id')));
     }
 
@@ -40,6 +49,10 @@ class QuickTradeController extends Controller
             'provider' => 'nullable|string|max:32',
             'integration_id' => 'nullable|uuid',
         ]);
+
+        // A named workspace selects that workspace's live integration for the
+        // candle fetch, so it must be the caller's own.
+        $this->assertOptionalWorkspaceMembership($request, $data['workspace_id'] ?? null);
 
         return response()->json($quickTrades->chart(
             $data['workspace_id'] ?? '',
@@ -63,6 +76,8 @@ class QuickTradeController extends Controller
             'timeframe' => 'nullable|string|max:16',
             'indicator_set' => 'nullable|array',
         ]);
+
+        $this->assertOptionalWorkspaceMembership($request, $data['workspace_id'] ?? null);
 
         $chart = $quickTrades->chart(
             $data['workspace_id'] ?? '',
@@ -146,7 +161,17 @@ class QuickTradeController extends Controller
             // only (duration_availability rows). Both this and
             // `expiry_seconds` above now share one derived cap.
             'durations.*' => 'integer|min:5|max:'.$maxExpiry,
+            // Optional, additive (`quick_trade.use_account_fee_rate`): lets a
+            // LIVE preview be priced off the selected integration's real
+            // Binance commission, so the preview and the placement-time A5
+            // guard use the same fee. Omit them and nothing changes.
+            'workspace_id' => 'nullable|uuid',
+            'integration_id' => 'nullable|uuid',
         ]);
+
+        // Naming a workspace can make the server call Binance with that
+        // workspace's stored credentials, so it must be the caller's own.
+        $this->assertOptionalWorkspaceMembership($request, $data['workspace_id'] ?? null);
 
         if ($request->boolean('async')) {
             return app(\App\Domain\Trading\AsyncTradeForecast::class)->request(
@@ -375,6 +400,22 @@ class QuickTradeController extends Controller
             'leverage' => 'required_if:leverage_enabled,true|nullable|numeric|min:1',
         ]);
 
+        $this->assertWorkspaceMembership($request, (string) $payload['workspace_id']);
+
+        // QuickTradeService stamps robot_session_id onto the trade and, by id
+        // alone, updates that session's last_trade_at and (at settlement) its
+        // performance counters -- so a body robot_session_id must belong to
+        // the same, already-authorized workspace.
+        if (! empty($payload['robot_session_id'])) {
+            $sessionInWorkspace = RobotSession::query()
+                ->whereKey($payload['robot_session_id'])
+                ->where('workspace_id', $payload['workspace_id'])
+                ->exists();
+            if (! $sessionInWorkspace) {
+                abort(403, 'You do not have access to this workspace.');
+            }
+        }
+
         $headerKey = $request->header('Idempotency-Key');
         if (! isset($payload['idempotency_key']) && is_string($headerKey) && trim($headerKey) !== '') {
             $payload['idempotency_key'] = trim($headerKey);
@@ -402,6 +443,8 @@ class QuickTradeController extends Controller
 
     public function active(Request $request, string $workspaceId, QuickTradeService $quickTrades)
     {
+        $this->assertWorkspaceMembership($request, $workspaceId);
+
         return response()->json($quickTrades->active(
             $workspaceId,
             $request->query('source'),
@@ -411,6 +454,8 @@ class QuickTradeController extends Controller
 
     public function history(Request $request, string $workspaceId, QuickTradeService $quickTrades)
     {
+        $this->assertWorkspaceMembership($request, $workspaceId);
+
         return response()->json($quickTrades->history(
             $workspaceId,
             $request->query('source'),
@@ -424,6 +469,16 @@ class QuickTradeController extends Controller
         return response()->json([
             'settled' => $quickTrades->settleExpired((int) $request->input('limit', 100)),
         ]);
+    }
+
+    /** Membership is only required when the caller actually names a workspace. */
+    private function assertOptionalWorkspaceMembership(Request $request, mixed $workspaceId): void
+    {
+        if (is_string($workspaceId) && trim($workspaceId) !== '') {
+            $this->assertWorkspaceMembership($request, $workspaceId);
+        } elseif ($workspaceId !== null && $workspaceId !== '') {
+            abort(403, 'You do not have access to this workspace.');
+        }
     }
 
     private function fetchBinanceHistory(string $symbol, string $timeframe, int $limit): array

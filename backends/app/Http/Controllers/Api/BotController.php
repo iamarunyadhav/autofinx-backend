@@ -13,6 +13,7 @@ use App\Domain\Trading\BotLogService;
 use App\Domain\Trading\TradingModuleSettingsService;
 use App\Domain\Venue\TradingVenueClientFactory;
 use App\Http\Controllers\Controller;
+use App\Http\Controllers\Concerns\AssertsWorkspaceMembership;
 use App\Jobs\EvaluateBotJob;
 use App\Jobs\ExecuteSignalJob;
 use App\Models\AiRecommendation;
@@ -22,12 +23,24 @@ use App\Models\Position;
 use App\Models\Trade;
 use App\Models\TradeSignal;
 use Illuminate\Http\Request;
+use Illuminate\Validation\Rule;
 use Illuminate\Support\Str;
 
+/**
+ * Every action asserts workspace membership (RatioBotController pattern):
+ * {workspace} routes against the route workspace, {bot} routes against the
+ * bot's own workspace_id. connection_id/risk_profile_id must also belong to
+ * that workspace -- VenueClientFactory::forBot() trades with the bound
+ * connection's credentials.
+ */
 class BotController extends Controller
 {
+    use AssertsWorkspaceMembership;
+
     public function index(Request $request, string $workspaceId)
     {
+        $this->assertWorkspaceMembership($request, $workspaceId);
+
         $query = Bot::with('riskProfile')
             ->where('workspace_id', $workspaceId)
             ->orderByDesc('created_at');
@@ -53,9 +66,11 @@ class BotController extends Controller
         TradingModuleSettingsService $settings
     )
     {
+        $this->assertWorkspaceMembership($request, $workspaceId);
+
         $data = $request->validate([
             'name' => 'required|string|max:120',
-            'connection_id' => 'nullable|uuid|exists:exchange_connections,id',
+            'connection_id' => ['nullable', 'uuid', Rule::exists('exchange_connections', 'id')->where('workspace_id', $workspaceId)],
             'exchange' => 'nullable|string|max:24',
             'symbol' => 'nullable|string|max:32',
             'asset_class' => 'nullable|string|in:CRYPTO,METALS,crypto,metals',
@@ -65,7 +80,7 @@ class BotController extends Controller
             'provider' => 'nullable|string|max:32',
             'interval_sec' => 'nullable|integer|min:1|max:3600',
             'is_live' => 'boolean',
-            'risk_profile_id' => 'nullable|uuid|exists:risk_profiles,id',
+            'risk_profile_id' => ['nullable', 'uuid', Rule::exists('risk_profiles', 'id')->where('workspace_id', $workspaceId)],
             'strategy_type' => 'nullable|string|max:40',
             'strategy_params' => 'nullable|array',
             'allocation_mode' => 'nullable|string|in:FIXED,PERCENT_WALLET,STRATEGY,fixed,percent_wallet,strategy',
@@ -124,9 +139,11 @@ class BotController extends Controller
 
     public function update(Request $request, Bot $bot, StrategyParamSchemaService $schemas)
     {
+        $this->assertBotAccess($request, $bot);
+
         $data = $request->validate([
             'name' => 'sometimes|string|max:120',
-            'connection_id' => 'nullable|uuid|exists:exchange_connections,id',
+            'connection_id' => ['nullable', 'uuid', Rule::exists('exchange_connections', 'id')->where('workspace_id', (string) $bot->workspace_id)],
             'symbol' => 'sometimes|string|max:32',
             'asset_class' => 'sometimes|string|in:CRYPTO,METALS,crypto,metals',
             'metal_type' => 'nullable|string|in:GOLD,SILVER,BRONZE,gold,silver,bronze',
@@ -136,7 +153,7 @@ class BotController extends Controller
             'exchange' => 'sometimes|string|max:24',
             'interval_sec' => 'sometimes|integer|min:1|max:3600',
             'is_live' => 'sometimes|boolean',
-            'risk_profile_id' => 'nullable|uuid|exists:risk_profiles,id',
+            'risk_profile_id' => ['nullable', 'uuid', Rule::exists('risk_profiles', 'id')->where('workspace_id', (string) $bot->workspace_id)],
             'strategy_type' => 'sometimes|string|max:40',
             'strategy_params' => 'sometimes|array',
             'allocation_mode' => 'sometimes|string|in:FIXED,PERCENT_WALLET,STRATEGY,fixed,percent_wallet,strategy',
@@ -201,13 +218,16 @@ class BotController extends Controller
         return response()->json($bot->fresh());
     }
 
-    public function destroy(Bot $bot)
+    public function destroy(Request $request, Bot $bot)
     {
+        $this->assertBotAccess($request, $bot);
+
         $bot->delete();
         return response()->json(['message' => 'Bot deleted']);
     }
 
     public function start(
+        Request $request,
         Bot $bot,
         BotLogService $logs,
         TradingEnvironmentGuard $modeGuard,
@@ -215,6 +235,8 @@ class BotController extends Controller
         TradingModuleSettingsService $settings
     )
     {
+        $this->assertBotAccess($request, $bot);
+
         if (! $settings->automationEnabled((string) $bot->workspace_id)) {
             return response()->json(['message' => 'Auto trading is disabled for this workspace. Enable it in Settings before starting bots.'], 422);
         }
@@ -256,8 +278,10 @@ class BotController extends Controller
         return response()->json($bot->fresh());
     }
 
-    public function pause(Bot $bot, BotLogService $logs)
+    public function pause(Request $request, Bot $bot, BotLogService $logs)
     {
+        $this->assertBotAccess($request, $bot);
+
         $bot->status = 'PAUSED';
         $bot->save();
         $logs->log($bot->id, $bot->workspace_id, 'WARN', 'Bot paused from UI.', [], (string) Str::uuid());
@@ -265,8 +289,10 @@ class BotController extends Controller
         return response()->json($bot->fresh());
     }
 
-    public function stop(Bot $bot, BotLogService $logs)
+    public function stop(Request $request, Bot $bot, BotLogService $logs)
     {
+        $this->assertBotAccess($request, $bot);
+
         $bot->status = 'STOPPED';
         $bot->save();
         $logs->log($bot->id, $bot->workspace_id, 'WARN', 'Bot stopped from UI.', [], (string) Str::uuid());
@@ -274,8 +300,10 @@ class BotController extends Controller
         return response()->json($bot->fresh());
     }
 
-    public function emergencyStop(Bot $bot, TradingVenueClientFactory $venues, BotLogService $logs)
+    public function emergencyStop(Request $request, Bot $bot, TradingVenueClientFactory $venues, BotLogService $logs)
     {
+        $this->assertBotAccess($request, $bot);
+
         $traceId = (string) Str::uuid();
 
         $openOrders = Order::where('bot_id', $bot->id)
@@ -319,6 +347,8 @@ class BotController extends Controller
         MetalsMarketDataService $metals,
     )
     {
+        $this->assertBotAccess($request, $bot);
+
         $request->validate([
             'max_slippage_pct' => 'nullable|numeric|min:0|max:10',
             'ttl_ms' => 'nullable|integer|min:100|max:60000',
@@ -386,8 +416,10 @@ class BotController extends Controller
         ]);
     }
 
-    public function monitor(Bot $bot, MarketPriceCacheService $prices, MetalsMarketDataService $metals)
+    public function monitor(Request $request, Bot $bot, MarketPriceCacheService $prices, MetalsMarketDataService $metals)
     {
+        $this->assertBotAccess($request, $bot);
+
         $assetClass = strtoupper((string) ($bot->asset_class ?? 'CRYPTO'));
         $assetCode = strtoupper((string) ($bot->asset_code ?: $bot->symbol));
         $provider = strtolower((string) ($bot->provider ?: ($assetClass === 'METALS' ? 'metal_broker' : $bot->exchange)));
@@ -409,6 +441,8 @@ class BotController extends Controller
 
     public function logs(Request $request, Bot $bot)
     {
+        $this->assertBotAccess($request, $bot);
+
         $query = $bot->logs()->latest('ts');
         if ($request->filled('trace_id')) {
             $query->where('trace_id', (string) $request->query('trace_id'));
@@ -419,6 +453,8 @@ class BotController extends Controller
 
     public function aiRecommendations(Request $request, Bot $bot, MasterBrainService $brain)
     {
+        $this->assertBotAccess($request, $bot);
+
         $data = $request->validate([
             'limit' => 'nullable|integer|min:1|max:100',
             'refresh' => 'nullable|boolean',
@@ -436,6 +472,8 @@ class BotController extends Controller
 
     public function applyAiRecommendation(Request $request, Bot $bot, MasterBrainService $brain)
     {
+        $this->assertBotAccess($request, $bot);
+
         $data = $request->validate([
             'recommendation_id' => 'nullable|uuid|exists:ai_recommendations,id',
         ]);
@@ -458,5 +496,10 @@ class BotController extends Controller
             'recommendation' => $applied,
             'bot' => $bot->fresh(),
         ]);
+    }
+
+    private function assertBotAccess(Request $request, Bot $bot): void
+    {
+        $this->assertWorkspaceMembership($request, (string) $bot->workspace_id);
     }
 }

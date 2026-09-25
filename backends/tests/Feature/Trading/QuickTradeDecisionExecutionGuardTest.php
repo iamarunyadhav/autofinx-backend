@@ -7,6 +7,7 @@ use App\Models\QuickTrade;
 use App\Models\Setting;
 use App\Models\User;
 use App\Models\Workspace;
+use App\Models\WorkspaceMember;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
@@ -27,6 +28,11 @@ function decisionGuardLiveWorkspace(): array
 {
     $user = User::factory()->create();
     $workspace = Workspace::factory()->create();
+    WorkspaceMember::create([
+        'workspace_id' => $workspace->id,
+        'user_id' => $user->id,
+        'role' => 'owner',
+    ]);
     $integration = Integration::create([
         'id' => (string) Str::uuid(),
         'workspace_id' => $workspace->id,
@@ -214,6 +220,11 @@ test('paper mode is never blocked by the live execution guard', function () {
 
     $user = User::factory()->create();
     $workspace = Workspace::factory()->create();
+    WorkspaceMember::create([
+        'workspace_id' => $workspace->id,
+        'user_id' => $user->id,
+        'role' => 'owner',
+    ]);
     $this->actingAs($user);
 
     $this->postJson('/api/v1/quick-trade/place', [

@@ -87,6 +87,13 @@ abstract class TestCase extends BaseTestCase
             'ts:binance*:*',
             'autofinx:market:*',
             'autofinx:market-feed:*',
+            // LiveCandleCacheService's bounded candle window (6h TTL).
+            // TradingMarketService::candles() serves any cached window of 30+
+            // bars instead of calling the (faked) provider, so a key seeded
+            // by one test -- e.g. 2023-timestamp fixture klines -- otherwise
+            // leaks into every later test (and later RUN, within 6h) that
+            // uses the same symbol/timeframe in live mode.
+            'live-candles:*',
         ];
 
         // Predis's KEYS command prepends the configured connection prefix to

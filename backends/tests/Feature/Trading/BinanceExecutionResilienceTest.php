@@ -17,6 +17,7 @@ use App\Models\Trade;
 use App\Models\User;
 use App\Models\WalletLedgerEntry;
 use App\Models\Workspace;
+use App\Models\WorkspaceMember;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
@@ -103,6 +104,11 @@ function phaseThreeResilienceExchangeInfoPayload(): array
 test('uncertain binance submissions are preserved and returned for operator review', function () {
     $user = User::factory()->create();
     $workspace = Workspace::factory()->create();
+    WorkspaceMember::create([
+        'workspace_id' => $workspace->id,
+        'user_id' => $user->id,
+        'role' => 'owner',
+    ]);
     enablePhaseThreeResilienceLiveMode($workspace->id);
     $integration = createPhaseThreeResilienceIntegration($workspace->id);
 
