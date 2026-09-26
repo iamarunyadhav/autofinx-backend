@@ -54,6 +54,7 @@ use App\Http\Controllers\Api\AssetController;
 use App\Http\Controllers\Api\MetalsController;
 use App\Http\Controllers\Api\ProviderController;
 use App\Http\Controllers\Api\QuickTradeController;
+use App\Http\Controllers\Api\MultiWindowForecastController;
 use App\Http\Controllers\Api\RobotSessionController;
 use App\Http\Controllers\Api\RatioBotController;
 use App\Http\Controllers\Api\ForexGridBotController;
@@ -182,6 +183,11 @@ Route::prefix('v1')->group(function () {
         Route::get('quick-trade/technical-summary', [QuickTradeController::class, 'technicalSummary']);
         Route::post('quick-trade/forecast', [QuickTradeController::class, 'forecast']);
         Route::post('forecast/comparison', [QuickTradeController::class, 'forecastComparison']);
+        // VNext Dynamic Decision Engine, Phase A -- read-only, informational
+        // 3-window (short/medium/long) forecast comparison. Never places,
+        // blocks or alters a trade.
+        Route::post('quick-trade/forecast/multi-window', [MultiWindowForecastController::class, 'compare'])->middleware('throttle:30,1');
+        Route::get('quick-trade/forecast/multi-window/accuracy-report', [MultiWindowForecastController::class, 'accuracyReport'])->middleware('throttle:30,1');
         Route::post('quick-trade/place', [QuickTradeController::class, 'place']);
         Route::post('quick-trade/settle-due', [QuickTradeController::class, 'settleDue']);
         Route::get('workspaces/{workspace}/quick-trades/active', [QuickTradeController::class, 'active']);

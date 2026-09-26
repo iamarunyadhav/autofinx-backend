@@ -68,6 +68,17 @@ class SampleQuickTradeResearchCommand extends Command
                 $result['evaluated'], $result['missing'], $pruned));
         }
 
+        // VNext Dynamic Decision Engine, Phase A -- multi-window forecast
+        // audit hindsight evaluation rides this same existing 5s scheduler
+        // entry (no new schedule). No-op unless the (currently un-migrated)
+        // multi_window_forecast_audits table exists; never throws.
+        $multiWindow = app(\App\Domain\Trading\MultiWindowForecastAuditService::class);
+        if ($multiWindow->enabled()) {
+            $mwResult = $multiWindow->evaluateDue($prices);
+            $this->info(sprintf('Multi-window forecast audits: %d evaluated, %d missing expiry price, %d unavailable.',
+                $mwResult['evaluated'], $mwResult['missing'], $mwResult['unavailable']));
+        }
+
         return self::SUCCESS;
     }
 }
