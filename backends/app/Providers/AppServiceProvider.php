@@ -13,6 +13,11 @@ use App\Domain\RatioBot\Contracts\AnchorCandidateProviderInterface;
 use App\Domain\RatioBot\NullAnchorCandidateProvider;
 use App\Domain\AuditResearch\ServerDiagnostics\SshExecutor;
 use App\Domain\AuditResearch\ServerDiagnostics\PhpseclibSshExecutor;
+use App\Domain\Prediction\PredictionObservatory;
+use App\Domain\Prediction\Providers\ExternalMlPredictionProvider;
+use App\Domain\Prediction\Providers\LegacyAutoFinXPredictionProvider;
+use App\Domain\Prediction\Providers\MarketStructurePredictionProvider;
+use App\Domain\Prediction\Providers\PineStrategyPredictionProvider;
 
 class AppServiceProvider extends ServiceProvider
 {
@@ -43,6 +48,17 @@ class AppServiceProvider extends ServiceProvider
         // stub. Sandbox-mode connections never reach this class at all (see
         // ServerDiagnosticsService::isSandbox()).
         $this->app->bind(SshExecutor::class, PhpseclibSshExecutor::class);
+
+        // Prediction providers are deliberately exposed as one shadow-only
+        // observatory. Nothing in this binding can influence order execution.
+        $this->app->singleton(PredictionObservatory::class, function ($app) {
+            return new PredictionObservatory([
+                $app->make(LegacyAutoFinXPredictionProvider::class),
+                $app->make(MarketStructurePredictionProvider::class),
+                $app->make(ExternalMlPredictionProvider::class),
+                $app->make(PineStrategyPredictionProvider::class),
+            ]);
+        });
     }
 
     /**

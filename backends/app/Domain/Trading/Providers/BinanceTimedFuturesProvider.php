@@ -53,8 +53,8 @@ class BinanceTimedFuturesProvider implements LiveTradeProviderInterface
                 ['symbol' => 'BNBUSDT', 'display' => 'BNB / USDT', 'asset_class' => 'CRYPTO', 'payout_rate' => 0],
                 ['symbol' => 'SOLUSDT', 'display' => 'SOL / USDT', 'asset_class' => 'CRYPTO', 'payout_rate' => 0],
             ],
-            'timeframes' => ['1m', '5m', '15m', '1h', '4h', '1d'],
-            'durations' => [60, 300, 900, 3600, 14400, 86400],
+            'timeframes' => ['1m', '5m', '10m', '15m', '30m', '1h', '2h', '4h', '1d'],
+            'durations' => [60, 300, 600, 900, 1800, 3600, 7200, 14400, 86400],
         ];
     }
 
@@ -81,6 +81,9 @@ class BinanceTimedFuturesProvider implements LiveTradeProviderInterface
     public function candles(?Integration $integration, string $symbol, string $timeframe, int $limit = 120): array
     {
         $normalizedSymbol = strtoupper($symbol);
+        if (strtolower(trim($timeframe)) === '10m') {
+            return $this->aggregateTenMinuteCandles($integration, $normalizedSymbol, $limit);
+        }
         $interval = $this->normalizeInterval($timeframe);
         $response = Http::get($this->baseUrl($integration) . '/fapi/v1/klines', [
             'symbol' => $normalizedSymbol,
@@ -103,6 +106,34 @@ class BinanceTimedFuturesProvider implements LiveTradeProviderInterface
                 'opens_at' => now()->setTimestamp((int) floor(((int) ($row[0] ?? 0)) / 1000))->toIso8601String(),
             ])
             ->all();
+    }
+
+    /** Binance has no 10m kline interval; aggregate two closed 5m bars. */
+    private function aggregateTenMinuteCandles(?Integration $integration, string $symbol, int $limit): array
+    {
+        $response = Http::get($this->baseUrl($integration) . '/fapi/v1/klines', [
+            'symbol' => $symbol, 'interval' => '5m', 'limit' => min(max($limit * 2, 20), 1000),
+        ]);
+        $this->assertSuccess($response, 'Failed to fetch Binance futures 5m candles for 10m aggregation.');
+
+        $groups = [];
+        foreach ((array) $response->json() as $row) {
+            $openMs = (int) ($row[0] ?? 0);
+            $bucketMs = intdiv($openMs, 600000) * 600000;
+            $groups[$bucketMs][] = $row;
+        }
+
+        return collect($groups)->sortKeys()->map(function (array $rows, int|string $bucketMs) use ($symbol) {
+            $first = $rows[0];
+            $last = $rows[array_key_last($rows)];
+            return [
+                'symbol' => $symbol, 'timeframe' => '10m', 'timestamp' => (int) $bucketMs,
+                'open' => (float) ($first[1] ?? 0), 'high' => max(array_map(fn ($row) => (float) ($row[2] ?? 0), $rows)),
+                'low' => min(array_map(fn ($row) => (float) ($row[3] ?? 0), $rows)),
+                'close' => (float) ($last[4] ?? 0), 'volume' => array_sum(array_map(fn ($row) => (float) ($row[5] ?? 0), $rows)),
+                'opens_at' => now()->setTimestamp((int) floor(((int) $bucketMs) / 1000))->toIso8601String(),
+            ];
+        })->values()->slice(-$limit)->all();
     }
 
     public function availableBalance(Integration $integration, string $asset = 'USDT'): array
@@ -754,6 +785,7 @@ class BinanceTimedFuturesProvider implements LiveTradeProviderInterface
             '5m' => '5m',
             '15m' => '15m',
             '1h' => '1h',
+            '2h' => '2h',
             '4h' => '4h',
             '1d' => '1d',
             default => '1m',

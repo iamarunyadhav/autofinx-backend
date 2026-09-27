@@ -12,8 +12,10 @@ class TimeframeRegistry
         '30s' => 30,
         '1m' => 60,
         '5m' => 300,
+        '10m' => 600,
         '15m' => 900,
         '1h' => 3600,
+        '2h' => 7200,
         '4h' => 14400,
         '1d' => 86400,
     ];
@@ -42,8 +44,10 @@ class TimeframeRegistry
             '30s' => '30 sec',
             '1m' => '1 min',
             '5m' => '5 min',
+            '10m' => '10 min (derived from Binance 5m)',
             '15m' => '15 min',
             '1h' => '1 hour',
+            '2h' => '2 hours',
             '4h' => '4 hours',
             '1d' => '1 day',
         ];
