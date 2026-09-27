@@ -10,7 +10,7 @@ afterEach(function () {
     Mockery::close();
 });
 
-it('uses the requested spot namespace and exposes only canonical live-feed telemetry', function () {
+it('keeps the forecast close anchored while exposing canonical live-feed telemetry', function () {
     $prices = Mockery::mock(MarketPriceCacheService::class);
     $prices->shouldReceive('getLiveFeedSnapshot')
         ->once()
@@ -36,10 +36,12 @@ it('uses the requested spot namespace and exposes only canonical live-feed telem
     app()->instance(FeatureFlagService::class, $flags);
 
     $forecast = Mockery::mock(TradeForecastService::class);
-    $forecast->shouldReceive('forecast')->once()->andReturn([
+    $forecast->shouldReceive('forecast')->once()->withArgs(function ($candles, $tf, $horizon, $decision, $vol, $feed, $symbol, $reference) {
+        return $reference === null && $feed['fresh'] === true && $symbol === 'ETHUSDT';
+    })->andReturn([
         'available' => true,
-        'reference_price' => 2500.25,
-        'reference_price_source' => 'fresh_canonical_quote',
+        'reference_price' => 1.0,
+        'reference_price_source' => 'latest_candle_close',
         'decision_trend' => 'BUY',
     ]);
     $forecast->shouldReceive('netEdge')->once()->andReturn(['tradeable' => true]);

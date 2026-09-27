@@ -24,6 +24,12 @@ class ConfidenceEngine
             ->first();
 
         $hitRatePct = $backtestRow?->hit_rate_pct !== null ? (float) $backtestRow->hit_rate_pct : null;
+        return $this->scoreEvidence($analysis, $hitRatePct, $backtestRow?->sample_size);
+    }
+
+    /** Reuse the weighting math with explicitly scoped calibration evidence. */
+    public function scoreEvidence(MarketAnalysisSnapshot $analysis, ?float $hitRatePct, ?int $sampleSize): ConfidenceResult
+    {
         $forecastWeight = ForecastReliabilityWeighting::weightForHitRate($hitRatePct);
         $trendWeight = 1.0 - $forecastWeight;
 
@@ -36,7 +42,7 @@ class ConfidenceEngine
             forecastContribution: $forecastContribution,
             forecastWeight: $forecastWeight,
             hitRatePct: $hitRatePct,
-            sampleSize: $backtestRow?->sample_size,
+            sampleSize: $sampleSize,
         );
     }
 }

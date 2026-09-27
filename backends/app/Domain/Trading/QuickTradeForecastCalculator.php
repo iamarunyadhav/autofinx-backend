@@ -18,9 +18,8 @@ class QuickTradeForecastCalculator
     public function forecast(array $data, TradeForecastService $forecastSvc): array
     {
         // --- Part B1: decisions are computed from CLOSED candles only -------
-        // The forming bar is still what supplies `current_price` (via the
-        // canonical live quote resolved below), it just never contributes to
-        // direction / trade decision / indicator evidence.
+        // Forecast targets and evidence use closed candles. Live display quotes
+        // travel separately; server quote freshness still gates data quality.
         $rawCandles = $data['candles'];
         $timing = app(CandleCloseResolver::class)->resolve($rawCandles, (string) $data['timeframe']);
         $candles = $timing['candles'];
@@ -48,13 +47,8 @@ class QuickTradeForecastCalculator
                     'max_event_lag_ms' => $snapshot['max_event_lag_ms'] ?? null,
                     'market_type' => $snapshot['market_type'] ?? null,
                 ];
-                // Never trust a browser-supplied display quote for a forecast
-                // that may be shown beside a live-order control. Only the
-                // same server-side canonical quote that passed freshness can
-                // become the price reference.
-                if (($snapshot['fresh'] ?? false) && (float) ($snapshot['price'] ?? 0) > 0) {
-                    $referencePrice = (float) $snapshot['price'];
-                }
+                // Keep the forecast reference at the last closed candle.
+                // This snapshot supplies freshness telemetry, not a moving target.
             }
         }
 
@@ -134,9 +128,8 @@ class QuickTradeForecastCalculator
         // The decision is recomputed once per CLOSED candle (plus a grace
         // window that absorbs feed-delivery jitter) and reused until the next
         // close, so the verdict on screen cannot flicker mid-candle. Only the
-        // DECISION fields are cached — price, live_feed and the candle
-        // countdown stay live on every call, because freezing a displayed
-        // price beside a live order button would be actively dangerous.
+        // DECISION fields are cached; freshness/countdown are refreshed on
+        // every call. Display quotes are streamed independently by the UI.
         // Scoped to this Quick Trade calculator: TradeForecastService itself
         // is untouched, so Ratio Bot / Robot Trade / Future Trade keep their
         // existing every-call behaviour.
@@ -147,11 +140,8 @@ class QuickTradeForecastCalculator
         // response always carry an identical $forecastResult -- the shadow
         // wiring's own test asserts response==audit-log-old byte-for-byte.
         $forecastResult['decision_source'] = 'internal';
-        // UI-only telemetry. This is intentionally copied from the exact
-        // server-side snapshot used as the reference above, so the browser
-        // can make clear whether the target is based on a fresh canonical
-        // quote or the candle-close fallback. It never becomes an execution
-        // authorization and contains no user-supplied price.
+        // UI-only telemetry from the server-side freshness snapshot. Forecast
+        // targets remain close-anchored; this never authorizes execution.
         $forecastResult['live_feed'] = $liveFeed;
 
         // Unified Forecast Engine, Phase 5 -- SHADOW COMPARISON ONLY. This
@@ -485,10 +475,11 @@ class QuickTradeForecastCalculator
 
     public function comparison(array $data, TradeForecastService $forecastSvc): array
     {
-        $candles = $data['candles'];
+        $timing = app(CandleCloseResolver::class)->resolve($data['candles'], $data['timeframe']);
+        $candles = $timing['candles'];
         $current = $forecastSvc->forecast($candles, $data['timeframe'], (int) $data['expiry_seconds'],
             isset($data['signal']) ? $forecastSvc->decisionFromSignalPreview($data['signal']) : null,
-            null, null, (string) $data['symbol']);
+            null, null, (string) $data['symbol'], null, $timing);
         $exchange = (string) ($data['exchange'] ?? 'binance');
         $unified = null;
         try {
@@ -502,10 +493,28 @@ class QuickTradeForecastCalculator
         } catch (Throwable $e) {
             Log::warning('[UnifiedForecastEngine] normalized comparison failed', ['bot_type' => $data['bot_type'], 'error' => $e->getMessage()]);
         }
+        $helpers = null;
+        try {
+            $analysis = app(\App\Domain\MarketIntelligence\MarketAnalysisEngine::class)
+                ->analyzeFor($exchange, $data['symbol'], $data['timeframe']);
+            $calibrated = (bool) ($unified['calibrated'] ?? false);
+            $evidence = $unified['calibration_evidence'] ?? [];
+            $confidence = app(\App\Domain\MarketIntelligence\ConfidenceEngine::class)->scoreEvidence(
+                $analysis, $calibrated ? ($evidence['hit_rate_pct'] ?? null) : null,
+                $evidence['sample_size'] ?? null,
+            );
+            $helpers = ['analysis' => $analysis, 'confidence' => $confidence,
+                'calibrated' => $calibrated, 'calibration_source' => 'unified_forecast',
+                'input_basis' => 'persisted_candles', 'mode' => 'shadow'];
+        } catch (Throwable $e) {
+            Log::warning('Forecast helper comparison unavailable', ['error' => $e->getMessage()]);
+        }
         $same = $unified !== null && strtoupper((string) ($current['bias'] ?? '')) === strtoupper((string) ($unified['direction'] ?? ''));
         return ['schema_version' => 1, 'bot_type' => $data['bot_type'],
             'current' => array_merge($current, ['source' => 'current', 'mode' => 'primary',
                 'symbol' => $data['symbol'], 'timeframe' => $data['timeframe'], 'price_target_available' => true]),
+            'helpers' => $helpers,
+            'candle_timing' => array_diff_key($timing, ['candles' => true]),
             'unified' => $unified, 'comparison' => ['direction_agreement' => $unified === null ? null : $same,
                 'agreement' => $unified === null ? 'UNAVAILABLE' : ($same ? 'AGREE' : 'DISAGREE')],
             'execution_source' => 'unchanged_existing_engine' ];

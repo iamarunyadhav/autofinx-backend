@@ -31,4 +31,18 @@ class MarketAnalysisEngine
             raw: $trend,
         );
     }
+
+    /** Read-only comparison for non-Ratio trading screens, using the existing scorer. */
+    public function analyzeFor(string $exchange, string $symbol, string $timeframe): MarketAnalysisSnapshot
+    {
+        $trend = $this->trendScoring->scoreFor($exchange, $symbol, $timeframe, 40, 0.15);
+
+        return new MarketAnalysisSnapshot(
+            trendDirection: $trend['direction'],
+            trendCompositeScore: (float) $trend['composite_score'],
+            windowBreakdown: $trend['windows'] ?? [],
+            minComposite: (float) $trend['min_composite'],
+            raw: $trend,
+        );
+    }
 }

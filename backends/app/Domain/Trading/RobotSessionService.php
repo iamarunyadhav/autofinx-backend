@@ -1439,6 +1439,8 @@ class RobotSessionService
 
     private function robotForecast(RobotSession $session, array $candles, float $currentPrice, mixed $decision, mixed $volatility): array
     {
+        $timing = app(CandleCloseResolver::class)->resolve($candles, (string) $session->timeframe);
+        $candles = $timing['candles'];
         if (count($candles) < 10 || $currentPrice <= 0) {
             return [
                 'available' => false,
@@ -1448,12 +1450,19 @@ class RobotSessionService
 
         $horizonSeconds = (int) ($session->expiry_seconds ?: $this->timeframes->seconds((string) $session->timeframe));
 
+        // Reporting uses its own closed-candle signal, not a changing runtime
+        // entry decision or volatility snapshot computed on a forming bar.
+        $closedSignal = $this->signals->preview($candles, (string) $session->timeframe, (array) $session->indicator_set);
         return $this->forecastSvc->forecast(
             $candles,
             (string) $session->timeframe,
             $horizonSeconds,
-            is_array($decision) ? $decision : null,
-            is_array($volatility) ? $volatility : null,
+            $this->forecastSvc->decisionFromSignalPreview($closedSignal),
+            null,
+            null,
+            null,
+            null,
+            $timing,
         );
     }
 

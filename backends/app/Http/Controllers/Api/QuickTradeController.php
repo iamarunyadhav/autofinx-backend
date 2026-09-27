@@ -187,6 +187,8 @@ class QuickTradeController extends Controller
     {
         $data = $request->validate([
             'bot_type' => 'required|string|in:quick_trade,robot_trade,future_trade',
+            'candles.*.timestamp' => 'nullable|numeric|min:1',
+            'candles.*.volume' => 'nullable|numeric|min:0',
             'symbol' => 'required|string|max:32', 'timeframe' => 'required|string|max:16',
             'expiry_seconds' => 'required|integer|min:5|max:'.$settings->maxExpirySeconds(), 'candles' => 'required|array|min:10|max:500',
             'candles.*.open' => 'required|numeric', 'candles.*.high' => 'required|numeric',
