@@ -17,6 +17,7 @@ final class PredictionObservatoryController extends Controller
     public function accuracyReport(Request $request, PredictionAccuracyReport $report)
     {
         $data = $request->validate([
+            'workspace_id' => 'required|uuid',
             'symbol' => 'nullable|string|max:32',
             'provider' => 'nullable|string|max:64',
             'timeframe' => 'nullable|string|max:16',
@@ -26,9 +27,10 @@ final class PredictionObservatoryController extends Controller
             'rows.*.direction_correct' => 'required_with:rows|boolean',
             'rows.*.return_pct' => 'nullable|numeric',
         ]);
+        $this->assertWorkspaceMembership($request, $data['workspace_id']);
 
         $rows = $data['rows'] ?? PredictionObservation::query()
-            ->where('status', 'EVALUATED')
+            ->where('workspace_id', $data['workspace_id'])->where('status', 'EVALUATED')
             ->when($data['symbol'] ?? null, fn ($query, $value) => $query->where('symbol', strtoupper($value)))
             ->when($data['provider'] ?? null, fn ($query, $value) => $query->where('provider', $value))
             ->when($data['timeframe'] ?? null, fn ($query, $value) => $query->where('timeframe', $value))
@@ -104,6 +106,7 @@ final class PredictionObservatoryController extends Controller
             $result = $provider['result'] ?? [];
             PredictionObservation::create([
                 'correlation_id' => $data['correlation_id'] ?? null, 'integration_id' => $data['integration_id'] ?? null,
+                'workspace_id' => $data['workspace_id'] ?? null,
                 'symbol' => strtoupper($data['symbol']), 'market_type' => $data['market_type'] ?? 'crypto',
                 'timeframe' => $data['timeframe'], 'horizon_seconds' => (int) $data['horizon_seconds'],
                 'provider' => $provider['key'], 'provider_version' => $provider['version'] ?? null,

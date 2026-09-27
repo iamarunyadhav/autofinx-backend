@@ -1,0 +1,8 @@
+<?php
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+return new class extends Migration {
+    public function up(): void { Schema::table('prediction_observations', function (Blueprint $table): void { $table->uuid('workspace_id')->nullable()->after('integration_id')->index(); }); }
+    public function down(): void { Schema::table('prediction_observations', function (Blueprint $table): void { $table->dropColumn('workspace_id'); }); }
+};
