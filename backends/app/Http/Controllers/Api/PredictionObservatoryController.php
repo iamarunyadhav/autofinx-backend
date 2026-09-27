@@ -23,8 +23,27 @@ final class PredictionObservatoryController extends Controller
             'candles.*.low' => 'required|numeric',
             'candles.*.close' => 'required|numeric',
             'candles.*.volume' => 'nullable|numeric',
-            'candles.*.timestamp' => 'nullable|numeric',
+            'candles.*.timestamp' => 'required|numeric',
         ]);
+
+        $intervals = ['1m' => 60, '5m' => 300, '10m' => 600, '15m' => 900, '30m' => 1800,
+            '1h' => 3600, '2h' => 7200, '4h' => 14400, '1d' => 86400];
+        $interval = $intervals[$data['timeframe']];
+        $now = time();
+        $closedCandles = array_values(array_filter($data['candles'], static function (array $candle) use ($interval, $now): bool {
+            $open = (float) $candle['timestamp'];
+            if ($open > 1_000_000_000_000) {
+                $open /= 1000;
+            }
+            return $open + $interval <= $now;
+        }));
+
+        if (count($closedCandles) < 8) {
+            return response()->json([
+                'message' => 'At least 8 fully closed candles are required.',
+                'reason' => 'insufficient_closed_candles',
+            ], 422);
+        }
 
         return response()->json($observatory->observe(new PredictionRequest(
             symbol: strtoupper($data['symbol']),
@@ -32,7 +51,7 @@ final class PredictionObservatoryController extends Controller
             timeframe: $data['timeframe'],
             horizonSeconds: (int) $data['horizon_seconds'],
             currentQuote: isset($data['current_quote']) ? (float) $data['current_quote'] : null,
-            candles: $data['candles'],
+            candles: $closedCandles,
         )));
     }
 }
