@@ -4,11 +4,25 @@ namespace App\Http\Controllers\Api;
 
 use App\Domain\Prediction\Data\PredictionRequest;
 use App\Domain\Prediction\PredictionObservatory;
+use App\Domain\Prediction\PredictionAccuracyReport;
 use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 
 final class PredictionObservatoryController extends Controller
 {
+    public function accuracyReport(Request $request, PredictionAccuracyReport $report)
+    {
+        $data = $request->validate([
+            'rows' => 'nullable|array|max:5000',
+            'rows.*.provider' => 'required_with:rows|string|max:64',
+            'rows.*.timeframe' => 'required_with:rows|string|max:16',
+            'rows.*.direction_correct' => 'required_with:rows|boolean',
+            'rows.*.return_pct' => 'nullable|numeric',
+        ]);
+
+        return response()->json($report->generate($data['rows'] ?? []));
+    }
+
     public function observe(Request $request, PredictionObservatory $observatory)
     {
         $data = $request->validate([

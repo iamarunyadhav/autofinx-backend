@@ -183,6 +183,7 @@ Route::prefix('v1')->group(function () {
         Route::get('quick-trade/technical-summary', [QuickTradeController::class, 'technicalSummary']);
         Route::post('quick-trade/forecast', [QuickTradeController::class, 'forecast']);
         Route::post('quick-trade/prediction-observatory', [\App\Http\Controllers\Api\PredictionObservatoryController::class, 'observe'])->middleware('throttle:30,1');
+        Route::post('quick-trade/prediction-accuracy-report', [\App\Http\Controllers\Api\PredictionObservatoryController::class, 'accuracyReport'])->middleware('throttle:30,1');
         Route::post('forecast/comparison', [QuickTradeController::class, 'forecastComparison']);
         // VNext Dynamic Decision Engine, Phase A -- read-only, informational
         // 3-window (short/medium/long) forecast comparison. Never places,
