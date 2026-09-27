@@ -449,3 +449,4 @@ if ($schedulerEnabled && ! $supervisorRuntime && $scheduleFutureTradeRuntime) {
         ->before(fn () => $markRunStart('future-trade:user-stream'))
         ->after(fn () => $markRunEnd('future-trade:user-stream'));
 }
+Schedule::command('prediction:dispatch-settlements --limit=100')->everyMinute()->withoutOverlapping();
