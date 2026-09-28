@@ -57,10 +57,15 @@ def train(input_path: Path, output_path: Path, horizon: int) -> None:
         raise ValueError("time-series split produced an empty train or validation set")
     try:
         import lightgbm as lgb
+        import numpy as np
     except ImportError as exc:
         raise RuntimeError("install lightgbm before training") from exc
     model = lgb.LGBMRegressor(n_estimators=200, learning_rate=0.03, num_leaves=31, random_state=42)
-    model.fit(features[:split], target[:split], eval_set=[(features[split:], target[split:])], callbacks=[lgb.early_stopping(20, verbose=False)])
+    train_features = np.asarray(features[:split], dtype=np.float64)
+    train_target = np.asarray(target[:split], dtype=np.float64)
+    validation_features = np.asarray(features[split:], dtype=np.float64)
+    validation_target = np.asarray(target[split:], dtype=np.float64)
+    model.fit(train_features, train_target, eval_set=[(validation_features, validation_target)], callbacks=[lgb.early_stopping(20, verbose=False)])
     output_path.parent.mkdir(parents=True, exist_ok=True)
     model.booster_.save_model(str(output_path))
     metadata = {
