@@ -20,6 +20,14 @@
 /storage/framework/*.json
 /storage/pail
 /vendor
+external-predictive-engine/.venv/
+external-predictive-engine/storage/*.log
+external-predictive-engine/**/__pycache__/
+external-predictive-engine/models/
+train-master/.venv/
+train-master/**/__pycache__/
+train-master/data/*
+!train-master/data/**/.gitkeep
 Homestead.json
 Homestead.yaml
 Thumbs.db

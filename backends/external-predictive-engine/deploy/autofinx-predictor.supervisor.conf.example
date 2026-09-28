@@ -1,0 +1,17 @@
+; Copy to the server's Supervisor include directory only during final deployment.
+; Keep the predictor bound to localhost; Laravel is the only intended caller.
+
+[program:autofinx-predictor]
+directory=/home/zcadmin/public_html/api.autofinx.arunyadhav.dev/autofinx-backend/backends/external-predictive-engine
+command=/home/zcadmin/public_html/api.autofinx.arunyadhav.dev/autofinx-backend/backends/external-predictive-engine/.venv/bin/python -m external_predictive_engine
+user=zcadmin
+autostart=true
+autorestart=true
+startsecs=5
+startretries=10
+stopwaitsecs=30
+redirect_stderr=true
+stdout_logfile=/home/zcadmin/public_html/api.autofinx.arunyadhav.dev/autofinx-backend/backends/external-predictive-engine/storage/predictor.log
+stdout_logfile_maxbytes=20MB
+stdout_logfile_backups=5
+environment=AUTOFINX_PREDICTOR_HOST="127.0.0.1",AUTOFINX_PREDICTOR_PORT="8091",AUTOFINX_PREDICTOR_PROVIDER="lightgbm",AUTOFINX_PREDICTOR_MODEL_PATH=""
