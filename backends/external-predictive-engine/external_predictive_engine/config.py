@@ -10,6 +10,7 @@ class Settings:
     port: int = 8091
     provider: str = "lightgbm"
     model_path: str | None = None
+    model_dir: str | None = None
     log_level: str = "INFO"
     influence: bool = False
     execution: bool = False
@@ -28,5 +29,6 @@ class Settings:
             port=port,
             provider=os.getenv("AUTOFINX_PREDICTOR_PROVIDER", "lightgbm"),
             model_path=os.getenv("AUTOFINX_PREDICTOR_MODEL_PATH") or None,
+            model_dir=os.getenv("AUTOFINX_PREDICTOR_MODEL_DIR") or None,
             log_level=os.getenv("AUTOFINX_PREDICTOR_LOG_LEVEL", "INFO"),
         )

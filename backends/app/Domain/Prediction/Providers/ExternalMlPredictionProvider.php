@@ -18,7 +18,7 @@ final class ExternalMlPredictionProvider implements PredictionProviderInterface
         try {
             $response = Http::timeout((int) config('prediction_observatory.providers.external_ml.timeout_seconds', 2))
                 ->acceptJson()->post(rtrim((string) config('prediction_observatory.providers.external_ml.url'), '/').'/v1/predict', [
-                    'symbol' => $request->symbol, 'horizon_seconds' => $request->horizonSeconds,
+                    'symbol' => $request->symbol, 'timeframe' => $request->timeframe, 'horizon_seconds' => $request->horizonSeconds,
                     'market_timestamp' => (string) ($request->candles[array_key_last($request->candles)]['timestamp'] ?? ''),
                     'features' => $this->features($request->candles),
                 ]);

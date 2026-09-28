@@ -10,6 +10,7 @@ class PredictionRequest:
     horizon_seconds: int
     market_timestamp: str
     features: dict[str, float]
+    timeframe: str = ""
 
 
 @dataclass(frozen=True)
@@ -47,36 +48,61 @@ class PredictionProvider(Protocol):
 class LightGBMProvider:
     name = "lightgbm"
 
-    def __init__(self, model_path: str | None = None) -> None:
+    def __init__(self, model_path: str | None = None, model_dir: str | None = None) -> None:
         self.model_path = model_path
-        self._model: Any = None
-        self._load_error: str | None = None
+        self.model_dir = model_dir
+        self._models: dict[str, Any] = {}
+        self._errors: dict[str, str] = {}
         if model_path:
-            self._load(model_path)
+            self._load("default", model_path)
 
-    def _load(self, model_path: str) -> None:
+    def _load(self, key: str, model_path: str) -> None:
         try:
             import lightgbm as lgb
 
-            self._model = lgb.Booster(model_file=model_path)
+            self._models[key] = lgb.Booster(model_file=model_path)
         except Exception as exc:  # model loading must not bring down the service
-            self._load_error = f"model_load_failed: {exc.__class__.__name__}"
+            self._errors[key] = f"model_load_failed: {exc.__class__.__name__}"
+
+    def _key(self, request: PredictionRequest) -> str:
+        return f"{request.symbol.upper()}-{request.timeframe.lower()}"
+
+    def _path_for(self, request: PredictionRequest) -> str | None:
+        if self.model_dir and request.timeframe:
+            from pathlib import Path
+            path = Path(self.model_dir) / f"{request.symbol.upper()}-{request.timeframe.lower()}.txt"
+            return str(path) if path.is_file() else None
+        return self.model_path
+
+    def _model_for(self, request: PredictionRequest) -> Any:
+        key = self._key(request)
+        if key in self._models:
+            return self._models[key]
+        path = self._path_for(request)
+        if path is None:
+            return None
+        self._load(key, path)
+        return self._models.get(key)
 
     def health(self) -> dict[str, Any]:
-        if self._model is not None:
-            return {"name": self.name, "status": "ready", "model_version": self.model_path}
-        reason = self._load_error or "model_not_configured"
-        return {"name": self.name, "status": "unavailable", "reason": reason}
+        if self._models:
+            return {"name": self.name, "status": "ready", "models_loaded": len(self._models), "model_dir": self.model_dir}
+        if self.model_dir:
+            from pathlib import Path
+            available = len(list(Path(self.model_dir).glob("*.txt"))) if Path(self.model_dir).is_dir() else 0
+            if available:
+                return {"name": self.name, "status": "ready", "models_available": available, "model_dir": self.model_dir}
+        return {"name": self.name, "status": "unavailable", "model_dir": self.model_dir, "reason": "model_not_configured"}
 
     def predict(self, request: PredictionRequest) -> PredictionResult:
-        if self._model is None:
-            health = self.health()
-            return PredictionResult(self.name, None, "unavailable", health.get("reason"))
+        model = self._model_for(request)
+        if model is None:
+            return PredictionResult(self.name, None, "unavailable", f"model_not_configured:{self._key(request)}")
         try:
             values = [request.features[key] for key in sorted(request.features)]
-            raw = self._model.predict([values])
+            raw = model.predict([values])
             predicted = float(raw[0])
         except Exception as exc:
-            return PredictionResult(self.name, self.model_path, "error", f"inference_failed: {exc.__class__.__name__}")
+            return PredictionResult(self.name, self._key(request), "error", f"inference_failed: {exc.__class__.__name__}")
         direction = "BUY" if predicted > 0 else "SELL" if predicted < 0 else "WAIT"
-        return PredictionResult(self.name, self.model_path, "ready", direction=direction, predicted_return_pct=predicted)
+        return PredictionResult(self.name, self._key(request), "ready", direction=direction, predicted_return_pct=predicted)

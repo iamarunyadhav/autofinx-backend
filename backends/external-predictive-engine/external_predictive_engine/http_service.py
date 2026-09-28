@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 def provider_for(settings: Settings) -> LightGBMProvider:
     if settings.provider != "lightgbm":
         raise ValueError(f"unsupported provider: {settings.provider}")
-    return LightGBMProvider(settings.model_path)
+    return LightGBMProvider(settings.model_path, settings.model_dir)
 
 
 def make_handler(settings: Settings, provider: LightGBMProvider):
@@ -45,6 +45,7 @@ def make_handler(settings: Settings, provider: LightGBMProvider):
                     horizon_seconds=int(body["horizon_seconds"]),
                     market_timestamp=str(body["market_timestamp"]),
                     features={str(k): float(v) for k, v in body.get("features", {}).items()},
+                    timeframe=str(body.get("timeframe", "")),
                 )
                 result = provider.predict(request)
                 self._write(200, {"prediction": result.as_dict()})
