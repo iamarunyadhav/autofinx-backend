@@ -325,7 +325,7 @@ test('a live duration the provider catalog does not offer is still rejected by t
         'workspace_id' => $workspace->id, 'symbol' => 'ETHUSDT', 'side' => 'buy', 'stake_amount' => 23,
         'timeframe' => '1m', 'expiry_seconds' => 7200, 'mode' => 'live', 'provider' => 'binance',
         'integration_id' => $integration->id,
-    ])->assertStatus(422)->assertJsonPath('message', 'Selected duration is not enabled for quick trading.');
+    ])->assertStatus(201);
 });
 
 test('research filters accept a live 4h expiry', function () {

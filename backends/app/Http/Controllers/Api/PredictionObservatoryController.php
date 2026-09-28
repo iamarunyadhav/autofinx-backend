@@ -5,6 +5,9 @@ namespace App\Http\Controllers\Api;
 use App\Domain\Prediction\Data\PredictionRequest;
 use App\Domain\Prediction\PredictionObservatory;
 use App\Domain\Prediction\PredictionAccuracyReport;
+use App\Domain\Prediction\PredictionForensicReport;
+use App\Domain\Prediction\PredictionMetricsService;
+use App\Domain\Prediction\PredictionReportExporter;
 use App\Models\PredictionObservation;
 use App\Models\Integration;
 use App\Http\Controllers\Concerns\AssertsWorkspaceMembership;
@@ -14,7 +17,7 @@ use Illuminate\Http\Request;
 final class PredictionObservatoryController extends Controller
 {
     use AssertsWorkspaceMembership;
-    public function accuracyReport(Request $request, PredictionAccuracyReport $report)
+    public function accuracyReport(Request $request, PredictionAccuracyReport $report, PredictionMetricsService $metrics)
     {
         $data = $request->validate([
             'workspace_id' => 'required|uuid',
@@ -36,10 +39,45 @@ final class PredictionObservatoryController extends Controller
             ->when($data['timeframe'] ?? null, fn ($query, $value) => $query->where('timeframe', $value))
             ->orderByDesc('evaluated_at')->limit(5000)->get()
             ->map(fn (PredictionObservation $observation) => $observation->only([
-                'provider', 'timeframe', 'direction_correct', 'return_pct',
+                'provider', 'timeframe', 'direction_correct', 'return_pct', 'predicted_direction',
+                'predicted_expiry_price', 'expiry_price', 'confidence', 'metadata',
             ]))->all();
+        $payload = $report->generate($rows);
+        $payload['metrics'] = $metrics->calculate(array_map(static function (array $row): array {
+            $outcome = (array) data_get($row, 'metadata.outcome', []);
+            return $row + [
+                'actual_direction' => $outcome['actual_direction'] ?? null,
+                'range_correct' => $outcome['range_correct'] ?? null,
+                'buy_probability' => data_get($row, 'metadata.buy_probability'),
+            ];
+        }, $rows));
+        return response()->json($payload);
+    }
 
-        return response()->json($report->generate($rows));
+    public function forensicReport(Request $request, PredictionForensicReport $report, PredictionReportExporter $exporter)
+    {
+        $data = $request->validate([
+            'workspace_id' => 'required|uuid',
+            'symbol' => 'nullable|string|max:32',
+            'provider' => 'nullable|string|max:64',
+            'limit' => 'nullable|integer|min:1|max:5000',
+            'format' => 'nullable|string|in:json,csv,markdown',
+        ]);
+        $this->assertWorkspaceMembership($request, $data['workspace_id']);
+
+        $rows = PredictionObservation::query()
+            ->where('workspace_id', $data['workspace_id'])->where('status', 'EVALUATED')
+            ->when($data['symbol'] ?? null, fn ($query, $value) => $query->where('symbol', strtoupper($value)))
+            ->when($data['provider'] ?? null, fn ($query, $value) => $query->where('provider', $value))
+            ->orderBy('predicted_at')->limit($data['limit'] ?? 1000)->get()
+            ->map(fn (PredictionObservation $observation) => $observation->toArray())->all();
+
+        $payload = $report->generate($rows);
+        return match ($data['format'] ?? 'json') {
+            'csv' => $exporter->csv($payload),
+            'markdown' => response($exporter->markdown($payload), 200, ['Content-Type' => 'text/markdown; charset=UTF-8']),
+            default => response()->json($payload),
+        };
     }
 
     public function observe(Request $request, PredictionObservatory $observatory)
@@ -112,7 +150,21 @@ final class PredictionObservatoryController extends Controller
                 'provider' => $provider['key'], 'provider_version' => $provider['version'] ?? null,
                 'predicted_direction' => $result['direction'] ?? null, 'confidence' => $result['confidence'] ?? null,
                 'entry_price' => $result['current_price'] ?? $data['current_quote'] ?? null,
-                'status' => 'PENDING', 'predicted_at' => now(), 'metadata' => ['shadow_only' => true],
+                'status' => 'PENDING', 'predicted_at' => now(), 'metadata' => [
+                    'shadow_only' => true,
+                    'source_candle_timestamp' => $closedCandles[array_key_last($closedCandles)]['timestamp'] ?? null,
+                    'input_candle_count' => count($closedCandles),
+                    'current_price' => $result['current_price'] ?? $data['current_quote'] ?? null,
+                    'predicted_expiry_price' => $result['predicted_expiry_price'] ?? null,
+                    'predicted_low' => $result['predicted_low'] ?? null,
+                    'predicted_high' => $result['predicted_high'] ?? null,
+                    'predicted_return_pct' => $result['predicted_return_pct'] ?? null,
+                    'buy_probability' => $result['buy_probability'] ?? null,
+                    'sell_probability' => $result['sell_probability'] ?? null,
+                    'neutral_probability' => $result['neutral_probability'] ?? null,
+                    'uncertainty' => $result['uncertainty'] ?? null,
+                    'data_quality' => $result['data_quality'] ?? 'UNKNOWN',
+                ],
             ]);
         }
 

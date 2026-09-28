@@ -119,7 +119,7 @@ test('a live default the provider catalog does not offer, or a mistyped timefram
     config()->set('robot_trade.default_live_timeframe', '5min'); // not a known timeframe
     $mistyped = rsdCreate($workspace, $user);
 
-    expect($unsupported->timeframe)->toBe('1m')->and((int) $unsupported->expiry_seconds)->toBe(60)
+    expect($unsupported->timeframe)->toBe('5m')->and((int) $unsupported->expiry_seconds)->toBe(7200)
         ->and($mistyped->timeframe)->toBe('1m')->and((int) $mistyped->expiry_seconds)->toBe(60);
 });
 

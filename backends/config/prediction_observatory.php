@@ -6,7 +6,7 @@ return [
     'providers' => [
         'legacy_autofinx' => ['enabled' => env('AUTOFINX_FORECAST_LEGACY_ENABLED', true), 'influence' => env('AUTOFINX_FORECAST_LEGACY_INFLUENCE', false)],
         'market_structure' => ['enabled' => env('AUTOFINX_FORECAST_MARKET_STRUCTURE_ENABLED', true), 'influence' => env('AUTOFINX_FORECAST_MARKET_STRUCTURE_INFLUENCE', false)],
-        'external_ml' => ['enabled' => env('AUTOFINX_FORECAST_EXTERNAL_ML_ENABLED', false), 'influence' => env('AUTOFINX_FORECAST_EXTERNAL_ML_INFLUENCE', false)],
+        'external_ml' => ['enabled' => env('AUTOFINX_FORECAST_EXTERNAL_ML_ENABLED', false), 'influence' => env('AUTOFINX_FORECAST_EXTERNAL_ML_INFLUENCE', false), 'url' => env('AUTOFINX_EXTERNAL_PREDICTOR_URL', 'http://127.0.0.1:8091'), 'timeout_seconds' => (int) env('AUTOFINX_EXTERNAL_PREDICTOR_TIMEOUT_SECONDS', 2)],
         'pine_strategy' => ['enabled' => env('AUTOFINX_FORECAST_PINE_ENABLED', false), 'influence' => env('AUTOFINX_FORECAST_PINE_INFLUENCE', false)],
         'weighted_fusion' => ['enabled' => env('AUTOFINX_FORECAST_WEIGHTED_FUSION_ENABLED', true), 'influence' => env('AUTOFINX_FORECAST_WEIGHTED_FUSION_INFLUENCE', false)],
     ],

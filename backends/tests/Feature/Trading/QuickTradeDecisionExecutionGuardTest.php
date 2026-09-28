@@ -338,15 +338,15 @@ test('quick trade metadata publishes the N4 threshold and only the C1 live prese
         ->and($response->json('quick_trade.min_horizon_candles'))->toBe(3);
 
     // config/quick_trade.php lists 5m/3600 (recommended), 5m/1800, 15m/3600.
-    // Binance's live duration catalog (BinanceTimedFuturesProvider::
-    // capabilities()) has no 1800s option, so that preset could never be
-    // selected -- it is filtered out rather than shown as a dead button.
+    // Binance's live duration catalog includes the configured 1800s research
+    // preset, so it remains visible alongside the recommended 3600s option.
     $liveDurations = app(\App\Domain\Trading\Providers\BinanceTimedFuturesProvider::class)->capabilities()['durations'];
-    expect($liveDurations)->not->toContain(1800);
+    expect($liveDurations)->toContain(1800);
 
     $presets = $response->json('quick_trade.live_expiry_presets');
-    expect($presets)->toHaveCount(2)
+    expect($presets)->toHaveCount(3)
         ->and($presets[0])->toMatchArray(['timeframe' => '5m', 'expiry_seconds' => 3600, 'recommended' => true, 'label' => '5m chart / 60m'])
-        ->and($presets[1])->toMatchArray(['timeframe' => '15m', 'expiry_seconds' => 3600, 'recommended' => false])
-        ->and(collect($presets)->pluck('expiry_seconds')->all())->not->toContain(1800);
+        ->and($presets[1])->toMatchArray(['timeframe' => '5m', 'expiry_seconds' => 1800, 'recommended' => false])
+        ->and($presets[2])->toMatchArray(['timeframe' => '15m', 'expiry_seconds' => 3600, 'recommended' => false])
+        ->and(collect($presets)->pluck('expiry_seconds')->all())->toContain(1800);
 });

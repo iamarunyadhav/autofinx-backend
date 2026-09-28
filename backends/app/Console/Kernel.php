@@ -44,6 +44,7 @@ use App\Console\Commands\FutureTradeRuntimeStatusCommand;
 use App\Console\Commands\FutureTradeScanAllCommand;
 use App\Console\Commands\FutureTradeTickCommand;
 use App\Console\Commands\FutureTradeUserStreamCommand;
+use App\Console\Commands\PredictionExportTrainingCandlesCommand;
 use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Foundation\Console\Kernel as ConsoleKernel;
 
@@ -103,6 +104,7 @@ class Kernel extends ConsoleKernel
         FutureTradeScanAllCommand::class,
         FutureTradeTickCommand::class,
         FutureTradeUserStreamCommand::class,
+        PredictionExportTrainingCandlesCommand::class,
     ];
 
 }
