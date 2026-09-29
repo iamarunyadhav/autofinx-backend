@@ -1,0 +1,8 @@
+# Add exactly one of these lines to the server user's crontab after the migration
+# is applied and a fresh dataset has been started. Replace DATASET_NAME.
+#
+# This is intentionally a direct, lock-protected command. Do not add it to
+# Laravel schedule:run: that scheduler is intentionally disabled on this host
+# because it overlaps Supervisor-owned market workers.
+
+* * * * * flock -n /tmp/autofinx-prediction-fresh-data.lock -c 'cd /home/zcadmin/public_html/api.autofinx.arunyadhav.dev/autofinx-backend/backends && /usr/local/bin/ea-php82 artisan prediction:fresh-dataset:cycle DATASET_NAME --limit=3 --repair-max-gaps=10' >> /home/zcadmin/public_html/api.autofinx.arunyadhav.dev/autofinx-backend/backends/storage/logs/prediction-fresh-data-cron.log 2>&1

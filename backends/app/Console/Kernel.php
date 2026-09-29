@@ -45,6 +45,17 @@ use App\Console\Commands\FutureTradeScanAllCommand;
 use App\Console\Commands\FutureTradeTickCommand;
 use App\Console\Commands\FutureTradeUserStreamCommand;
 use App\Console\Commands\PredictionExportTrainingCandlesCommand;
+use App\Console\Commands\PredictionFreshDatasetStartCommand;
+use App\Console\Commands\PredictionFreshCandlesCollectCommand;
+use App\Console\Commands\PredictionFreshCandlesRepairCommand;
+use App\Console\Commands\PredictionFreshDatasetAuditCommand;
+use App\Console\Commands\PredictionFreshDatasetSealCommand;
+use App\Console\Commands\PredictionFreshDatasetExportCommand;
+use App\Console\Commands\PredictionFreshModelTrainCommand;
+use App\Console\Commands\PredictionFreshDatasetCycleCommand;
+use App\Console\Commands\PredictionFreshDatasetReadinessCommand;
+use App\Console\Commands\PredictionFreshModelPublishShadowCommand;
+use App\Console\Commands\PredictionLegacyModelsArchiveCommand;
 use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Foundation\Console\Kernel as ConsoleKernel;
 
@@ -105,6 +116,17 @@ class Kernel extends ConsoleKernel
         FutureTradeTickCommand::class,
         FutureTradeUserStreamCommand::class,
         PredictionExportTrainingCandlesCommand::class,
+        PredictionFreshDatasetStartCommand::class,
+        PredictionFreshCandlesCollectCommand::class,
+        PredictionFreshCandlesRepairCommand::class,
+        PredictionFreshDatasetAuditCommand::class,
+        PredictionFreshDatasetSealCommand::class,
+        PredictionFreshDatasetExportCommand::class,
+        PredictionFreshModelTrainCommand::class,
+        PredictionFreshDatasetCycleCommand::class,
+        PredictionFreshDatasetReadinessCommand::class,
+        PredictionFreshModelPublishShadowCommand::class,
+        PredictionLegacyModelsArchiveCommand::class,
     ];
 
 }

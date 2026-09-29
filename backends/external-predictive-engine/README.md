@@ -26,12 +26,18 @@ isolated Python environment.
 
 ## Training
 
-Training requires a real, strictly ordered closed-candle CSV. It uses a
-chronological 80/20 split and writes a model plus a versioned metadata file:
+Training is permitted only from a sealed `prediction:fresh-dataset` JSONL
+snapshot. The trainer independently rejects duplicate, misaligned, gapped, or
+non-positive candles, then uses chronological 70/15/15 train/validation/holdout
+evaluation. A model must beat the zero-return MAE baseline and clear 52%
+holdout direction accuracy with at least 200 holdout rows before Laravel adds
+it to the **shadow-only** fresh model registry.
 
 ```bash
-python train_lightgbm.py --input data/BTCUSDT-5m.csv --output models/btcusdt-5m-v1.txt --horizon 12
+python train_lightgbm.py --input fresh.jsonl --output candidate.txt --timeframe 5m --horizon 12
 ```
 
-No data file means no training; the pipeline does not generate synthetic market
-data.
+Candidate artifacts go under Laravel storage, not the predictor's configured
+model directory. Registry membership never enables execution or trade influence.
+Legacy model files remain test/archive material until a separate, explicitly
+reviewed activation design exists.
