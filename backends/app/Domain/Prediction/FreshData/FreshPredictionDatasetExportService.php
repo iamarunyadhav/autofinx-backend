@@ -4,6 +4,7 @@ namespace App\Domain\Prediction\FreshData;
 
 use App\Models\PredictionFreshDataset;
 use App\Models\PredictionFreshDatasetCandle;
+use Illuminate\Support\Carbon;
 use InvalidArgumentException;
 
 final class FreshPredictionDatasetExportService
@@ -38,7 +39,7 @@ final class FreshPredictionDatasetExportService
                 ->where('dataset_id', $dataset->id)->where('symbol', $symbol)->where('timeframe', $timeframe)
                 ->orderBy('open_time')->cursor() as $candle) {
                     fwrite($handle, json_encode([
-                        'ts' => $candle->open_time->utc()->toIso8601String(),
+                        'ts' => Carbon::parse($candle->getRawOriginal('open_time'), 'UTC')->toIso8601String(),
                         'open' => (float) $candle->open,
                         'high' => (float) $candle->high,
                         'low' => (float) $candle->low,

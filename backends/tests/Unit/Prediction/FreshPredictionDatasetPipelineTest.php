@@ -82,6 +82,27 @@ final class FreshPredictionDatasetPipelineTest extends TestCase
         $this->assertFalse($report['influence']);
     }
 
+    public function test_audit_keeps_utc_hour_boundaries_aligned_when_the_application_timezone_is_not_utc(): void
+    {
+        $originalTimezone = date_default_timezone_get();
+        date_default_timezone_set('Asia/Colombo');
+        try {
+            $dataset = app(FreshPredictionDatasetService::class)->start('fresh-utc-boundary-check', ['BTCUSDT'], ['1h'], Carbon::now('UTC')->subDay());
+            $open = Carbon::create(2026, 9, 29, 0, 0, 0, 'UTC');
+            PredictionFreshDatasetCandle::query()->create([
+                'dataset_id' => $dataset->id, 'exchange' => 'binance_futures', 'symbol' => 'BTCUSDT', 'timeframe' => '1h',
+                'open_time' => $open, 'close_time' => $open->copy()->addHour()->subMillisecond(),
+                'open' => 100, 'high' => 101, 'low' => 99, 'close' => 100.5, 'volume' => 10,
+                'source' => 'binance_futures_canonical_rest', 'received_at' => now('UTC'), 'quality' => ['closed' => true, 'aligned' => true],
+            ]);
+
+            $report = app(FreshPredictionDatasetAuditService::class)->report($dataset);
+            $this->assertSame(0, $report['pairs'][0]['misaligned']);
+        } finally {
+            date_default_timezone_set($originalTimezone);
+        }
+    }
+
     public function test_gap_repair_fills_a_missing_closed_candle_without_reading_legacy_market_ohlc(): void
     {
         $base = Carbon::now('UTC')->subHours(2)->startOfHour();

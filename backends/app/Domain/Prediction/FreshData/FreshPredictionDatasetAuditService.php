@@ -39,18 +39,22 @@ final class FreshPredictionDatasetAuditService
         $misaligned = 0;
         $previous = null;
         foreach ($rows as $row) {
-            $open = Carbon::parse($row->open_time, 'UTC');
+            // Fresh canonical timestamps are persisted as UTC DATETIME values.
+            // Eloquent's normal datetime cast uses the application timezone, which
+            // would turn an exact UTC 1h boundary into :30 on an Asia/Colombo app.
+            $open = Carbon::parse($row->getRawOriginal('open_time'), 'UTC');
             if ($open->getTimestamp() % $expectedSeconds !== 0 || ! (($row->quality['closed'] ?? false) && ($row->quality['aligned'] ?? false))) $misaligned++;
             if ($previous && $previous->diffInSeconds($open) > (int) ($expectedSeconds * 1.5)) $gaps++;
             $previous = $open;
         }
-        $latest = $rows->last()?->close_time;
-        $staleSeconds = $latest ? Carbon::parse($latest, 'UTC')->diffInSeconds(now('UTC')) : null;
+        $latest = $rows->last()?->getRawOriginal('close_time');
+        $latestAt = $latest ? Carbon::parse($latest, 'UTC') : null;
+        $staleSeconds = $latestAt?->diffInSeconds(now('UTC'));
         $minimum = $this->minimumRows($timeframe);
         $state = $rows->count() < $minimum ? 'COLLECTING' : ($gaps > 0 || $misaligned > 0 ? 'QUALITY_BLOCKED' : 'READY_FOR_TRAINING');
         return [
             'symbol' => $symbol, 'timeframe' => $timeframe, 'rows' => $rows->count(), 'minimum_rows' => $minimum,
-            'gaps' => $gaps, 'misaligned' => $misaligned, 'latest_close_at' => $latest?->toIso8601String(),
+            'gaps' => $gaps, 'misaligned' => $misaligned, 'latest_close_at' => $latestAt?->toIso8601String(),
             'stale_seconds' => $staleSeconds, 'state' => $state,
         ];
     }

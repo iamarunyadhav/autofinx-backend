@@ -60,7 +60,9 @@ final class FreshPredictionCandleCollector
         $last = PredictionFreshDatasetCandle::query()
             ->where('dataset_id', $dataset->id)->where('symbol', $symbol)->where('timeframe', $timeframe)
             ->latest('open_time')->value('open_time');
-        $start = $last ? Carbon::parse($last, 'UTC')->addSeconds($seconds) : $dataset->started_at->copy();
+        $start = $last
+            ? Carbon::parse($last, 'UTC')->addSeconds($seconds)
+            : Carbon::parse($dataset->getRawOriginal('started_at'), 'UTC');
         $response = Http::timeout(15)->get(rtrim((string) config('services.binance.futures_api_url', 'https://fapi.binance.com'), '/').'/fapi/v1/klines', [
             'symbol' => $symbol, 'interval' => $timeframe, 'startTime' => $start->getTimestampMs(), 'limit' => max(1, min(1000, $limit)),
         ]);
@@ -102,7 +104,7 @@ final class FreshPredictionCandleCollector
             ->orderBy('open_time')->get(['open_time']);
 
         foreach ($rows as $row) {
-            $open = Carbon::parse($row->open_time, 'UTC');
+            $open = Carbon::parse($row->getRawOriginal('open_time'), 'UTC');
             if ($previous) {
                 $expected = $previous->copy()->addSeconds($seconds);
                 while ($expected->lt($open) && $result['requested'] < $remaining) {
