@@ -48,6 +48,24 @@ final class FreshPredictionShadowPublisher
         return $plan;
     }
 
+    /** @return list<array{candidate_id:string, source:string, target:string, metadata_source:string, metadata_target:string}> */
+    public function publishCandidate(string $candidateId): array
+    {
+        $plan = array_values(array_filter($this->plan(), static fn (array $entry): bool => $entry['candidate_id'] === $candidateId));
+        if ($plan === []) {
+            throw new RuntimeException('Candidate is not the active shadow registry entry.');
+        }
+        foreach ($plan as $entry) {
+            $directory = dirname($entry['target']);
+            if (! is_dir($directory) && ! mkdir($directory, 0750, true) && ! is_dir($directory)) {
+                throw new RuntimeException('Unable to create fresh shadow model directory.');
+            }
+            $this->copyAtomically($entry['source'], $entry['target']);
+            $this->copyAtomically($entry['metadata_source'], $entry['metadata_target']);
+        }
+        return $plan;
+    }
+
     private function copyAtomically(string $source, string $target): void
     {
         $temporary = $target.'.tmp';

@@ -14,4 +14,6 @@ redirect_stderr=true
 stdout_logfile=/home/zcadmin/public_html/api.autofinx.arunyadhav.dev/autofinx-backend/backends/external-predictive-engine/storage/predictor.log
 stdout_logfile_maxbytes=20MB
 stdout_logfile_backups=5
-environment=AUTOFINX_PREDICTOR_HOST="127.0.0.1",AUTOFINX_PREDICTOR_PORT="8091",AUTOFINX_PREDICTOR_PROVIDER="lightgbm",AUTOFINX_PREDICTOR_MODEL_PATH="",AUTOFINX_PREDICTOR_MODEL_DIR="/home/zcadmin/public_html/api.autofinx.arunyadhav.dev/autofinx-backend/backends/external-predictive-engine/models"
+; Fresh quality-passed models are published here by prediction:fresh-model:publish-shadow.
+; Never point this at a legacy/default model artifact.
+environment=AUTOFINX_PREDICTOR_HOST="127.0.0.1",AUTOFINX_PREDICTOR_PORT="8091",AUTOFINX_PREDICTOR_PROVIDER="lightgbm",AUTOFINX_PREDICTOR_MODEL_PATH="",AUTOFINX_PREDICTOR_MODEL_DIR="/home/zcadmin/public_html/api.autofinx.arunyadhav.dev/autofinx-backend/backends/storage/app/prediction-fresh-shadow-models"

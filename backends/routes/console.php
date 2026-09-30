@@ -450,3 +450,16 @@ if ($schedulerEnabled && ! $supervisorRuntime && $scheduleFutureTradeRuntime) {
         ->after(fn () => $markRunEnd('future-trade:user-stream'));
 }
 Schedule::command('prediction:dispatch-settlements --limit=100')->everyMinute()->withoutOverlapping();
+
+// Fresh ML snapshots are trained only after a human has sealed an audit-passed
+// dataset. This is intentionally opt-in and shadow-only: it cannot alter a
+// trading decision, publish a model, or modify execution configuration.
+if ($schedulerEnabled && (bool) config('prediction_fresh_data.automatic_training_enabled', false)) {
+    Schedule::command('prediction:fresh-model:dispatch-ready')
+        ->dailyAt((string) config('prediction_fresh_data.training_schedule_utc', '02:30'))
+        ->onOneServer()
+        ->withoutOverlapping(30)
+        ->runInBackground()
+        ->before(fn () => $markRunStart('prediction:fresh-model:dispatch-ready'))
+        ->after(fn () => $markRunEnd('prediction:fresh-model:dispatch-ready'));
+}

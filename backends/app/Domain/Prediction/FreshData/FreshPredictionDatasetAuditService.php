@@ -61,11 +61,11 @@ final class FreshPredictionDatasetAuditService
 
     private function minimumRows(string $timeframe): int
     {
-        return match ($timeframe) { '1m' => 10000, '5m' => 8000, '15m' => 5000, '1h' => 2500, '4h' => 1000, default => PHP_INT_MAX };
+        return match ($timeframe) { '1m' => 10000, '5m' => 8000, '15m' => 5000, '45m' => 1700, '1h' => 2500, '4h' => 1000, default => PHP_INT_MAX };
     }
 
     private function intervalSeconds(string $timeframe): int
     {
-        return match ($timeframe) { '1m' => 60, '5m' => 300, '15m' => 900, '1h' => 3600, '4h' => 14400, default => 1 };
+        return match ($timeframe) { '1m' => 60, '5m' => 300, '15m' => 900, '45m' => 2700, '1h' => 3600, '4h' => 14400, default => 1 };
     }
 }

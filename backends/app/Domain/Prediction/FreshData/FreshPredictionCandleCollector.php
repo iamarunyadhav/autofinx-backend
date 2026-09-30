@@ -56,6 +56,9 @@ final class FreshPredictionCandleCollector
     {
         $symbol = strtoupper($symbol);
         $timeframe = strtolower($timeframe);
+        if ($timeframe === '45m') {
+            return $this->collectDerived45mPair($dataset, $symbol, $limit);
+        }
         $seconds = $this->intervalSeconds($timeframe);
         $last = PredictionFreshDatasetCandle::query()
             ->where('dataset_id', $dataset->id)->where('symbol', $symbol)->where('timeframe', $timeframe)
@@ -97,6 +100,9 @@ final class FreshPredictionCandleCollector
     private function repairPairGaps(PredictionFreshDataset $dataset, string $symbol, string $timeframe, int $remaining): array
     {
         $result = ['requested' => 0, 'repaired' => 0, 'unavailable' => 0, 'invalid' => 0];
+        if ($timeframe === '45m') {
+            return $this->repairDerived45mGaps($dataset, $symbol, $remaining);
+        }
         $seconds = $this->intervalSeconds($timeframe);
         $previous = null;
         $rows = PredictionFreshDatasetCandle::query()
@@ -166,6 +172,138 @@ final class FreshPredictionCandleCollector
 
     private function intervalSeconds(string $timeframe): int
     {
-        return match ($timeframe) { '1m' => 60, '5m' => 300, '15m' => 900, '1h' => 3600, '4h' => 14400, default => throw new InvalidArgumentException('Unsupported timeframe.') };
+        return match ($timeframe) { '1m' => 60, '5m' => 300, '15m' => 900, '45m' => 2700, '1h' => 3600, '4h' => 14400, default => throw new InvalidArgumentException('Unsupported timeframe.') };
+    }
+
+    /**
+     * Binance Futures has no native 45m kline. This makes the interval only
+     * from three consecutive, fully closed 15m candles on a UTC 45m boundary.
+     * The resulting row remains in the isolated fresh dataset and cannot
+     * influence market_ohlc or any execution path.
+     *
+     * @return array{written:int, skipped_open:int, invalid:int}
+     */
+    private function collectDerived45mPair(PredictionFreshDataset $dataset, string $symbol, int $limit): array
+    {
+        $last = PredictionFreshDatasetCandle::query()
+            ->where('dataset_id', $dataset->id)->where('symbol', $symbol)->where('timeframe', '45m')
+            ->latest('open_time')->value('open_time');
+        $start = $last
+            ? Carbon::parse($last, 'UTC')->addMinutes(45)
+            : $this->next45MinuteBoundary(Carbon::parse($dataset->getRawOriginal('started_at'), 'UTC'));
+
+        $response = Http::timeout(15)->get(rtrim((string) config('services.binance.futures_api_url', 'https://fapi.binance.com'), '/').'/fapi/v1/klines', [
+            'symbol' => $symbol,
+            'interval' => '15m',
+            'startTime' => $start->getTimestampMs(),
+            'limit' => max(3, min(1000, $limit * 3)),
+        ]);
+        if ($response->failed()) {
+            throw new RuntimeException("Binance Futures derived 45m candle collection failed for {$symbol}: {$response->status()}");
+        }
+
+        $result = ['written' => 0, 'skipped_open' => 0, 'invalid' => 0];
+        foreach (array_chunk((array) $response->json(), 3) as $rows) {
+            $outcome = $this->storeDerived45mCandle($dataset, $symbol, $rows);
+            $result[$outcome]++;
+        }
+
+        return $result;
+    }
+
+    /** @return array{requested:int, repaired:int, unavailable:int, invalid:int} */
+    private function repairDerived45mGaps(PredictionFreshDataset $dataset, string $symbol, int $remaining): array
+    {
+        $result = ['requested' => 0, 'repaired' => 0, 'unavailable' => 0, 'invalid' => 0];
+        $previous = null;
+        $rows = PredictionFreshDatasetCandle::query()
+            ->where('dataset_id', $dataset->id)->where('symbol', $symbol)->where('timeframe', '45m')
+            ->orderBy('open_time')->get(['open_time']);
+
+        foreach ($rows as $row) {
+            $open = Carbon::parse($row->getRawOriginal('open_time'), 'UTC');
+            if ($previous) {
+                $expected = $previous->copy()->addMinutes(45);
+                while ($expected->lt($open) && $result['requested'] < $remaining) {
+                    $result['requested']++;
+                    $outcome = $this->fetchAndStoreDerived45mCandle($dataset, $symbol, $expected);
+                    $result[$outcome]++;
+                    $expected->addMinutes(45);
+                }
+            }
+            $previous = $open;
+            if ($result['requested'] >= $remaining) {
+                break;
+            }
+        }
+
+        return $result;
+    }
+
+    private function fetchAndStoreDerived45mCandle(PredictionFreshDataset $dataset, string $symbol, Carbon $open): string
+    {
+        $response = Http::timeout(15)->get(rtrim((string) config('services.binance.futures_api_url', 'https://fapi.binance.com'), '/').'/fapi/v1/klines', [
+            'symbol' => $symbol,
+            'interval' => '15m',
+            'startTime' => $open->getTimestampMs(),
+            'endTime' => $open->copy()->addMinutes(45)->getTimestampMs() - 1,
+            'limit' => 3,
+        ]);
+        if ($response->failed()) {
+            throw new RuntimeException("Binance Futures derived 45m gap repair failed for {$symbol}: {$response->status()}");
+        }
+
+        return $this->storeDerived45mCandle($dataset, $symbol, (array) $response->json());
+    }
+
+    /** @param array<int, mixed> $rows */
+    private function storeDerived45mCandle(PredictionFreshDataset $dataset, string $symbol, array $rows): string
+    {
+        if (count($rows) !== 3 || ! array_is_list($rows)) {
+            return 'invalid';
+        }
+        $rows = array_values($rows);
+        if (array_filter($rows, fn (mixed $row): bool => ! is_array($row) || count($row) < 7 || ! $this->validOhlcv($row)) !== []) {
+            return 'invalid';
+        }
+
+        $openMs = (int) $rows[0][0];
+        $nowMs = now('UTC')->getTimestampMs();
+        $sourceIntervalMs = 900_000;
+        foreach ($rows as $index => $row) {
+            if ((int) $row[0] !== $openMs + ($index * $sourceIntervalMs)) {
+                return 'invalid';
+            }
+        }
+        $closeMs = (int) $rows[2][6];
+        if ($openMs % 2_700_000 !== 0) {
+            return 'invalid';
+        }
+        if ($closeMs >= $nowMs) {
+            return 'skipped_open';
+        }
+
+        $openTime = Carbon::createFromTimestampMs($openMs, 'UTC');
+        if ($openTime->lt(Carbon::parse($dataset->getRawOriginal('started_at'), 'UTC'))) {
+            return 'invalid';
+        }
+        $candle = PredictionFreshDatasetCandle::query()->firstOrCreate([
+            'dataset_id' => $dataset->id, 'symbol' => $symbol, 'timeframe' => '45m', 'open_time' => $openTime,
+        ], [
+            'exchange' => 'binance_futures', 'close_time' => Carbon::createFromTimestampMs($closeMs, 'UTC'),
+            'open' => (float) $rows[0][1], 'high' => max(array_map(static fn (array $row): float => (float) $row[2], $rows)),
+            'low' => min(array_map(static fn (array $row): float => (float) $row[3], $rows)), 'close' => (float) $rows[2][4],
+            'volume' => array_sum(array_map(static fn (array $row): float => (float) $row[5], $rows)),
+            'source' => 'binance_futures_derived_15m_closed', 'received_at' => now('UTC'),
+            'quality' => ['closed' => true, 'aligned' => true, 'source_interval' => '15m', 'derived_timeframe' => '45m', 'source_candle_count' => 3],
+        ]);
+
+        return $candle->wasRecentlyCreated ? 'written' : 'unavailable';
+    }
+
+    private function next45MinuteBoundary(Carbon $at): Carbon
+    {
+        $seconds = $at->getTimestamp();
+        return Carbon::createFromTimestamp((int) (ceil($seconds / 2700) * 2700), 'UTC');
     }
 }

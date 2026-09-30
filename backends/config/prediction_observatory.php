@@ -11,8 +11,12 @@ return [
         'weighted_fusion' => ['enabled' => env('AUTOFINX_FORECAST_WEIGHTED_FUSION_ENABLED', true), 'influence' => env('AUTOFINX_FORECAST_WEIGHTED_FUSION_INFLUENCE', false)],
     ],
     // Binance-native intervals include 1m, 5m, 15m, 30m, 1h, 2h, 4h and 1d.
-    // 10m is derived from two closed 5m candles; it is not requested from Binance.
+    // Derived intervals are assembled from fully closed source bars; they are
+    // never sent to Binance as if they were native intervals.
     'horizons' => [60, 300, 600, 900, 1800, 3600, 7200, 14400, 86400],
     'timeframes' => ['1m', '5m', '15m', '30m', '1h', '2h', '4h', '1d'],
-    'derived_timeframes' => ['10m' => ['source' => '5m', 'bars' => 2]],
+    'derived_timeframes' => [
+        '10m' => ['source' => '5m', 'bars' => 2],
+        '45m' => ['source' => '15m', 'bars' => 3],
+    ],
 ];

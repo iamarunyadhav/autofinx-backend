@@ -8,7 +8,9 @@ use App\Domain\Prediction\PredictionAccuracyReport;
 use App\Domain\Prediction\PredictionForensicReport;
 use App\Domain\Prediction\PredictionMetricsService;
 use App\Domain\Prediction\PredictionReportExporter;
+use App\Domain\Prediction\FreshData\PredictionShadowPerformanceGuard;
 use App\Models\PredictionObservation;
+use App\Models\PredictionFreshModelCandidate;
 use App\Models\Integration;
 use App\Http\Controllers\Concerns\AssertsWorkspaceMembership;
 use App\Http\Controllers\Controller;
@@ -17,7 +19,7 @@ use Illuminate\Http\Request;
 final class PredictionObservatoryController extends Controller
 {
     use AssertsWorkspaceMembership;
-    public function accuracyReport(Request $request, PredictionAccuracyReport $report, PredictionMetricsService $metrics)
+    public function accuracyReport(Request $request, PredictionAccuracyReport $report, PredictionMetricsService $metrics, PredictionShadowPerformanceGuard $shadowGuard)
     {
         $data = $request->validate([
             'workspace_id' => 'required|uuid',
@@ -39,10 +41,24 @@ final class PredictionObservatoryController extends Controller
             ->when($data['timeframe'] ?? null, fn ($query, $value) => $query->where('timeframe', $value))
             ->orderByDesc('evaluated_at')->limit(5000)->get()
             ->map(fn (PredictionObservation $observation) => $observation->only([
-                'provider', 'timeframe', 'direction_correct', 'return_pct', 'predicted_direction',
+                'provider', 'provider_version', 'timeframe', 'horizon_seconds', 'predicted_at', 'direction_correct', 'return_pct', 'predicted_direction',
                 'predicted_expiry_price', 'expiry_price', 'confidence', 'metadata',
             ]))->all();
         $payload = $report->generate($rows);
+        $candidatesByVersion = PredictionFreshModelCandidate::query()->where('provider', 'lightgbm')->get()
+            ->keyBy(static fn (PredictionFreshModelCandidate $candidate): string => (string) data_get($candidate->metrics, 'model_version'));
+        $payload['groups'] = array_map(static function (array $group) use ($candidatesByVersion, $shadowGuard): array {
+            if (($group['provider'] ?? null) !== 'external_ml') {
+                return $group;
+            }
+            $candidate = $candidatesByVersion->get((string) ($group['provider_version'] ?? ''));
+            $group['shadow_health'] = $shadowGuard->assess(
+                $candidate ? (float) data_get($candidate->metrics, 'metrics.direction_accuracy_pct') : null,
+                isset($group['direction_accuracy_pct']) ? (float) $group['direction_accuracy_pct'] : null,
+                (int) ($group['samples'] ?? 0),
+            );
+            return $group;
+        }, $payload['groups']);
         $payload['metrics'] = $metrics->calculate(array_map(static function (array $row): array {
             $outcome = (array) data_get($row, 'metadata.outcome', []);
             return $row + [
@@ -85,7 +101,7 @@ final class PredictionObservatoryController extends Controller
         $data = $request->validate([
             'symbol' => 'required|string|max:32',
             'market_type' => 'nullable|string|in:crypto,forex,metals',
-            'timeframe' => 'required|string|in:1m,5m,10m,15m,30m,1h,2h,4h,1d',
+            'timeframe' => 'required|string|in:1m,5m,10m,15m,30m,45m,1h,2h,4h,1d',
             'horizon_seconds' => 'required|integer|min:60|max:86400',
             'current_quote' => 'nullable|numeric|min:0',
             'correlation_id' => 'nullable|uuid',
@@ -112,7 +128,7 @@ final class PredictionObservatoryController extends Controller
             }
         }
 
-        $intervals = ['1m' => 60, '5m' => 300, '10m' => 600, '15m' => 900, '30m' => 1800,
+        $intervals = ['1m' => 60, '5m' => 300, '10m' => 600, '15m' => 900, '30m' => 1800, '45m' => 2700,
             '1h' => 3600, '2h' => 7200, '4h' => 14400, '1d' => 86400];
         $interval = $intervals[$data['timeframe']];
         $now = time();
@@ -147,7 +163,7 @@ final class PredictionObservatoryController extends Controller
                 'workspace_id' => $data['workspace_id'] ?? null,
                 'symbol' => strtoupper($data['symbol']), 'market_type' => $data['market_type'] ?? 'crypto',
                 'timeframe' => $data['timeframe'], 'horizon_seconds' => (int) $data['horizon_seconds'],
-                'provider' => $provider['key'], 'provider_version' => $provider['version'] ?? null,
+                'provider' => $provider['key'], 'provider_version' => $provider['version'] ?? null, 'provider_reason' => $result['reason'] ?? null,
                 'predicted_direction' => $result['direction'] ?? null, 'confidence' => $result['confidence'] ?? null,
                 'entry_price' => $result['current_price'] ?? $data['current_quote'] ?? null,
                 'status' => 'PENDING', 'predicted_at' => now(), 'metadata' => [
@@ -163,6 +179,9 @@ final class PredictionObservatoryController extends Controller
                     'sell_probability' => $result['sell_probability'] ?? null,
                     'neutral_probability' => $result['neutral_probability'] ?? null,
                     'uncertainty' => $result['uncertainty'] ?? null,
+                    'model_holdout_direction_accuracy_pct' => data_get($result, 'evidence.model_holdout_direction_accuracy_pct'),
+                    'model_holdout_rows' => data_get($result, 'evidence.model_holdout_rows'),
+                    'model_evaluation' => data_get($result, 'evidence.model_evaluation'),
                     'data_quality' => $result['data_quality'] ?? 'UNKNOWN',
                 ],
             ]);

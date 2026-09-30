@@ -8,7 +8,9 @@ use InvalidArgumentException;
 
 final class FreshPredictionDatasetService
 {
-    public const SUPPORTED_TIMEFRAMES = ['1m', '5m', '15m', '1h', '4h'];
+    // 45m is a canonical derived interval made from three closed 15m bars.
+    // It is intentionally not requested from Binance as a native timeframe.
+    public const SUPPORTED_TIMEFRAMES = ['1m', '5m', '15m', '45m', '1h', '4h'];
 
     public function start(string $name, array $symbols, array $timeframes, ?Carbon $startedAt = null): PredictionFreshDataset
     {

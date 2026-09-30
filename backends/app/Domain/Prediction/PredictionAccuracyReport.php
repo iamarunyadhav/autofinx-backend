@@ -10,9 +10,12 @@ final class PredictionAccuracyReport
         $groups = [];
         foreach ($rows as $row) {
             $provider = (string) ($row['provider'] ?? 'unknown');
+            $providerVersion = (string) ($row['provider_version'] ?? 'unknown');
             $timeframe = (string) ($row['timeframe'] ?? 'unknown');
-            $key = $provider.'|'.$timeframe;
-            $groups[$key] ??= ['provider' => $provider, 'timeframe' => $timeframe, 'rows' => []];
+            // A new trained artifact must never inherit the observed accuracy
+            // of a previous artifact from the same provider/timeframe.
+            $key = $provider.'|'.$providerVersion.'|'.$timeframe;
+            $groups[$key] ??= ['provider' => $provider, 'provider_version' => $providerVersion, 'timeframe' => $timeframe, 'rows' => []];
             $groups[$key]['rows'][] = $row;
         }
 
@@ -49,7 +52,7 @@ final class PredictionAccuracyReport
             }
             $current = $metrics($rows);
             return [
-                'provider' => $group['provider'], 'timeframe' => $group['timeframe'],
+                'provider' => $group['provider'], 'provider_version' => $group['provider_version'], 'timeframe' => $group['timeframe'],
                 ...$current,
                 'rolling' => $rolling,
                 'non_overlapping' => $metrics($nonOverlapping),

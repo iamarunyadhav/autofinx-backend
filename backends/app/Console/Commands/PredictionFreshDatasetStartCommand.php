@@ -8,7 +8,7 @@ use Throwable;
 
 final class PredictionFreshDatasetStartCommand extends Command
 {
-    protected $signature = 'prediction:fresh-dataset:start {name} {--symbols=BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT} {--timeframes=5m,15m,1h}';
+    protected $signature = 'prediction:fresh-dataset:start {name} {--symbols=BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT} {--timeframes=5m,15m,45m,1h,4h}';
     protected $description = 'Start an isolated, Binance Futures, closed-candle-only prediction dataset.';
 
     public function handle(FreshPredictionDatasetService $datasets): int

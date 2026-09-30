@@ -23,4 +23,18 @@ final class PredictionAccuracyReportTest extends TestCase
     {
         self::assertSame('INSUFFICIENT_DATA', (new PredictionAccuracyReport())->generate([])['status']);
     }
+
+    public function test_report_keeps_different_model_versions_separate(): void
+    {
+        $report = (new PredictionAccuracyReport())->generate([
+            ['provider' => 'external_ml', 'provider_version' => 'btc-v1', 'timeframe' => '5m', 'direction_correct' => true],
+            ['provider' => 'external_ml', 'provider_version' => 'btc-v2', 'timeframe' => '5m', 'direction_correct' => false],
+        ]);
+
+        self::assertCount(2, $report['groups']);
+        self::assertSame('btc-v1', $report['groups'][0]['provider_version']);
+        self::assertSame(100.0, $report['groups'][0]['direction_accuracy_pct']);
+        self::assertSame('btc-v2', $report['groups'][1]['provider_version']);
+        self::assertSame(0.0, $report['groups'][1]['direction_accuracy_pct']);
+    }
 }

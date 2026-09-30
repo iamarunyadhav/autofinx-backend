@@ -14,7 +14,7 @@ final class ExternalMlPredictionProvider implements PredictionProviderInterface
     public function version(): string { return 'external-service-v1'; }
     public function predict(PredictionRequest $request): PredictionResult
     {
-        if (count($request->candles) < 8) return PredictionResult::unavailable($request, $this->key(), $this->version(), 'insufficient_candles');
+        if (count($request->candles) < 20) return PredictionResult::unavailable($request, $this->key(), $this->version(), 'insufficient_candles_for_ohlcv_v1');
         try {
             $response = Http::timeout((int) config('prediction_observatory.providers.external_ml.timeout_seconds', 2))
                 ->acceptJson()->post(rtrim((string) config('prediction_observatory.providers.external_ml.url'), '/').'/v1/predict', [
@@ -25,7 +25,7 @@ final class ExternalMlPredictionProvider implements PredictionProviderInterface
             if (!$response->successful()) return PredictionResult::unavailable($request, $this->key(), $this->version(), 'external_ml_http_error');
             $prediction = (array) $response->json('prediction', []);
             if (($prediction['status'] ?? '') !== 'ready') return PredictionResult::unavailable($request, $this->key(), (string) ($prediction['model_version'] ?? $this->version), (string) ($prediction['reason'] ?? 'external_ml_unavailable'));
-            return new PredictionResult(provider: $this->key(), providerVersion: (string) ($prediction['model_version'] ?? $this->version), generatedAt: now()->toIso8601String(), symbol: $request->symbol, marketType: $request->marketType, timeframe: $request->timeframe, horizonSeconds: $request->horizonSeconds, available: true, currentPrice: $request->currentQuote, predictedReturnPct: isset($prediction['predicted_return_pct']) ? (float) $prediction['predicted_return_pct'] : null, direction: (string) ($prediction['direction'] ?? 'WAIT'), confidence: isset($prediction['confidence']) ? (float) $prediction['confidence'] : null, evidence: ['source' => 'external_predictive_engine'], dataQuality: 'GOOD');
+            return new PredictionResult(provider: $this->key(), providerVersion: (string) ($prediction['model_version'] ?? $this->version), generatedAt: now()->toIso8601String(), symbol: $request->symbol, marketType: $request->marketType, timeframe: $request->timeframe, horizonSeconds: $request->horizonSeconds, available: true, currentPrice: $request->currentQuote, predictedReturnPct: isset($prediction['predicted_return_pct']) ? (float) $prediction['predicted_return_pct'] : null, direction: (string) ($prediction['direction'] ?? 'WAIT'), confidence: isset($prediction['confidence']) ? (float) $prediction['confidence'] : null, reason: isset($prediction['reason']) ? (string) $prediction['reason'] : null, evidence: ['source' => 'external_predictive_engine', 'model_holdout_direction_accuracy_pct' => isset($prediction['holdout_direction_accuracy_pct']) ? (float) $prediction['holdout_direction_accuracy_pct'] : null, 'model_holdout_rows' => isset($prediction['holdout_rows']) ? (int) $prediction['holdout_rows'] : null, 'model_evaluation' => is_array($prediction['model_evaluation'] ?? null) ? $prediction['model_evaluation'] : null], dataQuality: 'GOOD');
         } catch (Throwable) {
             return PredictionResult::unavailable($request, $this->key(), $this->version(), 'external_ml_timeout_or_connection_error');
         }

@@ -4,7 +4,6 @@ namespace App\Domain\Prediction\FreshData;
 
 use App\Models\PredictionFreshDataset;
 use App\Models\PredictionFreshModelCandidate;
-use App\Models\PredictionFreshModelRegistry;
 use InvalidArgumentException;
 
 final class FreshPredictionModelRegistryService
@@ -30,20 +29,8 @@ final class FreshPredictionModelRegistryService
             'metrics' => $metadata,
         ]);
 
-        if (! $passed) {
-            return $candidate;
-        }
-
-        PredictionFreshModelRegistry::query()->updateOrCreate([
-            'symbol' => $symbol, 'timeframe' => $timeframe, 'provider' => 'lightgbm',
-        ], [
-            'candidate_id' => $candidate->id,
-            'status' => 'SHADOW_ONLY',
-            'execution' => false,
-            'influence' => false,
-        ]);
-        $candidate->forceFill(['status' => 'SHADOW_REGISTERED'])->save();
-
-        return $candidate->refresh();
+        // A quality pass stages a reviewable candidate only. It must never
+        // replace the currently published shadow artifact automatically.
+        return $candidate;
     }
 }

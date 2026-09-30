@@ -55,6 +55,8 @@ use App\Console\Commands\PredictionFreshModelTrainCommand;
 use App\Console\Commands\PredictionFreshDatasetCycleCommand;
 use App\Console\Commands\PredictionFreshDatasetReadinessCommand;
 use App\Console\Commands\PredictionFreshModelPublishShadowCommand;
+use App\Console\Commands\PredictionFreshModelDispatchReadyCommand;
+use App\Console\Commands\PredictionFreshModelActivateShadowCommand;
 use App\Console\Commands\PredictionLegacyModelsArchiveCommand;
 use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Foundation\Console\Kernel as ConsoleKernel;
@@ -126,6 +128,8 @@ class Kernel extends ConsoleKernel
         PredictionFreshDatasetCycleCommand::class,
         PredictionFreshDatasetReadinessCommand::class,
         PredictionFreshModelPublishShadowCommand::class,
+        PredictionFreshModelDispatchReadyCommand::class,
+        PredictionFreshModelActivateShadowCommand::class,
         PredictionLegacyModelsArchiveCommand::class,
     ];
 
