@@ -16,4 +16,5 @@ stdout_logfile_maxbytes=20MB
 stdout_logfile_backups=5
 ; Fresh quality-passed models are published here by prediction:fresh-model:publish-shadow.
 ; Never point this at a legacy/default model artifact.
-environment=AUTOFINX_PREDICTOR_HOST="127.0.0.1",AUTOFINX_PREDICTOR_PORT="8091",AUTOFINX_PREDICTOR_PROVIDER="lightgbm",AUTOFINX_PREDICTOR_MODEL_PATH="",AUTOFINX_PREDICTOR_MODEL_DIR="/home/zcadmin/public_html/api.autofinx.arunyadhav.dev/autofinx-backend/backends/storage/app/prediction-fresh-shadow-models"
+; Quick Trade ML shadow champions (ml:train / ml:retrain:check) are published to SHADOW_DIR.
+environment=AUTOFINX_PREDICTOR_HOST="127.0.0.1",AUTOFINX_PREDICTOR_PORT="8091",AUTOFINX_PREDICTOR_PROVIDER="lightgbm",AUTOFINX_PREDICTOR_MODEL_PATH="",AUTOFINX_PREDICTOR_MODEL_DIR="/home/zcadmin/public_html/api.autofinx.arunyadhav.dev/autofinx-backend/backends/storage/app/prediction-fresh-shadow-models",AUTOFINX_PREDICTOR_SHADOW_DIR="/home/zcadmin/public_html/api.autofinx.arunyadhav.dev/autofinx-backend/backends/storage/app/ml-shadow/champions"

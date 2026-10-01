@@ -40,6 +40,18 @@ return [
             'after_commit' => true,
         ],
 
+        // Quick Trade ML shadow training (config/ml.php). Jobs can run for up to
+        // ml.training.timeout_seconds, so retry_after must exceed that or a
+        // still-running training would be re-released to a second worker.
+        'ml_training' => [
+            'driver' => 'database',
+            'connection' => env('DB_QUEUE_CONNECTION'),
+            'table' => env('DB_QUEUE_TABLE', 'jobs'),
+            'queue' => 'ml_training',
+            'retry_after' => (int) env('AUTOFINX_ML_TRAINING_RETRY_AFTER', 2400),
+            'after_commit' => true,
+        ],
+
         'sync' => [
             'driver' => 'sync',
         ],

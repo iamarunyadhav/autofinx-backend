@@ -463,3 +463,35 @@ if ($schedulerEnabled && (bool) config('prediction_fresh_data.automatic_training
         ->before(fn () => $markRunStart('prediction:fresh-model:dispatch-ready'))
         ->after(fn () => $markRunEnd('prediction:fresh-model:dispatch-ready'));
 }
+
+// Quick Trade Python ML — Phase 1 automatic SHADOW learning loop. Off unless
+// AUTOFINX_ML_SHADOW_ENABLED=true. Nothing here is read by any order path:
+// candles -> features/labels -> label maturation -> shadow predictions ->
+// live scoring, plus a daily retrain check that only QUEUES training (the
+// trainer runs on the queue worker, so the scheduler is never blocked).
+if ($schedulerEnabled && (bool) config('ml.enabled', false)) {
+    $mlSchedule = [
+        ['ml:candles:sync', 'everyMinute', 4],
+        ['ml:shadow:predict', 'everyMinute', 4],
+        ['ml:labels:mature', 'everyFiveMinutes', 10],
+        ['ml:shadow:evaluate', 'everyFiveMinutes', 10],
+        ['ml:trade-feedback:classify', 'hourly', 30],
+    ];
+    foreach ($mlSchedule as [$mlCommand, $mlFrequency, $mlOverlapMinutes]) {
+        Schedule::command($mlCommand)
+            ->{$mlFrequency}()
+            ->onOneServer()
+            ->withoutOverlapping($mlOverlapMinutes)
+            ->runInBackground()
+            ->before(fn () => $markRunStart($mlCommand))
+            ->after(fn () => $markRunEnd($mlCommand));
+    }
+    Schedule::command('ml:retrain:check')
+        ->timezone('UTC')
+        ->dailyAt((string) config('ml.training.schedule_utc', '03:05'))
+        ->onOneServer()
+        ->withoutOverlapping(60)
+        ->runInBackground()
+        ->before(fn () => $markRunStart('ml:retrain:check'))
+        ->after(fn () => $markRunEnd('ml:retrain:check'));
+}

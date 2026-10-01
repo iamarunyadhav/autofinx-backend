@@ -4,6 +4,7 @@ namespace App\Domain\Trading;
 
 use App\Domain\MarketIntelligence\UnifiedForecastEngine;
 use App\Domain\MarketIntelligence\UnifiedForecastLiveGate;
+use App\Domain\Ml\Shadow\TradeFeedbackEligibility;
 use App\Domain\Ops\FeatureFlagService;
 use App\Models\QuickTrade;
 use App\Models\QuickTradeResearchSample;
@@ -366,6 +367,10 @@ class QuickTradeResearchService
                 'price' => (float) $trade->exit_price, 'kind' => 'exit_fill', 'source' => 'stored_trade_execution'];
         }
         usort($timeline, fn ($a, $b) => ($a['time_ms'] ?? 0) <=> ($b['time_ms'] ?? 0));
+        // Eligibility comes from the trade's recorded fields (forming-bar flag,
+        // decision snapshot, real fees, live environment, cutoff) via one shared
+        // classifier — never from a previously stored flag.
+        $feedback = app(TradeFeedbackEligibility::class)->classify($trade);
         return [
             'schema_version' => 1, 'trade_id' => $trade->id, 'symbol' => $trade->symbol,
             'mode' => $trade->mode, 'source' => $trade->source, 'status' => $trade->status,
@@ -438,9 +443,9 @@ class QuickTradeResearchService
             'data_quality' => ['snapshot_available' => $research !== [], 'sample_count' => count($rows),
                 'price_history' => $rows === [] ? 'entry_exit_only_no_intratrade_samples' : 'sampled_not_every_tick',
                 'paper_is_synthetic' => $trade->mode !== 'live',
-                'training_eligible' => $trade->mode === 'live' && ($research['execution_environment'] ?? '') === 'live'
-                    && $closed && $primary['status'] === 'evaluated'
-                    && ($trade->fee_source ?? '') === 'real',
+                'training_eligible' => $closed && $feedback['tier'] === TradeFeedbackEligibility::TIER_FULL,
+                'feedback_tier' => $feedback['tier'],
+                'feedback_tier_reasons' => $feedback['reasons'],
                 'notes' => 'Features are pre-entry snapshots; comparisons/PnL/timeline are post-entry labels. Split chronologically; do not train features on future outcomes.'],
         ];
     }

@@ -7,6 +7,7 @@ from typing import Any
 
 from .config import Settings
 from .providers import LightGBMProvider, PredictionRequest
+from .shadow_models import ShadowModelStore, ShadowRequest
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +18,9 @@ def provider_for(settings: Settings) -> LightGBMProvider:
     return LightGBMProvider(settings.model_path, settings.model_dir)
 
 
-def make_handler(settings: Settings, provider: LightGBMProvider):
+def make_handler(settings: Settings, provider: LightGBMProvider, shadow: ShadowModelStore | None = None):
+    shadow = shadow if shadow is not None else ShadowModelStore(settings.shadow_dir)
+
     class Handler(BaseHTTPRequestHandler):
         def _write(self, status: int, payload: dict[str, Any]) -> None:
             body = json.dumps(payload).encode("utf-8")
@@ -29,11 +32,14 @@ def make_handler(settings: Settings, provider: LightGBMProvider):
 
         def do_GET(self) -> None:  # noqa: N802
             if self.path == "/health":
-                self._write(200, {"service": "external-predictive-engine", "version": "0.1.0", "provider": provider.health(), "influence": False, "execution": False})
+                self._write(200, {"service": "external-predictive-engine", "version": "0.1.0", "provider": provider.health(), "shadow": shadow.health(), "influence": False, "execution": False})
                 return
             self._write(404, {"error": "not_found"})
 
         def do_POST(self) -> None:  # noqa: N802
+            if self.path == "/v2/shadow/predict":
+                self._shadow_predict()
+                return
             if self.path != "/v1/predict":
                 self._write(404, {"error": "not_found"})
                 return
@@ -53,6 +59,24 @@ def make_handler(settings: Settings, provider: LightGBMProvider):
                 self._write(400, {"error": "invalid_request", "reason": str(exc)})
             except Exception:
                 logger.exception("prediction request failed")
+                self._write(500, {"error": "prediction_failed"})
+
+        def _shadow_predict(self) -> None:
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                body = json.loads(self.rfile.read(length))
+                request = ShadowRequest(
+                    symbol=str(body["symbol"]),
+                    horizon_minutes=int(body["horizon_minutes"]),
+                    feature_schema_version=str(body["feature_schema_version"]),
+                    features={str(k): float(v) for k, v in dict(body["features"]).items()},
+                    expected_model_version=(str(body["expected_model_version"]) if body.get("expected_model_version") else None),
+                )
+                self._write(200, {"prediction": shadow.predict(request)})
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                self._write(400, {"error": "invalid_request", "reason": str(exc)})
+            except Exception:
+                logger.exception("shadow prediction request failed")
                 self._write(500, {"error": "prediction_failed"})
 
         def log_message(self, fmt: str, *args: Any) -> None:

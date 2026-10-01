@@ -54,6 +54,13 @@ class QuickTradeResearchTest extends TestCase
     public function test_prediction_outcomes_and_net_loss_are_exported_without_double_slippage(): void
     {
         $trade = $this->trade();
+        // training_eligible now requires the recorded decision snapshot fields
+        // (closed-candle input, decision candle, fee-aware decision) too.
+        $payload = $trade->signal_payload;
+        $payload['research'] += ['input_candles_include_forming_bar' => false,
+            'decision_candle_close_at' => now()->subMinutes(3)->toIso8601String(),
+            'trade_decision_prediction' => ['value' => 'BUY', 'available' => true]];
+        $trade->update(['signal_payload' => $payload]);
         $this->sample($trade, now()->subMinute()->getTimestampMs());
         $this->getJson('/api/v1/workspaces/'.$this->workspace->id.'/quick-trades/research')->assertOk()
             ->assertJsonPath('rows.0.primary_comparison.direction_correct', true)

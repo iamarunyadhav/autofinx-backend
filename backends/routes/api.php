@@ -186,6 +186,9 @@ Route::prefix('v1')->group(function () {
         Route::post('quick-trade/prediction-accuracy-report', [\App\Http\Controllers\Api\PredictionObservatoryController::class, 'accuracyReport'])->middleware('throttle:30,1');
         Route::post('quick-trade/prediction-forensic-report', [\App\Http\Controllers\Api\PredictionObservatoryController::class, 'forensicReport'])->middleware('throttle:30,1');
         Route::get('quick-trade/prediction-fresh-datasets', [\App\Http\Controllers\Api\FreshPredictionDatasetDashboardController::class, 'index'])->middleware('throttle:30,1');
+        // Phase 1 Python ML shadow loop — read-only stored shadow rows; never an order input.
+        Route::get('quick-trade/ml-shadow', [\App\Http\Controllers\Api\MlShadowController::class, 'prediction'])->middleware('throttle:60,1');
+        Route::get('quick-trade/ml-shadow/learning', [\App\Http\Controllers\Api\MlShadowController::class, 'learning'])->middleware('throttle:30,1');
         Route::post('forecast/comparison', [QuickTradeController::class, 'forecastComparison']);
         // VNext Dynamic Decision Engine, Phase A -- read-only, informational
         // 3-window (short/medium/long) forecast comparison. Never places,

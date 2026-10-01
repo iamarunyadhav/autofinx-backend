@@ -1,0 +1,19 @@
+; Quick Trade Python ML (Phase 1) shadow training worker.
+; Consumes ONLY the dedicated ml_training queue (config/queue.php), so a long
+; LightGBM run never occupies a trading/analytics worker. Shadow only: a job
+; can at most swap the shadow champion; it has no order-path dependency.
+; --timeout must stay below the ml_training connection's retry_after (2400s).
+
+[program:autofinx-ml-training]
+directory=/home/zcadmin/public_html/api.autofinx.arunyadhav.dev/autofinx-backend/backends
+command=/usr/bin/php artisan queue:work ml_training --queue=ml_training --timeout=2000 --tries=1 --sleep=10 --memory=1024 --max-time=21600
+user=zcadmin
+numprocs=1
+autostart=true
+autorestart=true
+startsecs=5
+stopwaitsecs=2100
+redirect_stderr=true
+stdout_logfile=/home/zcadmin/public_html/api.autofinx.arunyadhav.dev/autofinx-backend/backends/storage/logs/ml-training-worker.log
+stdout_logfile_maxbytes=20MB
+stdout_logfile_backups=5
