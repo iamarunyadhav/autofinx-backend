@@ -2,7 +2,6 @@
 
 namespace App\Domain\Ml\Shadow;
 
-use App\Models\MlLabel;
 use App\Models\MlModel;
 
 /**
@@ -15,9 +14,9 @@ class RetrainEligibility
     public function check(string $symbol, int $horizon): array
     {
         $timeframe = (string) config('ml.base_timeframe', '5m');
-        $mature = MlLabel::query()->where('symbol', $symbol)->where('timeframe', $timeframe)
-            ->where('horizon_minutes', $horizon)->where('status', 'MATURE')
-            ->where('feature_schema_version', ShadowFeatureBuilder::SCHEMA_VERSION);
+        // Only rows the trainer can actually use: MATURE labels that have a
+        // feature row of the training schema (v2 needs taker volume).
+        $mature = MlShadowTrainer::matureTrainingRows($symbol, $horizon, $timeframe, ShadowFeatureBuilder::SCHEMA_VERSION);
         $total = (clone $mature)->count();
 
         // FAILED/TRAINING attempts produced no evaluated model, so they do not
@@ -40,7 +39,7 @@ class RetrainEligibility
         // The holdout was already used to judge that model, so "new" labels
         // are counted from the end of its full data window, not its train end.
         $lastTo = max((int) $last->training_window_to_ms, (int) data_get($last->metrics, 'holdout_to_ms', 0));
-        $new = (clone $mature)->where('anchor_time_ms', '>', $lastTo)->count();
+        $new = (clone $mature)->where('l.anchor_time_ms', '>', $lastTo)->count();
         $required = (int) config('ml.training.min_new_mature_labels', 288);
 
         return [

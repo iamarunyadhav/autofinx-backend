@@ -222,6 +222,15 @@ final class ShadowTrainingPromotionTest extends TestCase
         $this->assertTrue($policy->decide($this->metadata(0.4), false)['promote']);
     }
 
+    public function test_noise_level_improvement_over_baseline_is_not_a_champion(): void
+    {
+        // Production BTC 15m case: 0.12420 vs 0.12423 baseline (~0.02% better).
+        $noise = $this->metadata(0.4999, overrides: ['metrics' => ['holdout' => ['baseline_zero_mae_pct' => 0.5]]]);
+        $this->assertSame('mae_not_better_than_zero_return_baseline', (new PromotionPolicy)->decide($noise, false)['reason']);
+        $real = $this->metadata(0.49, overrides: ['metrics' => ['holdout' => ['baseline_zero_mae_pct' => 0.5]]]);
+        $this->assertTrue((new PromotionPolicy)->decide($real, false)['promote']); // 2% better
+    }
+
     public function test_export_is_chronological_single_symbol_single_horizon(): void
     {
         $this->seedMatureLabels(400);

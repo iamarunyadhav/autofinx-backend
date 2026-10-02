@@ -11,5 +11,5 @@ class MlCandle extends Model
 
     protected $guarded = [];
 
-    protected $casts = ['open_time_ms' => 'integer', 'close_time_ms' => 'integer', 'open' => 'float', 'high' => 'float', 'low' => 'float', 'close' => 'float', 'volume' => 'float', 'quote_volume' => 'float', 'trade_count' => 'integer', 'fetched_at' => 'datetime'];
+    protected $casts = ['open_time_ms' => 'integer', 'close_time_ms' => 'integer', 'open' => 'float', 'high' => 'float', 'low' => 'float', 'close' => 'float', 'volume' => 'float', 'taker_buy_volume' => 'float', 'quote_volume' => 'float', 'trade_count' => 'integer', 'fetched_at' => 'datetime'];
 }

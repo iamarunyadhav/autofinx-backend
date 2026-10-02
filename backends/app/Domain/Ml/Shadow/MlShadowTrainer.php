@@ -4,6 +4,7 @@ namespace App\Domain\Ml\Shadow;
 
 use App\Domain\Trading\QuickTradeCostModel;
 use App\Models\MlModel;
+use Illuminate\Database\Query\Builder;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -88,6 +89,22 @@ class MlShadowTrainer
         }
     }
 
+    /**
+     * MATURE labels that have a feature row of $schema at the same anchor.
+     * Same symbol, same horizon, one schema only — never mixed. Labels carry
+     * no schema of their own (a future return is the same for every schema).
+     */
+    public static function matureTrainingRows(string $symbol, int $horizon, string $timeframe, string $schema): Builder
+    {
+        return DB::table('ml_labels as l')
+            ->join('ml_feature_rows as f', function ($join) use ($schema): void {
+                $join->on('f.symbol', '=', 'l.symbol')->on('f.timeframe', '=', 'l.timeframe')
+                    ->on('f.anchor_time_ms', '=', 'l.anchor_time_ms')->where('f.feature_schema_version', '=', $schema);
+            })
+            ->where('l.symbol', $symbol)->where('l.timeframe', $timeframe)->where('l.horizon_minutes', $horizon)
+            ->where('l.status', 'MATURE');
+    }
+
     /** @return array{data:string, manifest:string, rows:int} */
     public function export(string $symbol, int $horizon, string $timeframe, string $name): array
     {
@@ -97,14 +114,7 @@ class MlShadowTrainer
             throw new RuntimeException('Unable to create ML export directory.');
         }
 
-        $base = DB::table('ml_labels as l')
-            ->join('ml_feature_rows as f', function ($join): void {
-                $join->on('f.symbol', '=', 'l.symbol')->on('f.timeframe', '=', 'l.timeframe')
-                    ->on('f.anchor_time_ms', '=', 'l.anchor_time_ms')->on('f.feature_schema_version', '=', 'l.feature_schema_version');
-            })
-            // Same symbol, same horizon, same schema only — never mixed.
-            ->where('l.symbol', $symbol)->where('l.timeframe', $timeframe)->where('l.horizon_minutes', $horizon)
-            ->where('l.status', 'MATURE')->where('l.feature_schema_version', $schema);
+        $base = self::matureTrainingRows($symbol, $horizon, $timeframe, $schema);
 
         $total = (clone $base)->count();
         $max = max(1, (int) config('ml.training.max_training_rows', 150000));

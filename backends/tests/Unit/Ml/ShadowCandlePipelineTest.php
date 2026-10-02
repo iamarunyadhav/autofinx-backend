@@ -87,6 +87,37 @@ final class ShadowCandlePipelineTest extends TestCase
         $this->assertTrue(MlCandleRejection::query()->where('reason', 'duplicate')->exists());
     }
 
+    public function test_restart_backfill_enriches_taker_volume_without_touching_ohlcv(): void
+    {
+        $first = $this->alignedOpen(20);
+        $this->seedCandles('BTCUSDT', $first, 2, fn (int $i) => 100.0 + $i, withTaker: false);
+        $stored = MlCandle::query()->orderBy('open_time_ms')->get();
+        Http::fake(['*/fapi/v1/klines*' => Http::response($stored->map(fn (MlCandle $c) => [
+            $c->open_time_ms, (string) $c->open, (string) $c->high, (string) $c->low, (string) $c->close, (string) $c->volume,
+            $c->close_time_ms, '1000', 42, (string) ($c->volume * 0.7), '500', '0',
+        ])->all())]);
+        $collector = app(MlCandleCollector::class);
+        $collector->backfill('BTCUSDT', '5m', $first, $first + self::FIVE_MIN);           // first run completes
+        $collector->backfill('BTCUSDT', '5m', $first, $first + self::FIVE_MIN, restart: true);
+
+        foreach (MlCandle::query()->orderBy('open_time_ms')->get() as $index => $candle) {
+            $this->assertEqualsWithDelta($stored[$index]->volume * 0.7, $candle->taker_buy_volume, 1e-9);
+            $this->assertEquals($stored[$index]->close, $candle->close);
+        }
+        $this->assertFalse(MlCandleRejection::query()->exists());
+    }
+
+    public function test_impossible_taker_volume_is_rejected(): void
+    {
+        $base = $this->alignedOpen(10);
+        $row = $this->kline($base, 100, volume: 10.0);
+        $row[9] = '11'; // taker buys cannot exceed total volume
+        $result = (new KlineBatchValidator)->validate([$row], self::FIVE_MIN, now('UTC')->getTimestampMs());
+
+        $this->assertSame([], $result['accepted']);
+        $this->assertSame(KlineBatchValidator::REASON_INVALID_OHLCV, $result['rejections'][0]['reason']);
+    }
+
     public function test_backfill_paginates_resumes_from_checkpoint_and_respects_page_budget(): void
     {
         config(['ml.binance.page_limit' => 3]);

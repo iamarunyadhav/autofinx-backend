@@ -20,12 +20,12 @@ class MlCandleStore
 
     /**
      * @param  array{accepted: list<array<string, int|float|null>>, rejections: list<array{open_time_ms:int, reason:string, payload:array<string, mixed>}>, forming_excluded:int}  $batch
-     * @return array{written:int, unchanged:int, rejected:int, forming_excluded:int}
+     * @return array{written:int, unchanged:int, enriched:int, rejected:int, forming_excluded:int}
      */
     public function persist(string $symbol, string $timeframe, array $batch, string $source): array
     {
         $provider = (string) config('ml.provider', 'binance_futures');
-        $result = ['written' => 0, 'unchanged' => 0, 'rejected' => 0, 'forming_excluded' => $batch['forming_excluded']];
+        $result = ['written' => 0, 'unchanged' => 0, 'enriched' => 0, 'rejected' => 0, 'forming_excluded' => $batch['forming_excluded']];
         $accepted = $batch['accepted'];
 
         if ($accepted !== []) {
@@ -44,14 +44,24 @@ class MlCandleStore
                         'provider' => $provider, 'symbol' => $symbol, 'timeframe' => $timeframe,
                         'open_time_ms' => $row['open_time_ms'], 'close_time_ms' => $row['close_time_ms'],
                         'open' => $row['open'], 'high' => $row['high'], 'low' => $row['low'], 'close' => $row['close'],
-                        'volume' => $row['volume'], 'quote_volume' => $row['quote_volume'], 'trade_count' => $row['trade_count'],
+                        'volume' => $row['volume'], 'taker_buy_volume' => $row['taker_buy_volume'] ?? null,
+                        'quote_volume' => $row['quote_volume'], 'trade_count' => $row['trade_count'],
                         'source' => $source, 'fetched_at' => $now, 'created_at' => $now, 'updated_at' => $now,
                     ];
 
                     continue;
                 }
                 if ($this->sameValues($stored, $row)) {
-                    $result['unchanged']++;
+                    // Same closed candle; the only thing a re-fetch may add is
+                    // the taker-buy volume Phase 1 did not store. Never
+                    // overwrite an existing value.
+                    if ($stored->taker_buy_volume === null && ($row['taker_buy_volume'] ?? null) !== null) {
+                        MlCandle::query()->whereKey($stored->id)->whereNull('taker_buy_volume')
+                            ->update(['taker_buy_volume' => $row['taker_buy_volume'], 'updated_at' => $now]);
+                        $result['enriched']++;
+                    } else {
+                        $result['unchanged']++;
+                    }
 
                     continue;
                 }

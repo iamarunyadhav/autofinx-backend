@@ -12,7 +12,7 @@ class PythonShadowClient
      * @param  array<string, float>  $features
      * @return array<string, mixed>
      */
-    public function predict(string $symbol, int $horizon, array $features, string $expectedModelVersion): array
+    public function predict(string $symbol, int $horizon, array $features, string $expectedModelVersion, string $schema = ShadowFeatureBuilder::SCHEMA_VERSION): array
     {
         try {
             $response = Http::timeout((float) config('ml.predictor.timeout_seconds', 3))
@@ -20,7 +20,7 @@ class PythonShadowClient
                 ->post(rtrim((string) config('ml.predictor.url'), '/').'/v2/shadow/predict', [
                     'symbol' => $symbol,
                     'horizon_minutes' => $horizon,
-                    'feature_schema_version' => ShadowFeatureBuilder::SCHEMA_VERSION,
+                    'feature_schema_version' => $schema,
                     'features' => $features,
                     'expected_model_version' => $expectedModelVersion,
                 ]);

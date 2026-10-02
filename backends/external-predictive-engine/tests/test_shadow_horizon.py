@@ -75,6 +75,34 @@ def test_champion_is_scored_on_the_same_holdout(tmp_path):
     assert meta["metrics"]["champion_holdout"]["rows"] == meta["metrics"]["holdout"]["rows"]
 
 
+def test_older_schema_champion_is_scored_on_its_own_columns(tmp_path):
+    # Champion trained on the first two features (an "older schema")...
+    data, manifest = write_dataset(tmp_path)
+    old_manifest = json.loads(manifest.read_text(encoding="utf-8"))
+    old_manifest.update(features=FEATURES[:2], feature_schema_version="test-v0")
+    old_data = tmp_path / "old.jsonl"
+    with data.open(encoding="utf-8") as source, old_data.open("w", encoding="utf-8") as target:
+        for line in source:
+            record = json.loads(line)
+            record["x"] = record["x"][:2]
+            target.write(json.dumps(record) + "\n")
+    old_manifest_path = tmp_path / "old_manifest.json"
+    old_manifest_path.write_text(json.dumps(old_manifest), encoding="utf-8")
+    trainer.train(old_data, old_manifest_path, tmp_path / "champion")
+
+    # ...is still comparable against a candidate with an appended feature.
+    meta = trainer.train(data, manifest, tmp_path / "candidate", champion_dir=tmp_path / "champion")
+    assert meta["metrics"]["champion_comparable"] is True
+    assert meta["metrics"]["champion_holdout"]["rows"] == meta["metrics"]["holdout"]["rows"]
+
+    # A champion needing a feature the candidate dataset lacks is not comparable.
+    champion_meta = json.loads((tmp_path / "champion" / "metadata.json").read_text(encoding="utf-8"))
+    champion_meta["features"] = ["f1", "nope"]
+    (tmp_path / "champion" / "metadata.json").write_text(json.dumps(champion_meta), encoding="utf-8")
+    _, _, reason = trainer.load_champion(lightgbm, tmp_path / "champion", json.loads(manifest.read_text(encoding="utf-8")))
+    assert reason == "champion_feature_schema_mismatch"
+
+
 def publish(tmp_path: Path, model_dir: Path, version: str = "qtml-test") -> Path:
     shadow = tmp_path / "champions"
     shadow.mkdir()

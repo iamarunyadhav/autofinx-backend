@@ -34,18 +34,21 @@ trait MlShadowTestHelpers
     }
 
     /** Insert $count contiguous closed 5m candles straight into ml_candles. */
-    protected function seedCandles(string $symbol, int $firstOpenMs, int $count, ?callable $price = null): void
+    /** @param bool $withTaker false seeds Phase 1-style rows without taker-buy volume */
+    protected function seedCandles(string $symbol, int $firstOpenMs, int $count, ?callable $price = null, bool $withTaker = true): void
     {
         $price ??= static fn (int $i): float => 100 + sin($i / 7) * 2 + $i * 0.01;
         $rows = [];
         for ($i = 0; $i < $count; $i++) {
             $close = $price($i);
             $open = $i === 0 ? $close : $price($i - 1);
+            $volume = 10 + ($i % 5);
             $rows[] = [
                 'provider' => 'binance_futures', 'symbol' => $symbol, 'timeframe' => '5m',
                 'open_time_ms' => $firstOpenMs + $i * self::FIVE_MIN, 'close_time_ms' => $firstOpenMs + ($i + 1) * self::FIVE_MIN - 1,
                 'open' => $open, 'high' => max($open, $close) * 1.001, 'low' => min($open, $close) * 0.999, 'close' => $close,
-                'volume' => 10 + ($i % 5), 'quote_volume' => null, 'trade_count' => null,
+                'volume' => $volume, 'taker_buy_volume' => $withTaker ? $volume * (0.4 + ($i % 3) * 0.1) : null,
+                'quote_volume' => null, 'trade_count' => null,
                 'source' => 'test', 'fetched_at' => now(), 'created_at' => now(), 'updated_at' => now(),
             ];
         }

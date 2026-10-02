@@ -28,31 +28,70 @@ final class ShadowFeatureLabelTest extends TestCase
         $service = app(FeatureLabelService::class);
         $service->build('BTCUSDT');
         $anchor = $first + 100 * self::FIVE_MIN; // anchor candle index 99 closes here
-        $before = MlFeatureRow::query()->where('anchor_time_ms', $anchor)->firstOrFail()->features;
+        $row = fn (string $schema) => MlFeatureRow::query()->where('anchor_time_ms', $anchor)->where('feature_schema_version', $schema)->firstOrFail()->features;
+        $before = array_map($row, array_combine(array_keys(ShadowFeatureBuilder::SCHEMAS), array_keys(ShadowFeatureBuilder::SCHEMAS)));
 
-        // Rewrite every candle that closes AFTER the anchor with wild values,
-        // then rebuild from scratch: the anchor's features must not move.
-        MlCandle::query()->where('open_time_ms', '>=', $anchor)->update(['open' => 1, 'high' => 9999, 'low' => 0.5, 'close' => 5000, 'volume' => 1e9]);
+        // Rewrite every candle that closes AFTER the anchor with wild values
+        // (taker volume included), then rebuild from scratch: no schema's
+        // features for the anchor may move.
+        MlCandle::query()->where('open_time_ms', '>=', $anchor)->update(['open' => 1, 'high' => 9999, 'low' => 0.5, 'close' => 5000, 'volume' => 1e9, 'taker_buy_volume' => 1e9]);
         MlFeatureRow::query()->delete();
         MlLabel::query()->delete();
         $service->build('BTCUSDT', full: true);
 
-        $after = MlFeatureRow::query()->where('anchor_time_ms', $anchor)->firstOrFail()->features;
-        $this->assertSame(ShadowFeatureBuilder::FEATURES, array_keys($after));
-        foreach (ShadowFeatureBuilder::FEATURES as $name) {
-            $this->assertSame($before[$name], $after[$name], "feature {$name} leaked future data");
+        foreach (ShadowFeatureBuilder::SCHEMAS as $schema => $names) {
+            $after = $row($schema);
+            $this->assertEqualsCanonicalizing($names, array_keys($after), $schema);
+            foreach ($names as $name) {
+                $this->assertSame($before[$schema][$name], $after[$name], "{$schema} feature {$name} leaked future data");
+            }
         }
+    }
+
+    public function test_v2_is_append_only_over_v1_and_needs_taker_volume(): void
+    {
+        $this->assertSame(ShadowFeatureBuilder::FEATURES_V1, array_slice(ShadowFeatureBuilder::FEATURES_V2, 0, count(ShadowFeatureBuilder::FEATURES_V1)));
+
+        $first = $this->alignedOpen(300);
+        $this->seedCandles('BTCUSDT', $first, 200, withTaker: false); // Phase 1-style rows
+        app(FeatureLabelService::class)->build('BTCUSDT');
+
+        $this->assertGreaterThan(0, MlFeatureRow::query()->where('feature_schema_version', ShadowFeatureBuilder::SCHEMA_V1)->count());
+        $this->assertSame(0, MlFeatureRow::query()->where('feature_schema_version', ShadowFeatureBuilder::SCHEMA_V2)->count());
+        // Labels exist regardless of schema; training (v2) just has no rows yet.
+        $this->assertGreaterThan(0, MlLabel::query()->where('status', 'MATURE')->count());
+
+        // Once taker volume is filled in, a full rebuild adds v2 rows whose v1
+        // part is identical to the existing v1 rows.
+        MlCandle::query()->update(['taker_buy_volume' => DB::raw('volume * 0.5')]);
+        app(FeatureLabelService::class)->build('BTCUSDT', full: true);
+        $v1 = MlFeatureRow::query()->where('feature_schema_version', ShadowFeatureBuilder::SCHEMA_V1)->orderBy('anchor_time_ms')->first();
+        $v2 = MlFeatureRow::query()->where('feature_schema_version', ShadowFeatureBuilder::SCHEMA_V2)->where('anchor_time_ms', $v1->anchor_time_ms)->firstOrFail();
+        foreach (ShadowFeatureBuilder::FEATURES_V1 as $name) {
+            $this->assertSame($v1->features[$name], $v2->features[$name], $name);
+        }
+        $this->assertEqualsWithDelta(0.5, $v2->features['taker_ratio_12'], 1e-9);
+        $this->assertEqualsWithDelta(0.0, $v2->features['taker_ratio_shift'], 1e-9);
     }
 
     public function test_builder_refuses_a_window_that_is_not_exactly_lookback_contiguous_candles(): void
     {
-        $window = array_map(fn (int $i) => ['open_time_ms' => $i * self::FIVE_MIN, 'open' => 100.0, 'high' => 101.0, 'low' => 99.0, 'close' => 100.0, 'volume' => 1.0], range(0, ShadowFeatureBuilder::LOOKBACK - 1));
+        $window = array_map(fn (int $i) => ['open_time_ms' => $i * self::FIVE_MIN, 'open' => 100.0, 'high' => 101.0, 'low' => 99.0, 'close' => 100.0, 'volume' => 1.0, 'taker_buy_volume' => 0.6], range(0, ShadowFeatureBuilder::LOOKBACK - 1));
         $gapped = $window;
         $gapped[10]['open_time_ms'] += 1;
+        $noTaker = $window;
+        $noTaker[ShadowFeatureBuilder::LOOKBACK - 1]['taker_buy_volume'] = null;
+        $builder = new ShadowFeatureBuilder;
 
-        $this->assertCount(count(ShadowFeatureBuilder::FEATURES), (new ShadowFeatureBuilder)->build($window, self::FIVE_MIN));
+        $this->assertCount(count(ShadowFeatureBuilder::FEATURES_V2), $builder->build($window, self::FIVE_MIN));
+        $this->assertCount(count(ShadowFeatureBuilder::FEATURES_V1), $builder->build($noTaker, self::FIVE_MIN, ShadowFeatureBuilder::SCHEMA_V1));
+        try {
+            $builder->build($noTaker, self::FIVE_MIN, ShadowFeatureBuilder::SCHEMA_V2);
+            $this->fail('v2 must refuse a window without taker volume');
+        } catch (InvalidArgumentException) {
+        }
         $this->expectException(InvalidArgumentException::class);
-        (new ShadowFeatureBuilder)->build($gapped, self::FIVE_MIN);
+        $builder->build($gapped, self::FIVE_MIN, ShadowFeatureBuilder::SCHEMA_V1);
     }
 
     public function test_no_feature_row_is_built_across_a_gap(): void

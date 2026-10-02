@@ -116,17 +116,26 @@ def evaluate(np: Any, predicted: Any, actual: Any, cost_pct: float, required_mov
     }
 
 
-def load_champion(lgb: Any, champion_dir: Path | None, manifest: dict[str, Any]) -> tuple[Any | None, str | None]:
+def load_champion(lgb: Any, champion_dir: Path | None, manifest: dict[str, Any]) -> tuple[Any | None, list[int] | None, str | None]:
+    """Load the champion and the column indices of ITS features in this dataset.
+
+    Feature schemas are append-only (v2 = v1 + extra columns), so an older
+    champion can be scored on the very same holdout rows by selecting its own
+    columns by name. A champion needing a feature this dataset lacks is not
+    comparable.
+    """
     if champion_dir is None:
-        return None, "no_champion"
+        return None, None, "no_champion"
     metadata_path = champion_dir / "metadata.json"
     model_path = champion_dir / "model.txt"
     if not metadata_path.is_file() or not model_path.is_file():
-        return None, "champion_artifacts_missing"
+        return None, None, "champion_artifacts_missing"
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    if metadata.get("feature_schema_version") != manifest["feature_schema_version"] or metadata.get("features") != manifest["features"]:
-        return None, "champion_feature_schema_mismatch"
-    return lgb.Booster(model_file=str(model_path)), None
+    champion_features = metadata.get("features") or []
+    if not champion_features or any(name not in manifest["features"] for name in champion_features):
+        return None, None, "champion_feature_schema_mismatch"
+    columns = [manifest["features"].index(name) for name in champion_features]
+    return lgb.Booster(model_file=str(model_path)), columns, None
 
 
 def write_atomic(path: Path, text: str) -> None:
@@ -176,8 +185,11 @@ def train(input_path: Path, manifest_path: Path, output_dir: Path, champion_dir:
     holdout["interval_coverage_pct"] = float(np.mean((y_holdout >= np.minimum(q10, q90)) & (y_holdout <= np.maximum(q10, q90))) * 100)
     holdout["interval_target_coverage_pct"] = 80.0
 
-    champion, champion_reason = load_champion(lgb, champion_dir, manifest)
-    champion_holdout = evaluate(np, champion.predict(x_holdout), y_holdout, cost_pct, required_move_pct) if champion is not None else None
+    champion, champion_columns, champion_reason = load_champion(lgb, champion_dir, manifest)
+    champion_holdout = (
+        evaluate(np, champion.predict(x_holdout[:, champion_columns]), y_holdout, cost_pct, required_move_pct)
+        if champion is not None else None
+    )
 
     output_dir.mkdir(parents=True, exist_ok=True)
     model.booster_.save_model(str(output_dir / "model.txt"))

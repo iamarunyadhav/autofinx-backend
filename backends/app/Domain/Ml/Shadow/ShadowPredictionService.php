@@ -31,13 +31,16 @@ class ShadowPredictionService
         if (! $champion) {
             return ['status' => 'NO_CHAMPION', 'prediction' => null];
         }
-        if ($champion->feature_schema_version !== ShadowFeatureBuilder::SCHEMA_VERSION) {
+        // Serve the champion the schema it was trained on (a v1 champion keeps
+        // getting v1 inputs while v2 candidates train alongside it).
+        $schema = (string) $champion->feature_schema_version;
+        if (! array_key_exists($schema, ShadowFeatureBuilder::SCHEMAS)) {
             return ['status' => 'FEATURE_SCHEMA_MISMATCH', 'prediction' => null];
         }
 
         $timeframe = (string) config('ml.base_timeframe', '5m');
         $row = MlFeatureRow::query()->where('symbol', $symbol)->where('timeframe', $timeframe)
-            ->where('feature_schema_version', ShadowFeatureBuilder::SCHEMA_VERSION)
+            ->where('feature_schema_version', $schema)
             ->orderByDesc('anchor_time_ms')->first();
         if (! $row) {
             return ['status' => 'NO_FEATURES', 'prediction' => null];
@@ -55,7 +58,7 @@ class ShadowPredictionService
         // Matched by name, not key order: MySQL's JSON type re-sorts keys.
         $stored = (array) $row->features;
         $features = [];
-        foreach (ShadowFeatureBuilder::FEATURES as $name) {
+        foreach (ShadowFeatureBuilder::features($schema) as $name) {
             if (! is_numeric($stored[$name] ?? null)) {
                 return ['status' => 'FEATURE_SCHEMA_MISMATCH', 'prediction' => null];
             }
@@ -64,12 +67,12 @@ class ShadowPredictionService
         if (count($stored) !== count($features)) {
             return ['status' => 'FEATURE_SCHEMA_MISMATCH', 'prediction' => null];
         }
-        $result = $this->python->predict($symbol, $horizon, $features, (string) $champion->model_version);
+        $result = $this->python->predict($symbol, $horizon, $features, (string) $champion->model_version, $schema);
         if (($result['status'] ?? null) !== 'ready') {
             return ['status' => 'PREDICTOR_'.strtoupper((string) ($result['status'] ?? 'unavailable')).':'.($result['reason'] ?? 'unknown'), 'prediction' => null];
         }
         if (($result['model_version'] ?? null) !== $champion->model_version
-            || ($result['feature_schema_version'] ?? null) !== ShadowFeatureBuilder::SCHEMA_VERSION
+            || ($result['feature_schema_version'] ?? null) !== $schema
             || ! is_numeric($result['predicted_return'] ?? null)) {
             return ['status' => 'MODEL_VERSION_MISMATCH', 'prediction' => null];
         }
@@ -89,7 +92,7 @@ class ShadowPredictionService
         ], [
             'target_time_ms' => (int) $row->anchor_time_ms + $horizon * 60_000,
             'model_id' => $champion->id, 'model_version' => $champion->model_version,
-            'feature_schema_version' => ShadowFeatureBuilder::SCHEMA_VERSION,
+            'feature_schema_version' => $schema,
             'current_price' => $current, 'predicted_return' => (float) $result['predicted_return'],
             'predicted_price' => $decided['predicted_price'], 'predicted_low' => $decided['predicted_low'], 'predicted_high' => $decided['predicted_high'],
             'buy_net_pct' => $decided['buy_net_pct'], 'sell_net_pct' => $decided['sell_net_pct'],

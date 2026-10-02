@@ -24,6 +24,12 @@ class FeatureLabelService
 
     public function __construct(private readonly ShadowFeatureBuilder $builder) {}
 
+    // Incremental runs only reach this far back for a schema that lags
+    // (e.g. v2 while taker volume is still being backfilled). Older history
+    // is covered by the full rebuild (after a backfill / daily retrain check),
+    // so a lagging schema can never turn every 1-minute sync into a full scan.
+    private const INCREMENTAL_MAX_LAG_MS = 2 * 86_400_000;
+
     /**
      * @param  bool  $full  Rescan the whole candle history (needed after a backfill
      *                      lands older candles than the newest existing anchor).
@@ -33,20 +39,34 @@ class FeatureLabelService
     {
         $timeframe = (string) config('ml.base_timeframe', '5m');
         $interval = MlCandleCollector::intervalMs($timeframe);
-        $schema = ShadowFeatureBuilder::SCHEMA_VERSION;
         $provider = (string) config('ml.provider', 'binance_futures');
+        $schemas = array_keys(ShadowFeatureBuilder::SCHEMAS);
 
-        $existing = [];
+        // Per schema: anchors already built (full mode) or the first anchor
+        // still to build (incremental mode).
+        $existing = array_fill_keys($schemas, []);
+        $minAnchor = array_fill_keys($schemas, 0);
+        $cursor = 0;
         if ($full) {
-            $existing = array_flip(MlFeatureRow::query()->where('symbol', $symbol)->where('timeframe', $timeframe)
-                ->where('feature_schema_version', $schema)->pluck('anchor_time_ms')->map(fn ($v) => (int) $v)->all());
-            $cursor = 0;
-            $minAnchor = 0;
+            foreach ($schemas as $schema) {
+                $existing[$schema] = array_flip(MlFeatureRow::query()->where('symbol', $symbol)->where('timeframe', $timeframe)
+                    ->where('feature_schema_version', $schema)->pluck('anchor_time_ms')->map(fn ($v) => (int) $v)->all());
+            }
         } else {
-            $lastAnchor = MlFeatureRow::query()->where('symbol', $symbol)->where('timeframe', $timeframe)
-                ->where('feature_schema_version', $schema)->max('anchor_time_ms');
-            $minAnchor = $lastAnchor === null ? 0 : (int) $lastAnchor + $interval;
-            $cursor = $lastAnchor === null ? 0 : max(0, (int) $lastAnchor - (ShadowFeatureBuilder::LOOKBACK * $interval));
+            $last = [];
+            foreach ($schemas as $schema) {
+                $value = MlFeatureRow::query()->where('symbol', $symbol)->where('timeframe', $timeframe)
+                    ->where('feature_schema_version', $schema)->max('anchor_time_ms');
+                $last[$schema] = $value === null ? null : (int) $value;
+            }
+            $newest = max(array_map(fn ($v) => $v ?? 0, $last));
+            if ($newest > 0) {
+                $floor = $newest - self::INCREMENTAL_MAX_LAG_MS;
+                foreach ($schemas as $schema) {
+                    $minAnchor[$schema] = max($last[$schema] ?? $newest, $floor) + $interval;
+                }
+                $cursor = max(0, min($minAnchor) - (ShadowFeatureBuilder::LOOKBACK + 1) * $interval);
+            }
         }
 
         $window = [];
@@ -58,7 +78,7 @@ class FeatureLabelService
                 ->where('provider', $provider)->where('symbol', $symbol)->where('timeframe', $timeframe)
                 ->where('open_time_ms', '>=', $cursor)
                 ->orderBy('open_time_ms')->limit(self::CANDLE_CHUNK)
-                ->get(['open_time_ms', 'open', 'high', 'low', 'close', 'volume']);
+                ->get(['open_time_ms', 'open', 'high', 'low', 'close', 'volume', 'taker_buy_volume']);
             if ($candles->isEmpty()) {
                 break;
             }
@@ -69,6 +89,7 @@ class FeatureLabelService
                 $c = [
                     'open_time_ms' => (int) $candle->open_time_ms, 'open' => (float) $candle->open, 'high' => (float) $candle->high,
                     'low' => (float) $candle->low, 'close' => (float) $candle->close, 'volume' => (float) $candle->volume,
+                    'taker_buy_volume' => $candle->taker_buy_volume === null ? null : (float) $candle->taker_buy_volume,
                 ];
                 $previous = $window === [] ? null : $window[count($window) - 1];
                 $run = $previous !== null && $c['open_time_ms'] - $previous['open_time_ms'] === $interval ? $run + 1 : 1;
@@ -76,18 +97,30 @@ class FeatureLabelService
                 if (count($window) > ShadowFeatureBuilder::LOOKBACK) {
                     array_shift($window);
                 }
-
-                $anchorTime = $c['open_time_ms'] + $interval;
-                if ($run < ShadowFeatureBuilder::LOOKBACK || $anchorTime < $minAnchor || isset($existing[$anchorTime])) {
+                if ($run < ShadowFeatureBuilder::LOOKBACK) {
                     continue;
                 }
-                $rows[] = [
-                    'symbol' => $symbol, 'timeframe' => $timeframe, 'anchor_time_ms' => $anchorTime,
-                    'anchor_close' => $c['close'], 'feature_schema_version' => $schema,
-                    'features' => json_encode($this->builder->build($window, $interval), JSON_THROW_ON_ERROR),
-                    'created_at' => $now, 'updated_at' => $now,
-                ];
-                $newAnchors[] = ['anchor_time_ms' => $anchorTime, 'anchor_close' => $c['close']];
+
+                $anchorTime = $c['open_time_ms'] + $interval;
+                $built = false;
+                foreach ($schemas as $schema) {
+                    if ($anchorTime < $minAnchor[$schema] || isset($existing[$schema][$anchorTime])) {
+                        continue;
+                    }
+                    if ($schema === ShadowFeatureBuilder::SCHEMA_V2 && ! ShadowFeatureBuilder::hasTakerData($window)) {
+                        continue;
+                    }
+                    $rows[] = [
+                        'symbol' => $symbol, 'timeframe' => $timeframe, 'anchor_time_ms' => $anchorTime,
+                        'anchor_close' => $c['close'], 'feature_schema_version' => $schema,
+                        'features' => json_encode($this->builder->build($window, $interval, $schema), JSON_THROW_ON_ERROR),
+                        'created_at' => $now, 'updated_at' => $now,
+                    ];
+                    $built = true;
+                }
+                if ($built) {
+                    $newAnchors[$anchorTime] = ['anchor_time_ms' => $anchorTime, 'anchor_close' => $c['close']];
+                }
             }
             foreach (array_chunk($rows, 500) as $chunk) {
                 $written += DB::table('ml_feature_rows')->insertOrIgnore($chunk);
@@ -99,7 +132,9 @@ class FeatureLabelService
             }
         }
 
-        $labels = $this->createLabels($symbol, $timeframe, $newAnchors);
+        // Labels are schema-independent (a future return does not depend on
+        // which features describe the anchor): one label per anchor x horizon.
+        $labels = $this->createLabels($symbol, $timeframe, array_values($newAnchors));
         if ($full) {
             $labels += $this->createMissingLabels($symbol, $timeframe);
         }
@@ -185,7 +220,8 @@ class FeatureLabelService
                         'anchor_close' => $anchor['anchor_close'], 'target_close' => $close,
                         'future_return' => $close === null ? null : $close / $anchor['anchor_close'] - 1,
                         'status' => $close === null ? 'PENDING' : 'MATURE',
-                        'feature_schema_version' => ShadowFeatureBuilder::SCHEMA_VERSION,
+                        // Informational only; labels are shared by all schemas.
+                        'feature_schema_version' => ShadowFeatureBuilder::SCHEMA_V1,
                         'matured_at' => $close === null ? null : $now, 'created_at' => $now, 'updated_at' => $now,
                     ];
                 }
@@ -203,13 +239,15 @@ class FeatureLabelService
         $created = 0;
         foreach ($this->horizons() as $horizon) {
             $labelCount = MlLabel::query()->where('symbol', $symbol)->where('timeframe', $timeframe)->where('horizon_minutes', $horizon)->count();
+            // v1 rows exist for every buildable anchor (v2 additionally needs
+            // taker volume), so v1 is the full anchor set.
             $featureCount = MlFeatureRow::query()->where('symbol', $symbol)->where('timeframe', $timeframe)
-                ->where('feature_schema_version', ShadowFeatureBuilder::SCHEMA_VERSION)->count();
+                ->where('feature_schema_version', ShadowFeatureBuilder::SCHEMA_V1)->count();
             if ($labelCount >= $featureCount) {
                 continue;
             }
             MlFeatureRow::query()->where('symbol', $symbol)->where('timeframe', $timeframe)
-                ->where('feature_schema_version', ShadowFeatureBuilder::SCHEMA_VERSION)
+                ->where('feature_schema_version', ShadowFeatureBuilder::SCHEMA_V1)
                 ->orderBy('id')->select(['id', 'anchor_time_ms', 'anchor_close'])
                 ->chunkById(self::LABEL_CHUNK, function ($rows) use ($symbol, $timeframe, &$created): void {
                     $created += $this->createLabels($symbol, $timeframe, $rows->map(fn (MlFeatureRow $r) => [

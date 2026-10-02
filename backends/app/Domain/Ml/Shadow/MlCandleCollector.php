@@ -41,7 +41,7 @@ class MlCandleCollector
     /**
      * @param  (Closure(MlBackfillCheckpoint):void)|null  $progress
      */
-    public function backfill(string $symbol, string $timeframe, int $fromMs, int $toMs, ?int $maxPages = null, ?Closure $progress = null): MlBackfillCheckpoint
+    public function backfill(string $symbol, string $timeframe, int $fromMs, int $toMs, ?int $maxPages = null, ?Closure $progress = null, bool $restart = false): MlBackfillCheckpoint
     {
         $symbol = $this->assertSymbol($symbol);
         $interval = self::intervalMs($timeframe);
@@ -55,6 +55,13 @@ class MlCandleCollector
             'provider' => (string) config('ml.provider', 'binance_futures'), 'symbol' => $symbol,
             'timeframe' => $timeframe, 'range_from_ms' => $fromMs,
         ], ['range_to_ms' => $toMs, 'cursor_ms' => $fromMs, 'status' => 'RUNNING']);
+
+        // A deliberate re-scan (e.g. to enrich rows with a newly stored field)
+        // rewinds the cursor. Safe: the store never overwrites a stored closed
+        // candle's OHLCV, it only fills fields that were null.
+        if ($restart) {
+            $checkpoint->forceFill(['cursor_ms' => $fromMs, 'pages' => 0, 'rows_written' => 0, 'rows_rejected' => 0, 'status' => 'RUNNING']);
+        }
 
         // Re-running with a later end extends the same checkpoint; the cursor
         // is never moved backwards, so completed pages are never re-fetched.

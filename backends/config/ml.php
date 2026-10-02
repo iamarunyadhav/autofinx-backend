@@ -77,8 +77,9 @@ return [
 
     'promotion' => [
         // A first champion must beat the zero-return baseline MAE by this
-        // fraction on the chronological holdout.
-        'min_mae_improvement_vs_baseline' => (float) env('AUTOFINX_ML_MIN_MAE_IMPROVEMENT_VS_BASELINE', 0.0),
+        // fraction (0.01 = 1%) on the chronological holdout. 0 let a model
+        // that was only ~0.02% better (statistical noise) become champion.
+        'min_mae_improvement_vs_baseline' => (float) env('AUTOFINX_ML_MIN_MAE_IMPROVEMENT_VS_BASELINE', 0.01),
         // A challenger must beat the champion's MAE on the SAME holdout by
         // this fraction AND not have a worse fee-aware net metric.
         'min_mae_improvement_vs_champion' => (float) env('AUTOFINX_ML_MIN_MAE_IMPROVEMENT_VS_CHAMPION', 0.005),

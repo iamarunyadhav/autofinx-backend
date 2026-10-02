@@ -111,7 +111,22 @@ final class ShadowPredictionEvaluationTest extends TestCase
         $this->assertSame(0, MlShadowPrediction::query()->count());
     }
 
-    public function test_champion_with_old_feature_schema_is_refused(): void
+    public function test_v1_champion_keeps_receiving_exactly_its_v1_inputs(): void
+    {
+        $this->champion(schema: ShadowFeatureBuilder::SCHEMA_V1);
+        Http::fake(['*/v2/shadow/predict' => Http::response(['prediction' => [
+            'status' => 'ready', 'model_version' => 'qtml-test-60', 'feature_schema_version' => ShadowFeatureBuilder::SCHEMA_V1, 'predicted_return' => 0.0001,
+        ]])]);
+
+        $result = app(ShadowPredictionService::class)->predictLatest('BTCUSDT', 60);
+
+        $this->assertSame('CREATED', $result['status']);
+        $this->assertSame(ShadowFeatureBuilder::SCHEMA_V1, $result['prediction']->feature_schema_version);
+        Http::assertSent(fn ($request) => $request['feature_schema_version'] === ShadowFeatureBuilder::SCHEMA_V1
+            && array_keys($request['features']) === ShadowFeatureBuilder::FEATURES_V1);
+    }
+
+    public function test_champion_with_unknown_feature_schema_is_refused(): void
     {
         $this->champion(schema: 'qt-shadow-features-v0');
         $this->assertSame('FEATURE_SCHEMA_MISMATCH', app(ShadowPredictionService::class)->predictLatest('BTCUSDT', 60)['status']);

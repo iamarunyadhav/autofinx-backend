@@ -113,7 +113,7 @@ final class KlineBatchValidator
         return ['accepted' => $accepted, 'rejections' => $rejections, 'forming_excluded' => $forming];
     }
 
-    /** @return array{open:float, high:float, low:float, close:float, volume:float, quote_volume:?float, trade_count:?int}|null */
+    /** @return array{open:float, high:float, low:float, close:float, volume:float, taker_buy_volume:?float, quote_volume:?float, trade_count:?int}|null */
     private function ohlcv(array $row): ?array
     {
         foreach ([1, 2, 3, 4, 5] as $index) {
@@ -134,9 +134,22 @@ final class KlineBatchValidator
         if ($open <= 0 || $close <= 0 || $low <= 0 || $volume < 0 || $high < max($open, $close) || $low > min($open, $close) || $high < $low) {
             return null;
         }
+        // Field 9 = taker BUY base volume. When present it must be a part of
+        // total volume; an impossible value means a corrupt row, not "unknown".
+        $takerBuy = null;
+        if (array_key_exists(9, $row) && $row[9] !== null) {
+            if (! is_numeric($row[9]) || ! is_finite((float) $row[9])) {
+                return null;
+            }
+            $takerBuy = (float) $row[9];
+            if ($takerBuy < 0 || $takerBuy > $volume * (1 + 1e-9) + 1e-12) {
+                return null;
+            }
+        }
 
         return [
             'open' => $open, 'high' => $high, 'low' => $low, 'close' => $close, 'volume' => $volume,
+            'taker_buy_volume' => $takerBuy,
             'quote_volume' => is_numeric($row[7] ?? null) ? (float) $row[7] : null,
             'trade_count' => is_numeric($row[8] ?? null) ? (int) $row[8] : null,
         ];

@@ -15,14 +15,23 @@ use InvalidArgumentException;
  *
  * The same function produces training rows and live prediction inputs, so
  * the model is always served the distribution it was trained on.
+ *
+ * Schemas are append-only: v2 = every v1 feature (identical values, same
+ * order) + taker-flow features. A v1 champion therefore keeps receiving
+ * exactly its training inputs while v2 candidates are trained alongside.
  */
 final class ShadowFeatureBuilder
 {
-    public const SCHEMA_VERSION = 'qt-shadow-features-v1';
+    public const SCHEMA_V1 = 'qt-shadow-features-v1';
+
+    public const SCHEMA_V2 = 'qt-shadow-features-v2';
+
+    /** Schema new models are trained on. */
+    public const SCHEMA_VERSION = self::SCHEMA_V2;
 
     public const LOOKBACK = 64;
 
-    public const FEATURES = [
+    public const FEATURES_V1 = [
         'ret_1', 'ret_3', 'ret_6', 'ret_12', 'ret_24', 'ret_48',
         'vol_12', 'vol_48',
         'range_1', 'range_mean_12', 'body_1',
@@ -32,12 +41,47 @@ final class ShadowFeatureBuilder
         'hour_sin', 'hour_cos', 'dow_sin', 'dow_cos',
     ];
 
+    // Taker BUY share of volume: who is crossing the spread. 0.5 = balanced.
+    public const TAKER_FEATURES = ['taker_ratio_1', 'taker_ratio_12', 'taker_ratio_48', 'taker_ratio_shift'];
+
+    // Candles (ending at the anchor) whose taker volume a v2 row needs.
+    public const TAKER_WINDOW = 48;
+
+    public const FEATURES_V2 = [...self::FEATURES_V1, ...self::TAKER_FEATURES];
+
+    /** Features of the training schema. */
+    public const FEATURES = self::FEATURES_V2;
+
+    public const SCHEMAS = [self::SCHEMA_V1 => self::FEATURES_V1, self::SCHEMA_V2 => self::FEATURES_V2];
+
+    /** @return list<string> */
+    public static function features(string $schema): array
+    {
+        return self::SCHEMAS[$schema] ?? throw new InvalidArgumentException("Unknown feature schema: {$schema}");
+    }
+
+    /** Whether a window carries the taker volume a v2 row needs. */
+    public static function hasTakerData(array $window): bool
+    {
+        foreach (array_slice($window, -self::TAKER_WINDOW) as $candle) {
+            if (! isset($candle['taker_buy_volume']) || $candle['taker_buy_volume'] === null) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     /**
-     * @param  list<array{open_time_ms:int, open:float, high:float, low:float, close:float, volume:float}>  $window  Ascending, contiguous, last = anchor candle.
+     * @param  list<array{open_time_ms:int, open:float, high:float, low:float, close:float, volume:float, taker_buy_volume?:?float}>  $window  Ascending, contiguous, last = anchor candle.
      * @return array<string, float>
      */
-    public function build(array $window, int $intervalMs): array
+    public function build(array $window, int $intervalMs, string $schema = self::SCHEMA_VERSION): array
     {
+        self::features($schema);
+        if ($schema === self::SCHEMA_V2 && ! self::hasTakerData($window)) {
+            throw new InvalidArgumentException('Feature window lacks taker-buy volume required by '.self::SCHEMA_V2.'.');
+        }
         if (count($window) !== self::LOOKBACK) {
             throw new InvalidArgumentException('Feature window must contain exactly '.self::LOOKBACK.' candles.');
         }
@@ -95,6 +139,17 @@ final class ShadowFeatureBuilder
             'dow_cos' => cos(2 * M_PI * $dow / 7),
         ];
 
+        if ($schema === self::SCHEMA_V2) {
+            $ratio12 = self::takerRatio(array_slice($window, -12));
+            $ratio48 = self::takerRatio(array_slice($window, -48));
+            $features += [
+                'taker_ratio_1' => self::takerRatio([$anchor]),
+                'taker_ratio_12' => $ratio12,
+                'taker_ratio_48' => $ratio48,
+                'taker_ratio_shift' => $ratio12 - $ratio48,
+            ];
+        }
+
         foreach ($features as $name => $value) {
             if (! is_finite($value)) {
                 throw new InvalidArgumentException("Feature {$name} is not finite.");
@@ -131,6 +186,15 @@ final class ShadowFeatureBuilder
         }
 
         return sqrt($sum / ($n - 1));
+    }
+
+    /** Taker BUY share of total volume; balanced (0.5) when nothing traded. */
+    private static function takerRatio(array $candles): float
+    {
+        $volume = array_sum(array_map(static fn (array $c): float => (float) $c['volume'], $candles));
+        $takerBuy = array_sum(array_map(static fn (array $c): float => (float) $c['taker_buy_volume'], $candles));
+
+        return $volume > 0 ? $takerBuy / $volume : 0.5;
     }
 
     /** @param list<float> $prior */

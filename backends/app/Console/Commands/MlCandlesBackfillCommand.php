@@ -5,6 +5,7 @@ namespace App\Console\Commands;
 use App\Domain\Ml\Shadow\FeatureLabelService;
 use App\Domain\Ml\Shadow\MlCandleCollector;
 use App\Models\MlBackfillCheckpoint;
+use App\Models\MlCandle;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Cache;
 use Throwable;
@@ -18,7 +19,8 @@ final class MlCandlesBackfillCommand extends MlShadowCommand
         {--to= : End (UTC date/time), default now}
         {--timeframe= : Candle interval (default ml.base_timeframe)}
         {--max-pages= : Page budget for this run; re-run to resume from the checkpoint}
-        {--no-build : Skip the feature/label rebuild after the backfill}';
+        {--no-build : Skip the feature/label rebuild after the backfill}
+        {--restart : Re-scan the range from its start (fills fields older rows lack, e.g. taker volume)}';
 
     protected $description = 'Paginated, checkpointed, resumable re-download of CLOSED Binance Futures klines into ml_candles (shadow ML only).';
 
@@ -49,12 +51,14 @@ final class MlCandlesBackfillCommand extends MlShadowCommand
                             $this->line(sprintf('  %s page %d cursor %s written %d rejected %d [%s]', $symbol, $cp->pages,
                                 gmdate('Y-m-d H:i', intdiv((int) $cp->cursor_ms, 1000)), $cp->rows_written, $cp->rows_rejected, $cp->status));
                         }
-                    });
+                    }, (bool) $this->option('restart'));
                 $this->info(sprintf('%s: %s - pages %d, written %d, rejected %d, cursor %s', $symbol, $checkpoint->status,
                     $checkpoint->pages, $checkpoint->rows_written, $checkpoint->rows_rejected, gmdate('c', intdiv((int) $checkpoint->cursor_ms, 1000))));
                 if ($checkpoint->status === 'RUNNING') {
                     $this->warn("{$symbol}: page budget reached; re-run the same command to resume from the checkpoint.");
                 }
+                $missingTaker = MlCandle::query()->where('symbol', $symbol)->where('timeframe', $timeframe)->whereNull('taker_buy_volume')->count();
+                $this->line("{$symbol}: candles still without taker-buy volume: {$missingTaker}");
                 if (! $this->option('no-build') && $timeframe === config('ml.base_timeframe', '5m')) {
                     $built = $features->build($symbol, full: true);
                     $matured = $features->mature($symbol);
