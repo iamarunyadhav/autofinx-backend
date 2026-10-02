@@ -30,8 +30,10 @@ final class ShadowPredictionEvaluationTest extends TestCase
         $this->configureMlForTests();
         Http::preventStrayRequests();
         // The newest closed candle closes "now", so the newest anchor is fresh.
-        $this->first = $this->alignedOpen(100);
-        $this->seedCandles('BTCUSDT', $this->first, 100);
+        // Enough history for the training schema (v3 reads 3 days of 5m bars).
+        $count = ShadowFeatureBuilder::LONG_LOOKBACK + 35;
+        $this->first = $this->alignedOpen($count);
+        $this->seedCandles('BTCUSDT', $this->first, $count);
         app(FeatureLabelService::class)->build('BTCUSDT');
     }
 

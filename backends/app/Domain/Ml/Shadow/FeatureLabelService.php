@@ -40,7 +40,8 @@ class FeatureLabelService
         $timeframe = (string) config('ml.base_timeframe', '5m');
         $interval = MlCandleCollector::intervalMs($timeframe);
         $provider = (string) config('ml.provider', 'binance_futures');
-        $schemas = array_keys(ShadowFeatureBuilder::SCHEMAS);
+        $schemas = $this->schemasToBuild();
+        $maxLookback = max(array_map([ShadowFeatureBuilder::class, 'lookback'], $schemas));
 
         // Per schema: anchors already built (full mode) or the first anchor
         // still to build (incremental mode).
@@ -65,7 +66,7 @@ class FeatureLabelService
                 foreach ($schemas as $schema) {
                     $minAnchor[$schema] = max($last[$schema] ?? $newest, $floor) + $interval;
                 }
-                $cursor = max(0, min($minAnchor) - (ShadowFeatureBuilder::LOOKBACK + 1) * $interval);
+                $cursor = max(0, min($minAnchor) - ($maxLookback + 1) * $interval);
             }
         }
 
@@ -94,7 +95,7 @@ class FeatureLabelService
                 $previous = $window === [] ? null : $window[count($window) - 1];
                 $run = $previous !== null && $c['open_time_ms'] - $previous['open_time_ms'] === $interval ? $run + 1 : 1;
                 $window[] = $c;
-                if (count($window) > ShadowFeatureBuilder::LOOKBACK) {
+                if (count($window) > $maxLookback) {
                     array_shift($window);
                 }
                 if ($run < ShadowFeatureBuilder::LOOKBACK) {
@@ -107,7 +108,8 @@ class FeatureLabelService
                     if ($anchorTime < $minAnchor[$schema] || isset($existing[$schema][$anchorTime])) {
                         continue;
                     }
-                    if ($schema === ShadowFeatureBuilder::SCHEMA_V2 && ! ShadowFeatureBuilder::hasTakerData($window)) {
+                    // Needs its whole lookback contiguous (run) and its taker data.
+                    if ($run < ShadowFeatureBuilder::lookback($schema) || ! ShadowFeatureBuilder::satisfies($window, $schema)) {
                         continue;
                     }
                     $rows[] = [
@@ -140,6 +142,26 @@ class FeatureLabelService
         }
 
         return ['feature_rows' => $written, 'labels' => $labels];
+    }
+
+    /**
+     * Schemas worth building: v1 (the cheapest, shortest-lookback schema — it
+     * defines the anchor/label set from the 64th candle on), the training
+     * schema, and every schema a live champion is served (so an older
+     * champion keeps getting its own inputs). Unused schemas are not built.
+     *
+     * @return list<string>
+     */
+    public function schemasToBuild(): array
+    {
+        $championSchemas = DB::table('ml_champions as c')->join('ml_models as m', 'm.id', '=', 'c.model_id')
+            ->distinct()->pluck('m.feature_schema_version')->all();
+        $wanted = [ShadowFeatureBuilder::SCHEMA_V1, ShadowFeatureBuilder::SCHEMA_VERSION, ...$championSchemas];
+
+        return array_values(array_filter(
+            array_keys(ShadowFeatureBuilder::SCHEMAS),
+            static fn (string $schema): bool => in_array($schema, $wanted, true),
+        ));
     }
 
     /**
@@ -239,15 +261,17 @@ class FeatureLabelService
         $created = 0;
         foreach ($this->horizons() as $horizon) {
             $labelCount = MlLabel::query()->where('symbol', $symbol)->where('timeframe', $timeframe)->where('horizon_minutes', $horizon)->count();
-            // v1 rows exist for every buildable anchor (v2 additionally needs
-            // taker volume), so v1 is the full anchor set.
-            $featureCount = MlFeatureRow::query()->where('symbol', $symbol)->where('timeframe', $timeframe)
-                ->where('feature_schema_version', ShadowFeatureBuilder::SCHEMA_V1)->count();
-            if ($labelCount >= $featureCount) {
+            // The schema with the most rows covers the widest anchor set (a
+            // longer-lookback schema starts later; v2+ also need taker volume).
+            $counts = MlFeatureRow::query()->where('symbol', $symbol)->where('timeframe', $timeframe)
+                ->selectRaw('feature_schema_version, count(*) as total')->groupBy('feature_schema_version')
+                ->pluck('total', 'feature_schema_version')->map(fn ($v) => (int) $v)->all();
+            if ($counts === [] || $labelCount >= max($counts)) {
                 continue;
             }
+            $widest = (string) array_search(max($counts), $counts, true);
             MlFeatureRow::query()->where('symbol', $symbol)->where('timeframe', $timeframe)
-                ->where('feature_schema_version', ShadowFeatureBuilder::SCHEMA_V1)
+                ->where('feature_schema_version', $widest)
                 ->orderBy('id')->select(['id', 'anchor_time_ms', 'anchor_close'])
                 ->chunkById(self::LABEL_CHUNK, function ($rows) use ($symbol, $timeframe, &$created): void {
                     $created += $this->createLabels($symbol, $timeframe, $rows->map(fn (MlFeatureRow $r) => [

@@ -17,8 +17,9 @@ use InvalidArgumentException;
  * the model is always served the distribution it was trained on.
  *
  * Schemas are append-only: v2 = every v1 feature (identical values, same
- * order) + taker-flow features. A v1 champion therefore keeps receiving
- * exactly its training inputs while v2 candidates are trained alongside.
+ * order) + taker-flow features; v3 = v2 + long-context (12h-3d) features for
+ * the 1h/4h horizons. An older champion therefore keeps receiving exactly its
+ * training inputs while newer candidates are trained alongside.
  */
 final class ShadowFeatureBuilder
 {
@@ -26,10 +27,16 @@ final class ShadowFeatureBuilder
 
     public const SCHEMA_V2 = 'qt-shadow-features-v2';
 
-    /** Schema new models are trained on. */
-    public const SCHEMA_VERSION = self::SCHEMA_V2;
+    public const SCHEMA_V3 = 'qt-shadow-features-v3';
 
+    /** Schema new models are trained on. */
+    public const SCHEMA_VERSION = self::SCHEMA_V3;
+
+    /** Candles the v1/v2 (short-context) features read. */
     public const LOOKBACK = 64;
+
+    /** Candles v3 reads: 3 days of 5m bars + 1 for the 72h return. */
+    public const LONG_LOOKBACK = 865;
 
     public const FEATURES_V1 = [
         'ret_1', 'ret_3', 'ret_6', 'ret_12', 'ret_24', 'ret_48',
@@ -49,10 +56,31 @@ final class ShadowFeatureBuilder
 
     public const FEATURES_V2 = [...self::FEATURES_V1, ...self::TAKER_FEATURES];
 
-    /** Features of the training schema. */
-    public const FEATURES = self::FEATURES_V2;
+    // Long context for 1h/4h horizons (5m bars: 144 = 12h, 288 = 24h, 864 = 3d).
+    public const LONG_FEATURES = [
+        'ret_12h', 'ret_24h', 'ret_72h',
+        'vol_24h', 'vol_regime',
+        'dist_high_24h', 'dist_low_24h', 'range_pos_72h',
+        'vwap_gap_24h', 'taker_ratio_24h', 'volume_ratio_24h',
+    ];
 
-    public const SCHEMAS = [self::SCHEMA_V1 => self::FEATURES_V1, self::SCHEMA_V2 => self::FEATURES_V2];
+    public const FEATURES_V3 = [...self::FEATURES_V2, ...self::LONG_FEATURES];
+
+    /** Features of the training schema. */
+    public const FEATURES = self::FEATURES_V3;
+
+    public const SCHEMAS = [
+        self::SCHEMA_V1 => self::FEATURES_V1,
+        self::SCHEMA_V2 => self::FEATURES_V2,
+        self::SCHEMA_V3 => self::FEATURES_V3,
+    ];
+
+    /** Per schema: candles read (ending at the anchor) and how many need taker volume. */
+    private const REQUIREMENTS = [
+        self::SCHEMA_V1 => ['lookback' => self::LOOKBACK, 'taker' => 0],
+        self::SCHEMA_V2 => ['lookback' => self::LOOKBACK, 'taker' => self::TAKER_WINDOW],
+        self::SCHEMA_V3 => ['lookback' => self::LONG_LOOKBACK, 'taker' => 288],
+    ];
 
     /** @return list<string> */
     public static function features(string $schema): array
@@ -60,10 +88,35 @@ final class ShadowFeatureBuilder
         return self::SCHEMAS[$schema] ?? throw new InvalidArgumentException("Unknown feature schema: {$schema}");
     }
 
-    /** Whether a window carries the taker volume a v2 row needs. */
-    public static function hasTakerData(array $window): bool
+    public static function lookback(string $schema): int
     {
-        foreach (array_slice($window, -self::TAKER_WINDOW) as $candle) {
+        self::features($schema);
+
+        return self::REQUIREMENTS[$schema]['lookback'];
+    }
+
+    public static function maxLookback(): int
+    {
+        return max(array_column(self::REQUIREMENTS, 'lookback'));
+    }
+
+    /** Whether $window (ending at the anchor) is enough for $schema. */
+    public static function satisfies(array $window, string $schema): bool
+    {
+        return count($window) >= self::lookback($schema)
+            && self::hasTakerData($window, self::REQUIREMENTS[$schema]['taker']);
+    }
+
+    /** Whether the last $candles (default: the v2 window) carry taker volume. */
+    public static function hasTakerData(array $window, int $candles = self::TAKER_WINDOW): bool
+    {
+        if ($candles <= 0) {
+            return true;
+        }
+        if (count($window) < $candles) {
+            return false;
+        }
+        foreach (array_slice($window, -$candles) as $candle) {
             if (! isset($candle['taker_buy_volume']) || $candle['taker_buy_volume'] === null) {
                 return false;
             }
@@ -73,21 +126,25 @@ final class ShadowFeatureBuilder
     }
 
     /**
-     * @param  list<array{open_time_ms:int, open:float, high:float, low:float, close:float, volume:float, taker_buy_volume?:?float}>  $window  Ascending, contiguous, last = anchor candle.
+     * @param  list<array{open_time_ms:int, open:float, high:float, low:float, close:float, volume:float, taker_buy_volume?:?float}>  $window  Ascending, contiguous, last = anchor candle. Only the schema's own lookback (the tail) is read.
      * @return array<string, float>
      */
     public function build(array $window, int $intervalMs, string $schema = self::SCHEMA_VERSION): array
     {
-        self::features($schema);
-        if ($schema === self::SCHEMA_V2 && ! self::hasTakerData($window)) {
-            throw new InvalidArgumentException('Feature window lacks taker-buy volume required by '.self::SCHEMA_V2.'.');
+        $lookback = self::lookback($schema);
+        if (count($window) < $lookback) {
+            throw new InvalidArgumentException("Feature window must contain at least {$lookback} candles for {$schema}.");
         }
-        if (count($window) !== self::LOOKBACK) {
-            throw new InvalidArgumentException('Feature window must contain exactly '.self::LOOKBACK.' candles.');
+        $long = count($window) === $lookback ? $window : array_slice($window, -$lookback);
+        if (! self::hasTakerData($long, self::REQUIREMENTS[$schema]['taker'])) {
+            throw new InvalidArgumentException("Feature window lacks taker-buy volume required by {$schema}.");
         }
-        if (! self::isContiguous($window, $intervalMs)) {
+        if (! self::isContiguous($long, $intervalMs)) {
             throw new InvalidArgumentException('Feature window is not contiguous.');
         }
+        // The short-context features always read exactly the last LOOKBACK
+        // candles, so v1/v2 values are identical whichever schema is built.
+        $window = $lookback === self::LOOKBACK ? $long : array_slice($long, -self::LOOKBACK);
 
         $closes = array_map(static fn (array $c): float => (float) $c['close'], $window);
         $last = self::LOOKBACK - 1;
@@ -139,7 +196,7 @@ final class ShadowFeatureBuilder
             'dow_cos' => cos(2 * M_PI * $dow / 7),
         ];
 
-        if ($schema === self::SCHEMA_V2) {
+        if ($schema === self::SCHEMA_V2 || $schema === self::SCHEMA_V3) {
             $ratio12 = self::takerRatio(array_slice($window, -12));
             $ratio48 = self::takerRatio(array_slice($window, -48));
             $features += [
@@ -148,6 +205,9 @@ final class ShadowFeatureBuilder
                 'taker_ratio_48' => $ratio48,
                 'taker_ratio_shift' => $ratio12 - $ratio48,
             ];
+        }
+        if ($schema === self::SCHEMA_V3) {
+            $features += $this->longContext($long, (float) $features['vol_12']);
         }
 
         foreach ($features as $name => $value) {
@@ -158,6 +218,57 @@ final class ShadowFeatureBuilder
         }
 
         return $features;
+    }
+
+    /**
+     * 12h-3d context from LONG_LOOKBACK closed candles ending at the anchor.
+     *
+     * @param  list<array<string, mixed>>  $long
+     * @return array<string, float>
+     */
+    private function longContext(array $long, float $vol12): array
+    {
+        $n = count($long);
+        $last = $n - 1;
+        $close = (float) $long[$last]['close'];
+        $closeAgo = static fn (int $bars): float => (float) $long[$last - $bars]['close'];
+
+        $day = array_slice($long, -288);
+        $returns = [];
+        for ($i = $n - 288; $i <= $last; $i++) {
+            $returns[] = log((float) $long[$i]['close'] / (float) $long[$i - 1]['close']);
+        }
+        $vol24 = self::stdev($returns);
+
+        $high24 = max(array_map(static fn (array $c): float => (float) $c['high'], $day));
+        $low24 = min(array_map(static fn (array $c): float => (float) $c['low'], $day));
+        $high72 = max(array_map(static fn (array $c): float => (float) $c['high'], $long));
+        $low72 = min(array_map(static fn (array $c): float => (float) $c['low'], $long));
+
+        $pv = 0.0;
+        $volume = 0.0;
+        foreach ($day as $candle) {
+            $typical = ((float) $candle['high'] + (float) $candle['low'] + (float) $candle['close']) / 3;
+            $pv += $typical * (float) $candle['volume'];
+            $volume += (float) $candle['volume'];
+        }
+        $lastHourVolume = array_sum(array_map(static fn (array $c): float => (float) $c['volume'], array_slice($long, -12)));
+
+        return [
+            'ret_12h' => log($close / $closeAgo(144)),
+            'ret_24h' => log($close / $closeAgo(288)),
+            'ret_72h' => log($close / $closeAgo(864)),
+            'vol_24h' => $vol24,
+            // >1 = the last hour is more volatile than the day: a regime shift.
+            'vol_regime' => $vol24 > 0 ? $vol12 / $vol24 : 1.0,
+            'dist_high_24h' => log($high24 / $close),
+            'dist_low_24h' => log($close / $low24),
+            'range_pos_72h' => $high72 > $low72 ? ($close - $low72) / ($high72 - $low72) : 0.5,
+            'vwap_gap_24h' => $volume > 0 ? $close / ($pv / $volume) - 1 : 0.0,
+            'taker_ratio_24h' => self::takerRatio($day),
+            // Last hour's volume vs the day's average hour.
+            'volume_ratio_24h' => $volume > 0 ? $lastHourVolume / ($volume / 24) : 0.0,
+        ];
     }
 
     /** @param list<array{open_time_ms:int}> $window */

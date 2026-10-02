@@ -86,9 +86,11 @@ final class ShadowTrainingPromotionTest extends TestCase
         ], $overrides);
     }
 
+    /** $candles usable training rows: v3 needs LONG_LOOKBACK candles of history first. */
     private function seedMatureLabels(int $candles): void
     {
-        $this->seedCandles('BTCUSDT', $this->alignedOpen($candles + 10), $candles);
+        $total = $candles + ShadowFeatureBuilder::LONG_LOOKBACK;
+        $this->seedCandles('BTCUSDT', $this->alignedOpen($total + 10), $total);
         app(FeatureLabelService::class)->build('BTCUSDT');
     }
 
@@ -234,12 +236,14 @@ final class ShadowTrainingPromotionTest extends TestCase
     public function test_export_is_chronological_single_symbol_single_horizon(): void
     {
         $this->seedMatureLabels(400);
-        $this->seedCandles('ETHUSDT', $this->alignedOpen(410), 400);
+        $this->seedCandles('ETHUSDT', $this->alignedOpen(1300), 1290);
         app(FeatureLabelService::class)->build('ETHUSDT');
 
         $export = app(MlShadowTrainer::class)->export('BTCUSDT', 60, '5m', 'export-test');
         $lines = array_map(fn ($l) => json_decode($l, true), array_filter(explode("\n", (string) file_get_contents($export['data']))));
-        $expected = \App\Models\MlLabel::query()->where('symbol', 'BTCUSDT')->where('horizon_minutes', 60)->where('status', 'MATURE')->count();
+        // Only MATURE labels that have a training-schema (v3) feature row.
+        $expected = MlShadowTrainer::matureTrainingRows('BTCUSDT', 60, '5m', ShadowFeatureBuilder::SCHEMA_VERSION)->count();
+        $this->assertGreaterThan(0, $expected);
 
         $this->assertCount($expected, $lines);
         $times = array_column($lines, 't');

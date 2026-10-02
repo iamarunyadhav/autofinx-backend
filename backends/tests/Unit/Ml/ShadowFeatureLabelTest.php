@@ -23,13 +23,15 @@ final class ShadowFeatureLabelTest extends TestCase
 
     public function test_future_candles_cannot_enter_the_feature_vector(): void
     {
-        $first = $this->alignedOpen(300);
-        $this->seedCandles('BTCUSDT', $first, 200);
+        $first = $this->alignedOpen(1100);
+        $this->seedCandles('BTCUSDT', $first, 1000);
         $service = app(FeatureLabelService::class);
         $service->build('BTCUSDT');
-        $anchor = $first + 100 * self::FIVE_MIN; // anchor candle index 99 closes here
+        $anchor = $first + 900 * self::FIVE_MIN; // anchor candle index 899 closes here (v3 needs 865 bars)
+        $schemas = $service->schemasToBuild();
+        $this->assertContains(ShadowFeatureBuilder::SCHEMA_VERSION, $schemas);
         $row = fn (string $schema) => MlFeatureRow::query()->where('anchor_time_ms', $anchor)->where('feature_schema_version', $schema)->firstOrFail()->features;
-        $before = array_map($row, array_combine(array_keys(ShadowFeatureBuilder::SCHEMAS), array_keys(ShadowFeatureBuilder::SCHEMAS)));
+        $before = array_map($row, array_combine($schemas, $schemas));
 
         // Rewrite every candle that closes AFTER the anchor with wild values
         // (taker volume included), then rebuild from scratch: no schema's
@@ -39,7 +41,8 @@ final class ShadowFeatureLabelTest extends TestCase
         MlLabel::query()->delete();
         $service->build('BTCUSDT', full: true);
 
-        foreach (ShadowFeatureBuilder::SCHEMAS as $schema => $names) {
+        foreach ($schemas as $schema) {
+            $names = ShadowFeatureBuilder::features($schema);
             $after = $row($schema);
             $this->assertEqualsCanonicalizing($names, array_keys($after), $schema);
             foreach ($names as $name) {
@@ -48,30 +51,53 @@ final class ShadowFeatureLabelTest extends TestCase
         }
     }
 
-    public function test_v2_is_append_only_over_v1_and_needs_taker_volume(): void
+    public function test_schemas_are_append_only_and_v3_needs_history_and_taker_volume(): void
     {
         $this->assertSame(ShadowFeatureBuilder::FEATURES_V1, array_slice(ShadowFeatureBuilder::FEATURES_V2, 0, count(ShadowFeatureBuilder::FEATURES_V1)));
+        $this->assertSame(ShadowFeatureBuilder::FEATURES_V2, array_slice(ShadowFeatureBuilder::FEATURES_V3, 0, count(ShadowFeatureBuilder::FEATURES_V2)));
 
-        $first = $this->alignedOpen(300);
-        $this->seedCandles('BTCUSDT', $first, 200, withTaker: false); // Phase 1-style rows
+        $first = $this->alignedOpen(1100);
+        $this->seedCandles('BTCUSDT', $first, 1000, withTaker: false); // Phase 1-style rows
         app(FeatureLabelService::class)->build('BTCUSDT');
 
         $this->assertGreaterThan(0, MlFeatureRow::query()->where('feature_schema_version', ShadowFeatureBuilder::SCHEMA_V1)->count());
-        $this->assertSame(0, MlFeatureRow::query()->where('feature_schema_version', ShadowFeatureBuilder::SCHEMA_V2)->count());
-        // Labels exist regardless of schema; training (v2) just has no rows yet.
+        $this->assertSame(0, MlFeatureRow::query()->where('feature_schema_version', ShadowFeatureBuilder::SCHEMA_V3)->count());
+        // Labels exist regardless of schema; training (v3) just has no rows yet.
         $this->assertGreaterThan(0, MlLabel::query()->where('status', 'MATURE')->count());
 
-        // Once taker volume is filled in, a full rebuild adds v2 rows whose v1
-        // part is identical to the existing v1 rows.
+        // Once taker volume is filled in, a full rebuild adds v3 rows — only
+        // from the 865th candle on — whose v1 part is identical to v1 rows.
         MlCandle::query()->update(['taker_buy_volume' => DB::raw('volume * 0.5')]);
         app(FeatureLabelService::class)->build('BTCUSDT', full: true);
-        $v1 = MlFeatureRow::query()->where('feature_schema_version', ShadowFeatureBuilder::SCHEMA_V1)->orderBy('anchor_time_ms')->first();
-        $v2 = MlFeatureRow::query()->where('feature_schema_version', ShadowFeatureBuilder::SCHEMA_V2)->where('anchor_time_ms', $v1->anchor_time_ms)->firstOrFail();
+        $firstV3 = (int) MlFeatureRow::query()->where('feature_schema_version', ShadowFeatureBuilder::SCHEMA_V3)->min('anchor_time_ms');
+        $this->assertSame($first + ShadowFeatureBuilder::LONG_LOOKBACK * self::FIVE_MIN, $firstV3);
+        $v3 = MlFeatureRow::query()->where('feature_schema_version', ShadowFeatureBuilder::SCHEMA_V3)->where('anchor_time_ms', $firstV3)->firstOrFail();
+        $v1 = MlFeatureRow::query()->where('feature_schema_version', ShadowFeatureBuilder::SCHEMA_V1)->where('anchor_time_ms', $firstV3)->firstOrFail();
         foreach (ShadowFeatureBuilder::FEATURES_V1 as $name) {
-            $this->assertSame($v1->features[$name], $v2->features[$name], $name);
+            $this->assertSame($v1->features[$name], $v3->features[$name], $name);
         }
-        $this->assertEqualsWithDelta(0.5, $v2->features['taker_ratio_12'], 1e-9);
-        $this->assertEqualsWithDelta(0.0, $v2->features['taker_ratio_shift'], 1e-9);
+        $this->assertEqualsWithDelta(0.5, $v3->features['taker_ratio_12'], 1e-9);
+        $this->assertEqualsWithDelta(0.5, $v3->features['taker_ratio_24h'], 1e-9);
+        $this->assertGreaterThanOrEqual(0.0, $v3->features['range_pos_72h']);
+        $this->assertLessThanOrEqual(1.0, $v3->features['range_pos_72h']);
+    }
+
+    public function test_v3_long_context_values_are_correct(): void
+    {
+        // Price rises 0.1% per bar; constant volume/taker share.
+        $window = array_map(fn (int $i) => ['open_time_ms' => $i * self::FIVE_MIN, 'open' => 100 * 1.001 ** max(0, $i - 1), 'high' => 100 * 1.001 ** $i * 1.0005,
+            'low' => 100 * 1.001 ** max(0, $i - 1) * 0.9995, 'close' => 100 * 1.001 ** $i, 'volume' => 2.0, 'taker_buy_volume' => 1.5],
+            range(0, ShadowFeatureBuilder::LONG_LOOKBACK - 1));
+        $features = (new ShadowFeatureBuilder)->build($window, self::FIVE_MIN, ShadowFeatureBuilder::SCHEMA_V3);
+
+        $this->assertSame(ShadowFeatureBuilder::FEATURES_V3, array_keys($features));
+        $this->assertEqualsWithDelta(144 * log(1.001), $features['ret_12h'], 1e-9);
+        $this->assertEqualsWithDelta(288 * log(1.001), $features['ret_24h'], 1e-9);
+        $this->assertEqualsWithDelta(864 * log(1.001), $features['ret_72h'], 1e-9);
+        $this->assertEqualsWithDelta(0.75, $features['taker_ratio_24h'], 1e-12);
+        $this->assertEqualsWithDelta(1.0, $features['volume_ratio_24h'], 1e-9);
+        $this->assertGreaterThan(0.99, $features['range_pos_72h']); // at the top of a steady uptrend
+        $this->assertGreaterThan(0, $features['vwap_gap_24h']);     // above the day's VWAP
     }
 
     public function test_builder_refuses_a_window_that_is_not_exactly_lookback_contiguous_candles(): void
@@ -83,7 +109,12 @@ final class ShadowFeatureLabelTest extends TestCase
         $noTaker[ShadowFeatureBuilder::LOOKBACK - 1]['taker_buy_volume'] = null;
         $builder = new ShadowFeatureBuilder;
 
-        $this->assertCount(count(ShadowFeatureBuilder::FEATURES_V2), $builder->build($window, self::FIVE_MIN));
+        $this->assertCount(count(ShadowFeatureBuilder::FEATURES_V2), $builder->build($window, self::FIVE_MIN, ShadowFeatureBuilder::SCHEMA_V2));
+        try {
+            $builder->build($window, self::FIVE_MIN, ShadowFeatureBuilder::SCHEMA_V3); // 64 bars < 865
+            $this->fail('v3 must refuse a window shorter than its lookback');
+        } catch (InvalidArgumentException) {
+        }
         $this->assertCount(count(ShadowFeatureBuilder::FEATURES_V1), $builder->build($noTaker, self::FIVE_MIN, ShadowFeatureBuilder::SCHEMA_V1));
         try {
             $builder->build($noTaker, self::FIVE_MIN, ShadowFeatureBuilder::SCHEMA_V2);
