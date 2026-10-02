@@ -51,6 +51,33 @@ class BinanceFuturesKlineClient
         return is_array($rows) ? $rows : [];
     }
 
+    /**
+     * Public funding-rate history (GET /fapi/v1/fundingRate), oldest first.
+     *
+     * @return array<int, mixed>
+     */
+    public function fundingRates(string $symbol, int $startMs, int $limit = 1000): array
+    {
+        $this->breaker->assertAvailable();
+        $this->breaker->throttle('ml_shadow');
+
+        $response = Http::timeout((int) config('ml.binance.timeout_seconds', 15))
+            ->acceptJson()
+            ->get(rtrim((string) config('ml.binance.base_url', 'https://fapi.binance.com'), '/').'/fapi/v1/fundingRate', [
+                'symbol' => strtoupper($symbol),
+                'startTime' => $startMs,
+                'limit' => max(1, min(1000, $limit)),
+            ]);
+
+        $this->breaker->recordResponse($response);
+        if ($response->failed()) {
+            throw new RuntimeException(sprintf('Binance Futures funding history failed for %s: HTTP %d', $symbol, $response->status()));
+        }
+        $rows = $response->json();
+
+        return is_array($rows) ? $rows : [];
+    }
+
     protected function pause(int $milliseconds): void
     {
         if ($milliseconds > 0) {

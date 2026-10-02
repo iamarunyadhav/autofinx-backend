@@ -90,7 +90,7 @@ final class MlShadowEndToEndTest extends TestCase
         $this->assertGreaterThan(3000, MlLabel::query()->where('horizon_minutes', 60)->where('status', 'MATURE')->count());
 
         // 2. Real training: candidate → decision.
-        $this->artisan('ml:train', ['symbol' => 'BTCUSDT', 'horizon' => 60])->assertSuccessful();
+        $this->artisan('ml:train', ['symbol' => 'BTCUSDT', 'horizon' => 60, '--type' => 'regression'])->assertSuccessful();
         $model = MlModel::query()->where('horizon_minutes', 60)->latest('created_at')->firstOrFail();
         $this->assertContains($model->status, ['CHAMPION', 'REJECTED']);
         $this->assertNotNull($model->decision_reason);
@@ -131,7 +131,7 @@ final class MlShadowEndToEndTest extends TestCase
             ->assertJsonPath('prediction.model_version', $model->model_version)
             ->assertJsonPath('execution', false);
         $this->actingAs($user)
-            ->getJson('/api/v1/quick-trade/ml-shadow?'.http_build_query(['workspace_id' => $workspace->id, 'symbol' => 'BTCUSDT', 'duration_seconds' => 900]))
-            ->assertOk()->assertJsonPath('status', 'NO_CHAMPION');
+            ->getJson('/api/v1/quick-trade/ml-shadow?'.http_build_query(['workspace_id' => $workspace->id, 'symbol' => 'BTCUSDT', 'duration_seconds' => 7200]))
+            ->assertOk()->assertJsonPath('status', 'NO_CHAMPION'); // h120 has its own (absent) model; never borrows h60
     }
 }

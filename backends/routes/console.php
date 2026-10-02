@@ -476,6 +476,7 @@ if ($schedulerEnabled && (bool) config('ml.enabled', false)) {
         ['ml:labels:mature', 'everyFiveMinutes', 10],
         ['ml:shadow:evaluate', 'everyFiveMinutes', 10],
         ['ml:trade-feedback:classify', 'hourly', 30],
+        ['ml:funding:sync', 'hourly', 30],
     ];
     foreach ($mlSchedule as [$mlCommand, $mlFrequency, $mlOverlapMinutes]) {
         Schedule::command($mlCommand)

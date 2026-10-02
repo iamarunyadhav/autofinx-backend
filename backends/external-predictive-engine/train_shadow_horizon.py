@@ -28,6 +28,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+import shadow_sim
+
 HOLDOUT_FRACTION = 0.15
 EARLY_STOP_FRACTION = 0.15
 WALK_FORWARD_STARTS = (0.55, 0.65, 0.75)
@@ -36,7 +38,7 @@ MIN_ROWS = 500
 QUANTILES = {"q10": 0.10, "q90": 0.90}
 
 
-def load_dataset(input_path: Path, manifest: dict[str, Any]) -> tuple[list[int], list[list[float]], list[float]]:
+def load_dataset(input_path: Path, manifest: dict[str, Any], funding: list[float] | None = None) -> tuple[list[int], list[list[float]], list[float]]:
     features = manifest["features"]
     times: list[int] = []
     rows: list[list[float]] = []
@@ -55,6 +57,8 @@ def load_dataset(input_path: Path, manifest: dict[str, Any]) -> tuple[list[int],
             times.append(int(record["t"]))
             rows.append(x)
             targets.append(y * 100.0)  # train in percent for numerical stability
+            if funding is not None:
+                funding.append(float(record.get("fb", 0.0)))  # BUY-side funding, percent
     if any(b <= a for a, b in zip(times, times[1:])):
         raise ValueError("anchor times must be strictly increasing (chronological, no duplicates)")
     if len(rows) < MIN_ROWS:
@@ -152,7 +156,9 @@ def train(input_path: Path, manifest_path: Path, output_dir: Path, champion_dir:
         raise RuntimeError("install external-predictive-engine requirements before training") from exc
 
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    times, rows, targets = load_dataset(input_path, manifest)
+    funding_list: list[float] = []
+    times, rows, targets = load_dataset(input_path, manifest, funding_list)
+    funding = np.asarray(funding_list, dtype=np.float64)
     x = np.asarray(rows, dtype=np.float64)
     y = np.asarray(targets, dtype=np.float64)
     n = len(y)
@@ -184,6 +190,17 @@ def train(input_path: Path, manifest_path: Path, output_dir: Path, champion_dir:
     q90 = quantile_models["q90"].predict(x_holdout)
     holdout["interval_coverage_pct"] = float(np.mean((y_holdout >= np.minimum(q10, q90)) & (y_holdout <= np.maximum(q10, q90))) * 100)
     holdout["interval_target_coverage_pct"] = 80.0
+    # Reported only (the regression gate is unchanged): the same NON-overlapping
+    # fee+funding simulation the classifier gate uses, next to its baselines.
+    horizon_ms = int(manifest["horizon_minutes"]) * 60_000
+    predicted_holdout = model.predict(x_holdout)
+    funding_holdout = funding[holdout_start:]
+    signals = np.where(predicted_holdout - funding_holdout >= required_move_pct, 1,
+                       np.where(-predicted_holdout + funding_holdout >= required_move_pct, -1, 0))
+    times_holdout = times[holdout_start:]
+    holdout["non_overlapping"] = shadow_sim.strip(shadow_sim.simulate(times_holdout, signals, y_holdout, funding_holdout, cost_pct, horizon_ms))
+    holdout["baselines"] = shadow_sim.baselines(times_holdout, y_holdout, funding_holdout, cost_pct, horizon_ms)
+    holdout["effective_samples"] = shadow_sim.effective_samples(times_holdout, int(manifest.get("step_ms", 300_000)), horizon_ms)
 
     champion, champion_columns, champion_reason = load_champion(lgb, champion_dir, manifest)
     champion_holdout = (
@@ -198,6 +215,7 @@ def train(input_path: Path, manifest_path: Path, output_dir: Path, champion_dir:
 
     metadata = {
         "model": "lightgbm",
+        "model_type": "regression",
         "objective": "regression_l2_future_return",
         "target_unit": "return_pct",
         "symbol": manifest["symbol"],

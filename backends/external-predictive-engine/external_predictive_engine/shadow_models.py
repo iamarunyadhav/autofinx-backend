@@ -28,6 +28,19 @@ class ShadowRequest:
     expected_model_version: str | None = None
 
 
+def _interp(value: float, xs: list[float], ys: list[float]) -> float:
+    """Piecewise-linear isotonic map, clipped at both ends (= sklearn's predict)."""
+    if value <= xs[0]:
+        return float(ys[0])
+    if value >= xs[-1]:
+        return float(ys[-1])
+    for i in range(1, len(xs)):
+        if value <= xs[i]:
+            x0, x1, y0, y1 = xs[i - 1], xs[i], ys[i - 1], ys[i]
+            return float(y0 if x1 == x0 else y0 + (y1 - y0) * (value - x0) / (x1 - x0))
+    return float(ys[-1])
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -63,7 +76,8 @@ class ShadowModelStore:
                 if not path.is_file() or _sha256(path) != entry["sha256"]:
                     return f"artifact_integrity_failed:{role}"
                 boosters[role] = lgb.Booster(model_file=str(path))
-            if "model" not in boosters:
+            required = ("buy", "sell") if manifest.get("model_type") == "side_classifier" else ("model",)
+            if any(role not in boosters for role in required):
                 return "artifact_missing_main_model"
         except Exception as exc:  # loading must never take the service down
             return f"model_load_failed:{exc.__class__.__name__}"
@@ -94,6 +108,22 @@ class ShadowModelStore:
         vector = [float(request.features[name]) for name in names]
         if not all(math.isfinite(v) for v in vector):
             return {**base, "status": "rejected", "reason": "non_finite_feature"}
+
+        if manifest.get("model_type") == "side_classifier":
+            # Calibrated side probabilities; the fee/funding-aware decision is
+            # made in Laravel with the live Quick Trade cost model.
+            probabilities = {}
+            for side in ("buy", "sell"):
+                params = manifest["sides"][side]
+                raw = float(boosters[side].predict([vector])[0])
+                xs, ys = params.get("isotonic_x") or [], params.get("isotonic_y") or []
+                probabilities[side] = _interp(raw, xs, ys) if xs else float(params.get("base_rate", 0.0))
+            return {
+                **base, "status": "ready", "reason": None, "model_type": "side_classifier",
+                "model_version": manifest.get("model_version"),
+                "feature_schema_version": manifest.get("feature_schema_version"),
+                "p_buy": probabilities["buy"], "p_sell": probabilities["sell"],
+            }
 
         # Models are trained on returns in percent (see train_shadow_horizon.py).
         to_fraction = 0.01 if manifest.get("target_unit") == "return_pct" else 1.0

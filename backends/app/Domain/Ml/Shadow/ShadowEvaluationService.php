@@ -15,6 +15,7 @@ use App\Models\MlShadowPrediction;
  */
 class ShadowEvaluationService
 {
+    public function __construct(private readonly FundingRateService $funding) {}
     // A target candle still missing this long after T+h is a data hole, not a
     // pending outcome; it is excluded from metrics rather than guessed.
     private const UNSCORABLE_AFTER_MS = 2 * 86_400_000;
@@ -43,21 +44,29 @@ class ShadowEvaluationService
                         continue;
                     }
                     $actualReturn = (float) $candle->close / (float) $prediction->current_price - 1;
+                    $hasReturn = $prediction->predicted_return !== null;
                     $predicted = (float) $prediction->predicted_return;
                     $costPct = (float) data_get($prediction->cost_snapshot, 'cost_pct', 0);
+                    // Funding actually paid/received over (T, T+h] (longs pay, shorts receive).
+                    $horizonMs = (int) $prediction->target_time_ms - (int) $prediction->anchor_time_ms;
+                    $fundingBuy = $this->funding->buyCostPct($prediction->symbol, [(int) $prediction->anchor_time_ms], $horizonMs)[(int) $prediction->anchor_time_ms] ?? 0.0;
                     $net = match ($prediction->decision) {
-                        'BUY' => $actualReturn * 100 - $costPct,
-                        'SELL' => -$actualReturn * 100 - $costPct,
+                        'BUY' => $actualReturn * 100 - $costPct - $fundingBuy,
+                        'SELL' => -$actualReturn * 100 - $costPct + $fundingBuy,
                         default => null,
                     };
+                    // Direction: regression = sign of the predicted return;
+                    // classifier = the side it took (WAIT has no direction).
+                    $direction = $hasReturn ? ($predicted <=> 0.0) : match ($prediction->decision) { 'BUY' => 1, 'SELL' => -1, default => 0 };
                     $prediction->forceFill([
                         'status' => 'SCORED',
                         'actual_price' => (float) $candle->close,
                         'actual_return' => $actualReturn,
-                        // A flat outcome or a zero prediction has no direction to hit.
-                        'direction_hit' => $actualReturn == 0.0 || $predicted == 0.0 ? null : (($actualReturn > 0) === ($predicted > 0)),
-                        'abs_error_pct' => abs($predicted - $actualReturn) * 100,
+                        // A flat outcome or no predicted direction has nothing to hit.
+                        'direction_hit' => $actualReturn == 0.0 || $direction === 0 ? null : (($actualReturn > 0) === ($direction > 0)),
+                        'abs_error_pct' => $hasReturn ? abs($predicted - $actualReturn) * 100 : null,
                         'decision_net_pct' => $net,
+                        'funding_actual_buy_pct' => $fundingBuy,
                         'scored_at' => now('UTC'),
                     ])->save();
                     $totals['scored']++;

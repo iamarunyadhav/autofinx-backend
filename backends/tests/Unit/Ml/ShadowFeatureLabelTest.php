@@ -140,8 +140,33 @@ final class ShadowFeatureLabelTest extends TestCase
 
     public function test_labels_use_the_exact_target_close_per_horizon_and_stay_pending_without_it(): void
     {
+        // 1440m needs 288 bars after the anchor: index 70 + 288 = 358 < 400.
+        $first = $this->alignedOpen(420);
+        $this->seedCandles('BTCUSDT', $first, 400, fn (int $i) => 100 + $i); // close at index i = 100 + i
+        app(FeatureLabelService::class)->build('BTCUSDT');
+
+        $anchorIndex = 70;
+        $anchor = $first + ($anchorIndex + 1) * self::FIVE_MIN;
+        foreach ([60 => 12, 120 => 24, 240 => 48, 1440 => 288] as $horizon => $steps) {
+            $label = MlLabel::query()->where('symbol', 'BTCUSDT')->where('horizon_minutes', $horizon)->where('anchor_time_ms', $anchor)->firstOrFail();
+            $this->assertSame($anchor + $horizon * 60_000, (int) $label->target_time_ms);
+            $this->assertSame('MATURE', $label->status, "h{$horizon}");
+            $this->assertEqualsWithDelta(100 + $anchorIndex + $steps, $label->target_close, 1e-9);
+            $this->assertEqualsWithDelta((100 + $anchorIndex + $steps) / (100 + $anchorIndex) - 1, $label->future_return, 1e-12);
+        }
+        // Near the end the 1440m target candle does not exist yet: PENDING, never false/zero.
+        $late = $first + (380 + 1) * self::FIVE_MIN;
+        $pending = MlLabel::query()->where('horizon_minutes', 1440)->where('anchor_time_ms', $late)->firstOrFail();
+        $this->assertSame('PENDING', $pending->status);
+        $this->assertNull($pending->future_return);
+        $this->assertSame(0, MlLabel::query()->where('horizon_minutes', 15)->count()); // 15m dropped
+    }
+
+    public function test_legacy_label_shape_for_a_short_horizon(): void
+    {
+        config(['ml.horizons_minutes' => [15, 60, 240]]);
         $first = $this->alignedOpen(150);
-        $this->seedCandles('BTCUSDT', $first, 120, fn (int $i) => 100 + $i); // close at index i = 100 + i
+        $this->seedCandles('BTCUSDT', $first, 120, fn (int $i) => 100 + $i);
         app(FeatureLabelService::class)->build('BTCUSDT');
 
         $anchorIndex = 70;
@@ -168,26 +193,27 @@ final class ShadowFeatureLabelTest extends TestCase
         $service = app(FeatureLabelService::class);
         $service->build('ETHUSDT');
         $last = MlFeatureRow::query()->where('symbol', 'ETHUSDT')->max('anchor_time_ms');
-        $label = MlLabel::query()->where('symbol', 'ETHUSDT')->where('horizon_minutes', 15)->where('anchor_time_ms', $last)->firstOrFail();
+        $label = MlLabel::query()->where('symbol', 'ETHUSDT')->where('horizon_minutes', 60)->where('anchor_time_ms', $last)->firstOrFail();
         $this->assertSame('PENDING', $label->status);
 
-        $this->seedCandles('ETHUSDT', $first + 70 * self::FIVE_MIN, 3, fn (int $i) => 200.0 + $i);
-        $this->assertGreaterThanOrEqual(1, $service->mature('ETHUSDT')[15]);
+        // h60 target = anchor + 60m -> candle index 69 + 12 = 81.
+        $this->seedCandles('ETHUSDT', $first + 70 * self::FIVE_MIN, 12, fn (int $i) => 200.0 + $i);
+        $this->assertGreaterThanOrEqual(1, $service->mature('ETHUSDT')[60]);
         $this->assertSame('MATURE', $label->refresh()->status);
-        $this->assertEqualsWithDelta(202.0, $label->target_close, 1e-9);
+        $this->assertEqualsWithDelta(211.0, $label->target_close, 1e-9);
     }
 
     public function test_no_cross_symbol_or_cross_horizon_mixing(): void
     {
-        $first = $this->alignedOpen(200);
-        $this->seedCandles('BTCUSDT', $first, 150, fn (int $i) => 60000 + $i);
-        $this->seedCandles('ETHUSDT', $first, 150, fn (int $i) => 3000 - $i * 0.5);
+        $first = $this->alignedOpen(480);
+        $this->seedCandles('BTCUSDT', $first, 450, fn (int $i) => 60000 + $i);
+        $this->seedCandles('ETHUSDT', $first, 450, fn (int $i) => 3000 - $i * 0.5);
         $service = app(FeatureLabelService::class);
         $service->build('BTCUSDT');
         $service->build('ETHUSDT');
 
         foreach (['BTCUSDT' => fn (int $i) => 60000 + $i, 'ETHUSDT' => fn (int $i) => 3000 - $i * 0.5] as $symbol => $price) {
-            foreach ([15 => 3, 60 => 12, 240 => 48] as $horizon => $steps) {
+            foreach ([60 => 12, 120 => 24, 240 => 48, 1440 => 288] as $horizon => $steps) {
                 $labels = MlLabel::query()->where('symbol', $symbol)->where('horizon_minutes', $horizon)->where('status', 'MATURE')->get();
                 $this->assertNotEmpty($labels->all(), "{$symbol} h{$horizon}");
                 foreach ($labels as $label) {
@@ -197,6 +223,6 @@ final class ShadowFeatureLabelTest extends TestCase
                 }
             }
         }
-        $this->assertSame(0, DB::table('ml_labels')->whereNotIn('horizon_minutes', [15, 60, 240])->count());
+        $this->assertSame(0, DB::table('ml_labels')->whereNotIn('horizon_minutes', [60, 120, 240, 1440])->count());
     }
 }

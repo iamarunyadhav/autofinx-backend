@@ -14,7 +14,7 @@ final class MlShadowApiTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
-        config(['ml.enabled' => true, 'ml.symbols' => ['BTCUSDT', 'ETHUSDT'], 'ml.horizons_minutes' => [15, 60, 240]]);
+        config(['ml.enabled' => true, 'ml.symbols' => ['BTCUSDT', 'ETHUSDT'], 'ml.horizons_minutes' => [60, 120, 240, 1440]]);
         $user = User::factory()->create();
         $this->workspace = Workspace::factory()->create();
         WorkspaceMember::create(['workspace_id' => $this->workspace->id, 'user_id' => $user->id, 'role' => 'owner']);
@@ -32,10 +32,11 @@ final class MlShadowApiTest extends TestCase
             ->assertJsonPath('live_evaluation.forecast.status', 'insufficient_data');
 
         $this->getJson('/api/v1/quick-trade/ml-shadow?'.http_build_query(['workspace_id' => $this->workspace->id, 'symbol' => 'BTCUSDT', 'duration_seconds' => 300]))
-            ->assertOk()->assertJsonPath('status', 'UNSUPPORTED_DURATION');
+            ->assertOk()->assertJsonPath('status', 'COST_EXCEEDS_MOVE')
+            ->assertJsonPath('message', 'No model for this expiry: trading costs exceed the typical price move at this horizon.');
 
         $this->getJson('/api/v1/quick-trade/ml-shadow/learning?'.http_build_query(['workspace_id' => $this->workspace->id, 'symbol' => 'ETHUSDT']))
-            ->assertOk()->assertJsonPath('candles.collected', 0)->assertJsonCount(3, 'horizons');
+            ->assertOk()->assertJsonPath('candles.collected', 0)->assertJsonCount(4, 'horizons');
     }
 
     public function test_non_member_is_refused_and_unknown_symbol_is_reported(): void

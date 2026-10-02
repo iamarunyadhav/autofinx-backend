@@ -9,22 +9,31 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
+use InvalidArgumentException;
 use RuntimeException;
 use Symfony\Component\Process\Process;
 use Throwable;
 
 /**
- * One training attempt for one symbol × horizon:
- * export mature rows → python walk-forward trainer → CANDIDATE → promotion
- * policy → CHAMPION or REJECTED. Any failure records a FAILED row and leaves
- * the current champion exactly as it was.
+ * One training attempt for one symbol × horizon × candidate type:
+ * export mature rows (+ per-row funding) → python trainer → CANDIDATE →
+ * type-specific promotion policy → CHAMPION or REJECTED. Any failure records
+ * a FAILED row and leaves the current champion exactly as it was.
  */
 class MlShadowTrainer
 {
+    public const TYPE_REGRESSION = 'regression';
+
+    public const TYPE_SIDE_CLASSIFIER = 'side_classifier';
+
+    public const TYPES = [self::TYPE_REGRESSION, self::TYPE_SIDE_CLASSIFIER];
+
     public function __construct(
         private readonly MlModelRegistry $registry,
         private readonly PromotionPolicy $policy,
+        private readonly ClassifierPromotionPolicy $classifierPolicy,
         private readonly QuickTradeCostModel $costModel,
+        private readonly FundingRateService $funding,
     ) {}
 
     public static function lockKey(string $symbol, int $horizon): string
@@ -32,50 +41,64 @@ class MlShadowTrainer
         return 'ml:shadow:train:'.strtoupper($symbol).':h'.$horizon;
     }
 
-    public function train(string $symbol, int $horizon): MlModel
+    /** @return list<string> */
+    public static function configuredTypes(): array
     {
+        $types = array_values(array_intersect((array) config('ml.training.candidate_types', [self::TYPE_SIDE_CLASSIFIER]), self::TYPES));
+
+        return $types === [] ? [self::TYPE_SIDE_CLASSIFIER] : $types;
+    }
+
+    public function train(string $symbol, int $horizon, string $type = self::TYPE_REGRESSION): MlModel
+    {
+        if (! in_array($type, self::TYPES, true)) {
+            throw new InvalidArgumentException("Unknown candidate type: {$type}");
+        }
         $lock = Cache::lock(self::lockKey($symbol, $horizon), (int) config('ml.training.timeout_seconds', 1800) + 300);
         if (! $lock->get()) {
             throw new RuntimeException("Training already running for {$symbol} h{$horizon}.");
         }
 
         try {
-            return $this->trainLocked($symbol, $horizon);
+            return $this->trainLocked($symbol, $horizon, $type);
         } finally {
             $lock->release();
         }
     }
 
-    private function trainLocked(string $symbol, int $horizon): MlModel
+    private function trainLocked(string $symbol, int $horizon, string $type): MlModel
     {
         $timeframe = (string) config('ml.base_timeframe', '5m');
         $modelId = (string) Str::uuid();
         $directory = rtrim((string) config('ml.training.artifact_dir'), '/\\').DIRECTORY_SEPARATOR.MlModelRegistry::championKey($symbol, $horizon).DIRECTORY_SEPARATOR.$modelId;
         $model = MlModel::query()->create([
             'id' => $modelId, 'symbol' => $symbol, 'horizon_minutes' => $horizon, 'timeframe' => $timeframe,
-            'feature_schema_version' => ShadowFeatureBuilder::SCHEMA_VERSION, 'status' => 'TRAINING',
+            'feature_schema_version' => ShadowFeatureBuilder::SCHEMA_VERSION, 'model_type' => $type, 'status' => 'TRAINING',
             'artifact_dir' => $directory,
         ]);
 
         try {
             $export = $this->export($symbol, $horizon, $timeframe, $modelId);
             $champion = $this->registry->champion($symbol, $horizon);
-            $metadata = $this->runTrainer($export, $directory, $champion);
+            $metadata = $this->runTrainer($export, $directory, $champion, $type);
             if (($metadata['feature_schema_version'] ?? null) !== ShadowFeatureBuilder::SCHEMA_VERSION
                 || ($metadata['features'] ?? null) !== ShadowFeatureBuilder::FEATURES
+                || ($metadata['model_type'] ?? self::TYPE_REGRESSION) !== $type
                 || (int) ($metadata['horizon_minutes'] ?? 0) !== $horizon || ($metadata['symbol'] ?? null) !== $symbol) {
-                throw new RuntimeException('Trained model schema/scope does not match the current feature builder, symbol and horizon.');
+                throw new RuntimeException('Trained model schema/scope/type does not match the current feature builder, symbol, horizon and candidate type.');
             }
             $model = $this->registry->registerCandidate($model, $metadata);
 
-            $decision = $this->policy->decide($metadata, $champion !== null);
-            $comparison = $decision['checks'] + ['champion_model_version' => $champion?->model_version];
+            $decision = $type === self::TYPE_SIDE_CLASSIFIER
+                ? $this->classifierPolicy->decide($metadata, $champion !== null, $horizon)
+                : $this->policy->decide($metadata, $champion !== null);
+            $comparison = $decision['checks'] + ['champion_model_version' => $champion?->model_version, 'champion_model_type' => $champion?->model_type];
             $result = $decision['promote']
                 ? $this->registry->promote($model, $decision['reason'], $comparison)
                 : $this->registry->reject($model, $decision['reason'], $comparison);
 
             Log::info('ml.shadow.training_decision', [
-                'symbol' => $symbol, 'horizon_minutes' => $horizon, 'model_version' => $result->model_version,
+                'symbol' => $symbol, 'horizon_minutes' => $horizon, 'model_type' => $type, 'model_version' => $result->model_version,
                 'status' => $result->status, 'reason' => $decision['reason'], 'champion_model_version' => $champion?->model_version,
             ]);
             @unlink($export['data']);
@@ -83,7 +106,7 @@ class MlShadowTrainer
             return $result;
         } catch (Throwable $exception) {
             $model->forceFill(['status' => 'FAILED', 'decision_reason' => mb_substr($exception->getMessage(), 0, 2000)])->save();
-            Log::warning('ml.shadow.training_failed', ['symbol' => $symbol, 'horizon_minutes' => $horizon, 'error' => $exception->getMessage()]);
+            Log::warning('ml.shadow.training_failed', ['symbol' => $symbol, 'horizon_minutes' => $horizon, 'model_type' => $type, 'error' => $exception->getMessage()]);
 
             throw $exception;
         }
@@ -105,15 +128,20 @@ class MlShadowTrainer
             ->where('l.status', 'MATURE');
     }
 
-    /** @return array{data:string, manifest:string, rows:int} */
-    public function export(string $symbol, int $horizon, string $timeframe, string $name): array
+    /**
+     * Rows: t (anchor ms), x (features of $schema, inputs only), y (future
+     * return, fraction) and fb (actual BUY-side funding over (T, T+h], %).
+     * fb/y are outcomes for labels and P&L — never model inputs.
+     *
+     * @return array{data:string, manifest:string, rows:int}
+     */
+    public function export(string $symbol, int $horizon, string $timeframe, string $name, string $schema = ShadowFeatureBuilder::SCHEMA_VERSION): array
     {
-        $schema = ShadowFeatureBuilder::SCHEMA_VERSION;
         $directory = (string) config('ml.training.export_dir');
         if (! is_dir($directory) && ! mkdir($directory, 0750, true) && ! is_dir($directory)) {
             throw new RuntimeException('Unable to create ML export directory.');
         }
-
+        $names = ShadowFeatureBuilder::features($schema);
         $base = self::matureTrainingRows($symbol, $horizon, $timeframe, $schema);
 
         $total = (clone $base)->count();
@@ -122,6 +150,9 @@ class MlShadowTrainer
             $from = (clone $base)->orderBy('l.anchor_time_ms')->offset($total - $max)->limit(1)->value('l.anchor_time_ms');
             $base->where('l.anchor_time_ms', '>=', (int) $from);
         }
+
+        $anchors = (clone $base)->orderBy('l.anchor_time_ms')->pluck('l.anchor_time_ms')->map(fn ($v) => (int) $v)->all();
+        $fundingBuy = $this->funding->buyCostPct($symbol, $anchors, $horizon * 60_000);
 
         $dataPath = $directory.DIRECTORY_SEPARATOR.$name.'.jsonl';
         $handle = fopen($dataPath, 'wb');
@@ -134,8 +165,9 @@ class MlShadowTrainer
                 $features = json_decode((string) $row->features, true, 512, JSON_THROW_ON_ERROR);
                 fwrite($handle, json_encode([
                     't' => (int) $row->anchor_time_ms,
-                    'x' => array_map(static fn (string $f): float => (float) $features[$f], ShadowFeatureBuilder::FEATURES),
+                    'x' => array_map(static fn (string $f): float => (float) $features[$f], $names),
                     'y' => (float) $row->future_return,
+                    'fb' => $fundingBuy[(int) $row->anchor_time_ms] ?? 0.0,
                 ], JSON_THROW_ON_ERROR)."\n");
                 $rows++;
             }
@@ -148,8 +180,11 @@ class MlShadowTrainer
         file_put_contents($manifestPath, json_encode([
             'symbol' => $symbol, 'horizon_minutes' => $horizon, 'timeframe' => $timeframe,
             'horizon_steps' => intdiv($horizon * 60_000, MlCandleCollector::intervalMs($timeframe)),
-            'feature_schema_version' => $schema, 'features' => ShadowFeatureBuilder::FEATURES, 'rows' => $rows,
+            'step_ms' => MlCandleCollector::intervalMs($timeframe),
+            'feature_schema_version' => $schema, 'features' => $names, 'rows' => $rows,
             'cost_pct' => $costs['cost_pct'], 'required_move_pct' => $costs['required_move_pct'],
+            'probability_floor' => (float) config('ml.classifier.probability_floor', 0.55),
+            'funding_rows_covered' => count(array_filter($fundingBuy, static fn (float $v): bool => $v !== 0.0)),
             'cost_source' => 'QuickTradeCostModel:'.$costs['fee_model'].':'.$costs['fee_rate_source'],
         ], JSON_PRETTY_PRINT | JSON_THROW_ON_ERROR));
 
@@ -160,12 +195,12 @@ class MlShadowTrainer
      * @param  array{data:string, manifest:string, rows:int}  $export
      * @return array<string, mixed>
      */
-    protected function runTrainer(array $export, string $directory, ?MlModel $champion): array
+    protected function runTrainer(array $export, string $directory, ?MlModel $champion, string $type = self::TYPE_REGRESSION): array
     {
         $python = (string) config('ml.training.python_bin');
-        $script = (string) config('ml.training.script');
+        $script = (string) config($type === self::TYPE_SIDE_CLASSIFIER ? 'ml.training.classifier_script' : 'ml.training.script');
         if (! is_file($python) || ! is_file($script)) {
-            throw new RuntimeException('ML trainer is not installed; check AUTOFINX_ML_PYTHON_BIN and external-predictive-engine/train_shadow_horizon.py.');
+            throw new RuntimeException("ML trainer is not installed; check AUTOFINX_ML_PYTHON_BIN and {$script}.");
         }
         $command = [$python, $script, '--input', $export['data'], '--manifest', $export['manifest'], '--output-dir', $directory];
         if ($champion && is_dir((string) $champion->artifact_dir)) {
@@ -183,6 +218,7 @@ class MlShadowTrainer
         if (! is_file($metadataPath)) {
             throw new RuntimeException('ML shadow trainer produced no metadata.');
         }
+
         return json_decode((string) file_get_contents($metadataPath), true, 512, JSON_THROW_ON_ERROR);
     }
 }

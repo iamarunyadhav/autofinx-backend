@@ -22,6 +22,16 @@ class MlModelRegistry
 {
     public const ARTIFACT_FILES = ['model' => 'model.txt', 'q10' => 'q10.txt', 'q90' => 'q90.txt'];
 
+    public const CLASSIFIER_ARTIFACT_FILES = ['buy' => 'buy.txt', 'sell' => 'sell.txt'];
+
+    /** @return array<string, string> role => file for this model's type */
+    public static function artifactFiles(MlModel $model): array
+    {
+        return ($model->model_type ?? 'regression') === MlShadowTrainer::TYPE_SIDE_CLASSIFIER
+            ? self::CLASSIFIER_ARTIFACT_FILES
+            : self::ARTIFACT_FILES;
+    }
+
     public function champion(string $symbol, int $horizon): ?MlModel
     {
         $pointer = MlChampion::query()->where('symbol', $symbol)->where('horizon_minutes', $horizon)->first();
@@ -33,7 +43,7 @@ class MlModelRegistry
     public function registerCandidate(MlModel $model, array $metadata): MlModel
     {
         $checksums = [];
-        foreach (self::ARTIFACT_FILES as $role => $file) {
+        foreach (self::artifactFiles($model) as $role => $file) {
             $path = $model->artifact_dir.DIRECTORY_SEPARATOR.$file;
             if (! is_file($path)) {
                 throw new RuntimeException("Trainer did not produce {$file}.");
@@ -47,7 +57,7 @@ class MlModelRegistry
             'status' => 'CANDIDATE',
             // Version identity is the artifact content itself: a different
             // model can never inherit another model's live evaluation.
-            'model_version' => 'qtml-'.substr($checksums['model'], 0, 12).'-'.substr(str_replace('-', '', (string) $model->id), 0, 6),
+            'model_version' => 'qtml-'.substr($checksums['model'] ?? hash('sha256', $checksums['buy'].$checksums['sell']), 0, 12).'-'.substr(str_replace('-', '', (string) $model->id), 0, 6),
             'training_window_from_ms' => (int) data_get($metadata, 'training_window_from_ms'),
             'training_window_to_ms' => (int) data_get($metadata, 'training_window_to_ms'),
             'total_samples' => (int) data_get($metadata, 'rows', 0),
@@ -58,6 +68,13 @@ class MlModelRegistry
                 'holdout_to_ms' => (int) data_get($metadata, 'holdout_to_ms'),
                 'best_iteration' => data_get($metadata, 'best_iteration'),
                 'cost_assumptions' => data_get($metadata, 'cost_assumptions'),
+                // Side classifiers: expected-value params the live decision uses
+                // (calibration maps themselves are served from the manifest).
+                'decision_params' => is_array($metadata['sides'] ?? null) ? [
+                    'probability_floor' => $metadata['probability_floor'] ?? null,
+                    'buy' => array_intersect_key((array) $metadata['sides']['buy'], array_flip(['avg_win_pct', 'avg_other_pct', 'base_rate'])),
+                    'sell' => array_intersect_key((array) $metadata['sides']['sell'], array_flip(['avg_win_pct', 'avg_other_pct', 'base_rate'])),
+                ] : null,
             ],
             'artifact_checksums' => $checksums,
             'trained_at' => now('UTC'),
@@ -146,7 +163,7 @@ class MlModelRegistry
 
     private function assertIntegrity(MlModel $model): void
     {
-        foreach (self::ARTIFACT_FILES + ['metadata' => 'metadata.json'] as $role => $file) {
+        foreach (self::artifactFiles($model) + ['metadata' => 'metadata.json'] as $role => $file) {
             $path = $model->artifact_dir.DIRECTORY_SEPARATOR.$file;
             $expected = (string) data_get($model->artifact_checksums, $role);
             if ($expected === '' || ! is_file($path) || hash_file('sha256', $path) !== $expected) {
@@ -165,7 +182,7 @@ class MlModelRegistry
         $key = self::championKey($model->symbol, (int) $model->horizon_minutes);
         $staged = [];
         $files = [];
-        foreach (self::ARTIFACT_FILES as $role => $file) {
+        foreach (self::artifactFiles($model) as $role => $file) {
             // Version-specific file names: a reader holding the old manifest
             // keeps resolving the old files until the new manifest lands.
             $name = $key.'.'.$model->model_version.'.'.$file;
@@ -191,6 +208,10 @@ class MlModelRegistry
             'feature_schema_version' => $model->feature_schema_version,
             'features' => $metadata['features'] ?? [],
             'target_unit' => $metadata['target_unit'] ?? 'return_pct',
+            'model_type' => $model->model_type ?? 'regression',
+            // Classifier serving needs its calibration maps and EV params.
+            'sides' => $metadata['sides'] ?? null,
+            'probability_floor' => $metadata['probability_floor'] ?? null,
             'files' => $files,
             'execution' => false,
             'influence' => false,

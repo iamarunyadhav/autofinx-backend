@@ -54,11 +54,19 @@ final class TrainMlShadowModelJob implements ShouldQueue, ShouldBeUnique
             return;
         }
 
-        try {
-            $trainer->train($this->symbol, $this->horizonMinutes);
-        } catch (RuntimeException $exception) {
+        // Each configured candidate type is its own attempt; one type failing
+        // (recorded as a FAILED row) does not stop the others.
+        $failure = null;
+        foreach (MlShadowTrainer::configuredTypes() as $type) {
+            try {
+                $trainer->train($this->symbol, $this->horizonMinutes, $type);
+            } catch (RuntimeException $exception) {
+                $failure = $exception;
+            }
+        }
+        if ($failure) {
             // Already recorded as a FAILED registry row; do not retry-loop.
-            $this->fail($exception);
+            $this->fail($failure);
         }
     }
 }

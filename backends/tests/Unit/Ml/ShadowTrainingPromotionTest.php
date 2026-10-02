@@ -2,7 +2,9 @@
 
 namespace Tests\Unit\Ml;
 
+use App\Domain\Ml\Shadow\ClassifierPromotionPolicy;
 use App\Domain\Ml\Shadow\FeatureLabelService;
+use App\Domain\Ml\Shadow\FundingRateService;
 use App\Domain\Ml\Shadow\MlModelRegistry;
 use App\Domain\Ml\Shadow\MlShadowTrainer;
 use App\Domain\Ml\Shadow\PromotionPolicy;
@@ -32,16 +34,16 @@ final class ShadowTrainingPromotionTest extends TestCase
         config(['ml.training.min_total_mature_labels' => 50, 'ml.training.min_new_mature_labels' => 20, 'ml.promotion.min_holdout_rows' => 10]);
 
         $test = $this;
-        $this->app->bind(MlShadowTrainer::class, fn ($app) => new class($app->make(MlModelRegistry::class), $app->make(PromotionPolicy::class), $app->make(QuickTradeCostModel::class), $test) extends MlShadowTrainer
+        $this->app->bind(MlShadowTrainer::class, fn ($app) => new class($app->make(MlModelRegistry::class), $app->make(PromotionPolicy::class), $app->make(ClassifierPromotionPolicy::class), $app->make(QuickTradeCostModel::class), $app->make(FundingRateService::class), $test) extends MlShadowTrainer
         {
-            public function __construct($registry, $policy, $costs, private readonly ShadowTrainingPromotionTest $test)
+            public function __construct($registry, $policy, $classifierPolicy, $costs, $funding, private readonly ShadowTrainingPromotionTest $test)
             {
-                parent::__construct($registry, $policy, $costs);
+                parent::__construct($registry, $policy, $classifierPolicy, $costs, $funding);
             }
 
-            protected function runTrainer(array $export, string $directory, $champion): array
+            protected function runTrainer(array $export, string $directory, ?MlModel $champion, string $type = self::TYPE_REGRESSION): array
             {
-                return $this->test->fakeTrainerRun($directory, $champion);
+                return $this->test->fakeTrainerRun($directory, $champion, $type);
             }
         });
     }
@@ -53,14 +55,15 @@ final class ShadowTrainingPromotionTest extends TestCase
     }
 
     /** @internal called by the fake trainer */
-    public function fakeTrainerRun(string $directory, $champion): array
+    public function fakeTrainerRun(string $directory, $champion, string $type = MlShadowTrainer::TYPE_REGRESSION): array
     {
         $metadata = array_shift($this->runs);
         if ($metadata instanceof \Throwable) {
             throw $metadata;
         }
         File::ensureDirectoryExists($directory);
-        foreach (['model.txt', 'q10.txt', 'q90.txt'] as $file) {
+        $files = $type === MlShadowTrainer::TYPE_SIDE_CLASSIFIER ? ['buy.txt', 'sell.txt'] : ['model.txt', 'q10.txt', 'q90.txt'];
+        foreach ($files as $file) {
             file_put_contents($directory.'/'.$file, $file.'-'.uniqid('', true));
         }
         file_put_contents($directory.'/metadata.json', json_encode($metadata));
@@ -116,7 +119,7 @@ final class ShadowTrainingPromotionTest extends TestCase
         Queue::fake();
         $this->seedMatureLabels(400);
         $this->artisan('ml:retrain:check', ['--symbol' => ['BTCUSDT']])->assertSuccessful();
-        Queue::assertPushed(TrainMlShadowModelJob::class, 3);
+        Queue::assertPushed(TrainMlShadowModelJob::class, 4); // 60, 120, 240, 1440
     }
 
     public function test_first_candidate_becomes_champion_with_checksummed_artifacts(): void

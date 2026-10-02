@@ -158,9 +158,34 @@ final class ShadowPredictionEvaluationTest extends TestCase
         $evaluation = app(ShadowEvaluationService::class);
 
         $this->assertSame(60, $service->payload('BTCUSDT', 3600, $evaluation)['horizon_minutes']);
-        $this->assertSame('NO_CHAMPION', $service->payload('BTCUSDT', 900, $evaluation)['status']); // no h15 model: never borrows h60
-        $this->assertSame('UNSUPPORTED_DURATION', $service->payload('BTCUSDT', 300, $evaluation)['status']);
+        $this->assertSame('READY', $service->payload('BTCUSDT', 3600, $evaluation)['status']);
+        // 2h / 4h / 1d each map to their OWN horizon — none borrows the h60 model.
+        foreach ([7200 => 120, 14400 => 240, 86400 => 1440] as $seconds => $horizon) {
+            $payload = $service->payload('BTCUSDT', $seconds, $evaluation);
+            $this->assertSame($horizon, $payload['horizon_minutes']);
+            $this->assertSame('NO_CHAMPION', $payload['status']);
+            $this->assertArrayNotHasKey('prediction', $payload);
+        }
+        // 15m and shorter: explicit cost message, no model at all.
+        foreach ([900, 300, 60] as $seconds) {
+            $payload = $service->payload('BTCUSDT', $seconds, $evaluation);
+            $this->assertSame('COST_EXCEEDS_MOVE', $payload['status']);
+            $this->assertSame(ShadowPredictionService::COST_EXCEEDS_MOVE_MESSAGE, $payload['message']);
+            $this->assertNull($payload['horizon_minutes']);
+        }
         $this->assertSame('UNSUPPORTED_DURATION', $service->payload('BTCUSDT', 1800, $evaluation)['status']);
+    }
+
+    public function test_fifteen_minute_horizon_produces_no_predictions(): void
+    {
+        $this->champion(15); // historical h15 champion stays in the registry...
+        $this->fakePython(['predicted_return' => 0.02]);
+
+        $this->artisan('ml:shadow:predict', ['--symbol' => ['BTCUSDT']])->assertSuccessful();
+
+        // ...but 15 is not a configured horizon, so nothing is predicted for it.
+        $this->assertSame(0, MlShadowPrediction::query()->where('horizon_minutes', 15)->count());
+        Http::assertNotSent(fn ($request) => ($request['horizon_minutes'] ?? null) === 15);
     }
 
     public function test_scoring_uses_the_exact_target_close_and_metrics_need_minimum_samples(): void

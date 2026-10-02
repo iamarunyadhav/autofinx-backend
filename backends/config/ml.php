@@ -26,9 +26,20 @@ return [
     // multiples of it so every label lands on a real candle close.
     'base_timeframe' => '5m',
     'base_interval_seconds' => 300,
-    // Live Quick Trade hides <15m expiries and the fee gate makes shorter
-    // horizons non-viable. Add more here later; each is its own model.
-    'horizons_minutes' => array_values(array_map('intval', array_filter(array_map('trim', explode(',', (string) env('AUTOFINX_ML_HORIZONS_MINUTES', '15,60,240')))))),
+    // Phase 3: long horizons only. At 15m the round-trip cost (~0.18% required
+    // move) eats most of the typical BTC/ETH move (~0.15-0.21%), so 15m is no
+    // longer trained or predicted; its history stays in the registry. Each
+    // horizon is its own model and is never relabelled for another expiry.
+    'horizons_minutes' => array_values(array_map('intval', array_filter(array_map('trim', explode(',', (string) env('AUTOFINX_ML_HORIZONS_MINUTES', '60,120,240,1440')))))),
+    // Quick Trade expiries at or below this get the "costs exceed the typical
+    // move" message instead of a model.
+    'cost_exceeds_move_max_seconds' => (int) env('AUTOFINX_ML_COST_EXCEEDS_MOVE_MAX_SECONDS', 900),
+
+    'funding' => [
+        // Binance USDT-M funding settles every 8h (00:00/08:00/16:00 UTC).
+        'interval_hours' => 8,
+        'default_months' => 12,
+    ],
 
     'binance' => [
         'base_url' => env('AUTOFINX_ML_BINANCE_FUTURES_URL', env('BINANCE_FUTURES_API_URL', 'https://fapi.binance.com')),
@@ -56,6 +67,11 @@ return [
     'training' => [
         'python_bin' => env('AUTOFINX_ML_PYTHON_BIN', env('AUTOFINX_FRESH_PYTHON_BIN', base_path('external-predictive-engine/.venv/bin/python'))),
         'script' => base_path('external-predictive-engine/train_shadow_horizon.py'),
+        'classifier_script' => base_path('external-predictive-engine/train_side_classifier.py'),
+        'analysis_script' => base_path('external-predictive-engine/analyze_signals.py'),
+        // Candidate types the daily retrain trains per symbol×horizon.
+        // 'side_classifier' (Phase 3) and/or 'regression' (Phase 1/2).
+        'candidate_types' => array_values(array_filter(array_map('trim', explode(',', (string) env('AUTOFINX_ML_CANDIDATE_TYPES', 'side_classifier'))))),
         'timeout_seconds' => (int) env('AUTOFINX_ML_TRAINING_TIMEOUT_SECONDS', 1800),
         // Dedicated connection/queue (config/queue.php `ml_training`) so a long
         // training run never occupies a trading or analytics worker.
@@ -85,6 +101,25 @@ return [
         'min_mae_improvement_vs_champion' => (float) env('AUTOFINX_ML_MIN_MAE_IMPROVEMENT_VS_CHAMPION', 0.005),
         'min_holdout_rows' => (int) env('AUTOFINX_ML_MIN_HOLDOUT_ROWS', 2000),
         'min_walk_forward_folds' => 3,
+        // Side classifiers are gated on a NON-overlapping fee+funding-aware
+        // trade simulation, never on MAE.
+        'classifier' => [
+            // Minimum non-overlapping holdout trades per horizon (the holdout is
+            // ~55 days: at most ~55 independent 1d trades exist).
+            'min_trades' => [60 => 30, 120 => 20, 240 => 15, 1440 => 8],
+            'default_min_trades' => 20,
+            // Share of walk-forward folds whose non-overlapping net must be > 0.
+            'min_positive_fold_share' => (float) env('AUTOFINX_ML_MIN_POSITIVE_FOLD_SHARE', 0.67),
+            // A challenger's holdout net (sum of % per trade) must beat the
+            // champion's on the same simulation by at least this much.
+            'min_net_improvement_vs_champion_pct' => (float) env('AUTOFINX_ML_MIN_NET_IMPROVEMENT_VS_CHAMPION_PCT', 0.5),
+        ],
+    ],
+
+    'classifier' => [
+        // A side is only taken when its calibrated probability reaches this
+        // floor AND its expected net (after costs + funding) is positive.
+        'probability_floor' => (float) env('AUTOFINX_ML_CLASSIFIER_PROBABILITY_FLOOR', 0.55),
     ],
 
     'predictor' => [

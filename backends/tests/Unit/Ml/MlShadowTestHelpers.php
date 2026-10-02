@@ -13,7 +13,7 @@ trait MlShadowTestHelpers
         config([
             'ml.enabled' => true,
             'ml.symbols' => ['BTCUSDT', 'ETHUSDT'],
-            'ml.horizons_minutes' => [15, 60, 240],
+            'ml.horizons_minutes' => [60, 120, 240, 1440],
             'ml.binance.backfill_page_sleep_ms' => 0,
             'future_trade.binance_rest.min_interval_ms' => 0,
             'ml.training.artifact_dir' => storage_path('framework/testing/ml-shadow/models'),
