@@ -54,6 +54,14 @@ class LiveWalletController extends Controller
             ->get();
 
         $accounts->each(function (WalletAccount $account) use ($workspaceId, $liveWallet, $settings, $integrations) {
+            // A paper wallet is practice money with its own ledger; it must
+            // never be "refreshed" from an exchange (in live mode that would
+            // overwrite the paper balance with the exchange's balance for
+            // the same currency — usually 0 for USD).
+            if (strtolower((string) $account->wallet_type) === 'paper') {
+                return;
+            }
+
             $integrationId = (string) (($account->metadata ?? [])['integration_id'] ?? '');
 
             $lastSyncAt = (($account->metadata ?? [])['last_provider_sync_at']) ?? null;

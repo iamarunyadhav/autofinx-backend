@@ -8,6 +8,7 @@ use App\Domain\MarketIntelligence\UnifiedForecastEngine;
 use App\Domain\MarketIntelligence\UnifiedForecastLiveGate;
 use App\Domain\Ops\FeatureFlagService;
 use App\Domain\Trading\ForecastLiveEvidenceService;
+use App\Domain\Trading\PaperWalletService;
 use App\Domain\Trading\QuickTradeService;
 use App\Domain\Trading\RuntimeSafetySettingsService;
 use App\Domain\Trading\TradeForecastService;
@@ -26,6 +27,28 @@ use Throwable;
 class QuickTradeController extends Controller
 {
     use AssertsWorkspaceMembership;
+
+    /**
+     * Reset the workspace's Quick Trade PAPER wallet to its starting balance.
+     * Practice money only — never touches an exchange, a live wallet or an
+     * order. Workspace membership is required.
+     */
+    public function resetPaperWallet(Request $request, string $workspace, PaperWalletService $wallets)
+    {
+        $this->assertWorkspaceMembership($request, $workspace);
+        try {
+            $account = $wallets->reset($workspace);
+        } catch (\RuntimeException $exception) {
+            return response()->json(['message' => $exception->getMessage()], 422);
+        }
+
+        return response()->json([
+            'wallet' => [
+                'id' => $account->id, 'name' => $account->name, 'currency' => $account->currency,
+                'wallet_type' => $account->wallet_type, 'balance' => (float) $account->balance, 'available' => (float) $account->available,
+            ],
+        ]);
+    }
 
     public function metadata(Request $request, TradingModuleSettingsService $settings)
     {

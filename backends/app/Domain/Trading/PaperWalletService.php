@@ -4,6 +4,7 @@ namespace App\Domain\Trading;
 
 use App\Models\Ledger;
 use App\Models\LedgerTransaction;
+use App\Models\QuickTrade;
 use App\Models\WalletAccount;
 use App\Models\WalletLedgerEntry;
 use Illuminate\Support\Facades\DB;
@@ -65,6 +66,31 @@ class PaperWalletService
         ]);
 
         return $this->bootstrapPaperState($workspaceId, $account, $currency, $initialBalance);
+    }
+
+    /**
+     * Reset the workspace's paper wallet to the configured starting balance
+     * (paper_wallet.initial_balance, default 10,000). Creates the wallet if
+     * it does not exist yet. Recorded as a normal ledger adjustment so the
+     * paper ledger stays consistent. Refused while any paper trade is still
+     * open — its settlement would otherwise land on top of the reset.
+     */
+    public function reset(string $workspaceId): WalletAccount
+    {
+        if (QuickTrade::where('workspace_id', $workspaceId)->where('mode', 'paper')->where('status', 'open')->exists()) {
+            throw new RuntimeException('Close or wait for all open paper trades to settle before resetting the paper wallet.');
+        }
+        $account = $this->resolveAccount($workspaceId);
+        $initial = (float) ($this->settings->walletConfig($workspaceId)['initial_balance'] ?? 10000);
+        $delta = round($initial - (float) $account->balance, 8);
+        if (abs($delta) < 0.000001) {
+            return $account->fresh();
+        }
+
+        return $this->postAmount($workspaceId, $account->id, $delta, 'paper_wallet_reset', [
+            'reason' => 'manual_paper_wallet_reset',
+            'reset_to' => $initial,
+        ]);
     }
 
     public function debitStake(string $workspaceId, ?string $walletAccountId, float $amount, array $meta = []): WalletAccount

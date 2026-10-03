@@ -249,6 +249,10 @@ class LiveWalletService
 
     public function refreshProviderSnapshot(WalletAccount $account, Integration $integration): WalletAccount
     {
+        // Defence in depth: exchange balances never overwrite a paper wallet.
+        if (strtolower((string) $account->wallet_type) === 'paper') {
+            return $account;
+        }
         $provider = $this->providers->for((string) $integration->provider_key);
         $snapshot = $provider->availableBalance($integration, (string) ($account->currency ?: 'USDT'));
         $balance = (float) ($snapshot['balance'] ?? 0);

@@ -175,6 +175,8 @@ Route::prefix('v1')->group(function () {
         Route::get('workspaces/{workspace}/ledger', [TradingController::class, 'ledger']);
         Route::get('workspaces/{workspace}/ledger/export.csv', [TradingController::class, 'exportLedger']);
         Route::get('quick-trade/metadata', [QuickTradeController::class, 'metadata']);
+        // Paper practice wallet only — resets to paper_wallet.initial_balance.
+        Route::post('workspaces/{workspace}/quick-trade/paper-wallet/reset', [QuickTradeController::class, 'resetPaperWallet'])->middleware('throttle:10,1');
         Route::get('runtime/health', [RuntimeHealthController::class, 'show']);
         Route::post('runtime/repair', [RuntimeHealthController::class, 'repair'])->middleware(['require.2fa', 'throttle:5,1']);
         Route::get('quick-trade/chart', [QuickTradeController::class, 'chart']);
