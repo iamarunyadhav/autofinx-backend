@@ -113,6 +113,11 @@ return [
             // A challenger's holdout net (sum of % per trade) must beat the
             // champion's on the same simulation by at least this much.
             'min_net_improvement_vs_champion_pct' => (float) env('AUTOFINX_ML_MIN_NET_IMPROVEMENT_VS_CHAMPION_PCT', 0.5),
+            // Average holdout net per trade (after fees + funding) must clear
+            // this, so a little extra slippage cannot erase the edge.
+            'min_avg_net_per_trade_pct' => (float) env('AUTOFINX_ML_MIN_AVG_NET_PER_TRADE_PCT', 0.10),
+            // One-sample t-statistic of per-trade net; 1.65 ≈ 95% one-sided.
+            'min_t_stat' => (float) env('AUTOFINX_ML_MIN_T_STAT', 1.65),
         ],
     ],
 

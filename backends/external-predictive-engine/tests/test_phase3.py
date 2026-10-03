@@ -32,6 +32,16 @@ def test_non_overlapping_simulation_never_holds_two_positions():
     assert sim["total_net_pct"] == pytest.approx(9 * (0.5 - 0.1))
 
 
+def test_t_stat_separates_a_consistent_edge_from_noise():
+    times = [i * HOUR for i in range(40)]
+    consistent = shadow_sim.simulate(times, [1] * 40, [0.40 + 0.05 * (i % 3) for i in range(40)], [0.0] * 40, 0.1, HOUR)
+    noisy = shadow_sim.simulate(times, [1] * 40, [3.0 if i % 2 else -2.6 for i in range(40)], [0.0] * 40, 0.1, HOUR)
+    assert consistent["t_stat"] > 10
+    assert noisy["average_net_pct"] > 0 and noisy["t_stat"] < 1.65   # positive on average, but luck can't be ruled out
+    single = shadow_sim.simulate([0], [1], [1.0], [0.0], 0.1, HOUR)
+    assert single["t_stat"] is None and single["std_net_pct"] is None
+
+
 def test_funding_sign_per_side_in_simulation():
     times, returns, funding = [0], [1.0], [0.02]
     buy = shadow_sim.simulate(times, [1], returns, funding, 0.1, HOUR)

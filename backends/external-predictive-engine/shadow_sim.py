@@ -39,6 +39,14 @@ def simulate(
         open_until = int(t) + int(horizon_ms)
     nets = [trade["net_pct"] for trade in trades]
     count = len(trades)
+    # Per-trade spread and a one-sample t-statistic of the mean net (H0: mean <= 0).
+    # A thin edge over few trades is indistinguishable from luck; the gate uses this.
+    std = None
+    t_stat = None
+    if count >= 2:
+        mean = sum(nets) / count
+        std = (sum((net - mean) ** 2 for net in nets) / (count - 1)) ** 0.5
+        t_stat = float(mean / (std / count ** 0.5)) if std > 0 else None
     return {
         "raw_signals": raw,
         "trades": count,
@@ -47,6 +55,8 @@ def simulate(
         "total_net_pct": float(sum(nets)),
         "average_net_pct": float(sum(nets) / count) if count else None,
         "net_win_rate_pct": float(sum(1 for net in nets if net > 0) / count * 100) if count else None,
+        "std_net_pct": float(std) if std is not None else None,
+        "t_stat": t_stat,
         "trade_list": trades,
     }
 

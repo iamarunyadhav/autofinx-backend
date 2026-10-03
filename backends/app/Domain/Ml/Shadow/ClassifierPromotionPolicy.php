@@ -17,6 +17,10 @@ namespace App\Domain\Ml\Shadow;
  *      simulation, on the holdout AND across the folds combined — so a model
  *      that only rides the holdout's trend is rejected; a tie is a rejection
  *   e) beats the current champion on the same holdout by the configured margin
+ *   f) average net per trade >= ml.promotion.classifier.min_avg_net_per_trade_pct
+ *      (a thin edge is wiped out by a little extra slippage)
+ *   g) one-sample t-statistic of the per-trade net >= min_t_stat, so a small
+ *      positive total over few trades (indistinguishable from luck) is rejected
  */
 final class ClassifierPromotionPolicy
 {
@@ -44,6 +48,7 @@ final class ClassifierPromotionPolicy
             'evaluation' => 'non_overlapping_after_fees_slippage_funding',
             'holdout_trades' => $trades, 'holdout_raw_signals' => (int) ($sim['raw_signals'] ?? 0),
             'holdout_net_pct' => $net, 'holdout_net_win_rate_pct' => $sim['net_win_rate_pct'] ?? null,
+            'holdout_average_net_pct' => $sim['average_net_pct'] ?? null, 'holdout_t_stat' => $sim['t_stat'] ?? null,
             'min_trades' => $minTrades, 'folds' => count($folds), 'positive_folds' => $positiveFolds,
             'fold_net_pct' => $foldNet,
             'always_buy_net_pct' => (float) data_get($baselines, 'always_buy.total_net_pct', 0),
@@ -62,6 +67,13 @@ final class ClassifierPromotionPolicy
         }
         if ($trades < $minTrades) {
             return $this->reject('too_few_non_overlapping_trades', $checks);
+        }
+        if ((float) ($sim['average_net_pct'] ?? 0.0) < (float) config('ml.promotion.classifier.min_avg_net_per_trade_pct', 0.10)) {
+            return $this->reject('average_net_per_trade_too_thin', $checks);
+        }
+        $tStat = $sim['t_stat'] ?? null;
+        if (! is_numeric($tStat) || (float) $tStat < (float) config('ml.promotion.classifier.min_t_stat', 1.65)) {
+            return $this->reject('edge_not_statistically_significant', $checks);
         }
         if ($foldShare < (float) config('ml.promotion.classifier.min_positive_fold_share', 0.67)) {
             return $this->reject('net_not_positive_across_folds', $checks);

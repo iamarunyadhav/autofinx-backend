@@ -111,7 +111,8 @@ final class ShadowPhase3Test extends TestCase
             'model_type' => 'side_classifier',
             'metrics' => [
                 'holdout' => [
-                    'non_overlapping' => ['total_net_pct' => $net, 'trades' => $trades, 'raw_signals' => $trades * 7, 'net_win_rate_pct' => 55],
+                    'non_overlapping' => ['total_net_pct' => $net, 'trades' => $trades, 'raw_signals' => $trades * 7, 'net_win_rate_pct' => 55,
+                        'average_net_pct' => $trades > 0 ? $net / $trades : null, 't_stat' => $net > 0 ? 2.5 : -1.0],
                     'baselines' => ['never_trade' => ['total_net_pct' => 0.0], 'always_buy' => ['total_net_pct' => $alwaysBuy], 'always_sell' => ['total_net_pct' => $alwaysSell]],
                     'effective_samples' => 1300,
                 ],
@@ -152,6 +153,22 @@ final class ShadowPhase3Test extends TestCase
         $this->assertSame('not_better_than_champion', $vsChampion(9.8)['reason']); // margin 0.5
         $this->assertTrue($vsChampion(9.0)['promote']);
         $this->assertSame('champion_not_comparable_on_same_holdout', $policy->decide($this->classifierMetadata(10.0, 40, alwaysBuy: 1.0), true, 60)['reason']);
+    }
+
+    public function test_thin_or_statistically_insignificant_edge_is_rejected(): void
+    {
+        $policy = new ClassifierPromotionPolicy;
+        // Production ETH 4h case: +1.90% over 36 trades = +0.053%/trade, t ≈ 0.4.
+        $thin = $this->classifierMetadata(1.90, 36, alwaysBuy: -5.0, overrides: ['metrics' => ['holdout' => ['non_overlapping' => ['t_stat' => 0.4]]]]);
+        $this->assertSame('average_net_per_trade_too_thin', $policy->decide($thin, false, 240)['reason']);
+
+        // Fat enough per trade but noisy: t below 1.65 -> luck can't be ruled out.
+        $noisy = $this->classifierMetadata(10.0, 40, alwaysBuy: 1.0, overrides: ['metrics' => ['holdout' => ['non_overlapping' => ['t_stat' => 1.2]]]]);
+        $this->assertSame('edge_not_statistically_significant', $policy->decide($noisy, false, 60)['reason']);
+
+        // Older metadata without a t-statistic can never pass by omission.
+        $missing = $this->classifierMetadata(10.0, 40, alwaysBuy: 1.0, overrides: ['metrics' => ['holdout' => ['non_overlapping' => ['t_stat' => null]]]]);
+        $this->assertSame('edge_not_statistically_significant', $policy->decide($missing, false, 60)['reason']);
     }
 
     // ---- classifier decision + prediction --------------------------------
