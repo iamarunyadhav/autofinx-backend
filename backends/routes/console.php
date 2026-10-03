@@ -473,6 +473,7 @@ if ($schedulerEnabled && (bool) config('ml.enabled', false)) {
     $mlSchedule = [
         ['ml:candles:sync', 'everyMinute', 4],
         ['ml:shadow:predict', 'everyMinute', 4],
+        ['ml:autopilot:run', 'everyMinute', 4],
         ['ml:labels:mature', 'everyFiveMinutes', 10],
         ['ml:shadow:evaluate', 'everyFiveMinutes', 10],
         ['ml:trade-feedback:classify', 'hourly', 30],

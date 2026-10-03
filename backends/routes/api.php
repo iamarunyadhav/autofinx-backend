@@ -191,6 +191,7 @@ Route::prefix('v1')->group(function () {
         // Phase 1 Python ML shadow loop — read-only stored shadow rows; never an order input.
         Route::get('quick-trade/ml-shadow', [\App\Http\Controllers\Api\MlShadowController::class, 'prediction'])->middleware('throttle:60,1');
         Route::get('quick-trade/ml-shadow/learning', [\App\Http\Controllers\Api\MlShadowController::class, 'learning'])->middleware('throttle:30,1');
+        Route::get('quick-trade/ml-autopilot', [\App\Http\Controllers\Api\MlShadowController::class, 'autopilot'])->middleware('throttle:30,1');
         Route::post('forecast/comparison', [QuickTradeController::class, 'forecastComparison']);
         // VNext Dynamic Decision Engine, Phase A -- read-only, informational
         // 3-window (short/medium/long) forecast comparison. Never places,

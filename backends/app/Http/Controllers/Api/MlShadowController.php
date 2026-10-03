@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Domain\Ml\Shadow\LearningStatusService;
+use App\Domain\Ml\Shadow\MlPaperAutopilotService;
 use App\Domain\Ml\Shadow\ShadowEvaluationService;
 use App\Domain\Ml\Shadow\ShadowPredictionService;
 use App\Http\Controllers\Concerns\AssertsWorkspaceMembership;
@@ -54,6 +55,15 @@ final class MlShadowController extends Controller
         }
 
         return response()->json($status->status($symbol));
+    }
+
+    /** ML Paper Autopilot dashboard — simulated trades only, separate from user trades. */
+    public function autopilot(Request $request, MlPaperAutopilotService $autopilot): JsonResponse
+    {
+        $data = $request->validate(['workspace_id' => 'required|uuid']);
+        $this->assertWorkspaceMembership($request, $data['workspace_id']);
+
+        return response()->json($autopilot->summary());
     }
 
     private function symbol(string $raw): ?string

@@ -121,6 +121,24 @@ return [
         ],
     ],
 
+    // ML Paper Autopilot: simulated trades that follow the shadow champion's
+    // BUY/SELL decisions so the results can be watched in the UI. Its own
+    // table and virtual balance — never quick_trades, never a wallet, never
+    // an order, never read by any live path.
+    'autopilot' => [
+        'enabled' => (bool) env('AUTOFINX_ML_PAPER_AUTOPILOT_ENABLED', true),
+        'starting_balance_usd' => (float) env('AUTOFINX_ML_PAPER_AUTOPILOT_START_BALANCE', 10000),
+        'stake_usd' => (float) env('AUTOFINX_ML_PAPER_AUTOPILOT_STAKE_USD', 100),
+        // Fee + slippage charged on every round trip (percent of notional).
+        'cost_pct' => (float) env('AUTOFINX_ML_PAPER_AUTOPILOT_COST_PCT', 0.18),
+        // A signal older than this is not traded (the move may be gone).
+        'max_signal_age_seconds' => (int) env('AUTOFINX_ML_PAPER_AUTOPILOT_MAX_SIGNAL_AGE', 600),
+        // Live quote must be at most this old to be used as entry/exit price.
+        'quote_max_age_seconds' => 15,
+        // Below this many closed trades, success metrics show "insufficient data".
+        'min_closed_trades' => 20,
+    ],
+
     'classifier' => [
         // A side is only taken when its calibrated probability reaches this
         // floor AND its expected net (after costs + funding) is positive.
