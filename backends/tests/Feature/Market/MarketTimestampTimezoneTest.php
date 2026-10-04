@@ -63,6 +63,25 @@ class MarketTimestampTimezoneTest extends TestCase
         $this->assertFalse($stale);
     }
 
+    public function test_a_stale_synthetic_paper_tick_does_not_block_live_trading_but_a_stale_real_feed_does(): void
+    {
+        config(['services.live_trading_enabled' => true]);
+        $workspace = Workspace::factory()->create();
+        $symbol = \App\Models\Symbol::firstOrCreate(['symbol' => 'ETHUSDT'], ['id' => (string) Str::uuid(), 'type' => 'crypto']);
+        \App\Models\MarketTick::create(['id' => (string) Str::uuid(), 'symbol_id' => $symbol->id, 'price' => 3200, 'bid' => 3199,
+            'ask' => 3201, 'volume' => 1, 'occurred_at' => now()->subHours(2), 'metadata' => ['synthetic' => true]]);
+        $feed = MarketFeedStatus::create(['id' => (string) Str::uuid(), 'workspace_id' => $workspace->id, 'symbol_id' => $symbol->id,
+            'symbol' => 'ETHUSDT', 'exchange' => 'binance', 'market_type' => 'spot', 'last_tick_at' => now()->subSeconds(2),
+            'last_price' => 3200, 'source' => 'test', 'status' => 'healthy']);
+        $gate = new SafeLiveGate(app(OperationalBreakerService::class));
+
+        $gate->ensureLiveAllowed((string) $workspace->id, 'ETHUSDT', 0);   // no exception
+
+        $feed->update(['last_tick_at' => now()->subMinutes(10)]);
+        $this->expectExceptionMessage('Stale feed breaker active for live trading.');
+        $gate->ensureLiveAllowed((string) $workspace->id, 'ETHUSDT', 0);
+    }
+
     public function test_market_ohlc_ts_is_stored_as_utc_wall_time_and_read_back_as_the_true_instant(): void
     {
         $openMs = now()->startOfMinute()->getTimestampMs();

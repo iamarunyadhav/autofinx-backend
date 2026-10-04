@@ -5,7 +5,6 @@ namespace App\Domain\Ops;
 use App\Models\ExchangeConnection;
 use App\Models\Ledger;
 use App\Models\MarketFeedStatus;
-use App\Models\MarketTick;
 use Illuminate\Support\Facades\Schema;
 use RuntimeException;
 
@@ -32,15 +31,17 @@ class SafeLiveGate
         if ($this->breakers->isStaleFeedBreakerActive($workspaceId, $symbol)) {
             throw new RuntimeException('Stale feed breaker active for live trading.');
         }
-        $latestTick = MarketTick::orderByDesc('occurred_at')->first();
         $staleThreshold = max(10, (int) env('LIVE_TRADING_STALE_FEED_THRESHOLD_SEC', 60));
         if ($this->hasStaleSelectedSymbolFeed($workspaceId, $symbol, $provider, $staleThreshold)) {
             throw new RuntimeException('Stale feed breaker active for live trading.');
         }
 
-        if ($latestTick?->occurred_at && now()->diffInSeconds($latestTick->occurred_at, true) > $staleThreshold) {
-            throw new RuntimeException('Latest market feed is stale for live trading.');
-        }
+        // No global MarketTick check here: every MarketTick writer is the
+        // synthetic paper/demo series (metadata synthetic/demo), never the
+        // real exchange feed, and it was not symbol-scoped. It only measured
+        // when a paper screen last generated a price, so live orders were
+        // blocked whenever nobody had one open. The real selected-symbol feed
+        // check above is the live-trading freshness authority.
 
         $allowlist = array_filter(explode(',', env('LIVE_TRADING_SYMBOL_ALLOWLIST', 'BTCUSDT,ETHUSDT')));
         if ($allowlist && !in_array($symbol, $allowlist, true)) {
