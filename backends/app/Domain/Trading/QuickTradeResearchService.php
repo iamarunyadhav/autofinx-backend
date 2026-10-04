@@ -337,7 +337,8 @@ class QuickTradeResearchService
         $cost = (array) ($payload['execution_cost'] ?? []);
         $samples = Schema::hasTable('quick_trade_research_samples')
             ? QuickTradeResearchSample::where('quick_trade_id', $trade->id)->orderBy('quote_time_ms')->get() : collect();
-        $rows = $samples->map(fn ($row) => ['time' => CarbonImmutable::createFromTimestampMs($row->quote_time_ms)->toIso8601String(),
+        $tz = config('app.timezone');
+        $rows = $samples->map(fn ($row) => ['time' => CarbonImmutable::createFromTimestampMs($row->quote_time_ms)->setTimezone($tz)->toIso8601String(),
             'time_ms' => $row->quote_time_ms, 'price' => (float) $row->price, 'source' => $row->source,
             'kind' => 'sampled_quote', 'recorded_at' => $row->recorded_at->toIso8601String()])->all();
         $closed = $trade->status !== 'open' && $trade->settled_at !== null && (float) $trade->exit_price > 0;
@@ -435,10 +436,10 @@ class QuickTradeResearchService
             'entry_fill_type' => $research['entry_fill_type'] ?? null,
             'limit_unfilled' => $research['limit_unfilled'] ?? null,
             'fee_rate_source' => $trade->fee_source === 'real' ? 'account' : ($research['primary']['trade_decision']['fee_rate_source'] ?? 'config'),
-            'decision_candle_close_at' => $research['decision_candle_close_at'] ?? null,
+            'decision_candle_close_at' => $this->localIso($research['decision_candle_close_at'] ?? null),
             'seconds_since_last_close' => $research['seconds_since_last_close'] ?? null,
             'input_candles_include_forming_bar' => $research['input_candles_include_forming_bar'] ?? null,
-            'research_snapshot' => $research ?: null, 'primary_comparison' => $primary, 'shadow_comparison' => $shadow,
+            'research_snapshot' => $research ? $this->localizeSnapshot($research) : null, 'primary_comparison' => $primary, 'shadow_comparison' => $shadow,
             'timeline' => $timeline,
             'data_quality' => ['snapshot_available' => $research !== [], 'sample_count' => count($rows),
                 'price_history' => $rows === [] ? 'entry_exit_only_no_intratrade_samples' : 'sampled_not_every_tick',
@@ -448,6 +449,49 @@ class QuickTradeResearchService
                 'feedback_tier_reasons' => $feedback['reasons'],
                 'notes' => 'Features are pre-entry snapshots; comparisons/PnL/timeline are post-entry labels. Split chronologically; do not train features on future outcomes.'],
         ];
+    }
+
+    /**
+     * Export copy only: snapshot timestamps arrive with mixed offsets (the
+     * upstream candle feed writes UTC, the app writes local), so they are
+     * re-expressed in the app timezone. Same instant, one offset. The stored
+     * snapshot itself is never rewritten.
+     */
+    private function localizeSnapshot(array $research): array
+    {
+        foreach (['captured_at', 'decision_candle_close_at'] as $key) {
+            if (array_key_exists($key, $research)) {
+                $research[$key] = $this->localIso($research[$key]);
+            }
+        }
+        if (is_array($research['input_candles'] ?? null)) {
+            $research['input_candles'] = array_map(function ($candle) {
+                if (! is_array($candle)) {
+                    return $candle;
+                }
+                foreach (['opens_at', 'time'] as $key) {
+                    if (array_key_exists($key, $candle)) {
+                        $candle[$key] = $this->localIso($candle[$key]);
+                    }
+                }
+                return $candle;
+            }, $research['input_candles']);
+        }
+
+        return $research;
+    }
+
+    /** ISO-8601 string -> same instant in the app timezone; anything else passes through untouched. */
+    private function localIso(mixed $value): mixed
+    {
+        if (! is_string($value) || ! preg_match('/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/', $value)) {
+            return $value;
+        }
+        try {
+            return CarbonImmutable::parse($value)->setTimezone(config('app.timezone'))->toIso8601String();
+        } catch (Throwable) {
+            return $value;
+        }
     }
 
     public function comparison(?array $forecast, ?string $capturedAt, array $samples): array

@@ -189,18 +189,29 @@ class QuickTradeResearchController extends Controller
             'cursor' => 'nullable|uuid', 'limit' => 'nullable|integer|min:1|max:100',
             'as_of' => 'nullable|date|before_or_equal:now',
         ]);
-        $asOf = CarbonImmutable::parse($data['as_of'] ?? now())->utc();
+        // Datetime columns hold app-timezone wall time and query bindings are
+        // formatted without conversion, so every bound instant must be in the
+        // app timezone. Binding UTC here hid the newest trades (app tz +05:30).
+        $tz = config('app.timezone');
+        $asOf = CarbonImmutable::parse($data['as_of'] ?? now())->setTimezone($tz);
         $limit = (int) ($data['limit'] ?? 50);
+        $cursor = null;
+        if ($data['cursor'] ?? null) {
+            $cursor = QuickTrade::where('workspace_id', $workspace)->whereKey($data['cursor'])->first(['id', 'settled_at']);
+            abort_unless($cursor && $cursor->settled_at, 422, 'Invalid cursor.');
+        }
         $query = QuickTrade::where('workspace_id', $workspace)->where('status', '!=', 'open')
             ->whereNotNull('settled_at')->where('settled_at', '<=', $asOf)
             ->when($data['trade_ids'] ?? null, fn ($q, $ids) => $q->whereIn('id', $ids))
             ->when($data['symbol'] ?? null, fn ($q, $symbol) => $q->where('symbol', strtoupper($symbol)))
             ->when($data['mode'] ?? null, fn ($q, $mode) => $q->where('mode', $mode))
             ->when($data['source'] ?? null, fn ($q, $source) => $q->where('source', $source))
-            ->when($data['from'] ?? null, fn ($q, $date) => $q->where('entry_at', '>=', CarbonImmutable::parse($date)->utc()))
-            ->when($data['to'] ?? null, fn ($q, $date) => $q->where('entry_at', '<=', CarbonImmutable::parse($date)->utc()))
-            ->when($data['cursor'] ?? null, fn ($q, $cursor) => $q->where('id', '>', $cursor));
-        $trades = $query->orderBy('id')->limit($limit + 1)->get();
+            ->when($data['from'] ?? null, fn ($q, $date) => $q->where('entry_at', '>=', CarbonImmutable::parse($date)->setTimezone($tz)))
+            ->when($data['to'] ?? null, fn ($q, $date) => $q->where('entry_at', '<=', CarbonImmutable::parse($date)->setTimezone($tz)))
+            // Newest first; keyset on (settled_at, id) so pages never skip or repeat.
+            ->when($cursor, fn ($q) => $q->where(fn ($w) => $w->where('settled_at', '<', $cursor->settled_at)
+                ->orWhere(fn ($x) => $x->where('settled_at', $cursor->settled_at)->where('id', '<', $cursor->id))));
+        $trades = $query->orderByDesc('settled_at')->orderByDesc('id')->limit($limit + 1)->get();
         $hasMore = $trades->count() > $limit;
         $page = $trades->take($limit);
         $rows = $page->map(fn ($trade) => $research->report($trade))->values();

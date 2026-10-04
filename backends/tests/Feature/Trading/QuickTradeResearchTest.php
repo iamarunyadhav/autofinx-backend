@@ -127,6 +127,56 @@ class QuickTradeResearchTest extends TestCase
         $this->assertNotContains($second->json('rows.0.trade_id'), array_column($first->json('rows'), 'trade_id'));
     }
 
+    public function test_export_is_newest_first_and_includes_the_latest_trade(): void
+    {
+        $old = $this->trade(['settled_at' => now()->subHours(3)]);
+        $mid = $this->trade(['settled_at' => now()->subHours(2)]);
+        $latest = $this->trade(['settled_at' => now()->subMinute()]);
+        $url = '/api/v1/workspaces/'.$this->workspace->id.'/quick-trades/research/export';
+        $first = $this->postJson($url, ['limit' => 1])->assertOk()->assertJsonPath('rows.0.trade_id', $latest->id);
+        $ids = [$latest->id];
+        $response = $first;
+        while ($response->json('next_cursor')) {
+            $response = $this->postJson($url, ['limit' => 1, 'cursor' => $response->json('next_cursor'), 'as_of' => $first->json('as_of')])->assertOk();
+            $ids = array_merge($ids, array_column($response->json('rows'), 'trade_id'));
+        }
+        $this->assertSame([$latest->id, $mid->id, $old->id], $ids);
+
+        $other = Workspace::factory()->create();
+        $foreign = $this->trade(['workspace_id' => $other->id]);
+        $this->postJson($url, ['cursor' => $foreign->id])->assertStatus(422);
+    }
+
+    public function test_export_filters_and_timestamps_use_the_app_timezone(): void
+    {
+        config(['app.timezone' => 'Asia/Colombo']);
+        $previousTz = date_default_timezone_get();
+        date_default_timezone_set('Asia/Colombo');
+        try {
+            $this->travelTo(now('Asia/Colombo'));
+            // Settled one minute ago: binding as_of in UTC wall time would cut
+            // off everything from the last 5.5 hours, including this trade.
+            $trade = $this->trade();
+            $payload = $trade->signal_payload;
+            $payload['research']['input_candles'] = [['opens_at' => '2026-10-04T04:00:00+00:00', 'close' => 100]];
+            $payload['research']['decision_candle_close_at'] = '2026-10-04T04:01:00+00:00';
+            $trade->update(['signal_payload' => $payload]);
+            $this->sample($trade, now()->subMinute()->getTimestampMs());
+
+            $response = $this->postJson('/api/v1/workspaces/'.$this->workspace->id.'/quick-trades/research/export', [
+                'from' => now()->subHour()->utc()->toIso8601String(),
+            ])->assertOk()->assertJsonPath('rows.0.trade_id', $trade->id);
+            $row = $response->json('rows.0');
+            $this->assertSame('2026-10-04T09:30:00+05:30', $row['research_snapshot']['input_candles'][0]['opens_at']);
+            $this->assertSame('2026-10-04T09:31:00+05:30', $row['decision_candle_close_at']);
+            foreach ($row['timeline'] as $point) {
+                $this->assertStringEndsWith('+05:30', $point['time']);
+            }
+        } finally {
+            date_default_timezone_set($previousTz);
+        }
+    }
+
     public function test_paper_data_never_contributes_to_live_accuracy(): void
     {
         $trade = $this->trade(['mode' => 'paper']);
