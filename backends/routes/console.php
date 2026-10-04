@@ -170,16 +170,19 @@ if ($schedulerEnabled && config('quick_trade_research.enabled', true)) {
 // was missed — intentionally NOT everySecond() like the old disabled block,
 // to avoid REST/circuit-breaker pressure shared with the other bots.
 if ($schedulerEnabled && (bool) config('autofinx.scheduler.ratio_bots', true)) {
+    // Short overlap locks: Laravel's default is 1440 minutes, so a run killed
+    // mid-flight (worker restart, deploy) left a mutex that silently skipped
+    // these commands for a whole day. evaluate only dispatches jobs (~1s).
     Schedule::command('ratio-bots:evaluate')
         ->everyMinute()
-        ->withoutOverlapping()
+        ->withoutOverlapping(5)
         ->runInBackground()
         ->before(fn () => $markRunStart('ratio-bots:evaluate'))
         ->after(fn () => $markRunEnd('ratio-bots:evaluate'));
 
     Schedule::command('ratio-bots:reconcile')
         ->everyFiveMinutes()
-        ->withoutOverlapping()
+        ->withoutOverlapping(10)
         ->runInBackground()
         ->before(fn () => $markRunStart('ratio-bots:reconcile'))
         ->after(fn () => $markRunEnd('ratio-bots:reconcile'));
