@@ -115,6 +115,10 @@ class RatioBotRealtimeEngine
         $marketHealth = $this->marketHealthSnapshot($config, $context, $indicatorSnapshot, $dynamicThresholds);
         $brainSnapshot = $config->brain_enabled ? $this->brain->resolve($config, $currentPrice) : null;
 
+        // markMarketSnapshot() overwrites last_seen_price with this tick, so the
+        // single-tick spike filter must compare against the value from before.
+        $previousSeenPrice = $config->state?->last_seen_price !== null ? (float) $config->state->last_seen_price : null;
+
         $this->stateService->markMarketSnapshot(
             $config,
             $currentPrice,
@@ -151,6 +155,7 @@ class RatioBotRealtimeEngine
 
         $strategy = $this->strategies->resolve($config);
         $analysisContext = array_merge($context, [
+            'previous_seen_price' => $previousSeenPrice,
             'dynamic_thresholds' => $dynamicThresholds,
             'indicator_snapshot' => $indicatorSnapshot,
             'trailing_profit' => $trailingProfit,

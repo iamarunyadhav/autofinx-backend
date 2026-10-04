@@ -733,7 +733,10 @@ class RatioBotController extends Controller
             // Fetch live price
             try {
                 if ($ratioBot->marketType() === 'futures') {
-                    $baseUrl = config('services.binance.futures_testnet_api_url', 'https://testnet.binancefuture.com');
+                    // Price from the same venue the bot's futures orders go to.
+                    $baseUrl = ($this->futuresConfigs->effective((string) $ratioBot->workspace_id)['futures_force_testnet'] ?? true)
+                        ? config('services.binance.futures_testnet_api_url', 'https://testnet.binancefuture.com')
+                        : config('services.binance.futures_api_url', 'https://fapi.binance.com');
                     $response = Http::get(rtrim((string) $baseUrl, '/') . '/fapi/v1/premiumIndex', ['symbol' => $ratioBot->normalizedSymbol()]);
                     $price = $response->successful() ? (float) ($response->json('markPrice') ?? $response->json('price')) : null;
                 } else {

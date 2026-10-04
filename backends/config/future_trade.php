@@ -14,6 +14,9 @@ return [
     'enable_testnet_trading' => filter_var(env('FUTURE_TRADE_ENABLE_TESTNET_TRADING', false), FILTER_VALIDATE_BOOL),
     'enable_live_trading' => filter_var(env('FUTURE_TRADE_ENABLE_LIVE_TRADING', false), FILTER_VALIDATE_BOOL),
     'force_testnet' => filter_var(env('FUTURE_TRADE_FORCE_TESTNET', true), FILTER_VALIDATE_BOOL),
+    // Read signal/HTF/chart candles from market_ohlc (closed candles only)
+    // instead of Binance REST. Off = the behaviour production has always had.
+    'use_stored_ohlc_candles' => filter_var(env('FUTURE_TRADE_USE_STORED_OHLC_CANDLES', false), FILTER_VALIDATE_BOOL),
     'shared_hosting_mode' => filter_var(env('AUTOFINX_SHARED_HOSTING_MODE', false), FILTER_VALIDATE_BOOL),
     // Kept for backward compatibility with consumers still reading the flat
     // key (FutureTradeLiveFeedManager.php, FutureTradeBotService.php) —

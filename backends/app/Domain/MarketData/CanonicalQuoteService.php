@@ -47,7 +47,7 @@ class CanonicalQuoteService
             return [
                 'price' => (float) $snapshot['price'],
                 'source' => 'canonical_market_snapshot',
-                'timestamp' => Carbon::createFromTimestampMs((int) ($snapshot['event_time_ms'] ?: $snapshot['received_at_ms'])),
+                'timestamp' => Carbon::createFromTimestampMs((int) ($snapshot['event_time_ms'] ?: $snapshot['received_at_ms']))->setTimezone(config('app.timezone')),
                 'price_age_seconds' => (int) ($snapshot['age_seconds'] ?? 0),
                 'latency_ms' => (int) data_get($snapshot, 'health.pipeline_latency_ms', data_get($snapshot, 'health.transport_latency_ms', 0)),
                 'quality' => [

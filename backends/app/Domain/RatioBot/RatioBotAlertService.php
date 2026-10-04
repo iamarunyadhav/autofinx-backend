@@ -41,6 +41,31 @@ class RatioBotAlertService
         }
     }
 
+    /**
+     * The bot stopped trading on its own (blocked, disabled, or waiting for
+     * a human after an unresolved order). Called at the moment it happens,
+     * not from checkAndNotify(): a stopped bot is no longer evaluated, so an
+     * evaluation-driven check would never see it. One alert per bot and
+     * reason per cooldown window, so a block that flaps is not a flood.
+     */
+    public function notifyStopped(RatioBotConfig $config, string $reasonCode, string $detail, bool $needsReview = false): void
+    {
+        try {
+            $cooldown = max(60, (int) config('services.ops_alert.ratio_bot_stop_cooldown_seconds', 1800));
+            if (! Cache::add("ratio-bot:alert:stopped:{$config->id}:{$reasonCode}", true, now()->addSeconds($cooldown))) {
+                return;
+            }
+
+            $title = $needsReview ? 'Bot paused — needs your review' : 'Bot stopped trading';
+            $body = sprintf("Reason: %s
+%s
+Mode: %s / %s", $reasonCode, $detail, (string) $config->execution_mode, (string) $config->mode);
+            $this->fire($config, $title, $body, $needsReview ? 'critical' : 'warning');
+        } catch (\Throwable $e) {
+            Log::warning('[RatioBotAlert] stop alert failed, continuing', ['config_id' => $config->id, 'error' => $e->getMessage()]);
+        }
+    }
+
     private function notifyNewEvents(RatioBotConfig $config): void
     {
         $cacheKey = "ratio-bot:alert:last-event-at:{$config->id}";

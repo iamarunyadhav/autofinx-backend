@@ -87,6 +87,37 @@ class RatioBotStaleFeedSymbolIsolationTest extends TestCase
         $this->assertFalse($breakers->isStaleFeedBreakerActive((string) $workspace->id, $ethBot->normalizedSymbol()));
     }
 
+    public function test_a_stale_feed_blocked_bot_recovers_when_its_own_symbol_is_fresh_even_if_another_is_stale(): void
+    {
+        config(['autofinx.runtime.live_feed_side_effect_interval_ms' => 250]);
+        $workspace = Workspace::factory()->create();
+        $this->clearMarketRedis('BTCUSDT');
+        $this->clearMarketRedis('ETHUSDT');
+        $this->makeBot($workspace->id, 'BTCUSDT', 'BTC Bot');
+        $ethBot = $this->makeBot($workspace->id, 'ETHUSDT', 'ETH Bot');
+        $ethTick = fn () => app(RealtimeMarketFeedService::class)->ingest([
+            'stream' => 'ethusdt@trade',
+            'data' => ['e' => 'trade', 's' => 'ETHUSDT', 'p' => '3200.25', 'E' => now()->getTimestampMs()],
+        ], 'spot', false);
+
+        // ETHUSDT is live; BTCUSDT has no ticks, so the detector trips only its breaker.
+        $ethTick();
+        (new DetectStaleFeedsJob(30))->handle(
+            app(OperationalBreakerService::class),
+            app(MarketFreshnessService::class),
+            app(MarketRecoveryManager::class),
+            app(MarketSnapshotService::class),
+        );
+        app(\App\Domain\RatioBot\RatioBotStateService::class)->block($ethBot, 'stale_feed', 'Latest market price is stale.');
+        $this->assertFalse((bool) $ethBot->fresh()->enabled);
+
+        usleep(300_000);   // past the per-symbol side-effect throttle
+        $ethTick();
+
+        $this->assertTrue((bool) $ethBot->fresh()->enabled);
+        $this->assertNull($ethBot->fresh('state')->state->block_reason_code);
+    }
+
     private function makeBot(string $workspaceId, string $symbol, string $name): RatioBotConfig
     {
         $config = RatioBotConfig::create([

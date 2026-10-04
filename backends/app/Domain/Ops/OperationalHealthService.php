@@ -154,7 +154,9 @@ class OperationalHealthService
         }
 
         $lastTickAt = $workspaceFeed?->last_tick_at ?: $latestTick?->occurred_at;
-        $ageSeconds = $lastTickAt ? $now->diffInSeconds($lastTickAt) : null;
+        // Absolute: Carbon 3's diff is signed, so the past tick gave a negative
+        // age that always read as healthy.
+        $ageSeconds = $lastTickAt ? $now->diffInSeconds($lastTickAt, true) : null;
         $threshold = (int) config('ops.live_readiness.scheduler_stale_minutes', 15) * 60;
 
         $blockers = [];

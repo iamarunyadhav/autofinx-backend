@@ -403,6 +403,20 @@ class RatioBotExecutionService
                 : \App\Models\AuditEvent::SEVERITY_MEDIUM,
         );
 
+        if ($this->stateService->fillAlreadyApplied($decision)) {
+            // The reconcile step inside place() already booked this fill
+            // (including a partial fill on an expired order) and its trade
+            // outcome; booking it again doubled lots/PnL.
+            Log::info('[RatioBotExec] Fill already applied by order sync', [
+                'config_id' => $config->id,
+                'decision_id' => $decision->id,
+                'order_id' => $order->id,
+                'status' => $status,
+            ]);
+
+            return;
+        }
+
         if (in_array($status, ['FILLED', 'PARTIAL'], true)) {
             $executedPrice = $this->avgFillPrice($order, (float) $decision->evaluated_price);
             $executedQty = $this->resolveExecutedQty($order, (float) $order->quantity);

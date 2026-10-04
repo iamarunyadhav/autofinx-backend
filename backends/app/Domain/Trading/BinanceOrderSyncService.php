@@ -85,14 +85,7 @@ class BinanceOrderSyncService
             ->limit($limit)
             ->get();
 
-        $synced = 0;
-        foreach ($orders as $order) {
-            if ($this->sync($order)) {
-                $synced++;
-            }
-        }
-
-        return $synced;
+        return $this->syncEach($orders, fn (Order $order) => $this->sync($order));
     }
 
     public function syncForWorkspace(string $workspaceId, ?string $symbol = null, ?string $integrationId = null, int $limit = 100): int
@@ -110,11 +103,29 @@ class BinanceOrderSyncService
             ->limit($limit)
             ->get();
 
+        return $this->syncEach($orders, fn (Order $order) => $this->sync($order, $order->trace_id ?: (string) Str::uuid(), 'manual_workspace_sync'));
+    }
+
+    /**
+     * One order that cannot be synced (its error is already recorded on it by
+     * sync()) must not stop every newer order behind it. Rethrows only when
+     * nothing could be synced, so a caller still sees a total failure.
+     */
+    private function syncEach(iterable $orders, callable $sync): int
+    {
         $synced = 0;
+        $firstError = null;
         foreach ($orders as $order) {
-            if ($this->sync($order, $order->trace_id ?: (string) Str::uuid(), 'manual_workspace_sync')) {
-                $synced++;
+            try {
+                if ($sync($order)) {
+                    $synced++;
+                }
+            } catch (\Throwable $e) {
+                $firstError ??= $e;
             }
+        }
+        if ($firstError !== null && $synced === 0) {
+            throw $firstError;
         }
 
         return $synced;
@@ -174,7 +185,27 @@ class BinanceOrderSyncService
             }
         }
         if (! is_array($remote) && $clientOrderId !== '') {
-            $remote = $client->fetchOrderByClientOrderId($symbol, $clientOrderId)->toArray();
+            try {
+                $remote = $client->fetchOrderByClientOrderId($symbol, $clientOrderId)->toArray();
+            } catch (\Throwable $e) {
+                if (! $this->confirmedNeverPlaced($order, $e)) {
+                    throw $e;
+                }
+
+                // No order with this client id exists on the exchange, so
+                // nothing filled. Resolving it lets the bot move on instead
+                // of staying blocked on an "uncertain" order forever.
+                return [
+                    'orderId' => '',
+                    'symbol' => $symbol,
+                    'status' => 'REJECTED',
+                    'executedQty' => 0,
+                    'price' => 0,
+                    'fills' => [],
+                    'raw' => ['error' => 'order_not_found_on_exchange', 'detail' => $e->getMessage()],
+                    'source' => $source,
+                ];
+            }
         }
 
         if (! is_array($remote)) {
@@ -191,6 +222,23 @@ class BinanceOrderSyncService
             'raw' => $remote['raw'] ?? $remote,
             'source' => $source,
         ];
+    }
+
+    /**
+     * Binance -2013 "Order does not exist" for an order we never got an
+     * exchange id for, asked well after submission. Orders that filled stay
+     * queryable; only never-created (or expired-unfilled) ones return -2013,
+     * so in both cases nothing filled.
+     */
+    private function confirmedNeverPlaced(Order $order, \Throwable $e): bool
+    {
+        $graceSeconds = max(60, (int) config('services.binance.unknown_order_resolve_after_seconds', 120));
+        $placedAt = $order->placed_ts ?? $order->created_at;
+
+        return trim((string) $order->exchange_order_id) === ''
+            && in_array($order->status, [Order::STATUS_UNCERTAIN, Order::STATUS_PENDING_PROVIDER], true)
+            && $placedAt !== null && $placedAt->lt(now()->subSeconds($graceSeconds))
+            && str_contains($e->getMessage(), '-2013');
     }
 
     private function provider(Order $order): string

@@ -2,6 +2,7 @@
 
 namespace App\Domain\Trading;
 
+use App\Domain\Exchange\BinanceOrderRejectedException;
 use App\Domain\Exchange\BinanceSpotHealthService;
 use App\Domain\Exchange\BinanceSpotSymbolService;
 use App\Domain\Exchange\BinanceSymbolNormalizer;
@@ -220,6 +221,30 @@ class LiveOrderIntentService
                 'latency_ms' => $latencyMs,
                 'error_message' => $e->getMessage(),
             ])->save();
+
+            // A definite exchange rejection (4XX, e.g. insufficient balance)
+            // means no order exists: record it as REJECTED and fail normally.
+            // Routing it through the uncertain path disabled the bot and
+            // blocked the symbol for 24h over an order that never existed.
+            // It is also not an exchange-health failure.
+            if (BinanceOrderRejectedException::in($e) !== null) {
+                $order->forceFill([
+                    'status' => Order::STATUS_REJECTED,
+                    'provider_status' => 'REJECTED',
+                    'reconciliation_state' => Order::RECONCILIATION_ALIGNED,
+                    'meta' => array_merge((array) ($order->meta ?? []), [
+                        'last_execution_error' => $e->getMessage(),
+                        'last_execution_error_at' => now()->toIso8601String(),
+                    ]),
+                ])->save();
+                $this->events->recordOrderEvent($order, 'exchange_rejected', [
+                    'attempt_no' => 1,
+                    'error' => $e->getMessage(),
+                    'latency_ms' => $latencyMs,
+                ], 'warning', 'submission_error', $traceId);
+
+                throw $e;
+            }
 
             $this->health->recordFailure($workspaceId, $e->getMessage(), [
                 'order_id' => $order->id,

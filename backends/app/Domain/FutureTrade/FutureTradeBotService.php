@@ -9905,6 +9905,16 @@ class FutureTradeBotService
 
     private function cachedOhlcCandles(string $symbol, string $timeframe, int $limit): array
     {
+        // Stored candles were never actually used in production: market_ohlc.ts
+        // read 5.5h early under Asia/Colombo, so the freshness check below
+        // always failed and every caller fell back to REST klines (which
+        // include the forming candle). Now that ts reads correctly, switching
+        // the live signal path to closed-only stored candles is an explicit
+        // opt-in rather than a side effect of the timezone fix.
+        if (! (bool) config('future_trade.use_stored_ohlc_candles', false)) {
+            return [];
+        }
+
         try {
             $interval = $this->normalizeKlineInterval($timeframe);
             $rows = MarketOhlc::query()
@@ -11776,7 +11786,8 @@ class FutureTradeBotService
             ->where('exchange', 'binance_futures')
             ->where('symbol', strtoupper((string) $audit->symbol))
             ->where('timeframe', '1m')
-            ->whereBetween('ts', [$start, $end])
+            // ts is UTC wall time; signal_time is app-timezone.
+            ->whereBetween('ts', [$start->copy()->utc(), $end->copy()->utc()])
             ->orderBy('ts')
             ->get(['ts', 'high', 'low', 'close']);
 
@@ -11914,7 +11925,9 @@ class FutureTradeBotService
         foreach ($candidates as $candidate) {
             if (is_string($candidate) && $candidate !== '') {
                 try {
-                    return Carbon::parse($candidate);
+                    // App timezone like now() below and the review_due_at
+                    // check, whatever offset the candle time carried.
+                    return Carbon::parse($candidate)->setTimezone(config('app.timezone'));
                 } catch (Throwable) {
                 }
             }

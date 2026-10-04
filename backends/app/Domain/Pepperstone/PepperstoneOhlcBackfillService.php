@@ -32,7 +32,8 @@ class PepperstoneOhlcBackfillService
                 continue;
             }
 
-            $ts = Carbon::parse((string) $candle['ts']);
+            // Stored as UTC wall time like every other market_ohlc writer.
+            $ts = Carbon::parse((string) $candle['ts'])->utc();
             $existingId = MarketOhlc::query()
                 ->where('exchange', 'pepperstone')
                 ->where('symbol', $symbol)

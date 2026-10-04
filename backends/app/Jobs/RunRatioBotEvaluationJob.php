@@ -866,12 +866,16 @@ class RunRatioBotEvaluationJob implements ShouldQueue, ShouldBeUnique
             ]);
 
             $tsMs = (int) floor(microtime(true) * 1000);
-            $priceCache->setLatestPrice($exchange, $symbol, $price, $tsMs);
+            // The binance_futures cache is shared with Future Trade and fed by
+            // the live websocket; a testnet mark price must not overwrite it.
+            if (! ($config->marketType() === 'futures' && $this->futuresPricesFromTestnet($config))) {
+                $priceCache->setLatestPrice($exchange, $symbol, $price, $tsMs);
+            }
 
             return [
                 'price' => $price,
                 'source' => $cached ? 'polling-fallback' : 'polling',
-                'timestamp' => Carbon::createFromTimestampMs($tsMs),
+                'timestamp' => Carbon::createFromTimestampMs($tsMs)->setTimezone(config('app.timezone')),
                 'price_age_seconds' => 0,
                 'latency_ms' => $latencyMs,
             ];
@@ -892,12 +896,22 @@ class RunRatioBotEvaluationJob implements ShouldQueue, ShouldBeUnique
         }
     }
 
+    private function futuresPricesFromTestnet(RatioBotConfig $config): bool
+    {
+        return (bool) (app(\App\Domain\Trading\FuturesConfigService::class)->effective((string) $config->workspace_id)['futures_force_testnet'] ?? true);
+    }
+
     private function fetchRemotePrice(RatioBotConfig $config, ExchangeClientFactory $clients): float
     {
         $symbol = $config->normalizedSymbol();
         if ($config->marketType() === 'futures') {
+            // Same venue the futures order path uses (FuturesOrderIntentService
+            // picks testnet vs live from the workspace's futures_force_testnet),
+            // so the price can never come from a different market than the order.
             $response = Http::timeout(5)->get(
-                rtrim((string) config('services.binance.futures_testnet_api_url', 'https://testnet.binancefuture.com'), '/') . '/fapi/v1/premiumIndex',
+                rtrim((string) ($this->futuresPricesFromTestnet($config)
+                    ? config('services.binance.futures_testnet_api_url', 'https://testnet.binancefuture.com')
+                    : config('services.binance.futures_api_url', 'https://fapi.binance.com')), '/') . '/fapi/v1/premiumIndex',
                 ['symbol' => $symbol]
             );
             if (! $response->successful()) {
@@ -1064,9 +1078,13 @@ class RunRatioBotEvaluationJob implements ShouldQueue, ShouldBeUnique
             }
         }
 
+        // Only this bot's own orders: an uncertain Quick Trade / futures /
+        // sibling-bot order on the same symbol used to block (and, with
+        // pause, disable) every Ratio Bot on it, with a non-recoverable code.
         $uncertainOrder = Order::query()
             ->where('workspace_id', $workspaceId)
             ->where('asset_code', $symbol)
+            ->where('meta->ratio_bot_config_id', (string) $config->id)
             ->where(function ($query): void {
                 $query->where('status', Order::STATUS_UNCERTAIN)
                     ->orWhereIn('reconciliation_state', [
@@ -1147,6 +1165,6 @@ class RunRatioBotEvaluationJob implements ShouldQueue, ShouldBeUnique
             return null;
         }
 
-        return Carbon::createFromTimestampMs((int) $timestampMs);
+        return Carbon::createFromTimestampMs((int) $timestampMs)->setTimezone(config('app.timezone'));
     }
 }

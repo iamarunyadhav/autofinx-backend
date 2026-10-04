@@ -76,11 +76,15 @@ class DynamicThresholdService
         );
 
         $manualStopLoss = max(
-            0.0005,
+            0.0,
             (float) ($params['manual_stop_loss_ratio'] ?? 0),
             $this->ratioFromPct($config->stop_loss_pct)
         );
-        $stopLoss = $this->clamp(
+        // A blank stop-loss means no stop-loss. Deriving one from the
+        // trailing/ATR math here put a hidden ~0.3-1% protective exit on every
+        // bot, which sold at a loss and made the staged buy ladder unreachable.
+        // Dynamic mode may only widen a stop the user actually set.
+        $stopLoss = $manualStopLoss <= 0 ? 0.0 : $this->clamp(
             $enabled
                 ? max($manualStopLoss, ($atrPct * 0.55), $trailingTakeProfit * 0.90)
                 : max($manualStopLoss, $trailingTakeProfit * 0.80),

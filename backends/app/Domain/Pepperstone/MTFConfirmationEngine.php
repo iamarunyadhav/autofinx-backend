@@ -336,7 +336,8 @@ class MTFConfirmationEngine
             return [];
         }
 
-        $cutoff = Carbon::now()->subMinutes($minutes);
+        // market_ohlc.ts is UTC wall time, so the cutoff must be bound in UTC.
+        $cutoff = Carbon::now('UTC')->subMinutes($minutes);
 
         return MarketOhlc::query()
             ->where('exchange', $exchange)

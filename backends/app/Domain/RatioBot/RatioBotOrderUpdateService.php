@@ -57,6 +57,15 @@ class RatioBotOrderUpdateService
             return;
         }
 
+        // An EXPIRED/CANCELLED order can still have partially filled (e.g. a
+        // thin book). Those coins are real: book the filled part instead of
+        // treating the order as failed and losing track of them.
+        $filledQty = (float) ($order->filled_qty ?? 0);
+        if ($status === 'CANCELLED' && $filledQty > 0) {
+            $status = 'FILLED';
+            $executedQty = $filledQty;
+        }
+
         if (in_array($status, ['REJECTED', 'FAILED', 'CANCELLED', 'UNCERTAIN'], true)) {
             $this->stateService->onOrderFailed($config, $decision, (string) data_get($order->raw_json, 'error', $status));
 

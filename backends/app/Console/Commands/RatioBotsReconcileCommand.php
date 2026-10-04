@@ -2,6 +2,7 @@
 
 namespace App\Console\Commands;
 
+use App\Domain\RatioBot\RatioBotAwaitingExecutionWatchdog;
 use App\Domain\RatioBot\RatioBotExchangeStopOrderService;
 use App\Domain\RatioBot\RatioBotFundingCostService;
 use App\Domain\Trading\BinanceOrderSyncService;
@@ -12,6 +13,7 @@ use App\Models\Order;
 use App\Models\RatioBotConfig;
 use App\Models\RatioBotEvent;
 use App\Models\RatioBotReconciliationLog;
+use App\Models\RatioBotState;
 use Illuminate\Console\Command;
 use Illuminate\Support\Str;
 
@@ -29,17 +31,22 @@ class RatioBotsReconcileCommand extends Command
         FuturesConfigService $futuresConfigs,
         RatioBotFundingCostService $fundingCost,
         RatioBotExchangeStopOrderService $stopOrders,
+        RatioBotAwaitingExecutionWatchdog $watchdog,
     ): int {
         $botId = trim((string) $this->option('bot'));
         $limit = max(1, min(500, (int) $this->option('limit')));
 
         $configs = RatioBotConfig::query()
-            // Only reconcile bots that are actually running — a disabled
-            // bot places no new orders, so reconciling it every 5 minutes
-            // was pure wasted Binance API calls and log noise. --bot=
-            // still lets an operator reconcile one specific bot by id
-            // regardless of enabled state, for manual troubleshooting.
-            ->when($botId === '', fn ($query) => $query->where('enabled', true))
+            // Running bots, plus disabled ones still waiting on an order
+            // result: errorReviewRequired()/block() disable the bot, and
+            // those are exactly the bots whose orders need resolving. Other
+            // disabled bots place no orders and are skipped. --bot= still
+            // reconciles one specific bot regardless of state.
+            ->when($botId === '', fn ($query) => $query->where(fn ($q) => $q->where('enabled', true)
+                ->orWhereHas('state', fn ($state) => $state->whereIn('position_state', [
+                    RatioBotState::STATE_AWAITING_EXECUTION,
+                    RatioBotState::STATE_ERROR_REVIEW,
+                ]))))
             ->when($botId !== '', fn ($query) => $query->whereKey($botId))
             ->orderByDesc('updated_at')
             ->limit($limit)
@@ -81,6 +88,16 @@ class RatioBotsReconcileCommand extends Command
                 ]);
 
                 $this->warn(sprintf('Reconcile failed for %s: %s', $config->normalizedSymbol(), $e->getMessage()));
+            }
+
+            // Runs even when the sync above failed: a bot stuck waiting on an
+            // order result must always end up resolved or visibly in review.
+            try {
+                if ($action = $watchdog->check($config)) {
+                    $this->info(sprintf('Awaiting-execution watchdog for %s: %s', $config->normalizedSymbol(), $action));
+                }
+            } catch (\Throwable $e) {
+                $this->warn(sprintf('Awaiting-execution watchdog failed for %s: %s', $config->normalizedSymbol(), $e->getMessage()));
             }
         }
 

@@ -246,8 +246,9 @@ class ForecastShadowReportService
             ->where('exchange', $exchange)
             ->where('symbol', $symbol)
             ->where('timeframe', $timeframe)
-            ->where('ts', '>=', $windowStart)
-            ->where('ts', '<=', $windowEnd)
+            // ts is UTC wall time; occurred_at is app-timezone. Bind UTC.
+            ->where('ts', '>=', $windowStart->utc())
+            ->where('ts', '<=', $windowEnd->utc())
             ->orderBy('ts')
             ->get(['ts', 'close'])
             ->values();

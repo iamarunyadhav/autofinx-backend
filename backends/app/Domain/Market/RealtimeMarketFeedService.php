@@ -517,7 +517,7 @@ class RealtimeMarketFeedService
             );
 
             if ($closedKline) {
-                $config->state?->update(['last_candle_close_at' => Carbon::createFromTimestampMs($eventTimestampMs)]);
+                $config->state?->update(['last_candle_close_at' => Carbon::createFromTimestampMs($eventTimestampMs)->setTimezone(config('app.timezone'))]);
             }
 
             if (! $config->enabled
@@ -578,7 +578,9 @@ class RealtimeMarketFeedService
             return;
         }
 
-        if ($code === 'stale_feed' && $this->breakers->isStaleFeedBreakerActive($config->workspace_id)) {
+        // Same symbol-scoped breaker RunRatioBotEvaluationJob checks: a stale
+        // feed on some other symbol must not keep this bot disabled.
+        if ($code === 'stale_feed' && $this->breakers->isStaleFeedBreakerActive($config->workspace_id, $config->normalizedSymbol(), $config->marketType())) {
             return;
         }
 
@@ -957,7 +959,7 @@ class RealtimeMarketFeedService
             $context
         );
 
-        $tickAt = $timestampMs ? Carbon::createFromTimestampMs($timestampMs) : now();
+        $tickAt = $timestampMs ? Carbon::createFromTimestampMs($timestampMs)->setTimezone(config('app.timezone')) : now();
         $previousStatus = (string) ($config->state?->feed_status ?? '');
 
         // Throttle state updates — only write to DB once per RATIO_STATE_WRITE_INTERVAL_S,
@@ -1053,15 +1055,19 @@ class RealtimeMarketFeedService
             ->where('market_type', strtolower($marketType))
             ->first();
 
+        // App-timezone wall time like every other column in this row and every
+        // reader (SafeLiveGate, Future Trade, ops health). A bare
+        // createFromTimestampMs() is UTC and was stored 5.5h "old" under
+        // Asia/Colombo, which made the live gate see every feed as stale.
         $tickAt = $timestampMs
-            ? Carbon::createFromTimestampMs($timestampMs)
+            ? Carbon::createFromTimestampMs($timestampMs)->setTimezone(config('app.timezone'))
             : ($status === 'healthy' ? now() : $existingFeed?->last_tick_at);
 
-        if ($existingFeed?->last_tick_at && $tickAt->lt($existingFeed->last_tick_at->copy()->subSecond())) {
+        if ($tickAt && $existingFeed?->last_tick_at && $tickAt->lt($existingFeed->last_tick_at->copy()->subSecond())) {
             return;
         }
 
-        if ($tickAt->gt(now()->addSeconds(30))) {
+        if ($tickAt && $tickAt->gt(now()->addSeconds(30))) {
             return;
         }
 

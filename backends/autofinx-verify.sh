@@ -403,7 +403,7 @@ if [ -x "${PHP:-}" ]; then
         ->get();
       foreach ($rows as $row) {
         $ts = $row->last_tick_at ?: $row->updated_at;
-        $age = $ts ? (int) \Carbon\Carbon::parse((string) $ts, "UTC")->diffInSeconds(now("UTC"), true) : null;
+        $age = $ts ? (int) \Carbon\Carbon::parse((string) $ts, config("app.timezone"))->diffInSeconds(now(), true) : null;
         echo implode("|", [
           $row->symbol ?? $row->symbol_id ?? "-",
           $row->exchange ?? "-",

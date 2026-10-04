@@ -55,7 +55,8 @@ class BinanceSpotClient implements ExchangeClientInterface
             $payload['newClientOrderId'] = $clientOrderId;
         }
 
-        $response = $this->signedRequest('POST', '/api/v3/order', $payload);
+        $response = $this->signedRequest('POST', '/api/v3/order', $payload, false);
+        $this->assertOrderAccepted($response, 'Binance limit order failed.');
 
         return ExchangeOrder::fromBinance($response->json());
     }
@@ -90,7 +91,12 @@ class BinanceSpotClient implements ExchangeClientInterface
             $payload['newClientOrderId'] = $clientOrderId;
         }
 
-        $response = $this->signedRequestWithRetry('POST', '/api/v3/order', $payload);
+        // Never auto-retry an order POST: after a 5XX / -1007 the first order
+        // may already be filled, and Binance only rejects a reused
+        // newClientOrderId while that order is still open, so a retry of a
+        // filled MARKET order would be a second fill.
+        $response = $this->signedRequest('POST', '/api/v3/order', $payload, false);
+        $this->assertOrderAccepted($response, 'Binance market order failed.');
         $json = (array) $response->json();
 
         $price = $this->resolveFillPrice($json);
@@ -352,6 +358,7 @@ class BinanceSpotClient implements ExchangeClientInterface
 
         while ($attempt < max(1, $maxAttempts)) {
             $attempt++;
+            $nonRetryable = false;
             try {
                 $response = $this->signedRequest($method, $path, $params, false);
 
@@ -361,6 +368,7 @@ class BinanceSpotClient implements ExchangeClientInterface
 
                 $errorCode = (int) ($response->json('code') ?? 0);
                 if (! in_array($errorCode, self::RETRYABLE_ERROR_CODES, true)) {
+                    $nonRetryable = true;
                     $this->assertSuccess($response, 'Binance request failed (non-retryable).');
                 }
 
@@ -377,7 +385,9 @@ class BinanceSpotClient implements ExchangeClientInterface
 
                 $lastException = new RuntimeException('Binance transient error: ' . $response->body());
             } catch (RuntimeException $e) {
-                if ($attempt >= $maxAttempts) {
+                // The catch also sees the non-retryable throw above; that one
+                // must surface immediately, not be retried.
+                if ($nonRetryable || $attempt >= $maxAttempts) {
                     throw $e;
                 }
                 $lastException = $e;
@@ -492,6 +502,21 @@ class BinanceSpotClient implements ExchangeClientInterface
         $msg = strtolower((string) ($responseJson['msg'] ?? ''));
 
         return $code === -2010 && str_contains($msg, 'duplicate');
+    }
+
+    /**
+     * Order POSTs: a definite 4XX rejection becomes BinanceOrderRejectedException
+     * (no order exists); anything else unsuccessful stays a plain
+     * RuntimeException, i.e. outcome unknown.
+     */
+    private function assertOrderAccepted(Response $response, string $message): void
+    {
+        if ($response->successful()) {
+            return;
+        }
+
+        throw BinanceOrderRejectedException::fromResponse($response, $message)
+            ?? new RuntimeException($message.' '.$response->body());
     }
 
     private function assertSuccess(Response $response, string $message): void

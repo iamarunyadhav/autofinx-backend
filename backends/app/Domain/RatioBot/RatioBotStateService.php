@@ -292,6 +292,9 @@ class RatioBotStateService
         string $clientOrderId
     ): RatioBotState {
         $state = $this->getOrCreate($config);
+        if ($this->fillAlreadyApplied($decision)) {
+            return $state;
+        }
         $cooldownUntil = now()->addSeconds((int) $config->cooldown_seconds_after_trade);
         $previousTracking = $this->trackingSnapshot($state);
 
@@ -308,7 +311,8 @@ class RatioBotStateService
         $isRecoveryFill = (string) data_get($decision->metadata, 'stage.type', '') === \App\Models\RatioBotLot::TYPE_RECOVERY;
         $priorQty = (float) ($state->last_buy_quantity ?? 0);
         $priorAvg = (float) ($state->last_buy_price ?? 0);
-        $isTrancheFill = $state->isPartialHolding() || ($isRecoveryFill && $priorQty > 0);
+        $isTrancheFill = $this->positionStateAtFill($state, $decision) === RatioBotState::STATE_PARTIAL_HOLDING
+            || ($isRecoveryFill && $priorQty > 0);
 
         if ($isTrancheFill && $priorQty > 0) {
             $newQty = $priorQty + $executedQty;
@@ -462,6 +466,9 @@ class RatioBotStateService
         string $clientOrderId
     ): RatioBotState {
         $state = $this->getOrCreate($config);
+        if ($this->fillAlreadyApplied($decision)) {
+            return $state;
+        }
         $cooldownUntil = now()->addSeconds((int) $config->cooldown_seconds_after_trade);
         $previousTracking = $this->trackingSnapshot($state);
 
@@ -499,7 +506,7 @@ class RatioBotStateService
             $sellStages = count(app(RatioBotStagePlanService::class)->plan($config)['sell_allocations'] ?? []);
             $tranchesRemaining = max(0, $sellStages - app(RatioBotLotService::class)->sellStagesCompleted($config));
         } elseif ($stagedExit) {
-            $tranchesRemaining = $state->isPartialSold()
+            $tranchesRemaining = $this->positionStateAtFill($state, $decision) === RatioBotState::STATE_PARTIAL_SOLD
                 ? max(0, (int) ($state->sell_tranches_remaining ?? 0) - 1)
                 : max(0, (int) $config->sell_tranche_count - 1);
         }
@@ -777,6 +784,39 @@ class RatioBotStateService
     /**
      * Mark that an execution was submitted but result is not yet confirmed.
      */
+    /**
+     * A live order is booked twice otherwise: ReconciliationService syncs the
+     * fill (RatioBotOrderUpdateService) inside place(), then the execution
+     * service handles the same result. The stored decision status is the
+     * one source of truth for "this fill is already in state and lots".
+     */
+    public function fillAlreadyApplied(RatioBotDecision $decision): bool
+    {
+        if (! $decision->exists) {
+            return false;
+        }
+        $stored = RatioBotDecision::whereKey($decision->id)->value('execution_status');
+        if ($stored !== RatioBotDecision::EXEC_FILLED) {
+            return false;
+        }
+        $decision->refresh();
+
+        return true;
+    }
+
+    /**
+     * Live orders are submitted from AWAITING_EXECUTION, so the position a
+     * fill applies to is the one recorded on the decision before submission
+     * (otherwise a reserve tranche or a staged sell always looked like a
+     * fresh entry/exit and reset the position).
+     */
+    private function positionStateAtFill(RatioBotState $state, RatioBotDecision $decision): ?string
+    {
+        return $state->position_state === RatioBotState::STATE_AWAITING_EXECUTION
+            ? ($decision->position_state_before ?: $state->position_state)
+            : $state->position_state;
+    }
+
     public function onAwaitingExecution(RatioBotConfig $config, RatioBotDecision $decision, ?string $clientOrderId = null, ?string $orderId = null): void
     {
         $state = $this->getOrCreate($config);
@@ -830,6 +870,7 @@ class RatioBotStateService
                 'last_runtime_error'     => $reason,
             ]);
             $this->emitEvent($config, RatioBotEvent::EVENT_BLOCKED, ['streak' => $newFailCount]);
+            app(RatioBotAlertService::class)->notifyStopped($config, 'order_failure_streak', "Failed {$newFailCount} orders in a row. Last reason: {$reason}");
             Log::warning('[RatioBot] Blocked due to order failure streak', ['config_id' => $config->id, 'streak' => $newFailCount]);
         } else {
             $state->update([
@@ -885,6 +926,7 @@ class RatioBotStateService
             'decision_id' => $decision->id,
             'context' => $context,
         ]);
+        app(RatioBotAlertService::class)->notifyStopped($config, $reasonCode, $detail, true);
     }
 
     /**
@@ -1006,6 +1048,7 @@ class RatioBotStateService
         ]);
         $config->update(['enabled' => false]);
         $this->emitEvent($config, RatioBotEvent::EVENT_BLOCKED, ['code' => $reasonCode, 'detail' => $detail]);
+        app(RatioBotAlertService::class)->notifyStopped($config, $reasonCode, $detail);
         Log::warning('[RatioBot] Blocked', ['config_id' => $config->id, 'reason' => $reasonCode]);
     }
 
@@ -1273,10 +1316,19 @@ class RatioBotStateService
         ]);
     }
 
+    // Datetime columns hold app-timezone wall time and Eloquent formats a
+    // Carbon without converting it, so a UTC instance (createFromTimestampMs
+    // returns UTC) would be stored 5.5h off under Asia/Colombo and every
+    // price would read back as stale. Always hand back an app-tz instant.
     private function normalizeTimestamp(mixed $value): ?Carbon
     {
+        return $this->parseTimestamp($value)?->setTimezone(config('app.timezone'));
+    }
+
+    private function parseTimestamp(mixed $value): ?Carbon
+    {
         if ($value instanceof Carbon) {
-            return $value;
+            return $value->copy();
         }
 
         if ($value instanceof \DateTimeInterface) {

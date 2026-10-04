@@ -165,7 +165,8 @@ class RatioBotDecisionService
             );
         }
 
-        $spikeRejection = $this->rejectSingleTickSpike($config, $state, $currentPrice, $correlationId, $priceSource, $priceTimestamp);
+        $spikeRejection = $this->rejectSingleTickSpike($config, $state, $currentPrice, $correlationId, $priceSource, $priceTimestamp,
+            array_key_exists('previous_seen_price', $context) ? (float) ($context['previous_seen_price'] ?? 0) : null);
         if ($spikeRejection !== null) {
             return $spikeRejection;
         }
@@ -1141,7 +1142,7 @@ class RatioBotDecisionService
                 $buyRatio = ((float) $state->last_buy_price / $currentPrice) - 1;
                 $result['buy_ratio'] = round($buyRatio, 6);
                 $result['effective_buy_ratio'] = round($buyRatio - $costRatio, 6);
-                $result['buy_distance_pct'] = round(((float) $config->buy_threshold_ratio + $costRatio - $buyRatio) * 100, 4);
+                $result['buy_distance_pct'] = round(($this->buyDropThreshold((float) $config->buy_threshold_ratio) + $costRatio - $buyRatio) * 100, 4);
             }
         }
 
@@ -1154,7 +1155,7 @@ class RatioBotDecisionService
             $result['effective_buy_ratio'] = round($effective, 6);
             $result['buy_distance_pct'] = $config->usesTrailingRatio()
                 ? round(($ratio - $this->trailingBuyBoundary($config, $costRatio)) * 100, 4)
-                : round(((float) $config->buy_threshold_ratio + $costRatio - $ratio) * 100, 4);
+                : round(($this->buyDropThreshold((float) $config->buy_threshold_ratio) + $costRatio - $ratio) * 100, 4);
         }
 
         return $result;
@@ -1244,7 +1245,7 @@ class RatioBotDecisionService
         }
 
         $buyRatio = ($anchor / $currentPrice) - 1; // same formula evaluateFlat() uses for its buy check
-        $buyThreshold = (float) ($policy['buy_threshold_ratio'] ?? $config->buy_threshold_ratio);
+        $buyThreshold = $this->buyDropThreshold((float) ($policy['buy_threshold_ratio'] ?? $config->buy_threshold_ratio));
         $costRatio = $this->executionCostRatio($config);
         $requiredBuyRatio = $buyThreshold + $costRatio;
         $metadata = array_merge(
@@ -1490,7 +1491,7 @@ class RatioBotDecisionService
         }
 
         $ratio = ($anchor / $currentPrice) - 1;
-        $threshold = (float) ($policy['buy_threshold_ratio'] ?? $config->buy_threshold_ratio);
+        $threshold = $this->buyDropThreshold((float) ($policy['buy_threshold_ratio'] ?? $config->buy_threshold_ratio));
         $costRatio = $this->executionCostRatio($config);
         $requiredRatio = $threshold + $costRatio;
         $metadata = array_merge(
@@ -1630,7 +1631,7 @@ class RatioBotDecisionService
         }
 
         $ratio = ($anchor / $currentPrice) - 1;
-        $threshold = (float) ($policy['buy_threshold_ratio'] ?? $config->buy_threshold_ratio);
+        $threshold = $this->buyDropThreshold((float) ($policy['buy_threshold_ratio'] ?? $config->buy_threshold_ratio));
         $costRatio = $this->executionCostRatio($config);
         $requiredRatio = $threshold + $costRatio;
         $metadata = array_merge(
@@ -2391,9 +2392,11 @@ class RatioBotDecisionService
         string $correlationId,
         ?string $priceSource,
         ?DateTimeInterface $priceTimestamp,
+        ?float $previousSeenPrice = null,
     ): ?array {
         $maxDeviation = max(0.0, (float) ($config->max_spike_deviation_bps ?? 0)) / 10000;
-        $lastSeen = (float) ($state->last_seen_price ?? 0);
+        // The engine passes the pre-tick price; state already holds this tick.
+        $lastSeen = $previousSeenPrice ?? (float) ($state->last_seen_price ?? 0);
         if ($maxDeviation <= 0 || $lastSeen <= 0 || $currentPrice <= 0) {
             return null;
         }
@@ -2766,6 +2769,17 @@ class RatioBotDecisionService
         return $ratio > 1 ? $ratio / 100 : $ratio;
     }
 
+    /**
+     * The buy threshold is the size of the drop from the anchor, whatever its
+     * sign: the UI shows the target as anchor / (1 + |threshold| + cost) and
+     * trailing mode already uses -|threshold|. Taken as signed, the default
+     * -0.015 let threshold mode buy back up to ~1% ABOVE its own sell price.
+     */
+    private function buyDropThreshold(float $threshold): float
+    {
+        return abs($threshold);
+    }
+
     private function normalizeRuntimeBuyRatio(mixed $value, float $fallback): float
     {
         $ratio = $this->normalizeRuntimeRatio($value, $fallback);
@@ -2790,11 +2804,17 @@ class RatioBotDecisionService
             || ((bool) $config->require_time_stop && (int) ($config->time_stop_minutes ?? 0) <= 0);
     }
 
+    // Returned in the app timezone: see RatioBotStateService::normalizeTimestamp().
     private function normalizePriceTimestamp(mixed $value): ?Carbon
+    {
+        return $this->parsePriceTimestamp($value)?->setTimezone(config('app.timezone'));
+    }
+
+    private function parsePriceTimestamp(mixed $value): ?Carbon
     {
         try {
             if ($value instanceof Carbon) {
-                return $value;
+                return $value->copy();
             }
             if ($value instanceof DateTimeInterface) {
                 return Carbon::instance($value);

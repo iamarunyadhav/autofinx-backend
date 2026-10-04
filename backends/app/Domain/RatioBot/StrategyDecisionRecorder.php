@@ -86,10 +86,16 @@ class StrategyDecisionRecorder
         ]));
     }
 
+    // Returned in the app timezone: see RatioBotStateService::normalizeTimestamp().
     private function normalizeTimestamp(mixed $value): ?Carbon
     {
+        return $this->parseTimestamp($value)?->setTimezone(config('app.timezone'));
+    }
+
+    private function parseTimestamp(mixed $value): ?Carbon
+    {
         if ($value instanceof Carbon) {
-            return $value;
+            return $value->copy();
         }
         if ($value instanceof \DateTimeInterface) {
             return Carbon::instance(\DateTimeImmutable::createFromInterface($value));

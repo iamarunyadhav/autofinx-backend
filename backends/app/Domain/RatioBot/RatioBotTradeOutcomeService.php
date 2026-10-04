@@ -411,7 +411,7 @@ class RatioBotTradeOutcomeService
         $grace = max(0, (int) config('ratio_bot_outcomes.close_grace_seconds', 120));
         if ($now->getTimestamp() < $window['ends_at'] + $grace) {
             // Bounded window still open -- honest "not yet evaluable".
-            $row->update(['next_evaluation_at' => Carbon::createFromTimestamp($window['ends_at'] + $grace)]);
+            $row->update(['next_evaluation_at' => Carbon::createFromTimestamp($window['ends_at'] + $grace)->setTimezone(config('app.timezone'))]);
 
             return $row;
         }
@@ -437,7 +437,7 @@ class RatioBotTradeOutcomeService
             'candles_observed' => $observed,
             'candles_expected' => $window['expected'],
             'evaluation_attempts' => $attempts,
-            'window_ends_at' => Carbon::createFromTimestamp($window['ends_at']),
+            'window_ends_at' => Carbon::createFromTimestamp($window['ends_at'])->setTimezone(config('app.timezone')),
         ];
 
         if ($row->side === RatioBotTradeOutcome::SIDE_BUY) {
@@ -445,7 +445,7 @@ class RatioBotTradeOutcomeService
             $reachedAt = null;
             $firstHit = $candles->first(fn ($c) => (float) $c->high >= $floorPrice);
             if ($firstHit) {
-                $reachedAt = Carbon::parse($firstHit->ts);
+                $reachedAt = Carbon::parse($firstHit->ts)->setTimezone(config('app.timezone'));
             }
             // A real sell fill of this lot inside the window is real traded
             // price evidence too (robust to candle gaps).
@@ -600,7 +600,7 @@ class RatioBotTradeOutcomeService
             $reason = 'unsupported_timeframe';
         } else {
             $window = $this->window($executedAt->getTimestamp(), $horizonSeconds, $tfSeconds);
-            $windowEndsAt = Carbon::createFromTimestamp($window['ends_at']);
+            $windowEndsAt = Carbon::createFromTimestamp($window['ends_at'])->setTimezone(config('app.timezone'));
             $evaluateAfter = $windowEndsAt->copy()->addSeconds(max(0, (int) config('ratio_bot_outcomes.close_grace_seconds', 120)));
             $expected = $window['expected'];
         }
