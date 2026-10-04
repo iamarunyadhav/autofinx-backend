@@ -121,7 +121,7 @@ class RatioBotsVerifyCommand extends Command
 
         // 4. Real exchange feed for this symbol (what the live gate checks).
         $feed = MarketFeedStatus::query()->where('workspace_id', $bot->workspace_id)->where('symbol', $bot->normalizedSymbol())
-            ->whereNotNull('last_tick_at')->orderByDesc('last_tick_at')->first();
+            ->where('market_type', $bot->marketType())->whereNotNull('last_tick_at')->orderByDesc('last_tick_at')->first();
         $feedAge = $feed?->last_tick_at ? (int) $feed->last_tick_at->diffInSeconds(now(), true) : null;
         $this->report($feedAge !== null && $feedAge <= 60 ? self::PASS : $severity, 'Websocket feed (market_feed_status)',
             $feedAge === null ? 'no row: is the market feed worker running for this symbol?' : "{$feedAge}s old via {$feed->exchange}/{$feed->market_type}");
@@ -150,7 +150,7 @@ class RatioBotsVerifyCommand extends Command
         }
 
         // 7. Orders this bot could not resolve.
-        $uncertain = Order::query()->where('meta->ratio_bot_config_id', (string) $bot->id)
+        $uncertain = Order::query()->where('workspace_id', $bot->workspace_id)->where('meta->ratio_bot_config_id', (string) $bot->id)
             ->where(fn ($query) => $query->where('status', Order::STATUS_UNCERTAIN)
                 ->orWhereIn('reconciliation_state', [Order::RECONCILIATION_UNCERTAIN, Order::RECONCILIATION_MISMATCH]))
             ->where('created_at', '>=', now()->subDay())->count();
@@ -163,18 +163,21 @@ class RatioBotsVerifyCommand extends Command
         $this->report($recentDuplicates > 0 ? self::FAIL : ($duplicates->isEmpty() ? self::PASS : self::WARN), 'Double-booked lots',
             $duplicates->isEmpty() ? 'none' : "{$duplicates->count()} total, {$recentDuplicates} in the last 2 days (older ones predate the fix)");
 
-        // 9. What the bot has been deciding.
-        $decisions = RatioBotDecision::query()->where('ratio_bot_config_id', $bot->id)->where('created_at', '>=', now()->subHour());
-        $count = (clone $decisions)->count();
-        $staleBlocks = (clone $decisions)->where('reason', 'like', '%stale%')->count();
-        $this->report($staleBlocks > 0 ? $severity : self::PASS, 'Decisions in the last hour', "{$count} total, {$staleBlocks} stale-price blocks");
-        $top = (clone $decisions)->selectRaw('SUBSTR(reason, 1, 70) as r, COUNT(*) as n')->groupBy('r')->orderByDesc('n')->limit(3)->get();
-        foreach ($top as $row) {
-            $this->line(sprintf('      %5d  %s', $row->n, $row->r));
-        }
-        $lastFill = RatioBotDecision::query()->where('ratio_bot_config_id', $bot->id)
-            ->where('execution_status', RatioBotDecision::EXEC_FILLED)->latest('executed_at')->first();
-        $this->line('    last fill: '.($lastFill ? "{$lastFill->decision} {$lastFill->executed_qty} @ {$lastFill->executed_price} on {$lastFill->executed_at}" : 'none'));
+        // 9. What the bot has been deciding. ratio_bot_decisions can hold
+        // millions of rows per bot and is only indexed on the bot id, so read
+        // the newest rows through that index (ids are time-ordered UUIDv7)
+        // instead of filtering or sorting on a timestamp.
+        $recent = RatioBotDecision::query()->where('ratio_bot_config_id', $bot->id)
+            ->orderByDesc('id')->limit(1000)->get(['id', 'reason', 'created_at'])
+            ->filter(fn (RatioBotDecision $decision) => $decision->created_at?->gte(now()->subHour()));
+        $staleBlocks = $recent->filter(fn (RatioBotDecision $decision) => str_contains(strtolower((string) $decision->reason), 'stale'))->count();
+        $this->report($staleBlocks > 0 ? $severity : self::PASS, 'Decisions in the last hour',
+            ($recent->count() >= 1000 ? '1000+' : (string) $recent->count())." total, {$staleBlocks} stale-price blocks");
+        $recent->countBy(fn (RatioBotDecision $decision) => mb_strimwidth((string) $decision->reason, 0, 70, '...'))
+            ->sortDesc()->take(3)->each(fn (int $n, string $reason) => $this->line(sprintf('      %5d  %s', $n, $reason)));
+        $this->line('    last trade: '.($state->last_trade_time
+            ? "{$state->last_trade_side} @ ".($state->last_fill_price ?? ($state->last_trade_side === 'SELL' ? $state->last_sell_price : $state->last_buy_price))." on {$state->last_trade_time}"
+            : 'none'));
 
         // 10. Bot holdings vs the real exchange account.
         if ($this->option('exchange') && $live && $bot->marketType() === 'spot') {
