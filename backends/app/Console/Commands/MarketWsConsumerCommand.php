@@ -528,10 +528,13 @@ class MarketWsConsumerCommand extends Command
         )));
 
         foreach ($intervals as $interval) {
+            // limit=2: the newest kline is still forming. Only the one before
+            // it is closed; storing the forming one marked closed wrote
+            // half-built candles.
             $klines = Http::timeout(10)->get($apiBase.$this->klinePath($marketType), [
                 'symbol' => $symbol,
                 'interval' => $interval,
-                'limit' => 1,
+                'limit' => 2,
             ]);
             (new BinanceRestCircuitBreaker)->recordResponse($klines);
             if ($klines->failed()) {
@@ -544,8 +547,11 @@ class MarketWsConsumerCommand extends Command
                 continue;
             }
 
-            $row = $klines->json('0');
-            if (! is_array($row) || count($row) < 6) {
+            $nowMs = (int) floor(microtime(true) * 1000);
+            $row = collect((array) $klines->json())
+                ->filter(fn ($kline) => is_array($kline) && count($kline) >= 7 && (int) $kline[6] < $nowMs)
+                ->last();
+            if (! is_array($row)) {
                 continue;
             }
 

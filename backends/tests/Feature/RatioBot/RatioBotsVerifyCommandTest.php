@@ -76,6 +76,24 @@ class RatioBotsVerifyCommandTest extends TestCase
         $this->assertStringContainsString('0 FAIL', $output);
     }
 
+    public function test_candles_with_a_future_open_time_fail_and_are_not_taken_as_newest(): void
+    {
+        $bot = $this->healthyLiveBot();
+        // What MySQL ON UPDATE CURRENT_TIMESTAMP did on the +08 server: an
+        // updated candle's open time rewritten to the server wall clock.
+        MarketOhlc::create(['id' => (string) Str::uuid(), 'exchange' => 'binance', 'symbol' => 'ETHUSDT', 'timeframe' => '1m',
+            'ts' => now('UTC')->addHours(8)->setSecond(4), 'open' => 1, 'high' => 1, 'low' => 1, 'close' => 1, 'volume' => 1]);
+
+        $exit = Artisan::call('ratio-bots:verify', ['--bot' => $bot->id]);
+        $output = Artisan::output();
+
+        $this->assertSame(1, $exit);
+        $this->assertStringContainsString('Candles with a future open time: 1 corrupted rows', $output);
+        $this->assertMatchesRegularExpression('/41 rows, newest opened (\d+)s ago/', $output);
+        preg_match('/41 rows, newest opened (\d+)s ago/', $output, $match);
+        $this->assertLessThan(120, (int) $match[1]);   // the real latest candle, not the corrupted one 8h ahead
+    }
+
     public function test_a_blocked_bot_with_a_stale_feed_fails(): void
     {
         $bot = $this->healthyLiveBot();

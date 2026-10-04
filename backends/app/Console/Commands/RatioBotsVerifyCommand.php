@@ -129,15 +129,23 @@ class RatioBotsVerifyCommand extends Command
         // 5. Closed candles for indicators / brain.
         $timeframe = $bot->timeFrame();
         $tfSeconds = $this->timeframeSeconds($timeframe);
-        $candle = MarketOhlc::query()->where('exchange', $bot->exchangeKey())->where('symbol', $bot->normalizedSymbol())
-            ->where('timeframe', $timeframe)->orderByDesc('ts')->first();
-        $candleCount = MarketOhlc::query()->where('exchange', $bot->exchangeKey())->where('symbol', $bot->normalizedSymbol())
-            ->where('timeframe', $timeframe)->count();
+        $series = fn () => MarketOhlc::query()->where('exchange', $bot->exchangeKey())->where('symbol', $bot->normalizedSymbol())
+            ->where('timeframe', $timeframe);
+        // ts is UTC wall time, so the cutoff is bound in UTC. A candle cannot
+        // open in the future: such rows are corrupted (MySQL ON UPDATE
+        // CURRENT_TIMESTAMP rewrote their open time) and sort ahead of every
+        // real candle in "latest N" reads.
+        $futureCutoff = now('UTC')->addMinute();
+        $future = $series()->where('ts', '>', $futureCutoff)->count();
+        $candle = $series()->where('ts', '<=', $futureCutoff)->orderByDesc('ts')->first();
+        $candleCount = $series()->count();
         $candleAge = $candle?->ts ? (int) $candle->ts->diffInSeconds(now(), true) : null;
         $candlesOk = $candleAge !== null && $candleAge <= $tfSeconds * 3 && $candleCount >= 30;
         $this->report($candlesOk ? self::PASS : self::WARN, "Stored {$timeframe} candles ({$bot->exchangeKey()})",
             $candleAge === null ? 'none: indicators/brain have no history (run the feed with --store-ohlc or market:ohlc-backfill)'
                 : "{$candleCount} rows, newest opened {$candleAge}s ago");
+        $this->report($future === 0 ? self::PASS : self::FAIL, 'Candles with a future open time',
+            $future === 0 ? 'none' : "{$future} corrupted rows; they are read as the newest candles");
 
         // 6. Live trading gate, exactly as an order would hit it (read-only).
         if ($live && $bot->marketType() === 'spot') {
