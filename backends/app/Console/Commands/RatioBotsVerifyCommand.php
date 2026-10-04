@@ -14,6 +14,7 @@ use App\Models\RatioBotConfig;
 use App\Models\RatioBotDecision;
 use App\Models\RatioBotState;
 use App\Models\SchedulerRun;
+use App\Support\Database\TimestampAutoUpdateRepair;
 use Illuminate\Console\Command;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
@@ -73,6 +74,12 @@ class RatioBotsVerifyCommand extends Command
         $castOk = (new MarketOhlc())->getCasts()['ts'] ?? null;
         $this->report($castOk === UtcDateTime::class ? self::PASS : self::FAIL,
             'Timezone fixes deployed (market_ohlc.ts read as UTC).', $castOk === UtcDateTime::class ? null : 'Pull and deploy the latest backend.');
+
+        if (TimestampAutoUpdateRepair::supported()) {
+            $autoUpdate = collect(TimestampAutoUpdateRepair::columns())->map(fn ($c) => "{$c->TABLE_NAME}.{$c->COLUMN_NAME}");
+            $this->report($autoUpdate->isEmpty() ? self::PASS : self::FAIL, 'No TIMESTAMP columns rewritten on UPDATE',
+                $autoUpdate->isEmpty() ? null : $autoUpdate->count().' found ('.$autoUpdate->take(5)->implode(', ').'): run php artisan migrate');
+        }
 
         foreach (['ratio-bots:evaluate' => 180, 'ratio-bots:reconcile' => 900] as $command => $maxAge) {
             $run = SchedulerRun::query()->where('command', $command)->orderByDesc('started_at')->first();
