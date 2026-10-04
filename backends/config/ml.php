@@ -21,23 +21,38 @@ return [
     'mode' => 'shadow_only',
 
     'provider' => 'binance_futures',
-    'symbols' => array_values(array_filter(array_map('trim', explode(',', (string) env('AUTOFINX_ML_SYMBOLS', 'BTCUSDT,ETHUSDT'))))),
+    'symbols' => array_values(array_filter(array_map('trim', explode(',', (string) env('AUTOFINX_ML_SYMBOLS', 'BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,XRPUSDT,SUIUSDT'))))),
+
+    // How far back candles + funding are collected per symbol. The deep
+    // majors get 5 years (more market regimes: bull, bear, sideways, crash);
+    // the rest 3 years. Format "SYMBOL:months,..."; unlisted symbols use the
+    // default. Recency weighting (training.recency_half_life_days) keeps old
+    // years from outvoting the current market.
+    'history' => [
+        'default_months' => (int) env('AUTOFINX_ML_HISTORY_DEFAULT_MONTHS', 36),
+        'months_by_symbol' => collect(explode(',', (string) env('AUTOFINX_ML_HISTORY_MONTHS', 'BTCUSDT:60,ETHUSDT:60,BNBUSDT:60')))
+            ->map(fn (string $pair) => array_map('trim', explode(':', $pair)))
+            ->filter(fn (array $pair) => count($pair) === 2 && $pair[0] !== '' && (int) $pair[1] > 0)
+            ->mapWithKeys(fn (array $pair) => [strtoupper($pair[0]) => (int) $pair[1]])
+            ->all(),
+    ],
     // Base candle interval for features and labels. Horizons must be exact
     // multiples of it so every label lands on a real candle close.
     'base_timeframe' => '5m',
     'base_interval_seconds' => 300,
-    // Phase 3: long horizons only. At 15m the round-trip cost (~0.18% required
-    // move) eats most of the typical BTC/ETH move (~0.15-0.21%), so 15m is no
-    // longer trained or predicted; its history stays in the registry. Each
-    // horizon is its own model and is never relabelled for another expiry.
-    'horizons_minutes' => array_values(array_map('intval', array_filter(array_map('trim', explode(',', (string) env('AUTOFINX_ML_HORIZONS_MINUTES', '60,120,240,1440')))))),
+    // Every horizon is trained, predicted and scored. Each is its own model
+    // and is never relabelled for another expiry. 15m is trained too (real
+    // fee + slippage is ~0.12%, and fast news/event moves can make it useful
+    // later) but is display-only: see autopilot.trade_horizons_minutes.
+    'horizons_minutes' => array_values(array_map('intval', array_filter(array_map('trim', explode(',', (string) env('AUTOFINX_ML_HORIZONS_MINUTES', '15,60,120,240,1440')))))),
     // Quick Trade expiries at or below this get the "costs exceed the typical
-    // move" message instead of a model.
-    'cost_exceeds_move_max_seconds' => (int) env('AUTOFINX_ML_COST_EXCEEDS_MOVE_MAX_SECONDS', 900),
+    // move" message instead of a model (1m-10m have no model; 15m has its own).
+    'cost_exceeds_move_max_seconds' => (int) env('AUTOFINX_ML_COST_EXCEEDS_MOVE_MAX_SECONDS', 600),
 
     'funding' => [
         // Binance USDT-M funding settles every 8h (00:00/08:00/16:00 UTC).
         'interval_hours' => 8,
+        // Fallback only; the real start is per symbol (ml.history).
         'default_months' => 12,
     ],
 
@@ -52,6 +67,7 @@ return [
     ],
 
     'backfill' => [
+        // Fallback only; without --months/--from the start is per symbol (ml.history).
         'default_months' => 12,
         // Maximum pages per invocation; the checkpoint makes the next run
         // resume exactly where this one stopped.
@@ -72,6 +88,8 @@ return [
         // Candidate types the daily retrain trains per symbol×horizon.
         // 'side_classifier' (Phase 3) and/or 'regression' (Phase 1/2).
         'candidate_types' => array_values(array_filter(array_map('trim', explode(',', (string) env('AUTOFINX_ML_CANDIDATE_TYPES', 'side_classifier'))))),
+        // Job timeout = this + 120s; must stay below the ml_training queue's
+        // retry_after (2400s). A 5-year side classifier trains in ~3 minutes.
         'timeout_seconds' => (int) env('AUTOFINX_ML_TRAINING_TIMEOUT_SECONDS', 1800),
         // Dedicated connection/queue (config/queue.php `ml_training`) so a long
         // training run never occupies a trading or analytics worker.
@@ -83,7 +101,16 @@ return [
         // Retrain only when this many NEW mature labels exist past the last
         // trained window (~1 day of 5m anchors).
         'min_new_mature_labels' => (int) env('AUTOFINX_ML_MIN_NEW_MATURE_LABELS', 288),
-        'max_training_rows' => (int) env('AUTOFINX_ML_MAX_TRAINING_ROWS', 150000),
+        // 5 years of 5m anchors is ~526k rows; this cap keeps all of it.
+        'max_training_rows' => (int) env('AUTOFINX_ML_MAX_TRAINING_ROWS', 600000),
+        // Rows older than this (months before the holdout) are not fitted.
+        // 0 = use the whole collected history. Pick it with
+        // `ml:train:compare-windows`, which scores every window on the SAME
+        // holdout; never by guess.
+        'window_months' => (int) env('AUTOFINX_ML_TRAINING_WINDOW_MONTHS', 0),
+        // Sample weight = 0.5 ^ (age / half-life): a row this many days older
+        // than the newest training row counts half. 0 = equal weights.
+        'recency_half_life_days' => (float) env('AUTOFINX_ML_RECENCY_HALF_LIFE_DAYS', 180),
         'schedule_utc' => env('AUTOFINX_ML_RETRAIN_SCHEDULE_UTC', '03:05'),
         'artifact_dir' => env('AUTOFINX_ML_ARTIFACT_DIR', storage_path('app/ml-shadow/models')),
         'export_dir' => storage_path('app/ml-shadow/exports'),
@@ -106,7 +133,7 @@ return [
         'classifier' => [
             // Minimum non-overlapping holdout trades per horizon (the holdout is
             // ~55 days: at most ~55 independent 1d trades exist).
-            'min_trades' => [60 => 30, 120 => 20, 240 => 15, 1440 => 8],
+            'min_trades' => [15 => 40, 60 => 30, 120 => 20, 240 => 15, 1440 => 8],
             'default_min_trades' => 20,
             // Share of walk-forward folds whose non-overlapping net must be > 0.
             'min_positive_fold_share' => (float) env('AUTOFINX_ML_MIN_POSITIVE_FOLD_SHARE', 0.67),
@@ -137,12 +164,28 @@ return [
         'quote_max_age_seconds' => 15,
         // Below this many closed trades, success metrics show "insufficient data".
         'min_closed_trades' => 20,
+        // Horizons the autopilot may trade. Every horizon is still trained and
+        // shown; 15m stays display-only until its results justify it.
+        'trade_horizons_minutes' => array_values(array_map('intval', array_filter(array_map('trim', explode(',', (string) env('AUTOFINX_ML_PAPER_AUTOPILOT_TRADE_HORIZONS', '60,120,240,1440')))))),
     ],
 
     'classifier' => [
         // A side is only taken when its calibrated probability reaches this
         // floor AND its expected net (after costs + funding) is positive.
         'probability_floor' => (float) env('AUTOFINX_ML_CLASSIFIER_PROBABILITY_FLOOR', 0.55),
+    ],
+
+    // Stable signal (SignalStabilityService): hysteresis over the stored
+    // 5-minute decisions so a probability hovering near the floor does not
+    // flip the screen or the Paper Autopilot between BUY, WAIT and SELL.
+    'stability' => [
+        // Consecutive raw decisions needed to enter, flip or leave a side.
+        'confirm_predictions' => (int) env('AUTOFINX_ML_STABILITY_CONFIRM', 2),
+        // Once in a side, it holds while that side's probability stays >= this
+        // (below the 0.55 entry floor: that gap is the hysteresis).
+        'exit_probability' => (float) env('AUTOFINX_ML_STABILITY_EXIT_PROBABILITY', 0.50),
+        // Recent predictions replayed per symbol × horizon (48 = 4 hours).
+        'lookback_predictions' => (int) env('AUTOFINX_ML_STABILITY_LOOKBACK', 48),
     ],
 
     'predictor' => [

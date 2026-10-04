@@ -90,6 +90,20 @@ final class QuickTradePaperWalletTest extends TestCase
             ->assertStatus(422)->assertJsonPath('message', 'Close or wait for all open paper trades to settle before resetting the paper wallet.');
     }
 
+    public function test_history_can_be_filtered_to_paper_or_live_trades(): void
+    {
+        foreach (['paper', 'live'] as $mode) {
+            QuickTrade::create(['workspace_id' => $this->workspace->id, 'symbol' => 'BTCUSDT', 'side' => 'buy', 'stake_amount' => 10,
+                'asset_class' => 'CRYPTO', 'mode' => $mode, 'source' => 'manual_quick_trade', 'timeframe' => '5m', 'expiry_seconds' => 300,
+                'payout_ratio' => 0.8, 'entry_price' => 100, 'status' => 'won', 'entry_at' => now(), 'expires_at' => now(), 'settled_at' => now()]);
+        }
+        $url = "/api/v1/workspaces/{$this->workspace->id}/quick-trades/history";
+
+        $this->getJson($url.'?mode=paper')->assertOk()->assertJsonCount(1)->assertJsonPath('0.mode', 'paper');
+        $this->getJson($url.'?mode=live')->assertOk()->assertJsonCount(1)->assertJsonPath('0.mode', 'live');
+        $this->getJson($url)->assertOk()->assertJsonCount(2); // no mode: unchanged combined list
+    }
+
     public function test_reset_requires_workspace_membership_and_never_touches_live_wallets(): void
     {
         $other = Workspace::factory()->create();

@@ -4,6 +4,7 @@ namespace App\Console\Commands;
 
 use App\Domain\Ml\Shadow\FeatureLabelService;
 use App\Domain\Ml\Shadow\MlCandleCollector;
+use App\Domain\Ml\Shadow\MlHistoryWindow;
 use App\Models\MlBackfillCheckpoint;
 use App\Models\MlCandle;
 use Illuminate\Support\Carbon;
@@ -14,7 +15,7 @@ final class MlCandlesBackfillCommand extends MlShadowCommand
 {
     protected $signature = 'ml:candles:backfill
         {--symbol=* : Symbol(s); defaults to ml.symbols}
-        {--months= : Months of history (default ml.backfill.default_months)}
+        {--months= : Months of history (default: per symbol, ml.history)}
         {--from= : Start (UTC date/time), overrides --months}
         {--to= : End (UTC date/time), default now}
         {--timeframe= : Candle interval (default ml.base_timeframe)}
@@ -28,10 +29,6 @@ final class MlCandlesBackfillCommand extends MlShadowCommand
     {
         $timeframe = (string) ($this->option('timeframe') ?: config('ml.base_timeframe', '5m'));
         $to = $this->option('to') ? Carbon::parse((string) $this->option('to'), 'UTC') : now('UTC');
-        // Day-aligned default start so a re-run on the same day resumes the same checkpoint.
-        $from = $this->option('from')
-            ? Carbon::parse((string) $this->option('from'), 'UTC')
-            : now('UTC')->subMonthsNoOverflow((int) ($this->option('months') ?: config('ml.backfill.default_months', 12)))->startOfDay();
         $maxPages = $this->option('max-pages') !== null ? max(1, (int) $this->option('max-pages')) : null;
         $failed = false;
 
@@ -43,6 +40,12 @@ final class MlCandlesBackfillCommand extends MlShadowCommand
 
                 continue;
             }
+            // Day-aligned start so a re-run on the same day resumes the same checkpoint.
+            $from = match (true) {
+                (bool) $this->option('from') => Carbon::parse((string) $this->option('from'), 'UTC'),
+                (bool) $this->option('months') => now('UTC')->subMonthsNoOverflow((int) $this->option('months'))->startOfDay(),
+                default => Carbon::createFromTimestampMs(MlHistoryWindow::startMs($symbol), 'UTC'),
+            };
             try {
                 $this->info("{$symbol} {$timeframe}: backfilling {$from->toIso8601String()} -> {$to->toIso8601String()}");
                 $checkpoint = $collector->backfill($symbol, $timeframe, $from->getTimestampMs(), $to->getTimestampMs(), $maxPages,

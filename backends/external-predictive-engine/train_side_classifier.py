@@ -41,25 +41,38 @@ MIN_ROWS = 500
 def load(input_path: Path, manifest: dict[str, Any]):
     import numpy as np
 
-    times, rows, returns, funding = [], [], [], []
     width = len(manifest["features"])
+    # Preallocated arrays (grown if the manifest under-counts): years of 5m
+    # rows as python lists of lists would need several times the memory.
+    capacity = max(MIN_ROWS, int(manifest.get("rows") or 0))
+    times = np.empty(capacity, dtype=np.int64)
+    x = np.empty((capacity, width), dtype=np.float64)
+    returns = np.empty(capacity, dtype=np.float64)
+    funding = np.empty(capacity, dtype=np.float64)
+    n = 0
     with input_path.open(encoding="utf-8") as handle:
         for line in handle:
             if not line.strip():
                 continue
             record = json.loads(line)
-            x = [float(v) for v in record["x"]]
-            if len(x) != width or not all(math.isfinite(v) for v in x):
+            row = [float(v) for v in record["x"]]
+            if len(row) != width or not all(math.isfinite(v) for v in row):
                 raise ValueError("feature vector does not match the manifest schema")
-            times.append(int(record["t"]))
-            rows.append(x)
-            returns.append(float(record["y"]) * 100.0)          # percent
-            funding.append(float(record.get("fb", 0.0)))         # percent, BUY side
-    if any(b <= a for a, b in zip(times, times[1:])):
+            if n == capacity:
+                capacity *= 2
+                times, returns, funding = (np.resize(a, capacity) for a in (times, returns, funding))
+                x = np.resize(x, (capacity, width))
+            times[n] = int(record["t"])
+            x[n] = row
+            returns[n] = float(record["y"]) * 100.0          # percent
+            funding[n] = float(record.get("fb", 0.0))         # percent, BUY side
+            n += 1
+    times, x, returns, funding = times[:n], x[:n], returns[:n], funding[:n]
+    if n > 1 and bool(np.any(np.diff(times) <= 0)):
         raise ValueError("anchor times must be strictly increasing (chronological, no duplicates)")
-    if len(rows) < MIN_ROWS:
-        raise ValueError(f"not enough mature rows: {len(rows)} < {MIN_ROWS}")
-    return np.asarray(times, dtype=np.int64), np.asarray(rows, dtype=np.float64), np.asarray(returns), np.asarray(funding)
+    if n < MIN_ROWS:
+        raise ValueError(f"not enough mature rows: {n} < {MIN_ROWS}")
+    return times, x, returns, funding
 
 
 def side_labels(np, returns, funding, required):
@@ -86,22 +99,39 @@ class SideModel:
                 "isotonic_x": self.iso_x, "isotonic_y": self.iso_y}
 
 
-def fit_side(lgb, np, x, label, signed_returns, end: int, purge: int) -> SideModel:
-    """Trees on [0, cal_start - purge), isotonic + EV params on [cal_start, end)."""
+def window_start(np, times, end: int, window_ms: int) -> int:
+    """First row inside the training window ending at row `end` (0 = all history)."""
+    if window_ms <= 0 or end <= 0:
+        return 0
+    return int(np.searchsorted(times, int(times[end - 1]) - window_ms, side="left"))
+
+
+def recency_weights(np, times, half_life_ms: float):
+    """0.5 ** (age / half-life), age measured from the newest row of the slice."""
+    if half_life_ms <= 0 or len(times) == 0:
+        return None
+    return np.power(0.5, (float(times[-1]) - times.astype(np.float64)) / half_life_ms)
+
+
+def fit_side(lgb, np, x, label, signed_returns, end: int, purge: int, times=None, window_ms: int = 0, half_life_ms: float = 0.0) -> SideModel:
+    """Trees on [start, cal_start - purge) with recency weights, isotonic + EV
+    params (unweighted, the most recent slice) on [cal_start, end)."""
     from sklearn.isotonic import IsotonicRegression
 
-    cal_start = int(end * (1 - CALIBRATION_FRACTION))
+    start = window_start(np, times, end, window_ms) if times is not None else 0
+    cal_start = start + int((end - start) * (1 - CALIBRATION_FRACTION))
     fit_end = cal_start - purge
-    if fit_end < 200 or end - cal_start < 100:
+    if fit_end - start < 200 or end - cal_start < 100:
         raise ValueError("not enough rows for a purged fit + calibration split")
     model = lgb.LGBMClassifier(
         n_estimators=300, learning_rate=0.03, num_leaves=31, min_child_samples=200,
         subsample=0.8, subsample_freq=1, colsample_bytree=0.8, reg_lambda=1.0,
         random_state=42, deterministic=True, force_row_wise=True, n_jobs=1, verbose=-1,
     )
-    if label[:fit_end].min() == label[:fit_end].max():
+    if label[start:fit_end].min() == label[start:fit_end].max():
         raise ValueError("training slice has a single class for this side")
-    model.fit(x[:fit_end], label[:fit_end])
+    weights = recency_weights(np, times[start:fit_end], half_life_ms) if times is not None else None
+    model.fit(x[start:fit_end], label[start:fit_end], sample_weight=weights)
     raw = model.booster_.predict(x[cal_start:end])
     iso = IsotonicRegression(y_min=0.0, y_max=1.0, out_of_bounds="clip")
     iso.fit(raw, label[cal_start:end])
@@ -203,10 +233,14 @@ def train(input_path: Path, manifest_path: Path, output_dir: Path, champion_dir:
     required = float(manifest["required_move_pct"])
     floor = float(manifest.get("probability_floor", 0.55))
     label_buy, label_sell = side_labels(np, returns, funding, required)
+    window_months = float(manifest.get("window_months") or 0)
+    window_ms = int(window_months * 30.4375 * 86_400_000)
+    half_life_days = float(manifest.get("recency_half_life_days") or 0.0)
+    half_life_ms = half_life_days * 86_400_000
 
     def fit_pair(end: int):
-        return (fit_side(lgb, np, x, label_buy, returns, end, purge),
-                fit_side(lgb, np, x, label_sell, -returns, end, purge))
+        return (fit_side(lgb, np, x, label_buy, returns, end, purge, times, window_ms, half_life_ms),
+                fit_side(lgb, np, x, label_sell, -returns, end, purge, times, window_ms, half_life_ms))
 
     holdout_start = int(n * (1 - HOLDOUT_FRACTION))
     train_end = holdout_start - purge
@@ -253,7 +287,8 @@ def train(input_path: Path, manifest_path: Path, output_dir: Path, champion_dir:
         "timeframe": manifest["timeframe"], "feature_schema_version": manifest["feature_schema_version"],
         "features": manifest["features"], "rows": n, "train_rows": train_end, "purge_rows": purge,
         "holdout_rows": n - holdout_start,
-        "training_window_from_ms": int(times[0]), "training_window_to_ms": int(times[train_end - 1]),
+        "training_window_months": window_months, "recency_half_life_days": half_life_days,
+        "training_window_from_ms": int(times[window_start(np, times, train_end, window_ms)]), "training_window_to_ms": int(times[train_end - 1]),
         "holdout_from_ms": int(times[holdout_start]), "holdout_to_ms": int(times[-1]),
         "split": "chronological_purged_walk_forward_calibrated",
         "probability_floor": floor,

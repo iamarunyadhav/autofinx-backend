@@ -6,6 +6,7 @@ use App\Domain\Ml\Shadow\ClassifierDecision;
 use App\Domain\Ml\Shadow\ClassifierPromotionPolicy;
 use App\Domain\Ml\Shadow\FeatureLabelService;
 use App\Domain\Ml\Shadow\FundingRateService;
+use App\Domain\Ml\Shadow\MlHistoryWindow;
 use App\Domain\Ml\Shadow\MlModelRegistry;
 use App\Domain\Ml\Shadow\MlShadowTrainer;
 use App\Domain\Ml\Shadow\ShadowEvaluationService;
@@ -96,6 +97,26 @@ final class ShadowPhase3Test extends TestCase
         $this->assertSame(12, MlFundingRate::query()->count());
         // Resumes after the newest stored row, not from the start.
         Http::assertSent(fn (Request $r) => str_contains($r->url(), 'startTime='.($start + 11 * 8 * self::HOUR + 1)));
+    }
+
+    public function test_funding_history_is_extended_back_to_the_symbol_window_once(): void
+    {
+        config(['ml.history.months_by_symbol' => ['BTCUSDT' => 60], 'ml.history.default_months' => 36]);
+        $this->assertSame(60, MlHistoryWindow::months('btcusdt'));
+        $this->assertSame(36, MlHistoryWindow::months('SUIUSDT'));
+        $windowStart = MlHistoryWindow::startMs('BTCUSDT');
+        // 12 months already stored (the old default): only the newest row matters here.
+        MlFundingRate::query()->create(['symbol' => 'BTCUSDT', 'funding_time_ms' => now('UTC')->subMonths(12)->getTimestampMs(), 'funding_rate' => 0.0001]);
+        $listedFrom = now('UTC')->subMonths(40)->startOfDay()->getTimestampMs();   // exchange history begins after the window start
+        Http::fake(['*/fapi/v1/fundingRate*' => fn () => Http::response([['symbol' => 'BTCUSDT', 'fundingTime' => $listedFrom, 'fundingRate' => '0.0001']])]);
+        $service = app(FundingRateService::class);
+
+        $service->sync('BTCUSDT');                       // re-scans from the 5-year window start
+        Http::assertSent(fn (Request $r) => str_contains($r->url(), 'startTime='.$windowStart));
+        Http::fake(['*/fapi/v1/fundingRate*' => fn () => Http::response([])]);
+        $service->sync('BTCUSDT');                       // listing date remembered: resumes, no re-scan
+
+        Http::assertNotSent(fn (Request $r) => str_contains($r->url(), 'startTime='.$windowStart));
     }
 
     // ---- classifier gate -------------------------------------------------

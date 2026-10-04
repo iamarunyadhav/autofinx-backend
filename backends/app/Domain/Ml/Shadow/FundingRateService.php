@@ -3,6 +3,7 @@
 namespace App\Domain\Ml\Shadow;
 
 use App\Models\MlFundingRate;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -31,9 +32,19 @@ class FundingRateService
     {
         $symbol = strtoupper($symbol);
         $latest = MlFundingRate::query()->where('symbol', $symbol)->max('funding_time_ms');
-        $cursor = $latest !== null
-            ? (int) $latest + 1
-            : ($fromMs ?? now('UTC')->subMonthsNoOverflow((int) config('ml.funding.default_months', 12))->startOfDay()->getTimestampMs());
+        $earliest = MlFundingRate::query()->where('symbol', $symbol)->min('funding_time_ms');
+        $start = $fromMs ?? MlHistoryWindow::startMs($symbol);
+        // Continue after the newest row, unless the stored history starts
+        // later than the symbol's history window (e.g. after it was extended
+        // from 12 months to 5 years): then re-scan from the start. Rows are
+        // insertOrIgnore'd, and 5 years of 8h funding is only ~6 pages.
+        // A symbol listed after $start has nothing older: remember where
+        // Binance's history really begins so that is not re-scanned every run.
+        $listedFromKey = 'ml:funding:listed-from:'.$symbol;
+        $intervalMs = (int) config('ml.funding.interval_hours', 8) * 3_600_000;
+        $covered = $earliest !== null && (int) $earliest <= max($start, (int) Cache::get($listedFromKey, 0)) + $intervalMs;
+        $rescan = ! ($latest !== null && $covered);
+        $cursor = $rescan ? $start : (int) $latest + 1;
         $result = ['written' => 0, 'pages' => 0, 'rejected' => 0];
 
         while ($result['pages'] < $maxPages) {
@@ -65,6 +76,9 @@ class FundingRateService
                 break;
             }
             $cursor = $maxTime + 1;
+        }
+        if ($rescan && ($first = MlFundingRate::query()->where('symbol', $symbol)->min('funding_time_ms')) !== null) {
+            Cache::forever($listedFromKey, (int) $first);
         }
 
         return $result;

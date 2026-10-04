@@ -130,3 +130,36 @@ def test_serving_probabilities_match_training_and_schema_is_enforced(tmp_path):
     assert served["execution"] is False
     assert store.predict(ShadowRequest("BTCUSDT", 60, "test-v2", vector))["reason"] == "feature_schema_version_mismatch"
     assert store.predict(ShadowRequest("BTCUSDT", 120, "test-v3", vector))["status"] == "unavailable"  # no horizon borrowing
+
+
+def test_loader_handles_a_manifest_that_under_counts_rows(tmp_path):
+    data, manifest = write_dataset(tmp_path, rows=1200)
+    spec = json.loads(manifest.read_text(encoding="utf-8"))
+    spec["rows"] = 10                                    # grows past the preallocation
+    times, x, returns, _ = classifier.load(data, spec)
+    assert len(times) == 1200 and x.shape == (1200, 4) and returns.shape == (1200,)
+    assert times[0] == 0 and times[-1] == 1199 * STEP
+
+
+def test_recency_weights_halve_every_half_life():
+    import numpy as np
+
+    times = np.array([0, 10 * 86_400_000, 20 * 86_400_000], dtype=np.int64)
+    weights = classifier.recency_weights(np, times, 10 * 86_400_000)
+    assert weights.tolist() == pytest.approx([0.25, 0.5, 1.0])
+    assert classifier.recency_weights(np, times, 0) is None   # 0 = equal weights
+
+
+def test_training_window_limits_fitting_rows_but_keeps_the_same_holdout(tmp_path):
+    data, manifest = write_dataset(tmp_path, rows=6000, signal=0.6)
+    full = classifier.train(data, manifest, tmp_path / "full")
+    spec = json.loads(manifest.read_text(encoding="utf-8"))
+    spec.update({"window_months": 0.5, "recency_half_life_days": 3})   # ~15 days of 5m rows
+    windowed_manifest = tmp_path / "windowed.json"
+    windowed_manifest.write_text(json.dumps(spec), encoding="utf-8")
+    windowed = classifier.train(data, windowed_manifest, tmp_path / "windowed")
+
+    assert windowed["holdout_from_ms"] == full["holdout_from_ms"]           # same test period
+    assert windowed["training_window_from_ms"] > full["training_window_from_ms"] == 0
+    assert windowed["training_window_to_ms"] - windowed["training_window_from_ms"] <= 0.5 * 30.4375 * 86_400_000
+    assert windowed["recency_half_life_days"] == 3

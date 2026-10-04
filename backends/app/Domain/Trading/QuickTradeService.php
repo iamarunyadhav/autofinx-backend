@@ -670,10 +670,13 @@ class QuickTradeService
             ->get();
     }
 
-    public function history(string $workspaceId, ?string $source = null, ?string $robotSessionId = null, int $limit = 100)
+    public function history(string $workspaceId, ?string $source = null, ?string $robotSessionId = null, int $limit = 100, ?string $mode = null)
     {
         return $this->tradeQuery($workspaceId, $source, $robotSessionId)
             ->where('status', '!=', 'open')
+            // Paper and live history are shown separately; null keeps the
+            // combined list for callers that never asked for a mode.
+            ->when($mode !== null, fn ($query) => $query->where('mode', $mode))
             ->orderByDesc('settled_at')
             ->limit($limit)
             ->get();

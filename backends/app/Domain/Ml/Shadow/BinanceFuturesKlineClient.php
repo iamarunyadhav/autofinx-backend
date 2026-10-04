@@ -78,6 +78,34 @@ class BinanceFuturesKlineClient
         return is_array($rows) ? $rows : [];
     }
 
+    /**
+     * Public last price (GET /fapi/v1/ticker/price, weight 1). Read-only, no
+     * key: used by the Paper Autopilot when the websocket cache has no fresh
+     * quote for a symbol nobody trades live.
+     *
+     * @return array{price: float, time_ms: int}|null
+     */
+    public function tickerPrice(string $symbol): ?array
+    {
+        $this->breaker->assertAvailable();
+        $this->breaker->throttle('ml_shadow');
+
+        $response = Http::timeout(5)
+            ->acceptJson()
+            ->get(rtrim((string) config('ml.binance.base_url', 'https://fapi.binance.com'), '/').'/fapi/v1/ticker/price', [
+                'symbol' => strtoupper($symbol),
+            ]);
+
+        $this->breaker->recordResponse($response);
+        if ($response->failed()) {
+            return null;
+        }
+        $price = (float) $response->json('price', 0);
+        $timeMs = (int) $response->json('time', 0);
+
+        return $price > 0 && $timeMs > 0 ? ['price' => $price, 'time_ms' => $timeMs] : null;
+    }
+
     protected function pause(int $milliseconds): void
     {
         if ($milliseconds > 0) {

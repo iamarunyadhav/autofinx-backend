@@ -26,6 +26,9 @@ final class ShadowTrainingPromotionTest extends TestCase
     /** @var list<array<string, mixed>> metadata the fake trainer returns, in order */
     private array $runs = [];
 
+    /** @var list<array<string, mixed>> manifests the fake trainer received */
+    public array $manifests = [];
+
     protected function setUp(): void
     {
         parent::setUp();
@@ -43,6 +46,8 @@ final class ShadowTrainingPromotionTest extends TestCase
 
             protected function runTrainer(array $export, string $directory, ?MlModel $champion, string $type = self::TYPE_REGRESSION): array
             {
+                $this->test->manifests[] = json_decode((string) file_get_contents($export['manifest']), true);
+
                 return $this->test->fakeTrainerRun($directory, $champion, $type);
             }
         });
@@ -95,6 +100,27 @@ final class ShadowTrainingPromotionTest extends TestCase
         $total = $candles + ShadowFeatureBuilder::LONG_LOOKBACK;
         $this->seedCandles('BTCUSDT', $this->alignedOpen($total + 10), $total);
         app(FeatureLabelService::class)->build('BTCUSDT');
+    }
+
+    public function test_window_comparison_scores_every_window_on_one_export_and_registers_nothing(): void
+    {
+        $this->seedMatureLabels(400);
+        config(['ml.training.recency_half_life_days' => 90]);
+        $this->runs = [$this->metadata(0.4), $this->metadata(0.4), new RuntimeException('python blew up')];
+
+        $report = app(MlShadowTrainer::class)->compareWindows('BTCUSDT', 60, [12, 0, 36]);
+
+        $this->assertSame(0, MlModel::query()->count());                         // nothing registered
+        $this->assertSame(0, MlChampion::query()->count());                       // nothing promoted
+        $this->assertSame([12, 0, 36], array_column($this->manifests, 'window_months'));
+        $this->assertEquals([90, 90, 90], array_column($this->manifests, 'recency_half_life_days'));
+        $this->assertCount(1, array_unique(array_column($this->manifests, 'rows'))); // one export, same rows
+        $this->assertSame([12, 0, 36], array_column($report['results'], 'window_months'));
+        $this->assertArrayHasKey('would_pass_gate', $report['results'][0]);
+        $this->assertSame('python blew up', $report['results'][2]['error']);      // one failure never stops the rest
+        $this->assertCount(0, File::glob(config('ml.training.export_dir').'/experiment-*'));  // temp files cleaned
+        $this->assertNotEmpty(File::glob(storage_path('app/ml-shadow/experiments').'/BTCUSDT_h60_*.json'));
+        File::deleteDirectory(storage_path('app/ml-shadow/experiments'));
     }
 
     public function test_insufficient_mature_labels_means_no_training_and_no_dispatch(): void

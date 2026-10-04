@@ -7,6 +7,7 @@ use App\Models\MlModel;
 use Illuminate\Database\Query\Builder;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use InvalidArgumentException;
@@ -113,6 +114,76 @@ class MlShadowTrainer
     }
 
     /**
+     * Experiment only: train the side classifier once per fitting window
+     * (months; 0 = all history) on ONE export, so every window is scored on
+     * the SAME newest-rows holdout and walk-forward folds. Nothing is
+     * registered or promoted; the champion is untouched. The report is
+     * written to storage/app/ml-shadow/experiments and returned.
+     *
+     * @param  list<int>  $windows
+     * @return array<string, mixed>
+     */
+    public function compareWindows(string $symbol, int $horizon, array $windows, ?float $halfLifeDays = null): array
+    {
+        $lock = Cache::lock(self::lockKey($symbol, $horizon), (int) config('ml.training.timeout_seconds', 1800) * max(1, count($windows)) + 300);
+        if (! $lock->get()) {
+            throw new RuntimeException("Training already running for {$symbol} h{$horizon}.");
+        }
+        $timeframe = (string) config('ml.base_timeframe', '5m');
+        $runId = 'experiment-'.Str::uuid();
+        $export = null;
+        $halfLife = max(0.0, $halfLifeDays ?? (float) config('ml.training.recency_half_life_days', 180));
+        try {
+            $export = $this->export($symbol, $horizon, $timeframe, $runId);
+            $manifest = json_decode((string) file_get_contents($export['manifest']), true, 512, JSON_THROW_ON_ERROR);
+            $results = [];
+            foreach ($windows as $window) {
+                $window = max(0, (int) $window);
+                $directory = (string) config('ml.training.export_dir').DIRECTORY_SEPARATOR.$runId.'-w'.$window;
+                $variantManifest = $directory.'.manifest.json';
+                file_put_contents($variantManifest, json_encode(['window_months' => $window, 'recency_half_life_days' => $halfLife] + $manifest, JSON_THROW_ON_ERROR));
+                try {
+                    $metadata = $this->runTrainer(['manifest' => $variantManifest] + $export, $directory, null, self::TYPE_SIDE_CLASSIFIER);
+                    $decision = $this->classifierPolicy->decide($metadata, false, $horizon);
+                    $folds = (array) data_get($metadata, 'metrics.walk_forward.folds', []);
+                    $results[] = [
+                        'window_months' => $window,
+                        'fitted_from' => gmdate('c', intdiv((int) ($metadata['training_window_from_ms'] ?? 0), 1000)),
+                        'holdout' => array_intersect_key((array) data_get($metadata, 'metrics.holdout.non_overlapping', []),
+                            array_flip(['trades', 'total_net_pct', 'average_net_pct', 'net_win_rate_pct', 't_stat'])),
+                        'positive_folds' => count(array_filter($folds, static fn ($f) => (float) data_get($f, 'non_overlapping.total_net_pct', 0) > 0)).'/'.count($folds),
+                        'would_pass_gate' => (bool) $decision['promote'],
+                        'gate_reason' => $decision['reason'],
+                    ];
+                } catch (Throwable $exception) {
+                    $results[] = ['window_months' => $window, 'error' => mb_substr($exception->getMessage(), 0, 500)];
+                } finally {
+                    @unlink($variantManifest);
+                    File::deleteDirectory($directory);
+                }
+            }
+            $report = [
+                'symbol' => $symbol, 'horizon_minutes' => $horizon, 'recency_half_life_days' => $halfLife,
+                'rows' => $export['rows'], 'run_at' => now('UTC')->toIso8601String(),
+                'note' => 'Same holdout and folds for every window. Experiment only: nothing registered or promoted.',
+                'results' => $results,
+            ];
+            $reportDir = storage_path('app/ml-shadow/experiments');
+            File::ensureDirectoryExists($reportDir);
+            file_put_contents($reportDir.DIRECTORY_SEPARATOR.sprintf('%s_h%d_%s.json', $symbol, $horizon, now('UTC')->format('Ymd_His')),
+                json_encode($report, JSON_PRETTY_PRINT | JSON_THROW_ON_ERROR));
+
+            return $report;
+        } finally {
+            if ($export !== null) {
+                @unlink($export['data']);
+                @unlink($export['manifest']);
+            }
+            $lock->release();
+        }
+    }
+
+    /**
      * MATURE labels that have a feature row of $schema at the same anchor.
      * Same symbol, same horizon, one schema only — never mixed. Labels carry
      * no schema of their own (a future return is the same for every schema).
@@ -184,6 +255,10 @@ class MlShadowTrainer
             'feature_schema_version' => $schema, 'features' => $names, 'rows' => $rows,
             'cost_pct' => $costs['cost_pct'], 'required_move_pct' => $costs['required_move_pct'],
             'probability_floor' => (float) config('ml.classifier.probability_floor', 0.55),
+            // Fitting window and recency weighting (side classifier); the
+            // holdout is always the newest rows, whatever the window.
+            'window_months' => max(0, (int) config('ml.training.window_months', 0)),
+            'recency_half_life_days' => max(0.0, (float) config('ml.training.recency_half_life_days', 180)),
             'funding_rows_covered' => count(array_filter($fundingBuy, static fn (float $v): bool => $v !== 0.0)),
             'cost_source' => 'QuickTradeCostModel:'.$costs['fee_model'].':'.$costs['fee_rate_source'],
         ], JSON_PRETTY_PRINT | JSON_THROW_ON_ERROR));

@@ -480,12 +480,14 @@ class QuickTradeController extends Controller
     public function history(Request $request, string $workspaceId, QuickTradeService $quickTrades)
     {
         $this->assertWorkspaceMembership($request, $workspaceId);
+        $mode = $request->query('mode');
 
         return response()->json($quickTrades->history(
             $workspaceId,
             $request->query('source'),
             $request->query('robot_session_id'),
-            (int) $request->query('limit', 100)
+            (int) $request->query('limit', 100),
+            in_array($mode, ['paper', 'live'], true) ? $mode : null
         ));
     }
 

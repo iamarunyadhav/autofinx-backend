@@ -4,6 +4,7 @@ namespace App\Domain\Ml\Shadow;
 
 use App\Domain\Market\MarketPriceCacheService;
 use App\Models\MlCandle;
+use App\Models\MlModel;
 use App\Models\MlPaperAutopilotTrade;
 use App\Models\MlShadowPrediction;
 
@@ -12,14 +13,17 @@ use App\Models\MlShadowPrediction;
  * SIMULATED trades so their behaviour can be watched in the UI.
  *
  * Isolation (by construction): it writes only ml_paper_autopilot_trades,
- * keeps its own virtual balance (starting balance + Σ closed P&L), reads the
- * live price feed read-only, and never calls Quick Trade, a wallet, an
- * exchange client or any order path. Manual trades are never touched.
+ * keeps its own virtual balance (starting balance + Σ closed P&L), reads
+ * prices read-only (websocket cache, else Binance's public no-key ticker),
+ * and never calls Quick Trade, a wallet, an account/order endpoint or any
+ * order path. Manual trades are never touched.
  *
- * Trading rules mirror the model's own evaluation: at most ONE open position
- * per symbol × horizon (signals while open are skipped and counted), entry at
- * the live quote when the signal is seen, exit at T+h, and every round trip
- * pays the configured fee + slippage (default 0.18%) plus actual funding.
+ * Trading rules: at most ONE open position per symbol × horizon (signals
+ * while open are skipped and counted); entry only on a CONFIRMED signal (the
+ * stable state is BUY/SELL and the newest fresh decision agrees, see
+ * SignalStabilityService) and only for autopilot.trade_horizons_minutes;
+ * entry at a fresh market price, exit at T+h; every round trip pays the
+ * configured fee + slippage (default 0.18%) plus actual funding.
  */
 class MlPaperAutopilotService
 {
@@ -28,7 +32,15 @@ class MlPaperAutopilotService
         private readonly FundingRateService $funding,
         private readonly MlModelRegistry $registry,
         private readonly FeatureLabelService $features,
+        private readonly BinanceFuturesKlineClient $binance,
+        private readonly SignalStabilityService $stability,
     ) {}
+
+    /** @return list<int> */
+    public static function tradeHorizons(): array
+    {
+        return array_values(array_map('intval', (array) config('ml.autopilot.trade_horizons_minutes', [60, 120, 240, 1440])));
+    }
 
     /** @return array{opened:int, settled:int, cancelled:int} */
     public function run(): array
@@ -44,13 +56,14 @@ class MlPaperAutopilotService
         $nowMs = $this->nowMs();
         $maxAgeMs = (int) config('ml.autopilot.max_signal_age_seconds', 600) * 1000;
         foreach ((array) config('ml.symbols', []) as $symbol) {
-            foreach ($this->features->horizons() as $horizon) {
+            foreach (array_intersect($this->features->horizons(), self::tradeHorizons()) as $horizon) {
                 if (! $this->registry->champion($symbol, $horizon)) {
                     continue;
                 }
-                $signal = MlShadowPrediction::query()->where('symbol', $symbol)->where('horizon_minutes', $horizon)
-                    ->orderByDesc('anchor_time_ms')->first();
-                if (! $signal || ! in_array($signal->decision, ['BUY', 'SELL'], true)
+                $stable = $this->stability->state($symbol, $horizon);
+                $signal = $stable['latest'];
+                // Confirmed only: stable side AND the newest fresh decision agrees.
+                if (! $signal || ! in_array($stable['state'], ['BUY', 'SELL'], true) || $signal->decision !== $stable['state']
                     || $nowMs - (int) $signal->anchor_time_ms > $maxAgeMs) {
                     continue;
                 }
@@ -128,15 +141,30 @@ class MlPaperAutopilotService
         ])->save();
     }
 
-    /** @return array{0:float, 1:string}|null fresh live quote */
+    /**
+     * Fresh market price: the websocket cache first (only symbols someone
+     * trades live are streamed), else Binance's public ticker. Null when
+     * neither is fresh; callers then fall back to a candle close.
+     *
+     * @return array{0:float, 1:string}|null
+     */
     private function quote(string $symbol): ?array
     {
-        $snapshot = $this->prices->getLiveFeedSnapshot((string) config('ml.provider', 'binance_futures'), $symbol, (int) config('ml.autopilot.quote_max_age_seconds', 15));
-        if (! $snapshot || ! ($snapshot['fresh'] ?? false) || (float) ($snapshot['price'] ?? 0) <= 0) {
+        $maxAgeSeconds = (int) config('ml.autopilot.quote_max_age_seconds', 15);
+        $snapshot = $this->prices->getLiveFeedSnapshot((string) config('ml.provider', 'binance_futures'), $symbol, $maxAgeSeconds);
+        if ($snapshot && ($snapshot['fresh'] ?? false) && (float) ($snapshot['price'] ?? 0) > 0) {
+            return [(float) $snapshot['price'], 'live_quote'];
+        }
+        try {
+            $ticker = $this->binance->tickerPrice($symbol);
+        } catch (\Throwable) {
+            return null; // breaker open / network: the simulation must never fail on a price read
+        }
+        if ($ticker === null || abs($this->nowMs() - $ticker['time_ms']) > $maxAgeSeconds * 1000) {
             return null;
         }
 
-        return [(float) $snapshot['price'], 'live_quote'];
+        return [$ticker['price'], 'rest_ticker'];
     }
 
     /**
@@ -179,7 +207,13 @@ class MlPaperAutopilotService
             'settings' => [
                 'starting_balance_usd' => $start, 'stake_usd' => (float) config('ml.autopilot.stake_usd', 100),
                 'cost_pct' => (float) config('ml.autopilot.cost_pct', 0.18), 'min_closed_trades' => $minClosed,
-                'rule' => 'one_position_per_symbol_horizon_exit_at_expiry',
+                'rule' => 'confirmed_signal_one_position_per_symbol_horizon_exit_at_expiry',
+                'trade_horizons_minutes' => self::tradeHorizons(),
+                'stability' => [
+                    'confirm_predictions' => (int) config('ml.stability.confirm_predictions', 2),
+                    'entry_probability' => (float) config('ml.classifier.probability_floor', 0.55),
+                    'exit_probability' => (float) config('ml.stability.exit_probability', 0.50),
+                ],
             ],
             'summary' => $stats + [
                 'status' => $closed->count() >= $minClosed ? 'ok' : 'insufficient_data',
@@ -198,8 +232,8 @@ class MlPaperAutopilotService
                 'autopilot_avg_net_pct' => $stats['avg_net_pct'],
                 'shadow_avg_net_pct_same_signals' => $shadowNets->isEmpty() ? null : round((float) $shadowNets->avg(), 6),
                 'avg_entry_slippage_pct' => $closed->isEmpty() ? null : round((float) $closed->avg(fn ($t) => ($t->side === 'BUY' ? 1 : -1) * ((float) $t->entry_price / (float) $t->signal_price - 1) * 100), 6),
-                'live_quote_entries' => $closed->where('entry_price_source', 'live_quote')->count(),
-                'live_quote_exits' => $closed->where('exit_price_source', 'live_quote')->count(),
+                'live_quote_entries' => $closed->whereIn('entry_price_source', ['live_quote', 'rest_ticker'])->count(),
+                'live_quote_exits' => $closed->whereIn('exit_price_source', ['live_quote', 'rest_ticker'])->count(),
             ],
             'equity_curve' => $equity,
             'signals' => $this->signals(),
@@ -234,34 +268,50 @@ class MlPaperAutopilotService
         ];
     }
 
-    /** Latest champion decision per symbol × horizon and what the autopilot did with it. */
+    /** Stable + latest champion decision per symbol × horizon, and what the autopilot did with it. */
     private function signals(): array
     {
         $out = [];
         $nowMs = $this->nowMs();
         $maxAgeMs = (int) config('ml.autopilot.max_signal_age_seconds', 600) * 1000;
+        $tradeHorizons = self::tradeHorizons();
         foreach ((array) config('ml.symbols', []) as $symbol) {
             foreach ($this->features->horizons() as $horizon) {
                 $champion = $this->registry->champion($symbol, $horizon);
-                $signal = MlShadowPrediction::query()->where('symbol', $symbol)->where('horizon_minutes', $horizon)->orderByDesc('anchor_time_ms')->first();
+                $stable = $this->stability->state($symbol, $horizon);
+                $signal = $stable['latest'];
                 $taken = $signal ? MlPaperAutopilotTrade::query()->where('prediction_id', $signal->id)->exists() : false;
                 $openPosition = MlPaperAutopilotTrade::query()->where('symbol', $symbol)->where('horizon_minutes', $horizon)->where('status', 'OPEN')->exists();
+                $rawSide = $signal && in_array($signal->decision, ['BUY', 'SELL'], true);
                 $action = match (true) {
                     ! $champion => 'no_champion',
                     ! $signal => 'no_signal_yet',
                     $taken => 'traded',
                     $nowMs - (int) $signal->anchor_time_ms > $maxAgeMs => 'signal_stale',
-                    ! in_array($signal->decision, ['BUY', 'SELL'], true) => 'wait',
+                    $stable['state'] === 'WAIT' => $rawSide ? 'confirming' : 'wait',
+                    ! in_array($horizon, $tradeHorizons, true) => 'display_only',
+                    $signal->decision !== $stable['state'] => 'holding_no_fresh_entry',
                     $openPosition => 'skipped_position_open',
                     default => 'pending_entry',
                 };
                 $out[] = [
                     'symbol' => $symbol, 'horizon_minutes' => $horizon, 'model_version' => $champion?->model_version, 'model_type' => $champion?->model_type,
+                    'tradable' => in_array($horizon, $tradeHorizons, true),
                     'decision' => $signal?->decision, 'decision_reason' => $signal?->decision_reason, 'p_buy' => $signal?->p_buy, 'p_sell' => $signal?->p_sell,
+                    'buy_net_pct' => $signal?->buy_net_pct, 'sell_net_pct' => $signal?->sell_net_pct, 'price' => $signal?->current_price,
                     'signal_time' => $signal ? gmdate('c', intdiv((int) $signal->anchor_time_ms, 1000)) : null,
                     'signal_age_seconds' => $signal ? max(0, intdiv($nowMs - (int) $signal->anchor_time_ms, 1000)) : null,
+                    'stable' => [
+                        'state' => $champion ? $stable['state'] : null, 'since' => $stable['since'], 'held_minutes' => $stable['held_minutes'],
+                        'confirming' => $stable['confirming'], 'raw_flips' => $stable['raw_flips'], 'window_predictions' => $stable['window_predictions'],
+                    ],
                     'action' => $action,
-                    // BUY/SELL signals the one-position rule skipped (raw vs taken).
+                    // "T" badge: the newest finished training attempt (champion or not).
+                    'last_training' => ($trained = MlModel::query()->where('symbol', $symbol)->where('horizon_minutes', $horizon)
+                        ->whereIn('status', ['CHAMPION', 'REJECTED', 'RETIRED', 'FAILED'])->orderByDesc('created_at')->first())
+                        ? ['status' => $trained->status, 'at' => ($trained->trained_at ?? $trained->created_at)?->toIso8601String(), 'reason' => $trained->decision_reason]
+                        : null,
+                    // BUY/SELL signals the confirmation + one-position rules skipped (raw vs taken).
                     'raw_trade_signals' => MlShadowPrediction::query()->where('symbol', $symbol)->where('horizon_minutes', $horizon)->whereIn('decision', ['BUY', 'SELL'])->count(),
                     'trades_taken' => MlPaperAutopilotTrade::query()->where('symbol', $symbol)->where('horizon_minutes', $horizon)->count(),
                 ];

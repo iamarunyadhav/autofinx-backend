@@ -166,8 +166,11 @@ final class ShadowPredictionEvaluationTest extends TestCase
             $this->assertSame('NO_CHAMPION', $payload['status']);
             $this->assertArrayNotHasKey('prediction', $payload);
         }
-        // 15m and shorter: explicit cost message, no model at all.
-        foreach ([900, 300, 60] as $seconds) {
+        // 15m is past the default 10m cut-off: it is a horizon of its own
+        // (not configured in this test), never the cost message.
+        $this->assertSame('UNSUPPORTED_DURATION', $service->payload('BTCUSDT', 900, $evaluation)['status']);
+        // 10m and shorter: explicit cost message, no model at all.
+        foreach ([600, 300, 60] as $seconds) {
             $payload = $service->payload('BTCUSDT', $seconds, $evaluation);
             $this->assertSame('COST_EXCEEDS_MOVE', $payload['status']);
             $this->assertSame(ShadowPredictionService::COST_EXCEEDS_MOVE_MESSAGE, $payload['message']);
