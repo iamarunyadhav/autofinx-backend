@@ -305,6 +305,19 @@ class RatioBotLotService
     /**
      * @param array<int, string> $lotIds
      */
+    /**
+     * Close open lots whose remaining quantity is below the exchange's
+     * minimum tradable size: it can never be sold on its own.
+     */
+    public function closeDustLots(RatioBotConfig $config, float $dustQty): int
+    {
+        return RatioBotLot::query()
+            ->where('ratio_bot_config_id', $config->id)
+            ->where('status', RatioBotLot::STATUS_OPEN)
+            ->where('remaining_qty', '<', $dustQty)
+            ->update(['status' => RatioBotLot::STATUS_CLOSED, 'closed_at' => now()]);
+    }
+
     public function applySellFill(RatioBotConfig $config, array $lotIds, float $price, float $qty, RatioBotDecision $decision, string $orderId): float
     {
         $remainingSellQty = $qty;

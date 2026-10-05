@@ -118,7 +118,7 @@ class RatioBotLiveBalanceCapTest extends TestCase
     }
 
     /** @test */
-    public function live_balance_fetch_is_shared_across_bots_on_the_same_connection(): void
+    public function live_balance_is_re_read_after_a_sibling_bots_fill(): void
     {
         $connection = ExchangeConnection::create([
             'workspace_id' => $this->workspace->id,
@@ -128,23 +128,26 @@ class RatioBotLiveBalanceCapTest extends TestCase
             'is_active' => true,
         ]);
 
-        // Two bots, two different symbols, same connection + same quote
-        // asset (USDT) — evaluating back-to-back the way two bots on the
-        // same account's evaluation loop would. Only ONE live fetchBalances
-        // call should happen for both; the second reads the short-TTL cache.
+        // Two bots, two symbols, one account. Bot A's fill spends USDT, so bot
+        // B must size against the balance AFTER that fill. Reusing the cached
+        // pre-fill balance (as this used to) let B overspend into a -2010
+        // rejection.
         [$configA, $decisionA] = $this->makeFixture($connection->id, stageQuoteAmount: 50.0, evaluatedPrice: 1000.0, symbol: 'BTCUSDT');
         [$configB, $decisionB] = $this->makeFixture($connection->id, stageQuoteAmount: 50.0, evaluatedPrice: 1000.0, symbol: 'ETHUSDT');
 
         $client = Mockery::mock(ExchangeClientInterface::class);
-        $client->shouldReceive('fetchBalances')->once()->andReturn([
-            ['asset' => 'USDT', 'free' => '500.00000000', 'locked' => '0.00000000'],
-        ]);
+        $client->shouldReceive('fetchBalances')->twice()->andReturn(
+            [['asset' => 'USDT', 'free' => '80.00000000', 'locked' => '0.00000000']],
+            [['asset' => 'USDT', 'free' => '30.00000000', 'locked' => '0.00000000']],
+        );
         $exchangeClients = Mockery::mock(ExchangeClientFactory::class);
-        $exchangeClients->shouldReceive('makeFromConnection')->once()->andReturn($client);
+        $exchangeClients->shouldReceive('makeFromConnection')->twice()->andReturn($client);
 
+        $placedQty = [];
         $orders = Mockery::mock(LiveOrderIntentService::class);
         $orders->shouldReceive('fetchReferencePrice')->twice()->andReturn(1000.0);
-        $orders->shouldReceive('place')->twice()->andReturnUsing(function (array $payload) {
+        $orders->shouldReceive('place')->twice()->andReturnUsing(function (array $payload) use (&$placedQty) {
+            $placedQty[] = $payload['qty'];
             $order = new Order();
             $order->status = 'FILLED';
             $order->filled_qty = $payload['qty'];
@@ -156,10 +159,8 @@ class RatioBotLiveBalanceCapTest extends TestCase
         $service->execute($configA, $decisionA);
         $service->execute($configB, $decisionB);
 
-        // Reaching here means fetchBalances()->once() was satisfied across
-        // BOTH executions instead of firing twice — Mockery would otherwise
-        // throw "expected exactly once but called twice".
-        $this->assertTrue(true);
+        $this->assertEqualsWithDelta(0.05, $placedQty[0], 0.0000001);   // A: full 50 USDT
+        $this->assertEqualsWithDelta(0.03, $placedQty[1], 0.0000001);   // B: capped to the 30 USDT left
     }
 
     /** @test */

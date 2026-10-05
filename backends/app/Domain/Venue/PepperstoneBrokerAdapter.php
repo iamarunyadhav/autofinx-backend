@@ -155,7 +155,10 @@ class PepperstoneBrokerAdapter implements TradingVenueClientInterface, SupportsH
 
         $candles = [];
         $previousClose = $base;
-        $now = now();
+        // Candle-aligned and in UTC like real venue candles, so two backfills
+        // a second apart produce the same open times (and the same rows).
+        $candleSeconds = $minutesPerCandle * 60;
+        $now = now('UTC')->setTimestamp(intdiv(now()->getTimestamp(), $candleSeconds) * $candleSeconds);
 
         for ($i = $limit - 1; $i >= 0; $i--) {
             // Deterministic pseudo-oscillation + deterministic "noise" from

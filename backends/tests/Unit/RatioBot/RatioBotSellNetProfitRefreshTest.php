@@ -66,7 +66,9 @@ class RatioBotSellNetProfitRefreshTest extends TestCase
         [$config, $decision] = $this->makeSellFixture(anchorPrice: 60000, evaluatedPrice: 66500, minimumNetProfitRatio: 0.05, maxDriftBps: 0, protectiveExit: true);
 
         $orders = Mockery::mock(LiveOrderIntentService::class);
-        $orders->shouldReceive('fetchReferencePrice')->once()->andReturn(59000.0);
+        // A protective exit skips the pre-submit drift/net-profit refresh
+        // entirely: it must go out in a fast market, not wait on a re-quote.
+        $orders->shouldReceive('fetchReferencePrice')->never();
         $orders->shouldReceive('place')->once()->andThrow(new RuntimeException('stub: stop before real order placement'));
 
         $this->makeService($orders)->execute($config, $decision);

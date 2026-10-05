@@ -475,6 +475,14 @@ class RatioBotStateService
         $priorQty = (float) ($state->last_buy_quantity ?? 0);
         $costBasisPrice = (float) ($state->last_buy_price ?? 0);
         $remainingQty = round(max(0.0, $priorQty - $executedQty), 8);
+        // A remainder below the exchange's minimum tradable size can never be
+        // sold (step-size round-down, base-coin fees): treat it as exited
+        // rather than leaving a dust position that every later SELL fails on.
+        $dustQty = RatioBotFillAccounting::dustQty($config, $executedPrice);
+        $dustRemainder = $remainingQty > 0 && $remainingQty < $dustQty ? $remainingQty : 0.0;
+        if ($dustRemainder > 0) {
+            $remainingQty = 0.0;
+        }
         $selectedLotIds = (array) data_get($decision->metadata, 'sell_lot_ids', []);
         $realizedPnlFromLots = [];
         if ($selectedLotIds !== []) {
@@ -482,7 +490,13 @@ class RatioBotStateService
                 'value' => app(RatioBotLotService::class)->applySellFill($config, $selectedLotIds, $executedPrice, $executedQty, $decision, $orderId),
             ];
         }
-        $realizedPnlThisStage = $realizedPnlFromLots['value'] ?? ($costBasisPrice > 0 ? ($executedPrice - $costBasisPrice) * $executedQty : 0.0);
+        if ($dustRemainder > 0) {
+            app(RatioBotLotService::class)->closeDustLots($config, $dustQty);
+        }
+        // Net of both legs' fees, so realized_pnl and the loss gates fed from
+        // it match what the account actually made.
+        $realizedPnlThisStage = ($realizedPnlFromLots['value'] ?? ($costBasisPrice > 0 ? ($executedPrice - $costBasisPrice) * $executedQty : 0.0))
+            - RatioBotFillAccounting::roundTripFee($config, $costBasisPrice, $executedPrice, $executedQty);
         $realizedPnlTotal = (float) ($state->realized_pnl ?? 0) + $realizedPnlThisStage;
 
         // Trade-level accuracy tracking -- observation only, never throws,
@@ -815,6 +829,85 @@ class RatioBotStateService
         return $state->position_state === RatioBotState::STATE_AWAITING_EXECUTION
             ? ($decision->position_state_before ?: $state->position_state)
             : $state->position_state;
+    }
+
+    /**
+     * An order the exchange would refuse for its size (minQty / minNotional /
+     * step size) was not sent. That is a sizing problem, not an exchange or
+     * connectivity failure, so it must not count toward the failure streak
+     * that blocks the bot: release any pending state and surface the reason.
+     */
+    public function onOrderSkipped(RatioBotConfig $config, RatioBotDecision $decision, string $code, string $reason): void
+    {
+        $state = $this->getOrCreate($config);
+        $state->update([
+            'position_state' => $state->position_state === RatioBotState::STATE_AWAITING_EXECUTION
+                ? ($decision->position_state_before ?: $state->resumableTradingState())
+                : $state->position_state,
+            'awaiting_since' => null,
+            'last_active_idempotency_key' => null,
+            'last_unresolved_order_id' => null,
+            'last_unresolved_client_order_id' => null,
+            'block_reason_code' => $code,
+            'block_reason_detail' => $reason,
+        ]);
+        $decision->update([
+            'execution_status' => RatioBotDecision::EXEC_SKIPPED,
+            'reason' => $reason,
+        ]);
+        Log::warning('[RatioBot] Order skipped before submission', ['config_id' => $config->id, 'code' => $code, 'reason' => $reason]);
+    }
+
+    /**
+     * The whole remaining position is below the exchange's minimum order size,
+     * so it can never be sold. Close it out at the current price instead of
+     * retrying (and failing) a SELL on every tick. No order is placed; the
+     * coins stay in the account as dust.
+     */
+    public function writeOffDustPosition(RatioBotConfig $config, RatioBotDecision $decision, float $price, string $reason): RatioBotState
+    {
+        $state = $this->getOrCreate($config);
+        $dustQty = (float) ($state->last_buy_quantity ?? 0);
+        app(RatioBotLotService::class)->closeDustLots($config, max($dustQty, RatioBotFillAccounting::dustQty($config, $price)) + RatioBotFillAccounting::MIN_DUST_QTY);
+
+        $state->update([
+            'position_state' => RatioBotState::STATE_FLAT,
+            'last_sell_price' => $price,
+            'last_buy_price' => 0,
+            'last_buy_quantity' => 0,
+            'sell_tranches_remaining' => 0,
+            'reserve_tranches_remaining' => 0,
+            'reserve_quote_remaining' => 0,
+            'current_cycle_number' => (int) ($state->current_cycle_number ?? 1) + 1,
+            'active_anchor_price' => $price,
+            'active_anchor_type' => 'sell_anchor',
+            'block_reason_code' => null,
+            'block_reason_detail' => null,
+            'awaiting_since' => null,
+            'sell_armed' => false,
+            'sell_peak_ratio' => null,
+            'sell_peak_price' => null,
+            'buy_armed' => false,
+            'buy_trough_ratio' => null,
+            'buy_trough_price' => null,
+            'pending_trigger_side' => null,
+            'pending_trigger_started_at' => null,
+            'pending_trigger_updates' => 0,
+            'last_position_side' => 'flat',
+            'last_position_qty' => 0,
+            'entry_price' => null,
+            'unrealized_pnl' => 0,
+        ]);
+        $decision->update([
+            'execution_status' => RatioBotDecision::EXEC_SKIPPED,
+            'reason' => "dust position written off: {$reason}",
+            'position_state_after' => RatioBotState::STATE_FLAT,
+            'metadata' => array_merge((array) ($decision->metadata ?? []), ['dust_write_off' => ['qty' => $dustQty, 'price' => $price]]),
+        ]);
+        $this->emitEvent($config, RatioBotEvent::EVENT_ORDER_FAILURE, ['reason' => 'dust_written_off', 'qty' => $dustQty, 'detail' => $reason]);
+        Log::info('[RatioBot] Dust position written off', ['config_id' => $config->id, 'qty' => $dustQty, 'reason' => $reason]);
+
+        return $state->refresh();
     }
 
     public function onAwaitingExecution(RatioBotConfig $config, RatioBotDecision $decision, ?string $clientOrderId = null, ?string $orderId = null): void

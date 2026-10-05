@@ -136,15 +136,26 @@ class RatioBotExecutionService
             return;
         }
 
+        if ($this->belowExchangeMinimumBlock($config, $decision, $side, $qty)) {
+            return;
+        }
+
+        // Stale data stays a hard stop even for a stop-loss (a stop fired off
+        // a wrong price is its own loss). The shock and price-drift guards are
+        // entry-quality checks: a protective exit (stop-loss, time stop,
+        // liquidation guard) must go through exactly when the market is
+        // moving fast, so they do not apply to it.
+        $protectiveExit = (bool) data_get($decision->metadata, 'protective_exit', false);
+
         if ($this->staleSnapshotBlock($config, $decision)) {
             return;
         }
 
-        if ($this->shockBlock($config, $decision)) {
+        if (! $protectiveExit && $this->shockBlock($config, $decision)) {
             return;
         }
 
-        if ($config->marketType() !== 'futures' && $this->entryPriceDriftBlock($config, $decision, $symbol)) {
+        if (! $protectiveExit && $config->marketType() !== 'futures' && $this->entryPriceDriftBlock($config, $decision, $symbol)) {
             return;
         }
 
@@ -192,6 +203,54 @@ class RatioBotExecutionService
             );
         } catch (Throwable $e) {
             $this->handleOrderException($config, $decision, $e, $clientOrderId);
+        } finally {
+            // The account balance just changed (or may have): the next sizing
+            // by this or a sibling bot on the same account must re-read it.
+            $this->forgetLiveBalances($config);
+        }
+    }
+
+    /**
+     * Binance refuses orders under its minQty / minNotional. Checked from the
+     * cached symbol rules before submission so a too-small order never
+     * counts as an exchange failure. A SELL of a whole position that is
+     * itself below the minimum can never succeed: close it out as dust.
+     */
+    private function belowExchangeMinimumBlock(RatioBotConfig $config, RatioBotDecision $decision, string $side, float $qty): bool
+    {
+        if ($config->marketType() !== 'spot') {
+            return false;
+        }
+        $price = (float) ($decision->evaluated_price ?? 0);
+        $reason = RatioBotFillAccounting::belowExchangeMinimum($config, $qty, $price);
+        if ($reason === null) {
+            return false;
+        }
+
+        if ($side === RatioBotDecision::DECISION_SELL) {
+            $positionQty = (float) ($this->stateService->getOrCreate($config)->last_buy_quantity ?? 0);
+            if ($positionQty > 0 && RatioBotFillAccounting::belowExchangeMinimum($config, $positionQty, $price) !== null) {
+                $this->stateService->writeOffDustPosition($config, $decision, $price, $reason);
+
+                return true;
+            }
+        }
+
+        $this->stateService->onOrderSkipped($config, $decision, 'order_below_exchange_minimum',
+            "{$side} not sent: {$reason}. Increase the bot's order size.");
+
+        return true;
+    }
+
+    private function forgetLiveBalances(RatioBotConfig $config): void
+    {
+        if (! $config->connection_id) {
+            return;
+        }
+        foreach (array_filter([$config->baseAsset(), $config->quoteAsset()]) as $asset) {
+            foreach (array_unique([(string) $asset, strtoupper((string) $asset)]) as $key) {
+                Cache::forget("ratio_bot:live_free_balance:{$config->connection_id}:{$key}");
+            }
         }
     }
 
@@ -434,6 +493,8 @@ class RatioBotExecutionService
             }
 
             if ($side === RatioBotDecision::DECISION_BUY) {
+                // Base-coin commission never reaches the account.
+                $executedQty = RatioBotFillAccounting::netBuyQty($order, $config, $executedQty);
                 $this->stateService->onBuyFilled($config, $decision, $executedPrice, $executedQty, $orderId, $clientOrderId);
             } else {
                 // Read the cost basis before onSellFilled() overwrites/clears it,
@@ -445,7 +506,7 @@ class RatioBotExecutionService
                 $entryPrice = (float) ($config->state?->last_buy_price ?? 0);
                 $this->stateService->onSellFilled($config, $decision, $executedPrice, $executedQty, $orderId, $clientOrderId);
                 if ($entryPrice > 0 && $executedQty > 0) {
-                    $this->stateService->recordTradeOutcome($config, ($executedPrice - $entryPrice) * $executedQty);
+                    $this->stateService->recordTradeOutcome($config, RatioBotFillAccounting::netRealizedPnl($config, $entryPrice, $executedPrice, $executedQty));
                 }
             }
 
@@ -625,6 +686,14 @@ class RatioBotExecutionService
     ): void {
         $message = $e->getMessage();
 
+        // The order intent's own pre-submit validation (symbol rules not yet
+        // cached locally) refused the size: nothing reached the exchange.
+        if (preg_match('/below Binance (minQty|minNotional)|becomes zero after Binance step-size|exceeds Binance maxQty/i', $message)) {
+            $this->stateService->onOrderSkipped($config, $decision, 'order_below_exchange_minimum', $message);
+
+            return;
+        }
+
         if ($this->isDuplicateOrderError($message)) {
             $decision->update([
                 'execution_status' => RatioBotDecision::EXEC_DUPLICATE_BLOCKED,
@@ -697,7 +766,7 @@ class RatioBotExecutionService
             $entryPrice = (float) ($config->state?->last_buy_price ?? 0);
             $this->stateService->onSellFilled($config, $decision, $price, $qty, $fakeOrderId, $clientOrderId);
             if ($entryPrice > 0 && $qty > 0) {
-                $this->stateService->recordTradeOutcome($config, ($price - $entryPrice) * $qty);
+                $this->stateService->recordTradeOutcome($config, RatioBotFillAccounting::netRealizedPnl($config, $entryPrice, $price, $qty));
             }
             return;
         }

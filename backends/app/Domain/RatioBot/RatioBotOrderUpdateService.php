@@ -82,7 +82,8 @@ class RatioBotOrderUpdateService
                     $config,
                     $decision,
                     $executedPrice > 0 ? $executedPrice : (float) $decision->evaluated_price,
-                    $executedQty,
+                    // Base-coin commission never reaches the account.
+                    RatioBotFillAccounting::netBuyQty($order, $config, $executedQty),
                     (string) ($order->exchange_order_id ?: $order->id),
                     (string) ($order->client_order_id ?: $decision->client_order_id)
                 );
@@ -97,7 +98,7 @@ class RatioBotOrderUpdateService
                     (string) ($order->client_order_id ?: $decision->client_order_id)
                 );
                 if ($entryPrice > 0 && $executedQty > 0) {
-                    $this->stateService->recordTradeOutcome($config, ($executedPrice - $entryPrice) * $executedQty);
+                    $this->stateService->recordTradeOutcome($config, RatioBotFillAccounting::netRealizedPnl($config, $entryPrice, $executedPrice, $executedQty));
                 }
             }
 
