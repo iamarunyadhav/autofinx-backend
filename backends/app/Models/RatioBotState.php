@@ -57,6 +57,7 @@ class RatioBotState extends BaseModel
         'trade_day'             => 'date',
         'daily_trade_count'     => 'integer',
         'daily_loss_total'      => 'decimal:8',
+        'daily_realized_pnl'    => 'decimal:8',
         'consecutive_losses'    => 'integer',
         'reserve_tranches_remaining' => 'integer',
         'reserve_quote_remaining' => 'decimal:8',

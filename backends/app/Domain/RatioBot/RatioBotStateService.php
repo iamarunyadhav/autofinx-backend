@@ -497,6 +497,9 @@ class RatioBotStateService
         // it match what the account actually made.
         $realizedPnlThisStage = ($realizedPnlFromLots['value'] ?? ($costBasisPrice > 0 ? ($executedPrice - $costBasisPrice) * $executedQty : 0.0))
             - RatioBotFillAccounting::roundTripFee($config, $costBasisPrice, $executedPrice, $executedQty);
+        // The loss gates read this exact value (lot cost basis when the sell
+        // is lot-scoped), not a re-derivation from the averaged last_buy_price.
+        $decision->update(['metadata' => array_merge((array) ($decision->metadata ?? []), ['realized_pnl_net' => round($realizedPnlThisStage, 8)])]);
         $realizedPnlTotal = (float) ($state->realized_pnl ?? 0) + $realizedPnlThisStage;
 
         // Trade-level accuracy tracking -- observation only, never throws,
@@ -1358,6 +1361,14 @@ class RatioBotStateService
         ]);
     }
 
+    /** Net realized PnL of a SELL fill as booked by onSellFilled(), falling back to an estimate. */
+    public function realizedPnlFor(RatioBotDecision $decision, RatioBotConfig $config, float $entryPrice, float $exitPrice, float $qty): float
+    {
+        $booked = data_get($decision->fresh()?->metadata, 'realized_pnl_net');
+
+        return is_numeric($booked) ? (float) $booked : RatioBotFillAccounting::netRealizedPnl($config, $entryPrice, $exitPrice, $qty);
+    }
+
     public function recordTradeOutcome(RatioBotConfig $config, float $pnl): void
     {
         $state = $this->getOrCreate($config);
@@ -1366,6 +1377,7 @@ class RatioBotStateService
 
         $dailyTradeCount = $tradeDay === $today ? (int) ($state->daily_trade_count ?? 0) : 0;
         $dailyLossTotal = $tradeDay === $today ? (float) ($state->daily_loss_total ?? 0) : 0.0;
+        $dailyRealized = $tradeDay === $today ? (float) ($state->daily_realized_pnl ?? 0) : 0.0;
         $consecutiveLosses = $pnl < 0
             ? (($tradeDay === $today ? (int) ($state->consecutive_losses ?? 0) : 0) + 1)
             : 0;
@@ -1375,6 +1387,7 @@ class RatioBotStateService
             'daily_trade_count' => $dailyTradeCount + 1,
             'daily_loss_total' => $pnl < 0 ? $dailyLossTotal + abs($pnl) : $dailyLossTotal,
             'consecutive_losses' => $consecutiveLosses,
+            'daily_realized_pnl' => round($dailyRealized + $pnl, 8),
         ]);
     }
 

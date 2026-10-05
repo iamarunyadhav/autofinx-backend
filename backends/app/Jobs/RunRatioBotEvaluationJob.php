@@ -286,6 +286,9 @@ class RunRatioBotEvaluationJob implements ShouldQueue, ShouldBeUnique
         $hasQuote = $quoteAvailable >= self::MIN_AUTO_ANCHOR_NOTIONAL_USDT;
 
         if (! $hasBase && ! $hasQuote) {
+            $this->noteAutoStartWait($config, sprintf('Waiting to start: wallet has under %s USDT of both %s and %s.',
+                self::MIN_AUTO_ANCHOR_NOTIONAL_USDT, $config->baseAsset(), $config->quoteAsset()));
+
             return;
         }
 
@@ -549,6 +552,29 @@ class RunRatioBotEvaluationJob implements ShouldQueue, ShouldBeUnique
         ]);
     }
 
+    /**
+     * An idle bot waiting to auto-start used to say only "idle" in the UI;
+     * the actual reason lived in events/audit rows nobody sees. Surface it in
+     * the state's block reason (non-blocking), and clear it once it starts.
+     */
+    private function noteAutoStartWait(RatioBotConfig $config, ?string $detail): void
+    {
+        $state = $config->state;
+        if (! $state) {
+            return;
+        }
+        if ($detail === null) {
+            if ($state->block_reason_code === 'auto_start_waiting') {
+                $state->update(['block_reason_code' => null, 'block_reason_detail' => null]);
+            }
+
+            return;
+        }
+        if ($state->block_reason_code === null || $state->block_reason_code === 'auto_start_waiting') {
+            $state->update(['block_reason_code' => 'auto_start_waiting', 'block_reason_detail' => mb_strimwidth($detail, 0, 480, '...')]);
+        }
+    }
+
     private function autoStartDirectionMode(RatioBotConfig $config): string
     {
         $mode = strtolower((string) data_get($config->strategy_params, 'auto_start_direction_mode', 'manual'));
@@ -678,6 +704,10 @@ class RunRatioBotEvaluationJob implements ShouldQueue, ShouldBeUnique
             'resolution' => $resolutionForLog,
             'wallet_fallback' => $walletFallbackResult,
         ];
+
+        $this->noteAutoStartWait($config, $direction ? null : sprintf('Waiting to start: %s (forecast %s, trend %s, confidence %s / min %s).',
+            (string) ($reason ?: 'no clear direction yet'), $forecastDirection ?? 'none', $trendDirection ?? 'none',
+            round((float) $confidence, 1), round((float) $minConfidence, 1)));
 
         RatioBotEvent::create([
             'ratio_bot_config_id' => $config->id,

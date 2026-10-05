@@ -506,7 +506,7 @@ class RatioBotExecutionService
                 $entryPrice = (float) ($config->state?->last_buy_price ?? 0);
                 $this->stateService->onSellFilled($config, $decision, $executedPrice, $executedQty, $orderId, $clientOrderId);
                 if ($entryPrice > 0 && $executedQty > 0) {
-                    $this->stateService->recordTradeOutcome($config, RatioBotFillAccounting::netRealizedPnl($config, $entryPrice, $executedPrice, $executedQty));
+                    $this->stateService->recordTradeOutcome($config, $this->stateService->realizedPnlFor($decision, $config, $entryPrice, $executedPrice, $executedQty));
                 }
             }
 
@@ -547,6 +547,8 @@ class RatioBotExecutionService
         $executedPrice = $this->avgFillPrice($order, (float) $decision->evaluated_price);
         $executedQty = $this->resolveExecutedQty($order, $qty);
         $orderId = (string) ($order->exchange_order_id ?: $order->id);
+        // The order sync may already have booked this fill (and its outcome).
+        $alreadyFilled = RatioBotDecision::query()->whereKey($decision->id)->value('execution_status') === RatioBotDecision::EXEC_FILLED;
 
         $decision->update([
             'client_order_id' => $clientOrderId,
@@ -633,6 +635,15 @@ class RatioBotExecutionService
             && in_array($status, ['FILLED', 'PARTIAL'], true)
         ) {
             $this->cancelFuturesStopOrderSafely($config, 'position_closed');
+            // Feed the daily-loss / consecutive-loss gates; futures exits never did.
+            $closing = $config->state()->first();
+            $entry = (float) ($closing?->entry_price ?? 0);
+            if (! $alreadyFilled && $entry > 0 && $executedQty > 0) {
+                $gross = strtolower((string) ($closing?->last_position_side ?? '')) === 'short'
+                    ? ($entry - $executedPrice) * $executedQty
+                    : ($executedPrice - $entry) * $executedQty;
+                $this->stateService->recordTradeOutcome($config, $gross - RatioBotFillAccounting::roundTripFee($config, $entry, $executedPrice, $executedQty));
+            }
             $this->stateService->syncPositionSnapshot($config, 'flat', 0, null, 0);
             $this->fundingCost->resetForClosedPosition($config);
         }
@@ -766,7 +777,7 @@ class RatioBotExecutionService
             $entryPrice = (float) ($config->state?->last_buy_price ?? 0);
             $this->stateService->onSellFilled($config, $decision, $price, $qty, $fakeOrderId, $clientOrderId);
             if ($entryPrice > 0 && $qty > 0) {
-                $this->stateService->recordTradeOutcome($config, RatioBotFillAccounting::netRealizedPnl($config, $entryPrice, $price, $qty));
+                $this->stateService->recordTradeOutcome($config, $this->stateService->realizedPnlFor($decision, $config, $entryPrice, $price, $qty));
             }
             return;
         }

@@ -98,7 +98,7 @@ class RatioBotOrderUpdateService
                     (string) ($order->client_order_id ?: $decision->client_order_id)
                 );
                 if ($entryPrice > 0 && $executedQty > 0) {
-                    $this->stateService->recordTradeOutcome($config, RatioBotFillAccounting::netRealizedPnl($config, $entryPrice, $executedPrice, $executedQty));
+                    $this->stateService->recordTradeOutcome($config, $this->stateService->realizedPnlFor($decision, $config, $entryPrice, $executedPrice, $executedQty));
                 }
             }
 
@@ -144,7 +144,7 @@ class RatioBotOrderUpdateService
             $pnl = $direction === 'short'
                 ? ($entryPrice - $executedPrice) * $executedQty
                 : ($executedPrice - $entryPrice) * $executedQty;
-            $this->stateService->recordTradeOutcome($config, $pnl);
+            $this->stateService->recordTradeOutcome($config, $pnl - RatioBotFillAccounting::roundTripFee($config, $entryPrice, $executedPrice, $executedQty));
         }
     }
 }

@@ -78,19 +78,19 @@ Schedule::command('orders:poll-status')
 if ($schedulerEnabled && ! $supervisorRuntime && ! $sharedHostingMode && $allowMarketConsumers) {
     Schedule::command('market:ws-consume --once --store-ohlc')
         ->everyTenSeconds()
-        ->withoutOverlapping()
+        ->withoutOverlapping(5)
         ->runInBackground();
 
     Schedule::command('market:ws-consume --once --market-type=futures --store-ohlc --ohlc-intervals=1m,5m,15m,1h,4h')
         ->everyTenSeconds()
-        ->withoutOverlapping()
+        ->withoutOverlapping(5)
         ->runInBackground();
 }
 
 if ($schedulerEnabled && $allowMetals) {
     Schedule::command('metals:poll-prices --once')
         ->everyFiveSeconds()
-        ->withoutOverlapping()
+        ->withoutOverlapping(5)
         ->runInBackground()
         ->before(fn () => $markRunStart('metals:poll-prices'))
         ->after(fn () => $markRunEnd('metals:poll-prices'));
@@ -103,7 +103,7 @@ if ($schedulerEnabled && $allowMetals) {
 if ($schedulerEnabled && (bool) config('autofinx.scheduler.robot_sessions', true)) {
     Schedule::command('robot-sessions:evaluate')
         ->everyTenSeconds()
-        ->withoutOverlapping()
+        ->withoutOverlapping(5)
         ->runInBackground()
         ->before(fn () => $markRunStart('robot-sessions:evaluate'))
         ->after(fn () => $markRunEnd('robot-sessions:evaluate'));
@@ -112,7 +112,7 @@ if ($schedulerEnabled && (bool) config('autofinx.scheduler.robot_sessions', true
 if ($schedulerEnabled && (bool) config('autofinx.scheduler.quick_settler', true)) {
     Schedule::command('quick-trades:settle')
         ->everyTenSeconds()
-        ->withoutOverlapping()
+        ->withoutOverlapping(5)
         ->runInBackground()
         ->before(fn () => $markRunStart('quick-trades:settle'))
         ->after(fn () => $markRunEnd('quick-trades:settle'));
@@ -131,7 +131,7 @@ if ($schedulerEnabled && (bool) config('autofinx.scheduler.quick_settler', true)
 if ($schedulerEnabled && $allowRuntimeAutoRepair) {
     Schedule::command('runtime:repair --attempts=1 --sleep=2')
         ->everyMinute()
-        ->withoutOverlapping()
+        ->withoutOverlapping(10)
         ->runInBackground()
         ->before(fn () => $markRunStart('runtime:repair'))
         ->after(fn () => $markRunEnd('runtime:repair'));
@@ -201,7 +201,7 @@ if ($schedulerEnabled && (bool) config('autofinx.scheduler.ratio_bots', true)) {
 if ($schedulerEnabled && (bool) config('autofinx.scheduler.forex_grid_bots', true)) {
     Schedule::command('forex-grid-bots:evaluate')
         ->everyMinute()
-        ->withoutOverlapping()
+        ->withoutOverlapping(10)
         ->runInBackground()
         ->before(fn () => $markRunStart('forex-grid-bots:evaluate'))
         ->after(fn () => $markRunEnd('forex-grid-bots:evaluate'));
@@ -213,7 +213,7 @@ if ($schedulerEnabled && (bool) config('autofinx.scheduler.forex_grid_bots', tru
 if ($schedulerEnabled && app(FeatureFlagService::class)->enabled('scheduler.ratio_bot_forecast_backtest', true)) {
     Schedule::command('ratio-bots:forecast-backtest')
         ->dailyAt('03:15')
-        ->withoutOverlapping()
+        ->withoutOverlapping(360)
         ->runInBackground()
         ->before(fn () => $markRunStart('ratio-bots:forecast-backtest'))
         ->after(fn () => $markRunEnd('ratio-bots:forecast-backtest'));
@@ -228,7 +228,7 @@ if ($schedulerEnabled && app(FeatureFlagService::class)->enabled('scheduler.rati
 if ($schedulerEnabled && app(FeatureFlagService::class)->enabled('scheduler.quick_trade_forecast_backtest', true)) {
     Schedule::command('quick-trade:forecast-backtest')
         ->dailyAt('03:45')
-        ->withoutOverlapping()
+        ->withoutOverlapping(360)
         ->runInBackground()
         ->before(fn () => $markRunStart('quick-trade:forecast-backtest'))
         ->after(fn () => $markRunEnd('quick-trade:forecast-backtest'));
@@ -241,7 +241,7 @@ if ($schedulerEnabled && app(FeatureFlagService::class)->enabled('scheduler.quic
 if ($schedulerEnabled && app(FeatureFlagService::class)->enabled('scheduler.robot_trade_forecast_backtest', true)) {
     Schedule::command('robot-trade:forecast-backtest')
         ->dailyAt('04:15')
-        ->withoutOverlapping()
+        ->withoutOverlapping(360)
         ->runInBackground()
         ->before(fn () => $markRunStart('robot-trade:forecast-backtest'))
         ->after(fn () => $markRunEnd('robot-trade:forecast-backtest'));
@@ -254,7 +254,7 @@ if ($schedulerEnabled && app(FeatureFlagService::class)->enabled('scheduler.robo
 if ($schedulerEnabled && app(FeatureFlagService::class)->enabled('scheduler.future_trade_forecast_backtest', true)) {
     Schedule::command('future-trade:forecast-backtest')
         ->dailyAt('04:45')
-        ->withoutOverlapping()
+        ->withoutOverlapping(360)
         ->runInBackground()
         ->before(fn () => $markRunStart('future-trade:forecast-backtest'))
         ->after(fn () => $markRunEnd('future-trade:forecast-backtest'));
@@ -272,7 +272,7 @@ if ($schedulerEnabled && app(FeatureFlagService::class)->enabled('scheduler.futu
 if ($schedulerEnabled && app(FeatureFlagService::class)->enabled('scheduler.fast2x_calibration_backtest', true)) {
     Schedule::command('fast2x:calibration-backtest')
         ->dailyAt('05:15')
-        ->withoutOverlapping()
+        ->withoutOverlapping(360)
         ->runInBackground()
         ->before(fn () => $markRunStart('fast2x:calibration-backtest'))
         ->after(fn () => $markRunEnd('fast2x:calibration-backtest'));
@@ -289,7 +289,7 @@ if ($schedulerEnabled && app(FeatureFlagService::class)->enabled('scheduler.fast
 if ($schedulerEnabled && app(FeatureFlagService::class)->enabled('scheduler.fast2x_supervisor', true)) {
     Schedule::command('fast2x:supervise')
         ->everyMinute()
-        ->withoutOverlapping()
+        ->withoutOverlapping(10)
         ->runInBackground()
         ->before(fn () => $markRunStart('fast2x:supervise'))
         ->after(fn () => $markRunEnd('fast2x:supervise'));
@@ -308,7 +308,7 @@ if ($schedulerEnabled && app(FeatureFlagService::class)->enabled('scheduler.fast
 if ($schedulerEnabled && app(FeatureFlagService::class)->enabled('scheduler.forecast_readiness_evaluation', true)) {
     Schedule::command('forecast:evaluate-readiness')
         ->dailyAt('05:45')
-        ->withoutOverlapping()
+        ->withoutOverlapping(360)
         ->runInBackground()
         ->before(fn () => $markRunStart('forecast:evaluate-readiness'))
         ->after(fn () => $markRunEnd('forecast:evaluate-readiness'));
@@ -317,20 +317,20 @@ if ($schedulerEnabled && app(FeatureFlagService::class)->enabled('scheduler.fore
 if ($schedulerEnabled && ! $supervisorRuntime && $allowBinanceRest) {
     Schedule::job(new KeepAliveUserStreamsJob)
         ->everyThirtyMinutes()
-        ->withoutOverlapping()
+        ->withoutOverlapping(60)
         ->before(fn () => $markRunStart('KeepAliveUserStreamsJob'))
         ->after(fn () => $markRunEnd('KeepAliveUserStreamsJob'));
 }
 
 Schedule::job(new DetectStaleFeedsJob((int) env('LIVE_TRADING_STALE_FEED_THRESHOLD_SEC', 60)))
     ->everyMinute()
-    ->withoutOverlapping()
+    ->withoutOverlapping(5)
     ->before(fn () => $markRunStart('DetectStaleFeedsJob'))
     ->after(fn () => $markRunEnd('DetectStaleFeedsJob'));
 
 Schedule::command('jobs:maintain-backlog')
     ->everyMinute()
-    ->withoutOverlapping()
+    ->withoutOverlapping(10)
     ->runInBackground()
     ->before(fn () => $markRunStart('jobs:maintain-backlog'))
     ->after(fn () => $markRunEnd('jobs:maintain-backlog'));
@@ -452,7 +452,7 @@ if ($schedulerEnabled && ! $supervisorRuntime && $scheduleFutureTradeRuntime) {
         ->before(fn () => $markRunStart('future-trade:user-stream'))
         ->after(fn () => $markRunEnd('future-trade:user-stream'));
 }
-Schedule::command('prediction:dispatch-settlements --limit=100')->everyMinute()->withoutOverlapping();
+Schedule::command('prediction:dispatch-settlements --limit=100')->everyMinute()->withoutOverlapping(10);
 
 // Fresh ML snapshots are trained only after a human has sealed an audit-passed
 // dataset. This is intentionally opt-in and shadow-only: it cannot alter a

@@ -22,7 +22,6 @@ use App\Models\RatioBotBrainSnapshot;
 use App\Models\RatioBotConfig;
 use App\Models\RatioBotLot;
 use App\Models\RatioBotState;
-use App\Models\Trade;
 use Throwable;
 
 class RatioBotRuntimeQueryService
@@ -189,11 +188,12 @@ class RatioBotRuntimeQueryService
     public function pnlSummary(RatioBotConfig $config): array
     {
         $position = $this->currentPosition($config);
-        $todayRealized = Trade::query()
-            ->where('workspace_id', $config->workspace_id)
-            ->where('asset_code', $config->normalizedSymbol())
-            ->whereDate('ts', now()->toDateString())
-            ->sum('realized_pnl');
+        // This bot's own net realized PnL for today (recordTradeOutcome), not
+        // the workspace-wide Trade sum for the symbol, which mixed every Ratio
+        // Bot and manual order on it.
+        $todayRealized = optional($config->state?->trade_day)->toDateString() === now()->toDateString()
+            ? (float) ($config->state?->daily_realized_pnl ?? 0)
+            : 0.0;
 
         // Estimated slippage cost + fees (spec §55): computed from ACTUAL
         // filled decisions (evaluated_price vs executed_price divergence,

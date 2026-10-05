@@ -2439,11 +2439,17 @@ class RatioBotDecisionService
             return true;
         }
 
+        // A PENDING decision is executed within the same job (or the same
+        // approval request) that made it pending; one older than a couple of
+        // minutes was orphaned by a dying worker and must not block every
+        // trade for half an hour. SUBMITTED orders are covered above by the
+        // awaiting state and the reconcile watchdog.
         return RatioBotDecision::query()
             ->where('ratio_bot_config_id', $config->id)
             ->whereIn('decision', [RatioBotDecision::DECISION_BUY, RatioBotDecision::DECISION_SELL])
-            ->whereIn('execution_status', [RatioBotDecision::EXEC_PENDING, RatioBotDecision::EXEC_SUBMITTED])
-            ->where('created_at', '>=', now()->subMinutes(30))
+            ->where(fn ($query) => $query
+                ->where(fn ($q) => $q->where('execution_status', RatioBotDecision::EXEC_PENDING)->where('updated_at', '>=', now()->subMinutes(2)))
+                ->orWhere(fn ($q) => $q->where('execution_status', RatioBotDecision::EXEC_SUBMITTED)->where('created_at', '>=', now()->subMinutes(30))))
             ->exists();
     }
 
