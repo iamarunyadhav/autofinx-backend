@@ -103,3 +103,11 @@ same-1m-bar ambiguity (SPEC §26). Order: (1) the full P3 report counts ambiguou
 horizon × policy; (2) resolve only those minutes with official Binance futures aggTrades (REST per
 minute, not 5-year bulk tick files); (3) re-run the P3 policy lab and report how many outcomes changed.
 Unresolvable minutes stay conservative. Must finish before P5 freezes the policy.
+
+**D-020 · 2026-10-07 · agent (supersedes the method in D-019; owner direction unchanged)** — Binance
+REST aggTrades only serves the last 2 days (`-4166 Search window is restricted to recent 2 days`), and
+daily bulk aggTrades files are 17–60 MB/day for BTC (~150 GB for 6 coins × full history). So:
+(1) before P5: SAMPLED resolver — ~60 random dev days per coin, stream each daily file, keep only the
+ambiguous minutes, measure how often the conservative rule was wrong and the P&L difference;
+(2) at P6: resolve every ambiguous minute of the executed holdout trades (one time, ~9 months).
+If (1) shows a small difference, conservative evaluation stays for P3–P5.

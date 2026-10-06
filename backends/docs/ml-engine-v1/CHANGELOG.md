@@ -105,3 +105,9 @@ Plan lock (same day, session d):
   volatility regime), policy lab with pre-declared baselines; asserts no holdout rows.
 - `external-predictive-engine/v4/cli.py` — command `p3` (+ `reports/p3/SUMMARY.md`).
 - Tests: `tests/v4/test_policy.py` (16), `tests/v4/test_splits.py` (1).
+- `external-predictive-engine/v4/resolver.py` (new) — sampled aggTrade resolver (D-020): streams
+  official daily aggTrades zips for random dev days, keeps only ambiguous minutes, re-simulates trades
+  tick by tick, reports outcome changes and P&L bias of the conservative 1m rule.
+- `external-predictive-engine/v4/cli.py` — command `resolve --days N`.
+- `external-predictive-engine/tests/v4/test_resolver.py` (new, 3 tests; 45 V4 tests total).
+- `docs/ml-engine-v1/DECISIONS.md` — D-018 (splits confirmed), D-019, D-020 (resolver method).

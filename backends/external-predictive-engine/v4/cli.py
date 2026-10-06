@@ -28,7 +28,8 @@ def _months(symbol: str, override: int | None) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="v4.cli")
-    parser.add_argument("command", choices=["download", "verify", "status", "targets", "import-candles", "export-features", "p3"])
+    parser.add_argument("command", choices=["download", "verify", "status", "targets", "import-candles", "export-features", "p3", "resolve"])
+    parser.add_argument("--days", type=int, default=30, help="resolve: random development days to sample")
     parser.add_argument("--horizons", default="15,60,120,240,1440")
     parser.add_argument("--cost-pct", type=float, default=None, help="round-trip cost for Layer A (default 0.12, R-002)")
     parser.add_argument("--work", required=True, type=Path)
@@ -74,6 +75,16 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"   G7 metrics: days {g7.get('days_present')} present / {g7.get('days_missing')} missing, "
                           f"{g7.get('first_utc')} -> {g7.get('last_utc')}, step {g7.get('median_step_minutes')} min, gaps>15m {g7.get('gaps_over_15min')}")
                 worst = max(worst, {"OK": 0, "WARN": 1, "FAIL": 2}[v["status"]])
+            elif args.command == "resolve":
+                from .resolver import run_sample
+                horizons = [int(h) for h in args.horizons.replace(";", ",").split(",") if h.strip()]
+                s = run_sample(args.work, symbol, horizons, days=args.days)
+                print(f"== {symbol}: {s['resolved']} flagged trades resolved on {s['days_sampled']} sampled days "
+                      f"(of {s['flagged_trades_total']} flagged in dev), {s['seconds']}s", flush=True)
+                for name, g in s["groups"].items():
+                    print(f"   {name}: resolved {g['resolved']}, outcome changed {g['outcome_changed_pct']}%, "
+                          f"avg net change {g['avg_delta_net_pct']:+.4f}% (conservative understated {g['conservative_understates_pct']}%, "
+                          f"overstated {g['conservative_overstates_pct']}%)", flush=True)
             elif args.command == "p3":
                 from .lab import markdown_summary, run_symbol
                 horizons = [int(h) for h in args.horizons.replace(";", ",").split(",") if h.strip()]
