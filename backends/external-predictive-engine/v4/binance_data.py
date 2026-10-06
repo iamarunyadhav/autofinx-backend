@@ -20,6 +20,7 @@ from __future__ import annotations
 import csv
 import datetime as dt
 import hashlib
+import http.client
 import io
 import json
 import os
@@ -65,7 +66,7 @@ def http_get(url: str, timeout: float = 60.0, retries: int = 6, sleep: Callable[
                 raise
             wait = float(error.headers.get("Retry-After") or delay) if error.code in (418, 429) else delay
             sleep(min(wait, 120.0))
-        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError):
+        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError, http.client.HTTPException):
             if attempt == retries:
                 raise
             sleep(delay)

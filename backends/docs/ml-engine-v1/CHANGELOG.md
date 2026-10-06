@@ -111,3 +111,13 @@ Plan lock (same day, session d):
 - `external-predictive-engine/v4/cli.py` — command `resolve --days N`.
 - `external-predictive-engine/tests/v4/test_resolver.py` (new, 3 tests; 45 V4 tests total).
 - `docs/ml-engine-v1/DECISIONS.md` — D-018 (splits confirmed), D-019, D-020 (resolver method).
+- `external-predictive-engine/v4/binance_data.py` — retries also on `http.client.HTTPException`
+  (IncompleteRead seen on a 22 MB aggTrades file); `resolver.py` skips and records a failed day.
+
+## 2026-10-07 — P4A (session i; owner said "go P4A")
+- `external-predictive-engine/v4/train_v4.py` (new) — per symbol × horizon on dev data: V3 and V4
+  BUY/SELL classifiers (same tree settings, recency weights, isotonic calibration on the last 20% of
+  dev_train with purge), MFE/MAE quantile models, dev_val comparison ARM1_V3 / V3 signal + new exits /
+  ARM2_V4 / always-take baselines, plus EV-only diagnostic arms. Models in
+  `D:\autofinx-ml-v4\models\<SYMBOL>\h<H>\`, reports in `reports\p4a\`. Status P4A_DEV_ONLY_NOT_FROZEN.
+- `external-predictive-engine/v4/cli.py` — command `p4a`.

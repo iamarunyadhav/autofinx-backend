@@ -120,6 +120,21 @@ are. Numbers are copied from real output, never estimated after the fact.
 - G7 metrics: BTC 1,350 days fetched before the run switched to `-NoMetrics` (2021-10-01 → 2026-10-05,
   5-min step, 8 gaps > 15 min). Remaining days/coins later, before P4B.
 
+## R-011 · 2026-10-07 · P4A first result — BTCUSDT h15 (development data only)
+- Owner said "go P4A" while the full P3 run was still running (BTC P3 reports were complete).
+- Rows: fit 249,998 · calibration 62,501 · dev_val 134,416 (holdout asserted untouched). 531 s.
+- Classifiers on dev_val: V3 endpoint labels AUC 0.706 (long) / 0.709 (short), base rate ~14.5%;
+  V4 path labels (REFERENCE policy, net ≥ 0.06%) AUC 0.640 / 0.646, base rate ~10.7%. Brier below
+  climatology for all four (e.g. V4 long 0.0939 vs 0.0962).
+- With the inherited V3 probability floor 0.55 almost nothing trades (calibrated p ≥ 0.55 on 0.004–0.055%
+  of rows): ARM1_V3 57 trades avg +0.033% (t 0.25); V3 signal + new exits 78 trades −0.128%;
+  ARM2_V4 4 trades. Baselines always-long/short −0.127%.
+- Finding: a fixed 0.55 floor does not fit horizons whose success base rate is ~11–15%; the decision
+  gate must be calibrated in P5 on validation. Added clearly-labelled diagnostic arms with the EV gate
+  only (no floor) — not tuned, not frozen.
+- MFE/MAE quantile models trained (q25/q50/q75 per side); coverage and pinball vs constant baseline
+  are in `D:\autofinx-ml-v4\reports\p4a\BTCUSDT_h15.json`.
+
 ## R-010 · 2026-10-07 · P2 gate — features + Layer A targets for all six coins
 - Runner `-TargetsOnly -ForceRebuildTargets`: 47.9 min, exit 0.
 - Exact V3 features (PHP builder, 0 NaN cells): BTC 526,673 · ETH 526,676 · BNB 526,679 ·

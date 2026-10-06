@@ -28,7 +28,7 @@ def _months(symbol: str, override: int | None) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="v4.cli")
-    parser.add_argument("command", choices=["download", "verify", "status", "targets", "import-candles", "export-features", "p3", "resolve"])
+    parser.add_argument("command", choices=["download", "verify", "status", "targets", "import-candles", "export-features", "p3", "resolve", "p4a"])
     parser.add_argument("--days", type=int, default=30, help="resolve: random development days to sample")
     parser.add_argument("--horizons", default="15,60,120,240,1440")
     parser.add_argument("--cost-pct", type=float, default=None, help="round-trip cost for Layer A (default 0.12, R-002)")
@@ -75,6 +75,16 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"   G7 metrics: days {g7.get('days_present')} present / {g7.get('days_missing')} missing, "
                           f"{g7.get('first_utc')} -> {g7.get('last_utc')}, step {g7.get('median_step_minutes')} min, gaps>15m {g7.get('gaps_over_15min')}")
                 worst = max(worst, {"OK": 0, "WARN": 1, "FAIL": 2}[v["status"]])
+            elif args.command == "p4a":
+                from .train_v4 import run as run_p4a
+                for h in [int(v) for v in args.horizons.replace(";", ",").split(",") if v.strip()]:
+                    r = run_p4a(args.work, symbol, h)
+                    print(f"== {symbol} h{h}: fit {r['rows']['fit']}, cal {r['rows']['calibration']}, dev_val {r['rows']['dev_val']}, {r['seconds']}s", flush=True)
+                    for name, c in r["classifiers"].items():
+                        print(f"   {name:9s} val AUC {c['val_auc']}  base {c['val_base_rate_pct']}%  Brier {c['val_brier']} vs {c['val_brier_climatology']}  p>=floor {c['val_rows_p_ge_floor_pct']}%", flush=True)
+                    for name, s in r["arms_dev_val"].items():
+                        print(f"   {name:26s} trades {s.get('trades', 0):6d}  avg net {s.get('avg_net_pct', 0):+.4f}%  total {s.get('total_net_pct', 0):+.2f}%  "
+                              f"win {s.get('win_rate_pct', 0)}%  PF {s.get('profit_factor')}  t {s.get('t_stat')}", flush=True)
             elif args.command == "resolve":
                 from .resolver import run_sample
                 horizons = [int(h) for h in args.horizons.replace(";", ",").split(",") if h.strip()]

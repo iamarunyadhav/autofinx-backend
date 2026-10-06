@@ -142,10 +142,15 @@ def run_sample(work: Path, symbol: str, horizons: list[int], days: int = 30, see
     all_days = sorted({c[0] for c in cases})
     rng = random.Random(seed)
     sample = sorted(rng.sample(all_days, min(days, len(all_days))))
-    results = []
+    results, failed_days = [], []
     for n, day in enumerate(sample, 1):
         day_cases = [c for c in cases if c[0] == day]
-        ticks = day_minutes_trades(symbol, day, {c[1] for c in day_cases}, get)
+        try:
+            ticks = day_minutes_trades(symbol, day, {c[1] for c in day_cases}, get)
+        except Exception as error:                       # one bad day never stops the sample
+            failed_days.append({"day": day, "error": str(error)[:200]})
+            print(f"  {symbol} aggTrades day {n}/{len(sample)} {day}: FAILED ({error})", flush=True)
+            continue
         for _, minute, c in day_cases:
             n_bars = c["h"]
             first = int((c["anchor"] - int(grid["start"])) // MINUTE)
@@ -161,7 +166,7 @@ def run_sample(work: Path, symbol: str, horizons: list[int], days: int = 30, see
         print(f"  {symbol} aggTrades day {n}/{len(sample)} {day}: {len(day_cases)} flagged trades", flush=True)
 
     summary = {"symbol": symbol, "days_sampled": len(sample), "days_with_flagged_trades": len(all_days),
-               "flagged_trades_total": len(cases), "resolved": len(results), "seconds": round(time.monotonic() - started, 1), "groups": {}}
+               "flagged_trades_total": len(cases), "resolved": len(results), "failed_days": failed_days, "seconds": round(time.monotonic() - started, 1), "groups": {}}
     for key in sorted({(r["h"], r["policy"], r["side"]) for r in results}):
         g = [r for r in results if (r["h"], r["policy"], r["side"]) == key]
         d = np.array([r["delta_net"] for r in g])

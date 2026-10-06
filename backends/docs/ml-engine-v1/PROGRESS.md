@@ -48,7 +48,7 @@ Last updated: 2026-10-06 by ml-engine-v1 (Claude Code session).
 | P1 Data (1m + 5m + funding, verify, runner skeleton) | ✅ done 2026-10-07 (G7 metrics partial) | R-006, R-007 |
 | P2 Layer A path targets + exact features | ✅ done 2026-10-07 | R-008, R-010 |
 | P3 Label audit + path distribution + policy lab | 🔄 code + BTC h15/h240 done (R-009) | dev data only |
-| P4A V4 models on V3 features | not started | holdout sealed |
+| P4A V4 models on V3 features | 🔄 code done, BTC h15 first result (R-011); BTC 15/60/240 running | holdout sealed |
 | P4B Feature schema v4, G1–G6 ablation (G7 optional) | not started | holdout sealed |
 | P5 Policy calibration → FREEZE (incl. 3 arms, primary = Arm 3) | not started | every frozen value in DECISIONS |
 | P6 Walk-forward + one final holdout, all arms | not started | opened once |
