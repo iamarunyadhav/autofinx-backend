@@ -572,33 +572,58 @@ The four "brains" map to SPEC §32: Regime (features), Direction (A/B classifier
   folds (one big fold cannot hide worse folds), does not degrade calibration materially, and does
   not explode the feature count.
 
-## 103. P5 design — PROPOSED 2026-10-07 (D-027), awaiting owner review; not implemented yet
+## 103. P5 design — LOCKED 2026-10-07 (D-027, as amended by the owner's review)
 Per symbol × horizon, development data only (holdout sealed). Inputs: the P4 models on the P4B-selected
-features (V3 base if no group survived): BUY/SELL classifiers, quantile models of MFE,
-MAE-before-profit (SL) and pullback-before-continuation (trailing).
+features (V3 base if no group survived): BUY/SELL classifiers and quantile models of MFE,
+MAE-before-profit (SL) and pullback-before-continuation (trailing). Policy multipliers are SHARED by
+LONG and SHORT within a symbol × horizon; predictions and caps are side-specific.
 
-1. **Market SL cap (L2):** CAP = p90 of realized MAE-before-profit of profitable dev_train paths, per side.
-   One rule, no search. Predicted required SL > CAP ⇒ WAIT (§15).
-2. **Dynamic levels per anchor — small pre-registered family (12 exit policies):**
-   - SL = a × predicted q75(MAE-before-profit), a ∈ {1.0, 1.25}, clipped to [0.10%, CAP]
-   - Activation = max(cost + edge, b × predicted q25(MFE)), b ∈ {0.6, 0.8}
-   - Trailing ∈ {1.0 × q50(pullback), 1.5 × q50(pullback), 0.5 × σ_h volatility (§102 comparison)},
-     clipped to [0.05%, activation]
-   - Consistency gate (§84, fixed): activation > cost + edge, SL ≤ CAP, q50(MFE) / SL ≥ 1.0
-3. **Decision gate (D-021/22/23):** EV = p·avg_win + (1−p)·avg_other with avg_win/avg_other measured on the
-   calibration slice UNDER THE CANDIDATE POLICY; 12 gate combos (lift none/1.25/1.5/2.0 × margin
-   0/0.03/0.06%); conflict margin 0.02% ⇒ WAIT.
-4. **Two-stage selection to limit multiple testing:** stage 1 picks the exit policy (12) with a fixed default
-   gate (lift none, margin 0.03%); stage 2 picks the gate (12) for that policy — 24 evaluations, not 144.
-5. **Selection data:** dev_val split into 3 chronological folds (purged). Score = median fold average net
-   per trade after all costs; a candidate must have ≥ ⌈min_trades/3⌉ trades per fold (server min_trades
-   by horizon) and positive net in ≥ 2 of 3 folds. No candidate passes ⇒ symbol × horizon REJECTED
-   (WAIT forever), reported honestly.
-6. **Final retrain under the frozen policy (D-026 #5):** quantile predictions for every dev row by
-   5-block time cross-fitting (each block predicted by models trained without it, purged); rebuild V4
-   success labels with the frozen dynamic levels; retrain + recalibrate the classifiers on development
-   data; store artifacts with sha256.
-7. **Freeze record (DECISIONS):** per symbol × horizon — features, model hashes, policy (a, b, trailing
-   rule), CAP, gate (lift, margin), the pre-registered three arms with PRIMARY = Arm 3 (Arm 2 if no P4B
-   group survived, L9), and the stress matrix (L7). Then P6.
-
+1. **Market SL cap (L2):** per symbol × horizon × side, CAP = p90 of Layer A
+   `max_adverse_before_profit_pct` on DEV_TRAIN rows that reached the cost + edge threshold, excluding
+   invalid / conflict rows and `profit_bar_ambiguous` rows. Policy-independent (never derived from the
+   selected exit policy). A market-price cap only; account-money risk is a future autopilot phase.
+2. **Quantile quality gate (before any dynamic use):** per component (MFE q25, adverse-before-profit q75,
+   pullback q50) on 3 chronological sub-folds of the P5-A window: pinball loss below the constant
+   (dev_train quantile) baseline in ≥ 2 of 3 folds with a positive median improvement; q25–q75 coverage
+   within 40–60%; quantile crossings are repaired by sorting and their rate reported — a crossing rate
+   above 5% fails the component. A failed component may only fall back to its pre-declared simple
+   candidate (adverse / reward: the dev_train constant quantile; trailing: 0.5 × σ_h volatility); if the
+   simple version is not in the family, the symbol × horizon is REJECTED.
+3. **Dynamic levels per anchor (pre-registered family, 12 exit policies):**
+   - Reward floor: predicted q25(MFE) ≤ cost + edge ⇒ **WAIT** (activation is never forced up).
+   - SL = a × predicted q75(adverse-before-profit), a ∈ {1.0, 1.25}; SL < 0.10% ⇒ 0.10%; SL > CAP ⇒ WAIT.
+   - Activation = b × predicted q25(MFE), b ∈ {0.6, 0.8}; activation ≤ cost + edge ⇒ WAIT.
+   - Trailing ∈ {1.0 × q50(pullback), 1.5 × q50(pullback), 0.5 × σ_h}, clipped to [0.05%, activation].
+4. **Consistency, uncertainty, OOD and conflict gates (fixed rules, frozen in P5):** SL > 0, activation > 0,
+   trailing > 0; activation > cost + edge; conservative reward q25(MFE) > activation; q50(MFE) / SL ≥ 1.0;
+   conservative expected net > 0; uncertainty = (q75 − q25) / q50 of MFE must be ≤ its dev_train p90;
+   OOD = WAIT when > 10% of features have |z| > 4 against dev_train mean/std or any |z| > 8; conflict:
+   BUY and SELL EV within 0.02% ⇒ WAIT. Any failure ⇒ WAIT (no invented fallback values).
+5. **Decision gate (D-021/22/23):** EV = p·avg_win + (1−p)·avg_other, with avg_win / avg_other measured
+   on the classifier calibration slice under the candidate policy; 12 gate combos (lift none/1.25/1.5/2.0
+   × margin 0/0.03/0.06%).
+6. **Nested chronological selection (no evidence reused):** dev_val is split into P5-A (first 40%),
+   P5-B (next 30%), P5-C (last 30%) with a purge of H between windows.
+   - P5-A: quantile quality gate + choose the exit policy (12) with the fixed default gate
+     (lift none, margin 0.03%).
+   - P5-B: choose the decision gate (12) for that exit policy.
+   - P5-C: confirm the frozen pair once; no selection happens on P5-C.
+7. **Selection rules (pre-registered):** each window is split into 3 sub-folds. A candidate qualifies only
+   with ≥ the server min_trades for the horizon in the window (15m 40, 60m 30, 120m 20, 240m 15,
+   1440m 8), positive net in ≥ 2 of 3 sub-folds, positive aggregate net, profit factor ≥ 1.05 and
+   t-stat ≥ 1.0. Primary score = median sub-fold average net per trade. Tie-break: if the best two differ
+   by < 0.02% average net per trade, choose the simpler / lower-risk one (a = 1.0 before 1.25, b = 0.8
+   before 0.6, volatility trailing before model trailing, then the lower ambiguity rate). Nothing
+   qualifies in P5-A or P5-B, or P5-C is not positive ⇒ symbol × horizon REJECTED (WAIT), reported.
+8. **Ambiguity in economics:** every candidate is evaluated on the same reality — aggTrade-resolved
+   outcomes where available, otherwise the conservative worst case (`apply_worst_case`). Ambiguous rows
+   are never dropped from economic comparison (they are only excluded from training labels).
+9. **Final retrain under the frozen policy (D-026 #5), forward-chaining only:** dev rows are cut into 5
+   chronological blocks; block k's quantile predictions come from models trained on blocks < k
+   (purged) — never on the same or a later block; block 1 is warm-up and gets no final label. Rebuild
+   V4 success labels with the frozen dynamic levels; retrain + recalibrate the classifiers on development
+   data; store every artifact with sha256.
+10. **Freeze record (DECISIONS):** per symbol × horizon — features, model hashes, CAP per side, exit policy
+    (a, b, trailing rule), gate (lift, margin), uncertainty / OOD / conflict thresholds, quality-gate
+    results, the three arms with PRIMARY = Arm 3 (Arm 2 if no P4B group survived, L9), and the stress
+    matrix (L7). Then P6.

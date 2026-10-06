@@ -14,7 +14,7 @@ Last updated: 2026-10-06 by ml-engine-v1 (Claude Code session).
   P4A table (R-015); (2) run the full backend suite (`php artisan test`) for the P4B PHP changes;
   (3) `ml-v4-local.ps1 -TargetsOnly -PatternFeatures` (v4 features, ~3 h for 6 coins);
   (4) `python -m v4.cli p4b` ablation (D-025), BTC/ETH 15m first (SPEC §75); (5) report to the owner.
-  (6) owner reviews the P5 design (SPEC §103, D-027 PROPOSED) — P5 code starts only after that.
+  (6) P5 design LOCKED (SPEC §103, D-028) — implement `v4/p5.py` + tests; run after P4A/P4B results.
 - **Server:** ML paused with `ml-server-pause.sh --apply` on 2026-10-07 00:53 +08 (flag false, worker
   autostart off, 1.4 GB exports removed). Load stayed ~27–29, so ML was not the main server load.
   `--free-disk` (~16 GB) recommended, owner to decide.
@@ -41,8 +41,7 @@ Last updated: 2026-10-06 by ml-engine-v1 (Claude Code session).
   7. Run on BTCUSDT for a small window first, then report sizes and real timings in RESULTS.md.
 - **Open questions:**
   1. Market SL cap — decided in P5 from P3 distributions (L2). Not needed now.
-  2. V4 split fractions (V3: holdout = newest 15%, folds at 55/65/75%) — agent proposes in P2 design
-     and the owner confirms before any holdout row is used.
+  2. (resolved by D-018) V4 split fractions: holdout newest 15%, dev 70/30 with purge.
 
 ## Phase tracker
 
@@ -54,7 +53,7 @@ Last updated: 2026-10-06 by ml-engine-v1 (Claude Code session).
 | P3 Label audit + path distribution + policy lab | 🔄 code + BTC h15/h240 done (R-009) | dev data only |
 | P4A V4 models on V3 features | 🔄 code done, BTC h15 first result (R-011); BTC 15/60/240 running | holdout sealed |
 | P4B Feature schema v4, G1–G6 ablation (G7 optional) | 🔧 PHP features + tests ready (not run on data yet) | holdout sealed |
-| P5 Policy calibration → FREEZE (incl. 3 arms, primary = Arm 3) | not started | every frozen value in DECISIONS |
+| P5 Policy calibration → FREEZE (incl. 3 arms, primary = Arm 3) | 🔧 design locked (D-028), rules + 11 tests done; orchestration next | every frozen value in DECISIONS |
 | P6 Walk-forward + one final holdout, all arms | not started | opened once |
 | P7 Stress tests | not started | |
 | P8 Reports | not started | STOP after P8 |

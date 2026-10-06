@@ -182,3 +182,12 @@ q75 MAE-before-profit; activation b ∈ {0.6, 0.8} × q25 MFE floored at cost + 
 1.0/1.5 × q50 pullback or 0.5 σ volatility); 12 gate combos; two-stage selection (24 evaluations) on 3
 purged dev_val folds with min-trade and fold-consistency rules; REJECT when nothing passes; final retrain
 under the frozen policy with 5-block time cross-fitted quantile predictions; full freeze record.
+
+**D-028 · 2026-10-07 · owner (external review) — D-027 LOCKED as amended** (SPEC §103 rewritten): CAP from
+Layer A dev_train, per symbol × horizon × side, ambiguity excluded; reward floor ⇒ WAIT (activation never
+forced up); quantile quality gate with simple fallbacks; consistency + uncertainty + OOD + conflict gates
+frozen; nested P5-A / P5-B / P5-C selection on dev_val (no evidence reused); pre-registered min trades,
+fold consistency, PF ≥ 1.05, t ≥ 1.0 and a simplicity tie-break; ambiguity never dropped from economic
+comparison; forward-chaining (past-only) cross-fitting for the final retrain; multipliers shared by
+LONG/SHORT. Agent note: nesting reduces the data per stage (BTC dev_val ≈ 15 months split 40/30/30), so
+some symbol × horizons may be REJECTED for too few trades — accepted as the honest outcome.

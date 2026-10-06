@@ -163,3 +163,13 @@ Plan lock (same day, session d):
 - Targets rebuilt for 6 coins × 5 horizons to add the column (existing columns unchanged).
 - `docs/ml-engine-v1/FEATURES_V4.md` (new) — feature manifest; `SPEC.md` §101 P5 row now includes the
   final retrain under the frozen policy; `DECISIONS.md` D-026.
+
+## 2026-10-07 — P5 design locked + building blocks (session m, D-028)
+- `docs/ml-engine-v1/SPEC.md` §103 rewritten as LOCKED (owner review); `DECISIONS.md` D-028;
+  `PROGRESS.md` split-fraction question marked resolved (D-018), P5 next step.
+- `external-predictive-engine/v4/p5.py` (new) — pure P5 rules: SL cap (Layer A, ambiguity excluded),
+  quantile quality gate (pinball vs constant, coverage 40-60%, crossing repair + rate), 12-policy exit
+  family with shared multipliers, dynamic levels with first-failing WAIT reason (reward floor, cap,
+  activation floor, consistency, uncertainty, OOD), EV/lift/conflict decision, nested P5-A/B/C windows,
+  selection rule (min trades, 2/3 sub-folds, PF, t-stat) + simplicity tie-break, forward-chaining blocks.
+- `external-predictive-engine/tests/v4/test_p5.py` (new, 11 tests incl. SPEC §78 M, N, O); 64 V4 tests.
