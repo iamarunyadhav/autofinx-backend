@@ -92,6 +92,8 @@ LOG="$APP/storage/logs/ml-batch-$(date +%Y%m%d-%H%M%S).log"
 log() { echo "$(date '+%F %T') $*" | tee -a "$LOG"; }
 
 trainers_running() { pgrep -f 'artisan ml:train [A-Z]' >/dev/null; }
+# A training run started from the dashboard/queue trains inside the worker process, which pgrep cannot see.
+runs_busy() { runuser -u "$APP_USER" -- "$PHP" "$APP/artisan" ml:training:busy >/dev/null 2>&1; }
 
 log "batch $WHICH start | load: $(cut -d' ' -f1-3 /proc/loadavg) | $(free -m | awk '/^Mem:/{printf "RAM avail %sMB", $7} /^Swap:/{printf ", swap used %s/%sMB", $3, $2}')"
 
@@ -124,9 +126,9 @@ while read -r sym h; do
   if [ -e "$STOP_FILE" ]; then log "stop file found: stopping before $sym ${h}m"; break; fi
   if is_done "$sym" "$h"; then log "skip $sym ${h}m (already done)"; continue; fi
 
-  while trainers_running; do
+  while trainers_running || runs_busy; do
     [ -e "$STOP_FILE" ] && break
-    log "another ml:train is running; waiting (one model at a time)"
+    log "another training is running (CLI or the queue worker); waiting (one model at a time)"
     sleep 120
   done
   [ -e "$STOP_FILE" ] && { log "stop file found: stopping before $sym ${h}m"; break; }

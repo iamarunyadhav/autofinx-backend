@@ -125,9 +125,10 @@ class TrainingOverviewService
 
         foreach ($activeRuns as $run) {
             $row = $activeSummaries->get($run->id);
-            if ($run->status === MlTrainingRun::RUNNING && ($row['heartbeat_age_seconds'] ?? 0) > $stallSeconds) {
+            $limit = $run->phase === 'exporting' ? max($stallSeconds, (int) config('ml.training.export_stall_seconds', 1800)) : $stallSeconds;
+            if ($run->status === MlTrainingRun::RUNNING && ($row['heartbeat_age_seconds'] ?? 0) > $limit) {
                 $alerts[] = $this->alert('run_stalled', 'critical', "{$run->symbol} h{$run->horizon_minutes} training has stalled",
-                    "No heartbeat for {$row['heartbeat_age_seconds']} s (limit {$stallSeconds} s). The reaper marks it interrupted and re-queues it shortly.",
+                    "No heartbeat for {$row['heartbeat_age_seconds']} s (limit {$limit} s). The reaper marks it interrupted and re-queues it shortly.",
                     (string) ($row['heartbeat_at'] ?? $row['started_at']), $run->symbol, (int) $run->horizon_minutes, ['type' => 'open_run', 'run_id' => $run->id], $run->id);
             }
         }

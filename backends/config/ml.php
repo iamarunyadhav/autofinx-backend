@@ -96,6 +96,11 @@ return [
         // INTERRUPTED. Auto-retry applies only to INTERRUPTED and python-crash
         // failures, never REJECTED, TIMEOUT or STOPPED; backoff in minutes per attempt.
         'stall_seconds' => (int) env('AUTOFINX_ML_TRAINING_STALL_SECONDS', 180),
+        // The export phase (count, anchors, funding, 500k+ rows) writes its heartbeat
+        // between steps and every few seconds while streaming rows, but one single
+        // query can still run for minutes on a loaded host. A run in this phase is
+        // only called stalled after this many seconds without a heartbeat.
+        'export_stall_seconds' => (int) env('AUTOFINX_ML_TRAINING_EXPORT_STALL_SECONDS', 1800),
         'auto_retry' => (bool) env('AUTOFINX_ML_TRAINING_AUTO_RETRY', true),
         'max_attempts' => (int) env('AUTOFINX_ML_TRAINING_MAX_ATTEMPTS', 3),
         'retry_backoff_minutes' => array_values(array_filter(array_map('intval', explode(',', (string) env('AUTOFINX_ML_TRAINING_RETRY_BACKOFF_MINUTES', '2,4,8'))), static fn (int $m): bool => $m > 0)),

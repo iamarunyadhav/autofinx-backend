@@ -165,9 +165,7 @@ final class MlDoctor
     {
         $s = 'Registry';
         $stall = max(30, (int) config('ml.training.stall_seconds', 180));
-        $cutoff = MlTrainingRun::utcNow(-$stall);
-        $dead = MlTrainingRun::query()->where('status', MlTrainingRun::RUNNING)
-            ->where(fn ($q) => $q->where('heartbeat_at', '<', $cutoff)->orWhereNull('heartbeat_at'))->count();
+        $dead = $this->reaper->staleCount();
         if ($dead > 0) {
             if ($fix) {
                 $result = $this->reaper->run();
@@ -195,6 +193,17 @@ final class MlDoctor
             $this->add(self::FIXED, $s, 'Marked '.$stale->count().' TRAINING model row(s) FAILED: no trainer process exists for them ('.$stale->map(fn ($m) => "{$m->symbol} h{$m->horizon_minutes}")->implode(', ').').');
         } else {
             $this->add(self::WARN, $s, $stale->count().' TRAINING model row(s) have no live trainer ('.$stale->map(fn ($m) => "{$m->symbol} h{$m->horizon_minutes}")->implode(', ').'). The dashboard shows them as training. Run with --fix.');
+        }
+
+        $running = MlTrainingRun::query()->where('status', MlTrainingRun::RUNNING)->get(['symbol', 'horizon_minutes', 'source']);
+        $phpTrainers = $processes === null ? 0 : count(array_filter($processes, static fn ($p) => $p['kind'] === 'php'));
+        if ($running->count() > 1 || ($running->isNotEmpty() && $phpTrainers > 0 && $running->contains(fn ($r) => $r->source !== MlTrainingRun::SOURCE_CLI))) {
+            $this->add(self::WARN, $s, 'More than one training is active at once ('.$running->map(fn ($r) => "{$r->symbol} h{$r->horizon_minutes} via {$r->source}")->implode(', ').", {$phpTrainers} CLI trainer process(es)). On this host they slow each other down. Use ONE channel at a time: either the dashboard/queue or ml-train-batch.sh.");
+        }
+        $storm = MlTrainingRun::query()->where('status', MlTrainingRun::INTERRUPTED)->where('finished_at', '>=', MlTrainingRun::utcNow(-6 * 3600))
+            ->selectRaw('symbol, horizon_minutes, COUNT(*) as n')->groupBy('symbol', 'horizon_minutes')->havingRaw('COUNT(*) >= 2')->get();
+        foreach ($storm as $row) {
+            $this->add(self::WARN, $s, "{$row->symbol} h{$row->horizon_minutes} was INTERRUPTED {$row->n} times in 6 h: a run is being declared dead and re-queued repeatedly. Check the host (swap), and that no second worker or batch is training the same pair.");
         }
 
         $failed = MlTrainingRun::query()->whereIn('status', [MlTrainingRun::FAILED, MlTrainingRun::INTERRUPTED])

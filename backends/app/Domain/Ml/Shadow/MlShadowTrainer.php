@@ -270,7 +270,12 @@ class MlShadowTrainer
         $names = ShadowFeatureBuilder::features($schema);
         $base = self::matureTrainingRows($symbol, $horizon, $timeframe, $schema);
 
+        // The export is the longest silent stretch of a run on a loaded host:
+        // beat between its steps and while streaming rows, otherwise the reaper
+        // would end a perfectly alive run as dead and queue a duplicate.
+        $this->exportBeat(true);
         $total = (clone $base)->count();
+        $this->exportBeat(true);
         $max = max(1, (int) config('ml.training.max_training_rows', 150000));
         if ($total > $max) {
             $from = (clone $base)->orderBy('l.anchor_time_ms')->offset($total - $max)->limit(1)->value('l.anchor_time_ms');
@@ -278,7 +283,9 @@ class MlShadowTrainer
         }
 
         $anchors = (clone $base)->orderBy('l.anchor_time_ms')->pluck('l.anchor_time_ms')->map(fn ($v) => (int) $v)->all();
+        $this->exportBeat(true);
         $fundingBuy = $this->funding->buyCostPct($symbol, $anchors, $horizon * 60_000);
+        $this->exportBeat(true);
 
         $dataPath = $directory.DIRECTORY_SEPARATOR.$name.'.jsonl';
         $handle = fopen($dataPath, 'wb');
@@ -296,6 +303,9 @@ class MlShadowTrainer
                     'fb' => $fundingBuy[(int) $row->anchor_time_ms] ?? 0.0,
                 ], JSON_THROW_ON_ERROR)."\n");
                 $rows++;
+                if ($rows % 500 === 0) {
+                    $this->exportBeat();
+                }
             }
         } finally {
             fclose($handle);
@@ -445,6 +455,32 @@ class MlShadowTrainer
                 'ML shadow training failed: '.mb_substr(trim($process->getErrorOutput() ?: $process->getOutput()), -1500),
                 $process->getExitCode(), $process->hasBeenSignaled(),
             );
+        }
+    }
+
+    private float $lastExportBeat = 0.0;
+
+    /**
+     * Heartbeat from inside export(): only while a run is attached (comparison
+     * experiments have none), at most every few seconds unless forced. Throws
+     * TrainingRunLost when the reaper already ended the run and TrainingCancelled
+     * on an operator stop, so a dead or stopped run stops exporting at once
+     * instead of wasting the remaining minutes.
+     */
+    private function exportBeat(bool $force = false): void
+    {
+        $runId = $this->activeRunId;
+        if ($runId === null) {
+            return;
+        }
+        $now = microtime(true);
+        if (! $force && $now - $this->lastExportBeat < max(1, min(10, (int) config('ml.training.heartbeat_seconds', 5)))) {
+            return;
+        }
+        $this->lastExportBeat = $now;
+        $this->refreshLock();
+        if ($this->recorder()->tick($runId, true, null)) {
+            throw new TrainingCancelled('Training stopped by the operator.');
         }
     }
 

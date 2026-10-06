@@ -68,7 +68,8 @@ fi
 section "Training processes"
 if pgrep -f 'ml-train-all.sh' >/dev/null; then warn "The old /root/ml-train-all.sh is still running; it starts the next model the moment one ends. Stop it: pkill -f ml-train-all.sh (the running model finishes)."; else ok "The old ml-train-all.sh is not running."; fi
 if pgrep -f 'ml-train-batch.sh' >/dev/null; then
-  ok "ml-train-batch.sh is running. $(wc -l < /root/.ml-batch-done 2>/dev/null || echo 0) model(s) marked done so far."
+  done_n=0; [ -f /root/.ml-batch-done ] && done_n=$(wc -l < /root/.ml-batch-done)
+  ok "ml-train-batch.sh is running. ${done_n} model(s) marked done so far."
   [ -e /root/ml-batch.stop ] && info "A stop file exists: the batch ends after the current model."
 else info "No batch is running. Start one: bash ml-train-batch.sh 1   (list: bash ml-train-batch.sh list)"; fi
 [ -f /root/ml-batch.out ] && { info "Last batch log lines:"; tail -n 4 /root/ml-batch.out | sed 's/^/          /'; }

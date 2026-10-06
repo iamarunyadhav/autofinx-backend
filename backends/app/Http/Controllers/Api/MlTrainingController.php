@@ -54,6 +54,7 @@ final class MlTrainingController extends Controller
             ],
             'training' => [
                 'timeout_seconds' => (int) config('ml.training.timeout_seconds', 1800), 'stall_seconds' => (int) config('ml.training.stall_seconds', 180),
+                'export_stall_seconds' => (int) config('ml.training.export_stall_seconds', 1800),
                 'auto_retry' => (bool) config('ml.training.auto_retry', true), 'max_attempts' => (int) config('ml.training.max_attempts', 3),
             ],
             'thresholds' => $system->thresholds(),

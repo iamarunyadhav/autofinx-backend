@@ -41,14 +41,36 @@ class TrainingReaper
         return $result;
     }
 
+    /** RUNNING runs that currently count as dead. */
+    public function staleCount(): int
+    {
+        return MlTrainingRun::query()->where('status', MlTrainingRun::RUNNING)->where($this->staleCondition())->count();
+    }
+
+    /**
+     * No heartbeat for stall_seconds, except in the export phase, which gets
+     * export_stall_seconds: it can sit inside one long database query.
+     */
+    private function staleCondition(): \Closure
+    {
+        $stall = max(30, (int) config('ml.training.stall_seconds', 180));
+        $cutoff = MlTrainingRun::utcNow(-$stall);
+        $exportCutoff = MlTrainingRun::utcNow(-max($stall, (int) config('ml.training.export_stall_seconds', 1800)));
+        $silent = static fn ($q, string $limit) => $q->where(function ($w) use ($limit): void {
+            $w->where('heartbeat_at', '<', $limit)
+                ->orWhere(fn ($n) => $n->whereNull('heartbeat_at')->where(fn ($s) => $s->whereNull('started_at')->orWhere('started_at', '<', $limit)));
+        });
+
+        return static fn ($q) => $q->where(function ($any) use ($silent, $cutoff, $exportCutoff): void {
+            $any->where(fn ($e) => $silent($e->where('phase', 'exporting'), $exportCutoff))
+                ->orWhere(fn ($o) => $silent($o->where(fn ($p) => $p->whereNull('phase')->orWhere('phase', '!=', 'exporting')), $cutoff));
+        });
+    }
+
     /** @return array{interrupted:int, stopped:int} */
     public function reapStalled(): array
     {
-        $cutoff = MlTrainingRun::utcNow(-max(30, (int) config('ml.training.stall_seconds', 180)));
-        $stale = static fn ($q) => $q->where(function ($w) use ($cutoff): void {
-            $w->where('heartbeat_at', '<', $cutoff)
-                ->orWhere(fn ($n) => $n->whereNull('heartbeat_at')->where(fn ($s) => $s->whereNull('started_at')->orWhere('started_at', '<', $cutoff)));
-        });
+        $stale = $this->staleCondition();
 
         $interrupted = 0;
         $stopped = 0;

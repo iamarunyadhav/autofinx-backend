@@ -598,7 +598,7 @@ final class MlTrainingApiTest extends TestCase
         $this->assertSame(240, $failed['horizon_minutes']);
         $this->assertStringNotContainsString('SECRETVALUE', $failed['summary']);
         $this->assertStringContainsString('TrainMlShadowModelJob', $failed['summary']);
-        $this->assertSame(['timeout_seconds' => 1800, 'stall_seconds' => 180, 'auto_retry' => true, 'max_attempts' => 3], $json['training']);
+        $this->assertSame(['timeout_seconds' => 1800, 'stall_seconds' => 180, 'export_stall_seconds' => 1800, 'auto_retry' => true, 'max_attempts' => 3], $json['training']);
         $this->assertContains($json['health']['level'], ['ok', 'warning', 'critical']);
         if (PHP_OS_FAMILY !== 'Linux') {
             $this->assertNull($json['host']['load']);
