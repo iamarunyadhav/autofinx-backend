@@ -120,6 +120,15 @@ are. Numbers are copied from real output, never estimated after the fact.
 - G7 metrics: BTC 1,350 days fetched before the run switched to `-NoMetrics` (2021-10-01 → 2026-10-05,
   5-min step, 8 gaps > 15 min). Remaining days/coins later, before P4B.
 
+## R-010 · 2026-10-07 · P2 gate — features + Layer A targets for all six coins
+- Runner `-TargetsOnly -ForceRebuildTargets`: 47.9 min, exit 0.
+- Exact V3 features (PHP builder, 0 NaN cells): BTC 526,673 · ETH 526,676 · BNB 526,679 ·
+  SOL 316,441 · XRP 316,444 · SUI 316,446 rows (PHP build 5.7–10.4 min per coin).
+- Layer A targets for 15/60/120/240/1440: 0 gap-invalid anchors on every coin. SOURCE_CONFLICT
+  exclusions (Binance archive events, R-007): 4–12 buckets per coin → h15 16–48 anchors, h1440
+  1,156–3,197 anchors (≤ 0.61%). h1440 build 56–97 s per coin.
+- P2 status: DONE (pending owner sign-off with the P3 report).
+
 ## R-009 · 2026-10-07 · P3 first results — BTCUSDT h15 and h240 (development data only)
 - Split (D-016 proposed): dev 2021-10-01 → 2026-01-03 23:15; holdout sealed from 2026-01-04 23:15
   (79,131 rows, untouched). 447,254 valid dev anchors with a causal feature row.

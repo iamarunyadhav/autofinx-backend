@@ -46,7 +46,7 @@ Last updated: 2026-10-06 by ml-engine-v1 (Claude Code session).
 |---|---|---|
 | P0 Audit | ✅ done 2026-10-06 | RESULTS R-002 |
 | P1 Data (1m + 5m + funding, verify, runner skeleton) | ✅ done 2026-10-07 (G7 metrics partial) | R-006, R-007 |
-| P2 Layer A path targets + exact features | 🔄 BTC done (R-008), other coins after the download | holdout sealed |
+| P2 Layer A path targets + exact features | ✅ done 2026-10-07 | R-008, R-010 |
 | P3 Label audit + path distribution + policy lab | 🔄 code + BTC h15/h240 done (R-009) | dev data only |
 | P4A V4 models on V3 features | not started | holdout sealed |
 | P4B Feature schema v4, G1–G6 ablation (G7 optional) | not started | holdout sealed |

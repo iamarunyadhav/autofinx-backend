@@ -95,3 +95,11 @@ a bar making a new peak and crossing the stop implied by it ⇒ exit at that new
 `same_bar_trail`), including the arming bar; a bar gapping through an existing stop ⇒ fill at its open.
 Trail distance is measured in % of the entry price. Why: SPEC §25-26 forbids favourable ordering; the
 rates are reported so the owner can decide on an aggTrade resolver (§26).
+
+**D-018 · 2026-10-07 · owner** — D-016 splits CONFIRMED (holdout newest 15%, dev 70/30 with purge).
+
+**D-019 · 2026-10-07 · owner (direction) + agent (method)** — Plan an aggTrade resolver for
+same-1m-bar ambiguity (SPEC §26). Order: (1) the full P3 report counts ambiguous minutes per symbol ×
+horizon × policy; (2) resolve only those minutes with official Binance futures aggTrades (REST per
+minute, not 5-year bulk tick files); (3) re-run the P3 policy lab and report how many outcomes changed.
+Unresolvable minutes stay conservative. Must finish before P5 freezes the policy.
