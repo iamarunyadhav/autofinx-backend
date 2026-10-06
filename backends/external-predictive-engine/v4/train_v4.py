@@ -195,20 +195,31 @@ def run(work: Path, symbol: str, horizon: int) -> dict:
     report["arms_dev_val"]["BASELINE_ALWAYS_LONG_REF"] = always["long"]
     report["arms_dev_val"]["BASELINE_ALWAYS_SHORT_REF"] = always["short"]
 
+    # Reward / risk / trailing distributions (D-026). MFE and MAE are defined for every row; the SL target
+    # (adverse before profit) and the trailing target (normal pullback before continuation) are CONDITIONAL:
+    # they exist only on paths that became profitable, so those models train and score on those rows.
     for side in ("long", "short"):
-        for target in ("mfe_pct", "mae_pct"):
-            y = t[f"{side}_{target}"][rows]
+        for target in ("mfe_pct", "mae_pct", "max_adverse_before_profit_pct", "pullback_before_continuation_pct"):
+            column = f"{side}_{target}"
+            if column not in t:
+                report["quantiles"][column] = "missing in targets (rebuild Layer A)"
+                continue
+            y = t[column][rows]
+            fit_q, val_q = fit[np.isfinite(y[fit])], val[np.isfinite(y[val])]
+            if len(fit_q) < 1000 or len(val_q) < 100:
+                report["quantiles"][column] = "too few rows"
+                continue
             preds = {}
             for q in QUANTILES:
                 model = lgb.LGBMRegressor(objective="quantile", alpha=q, **TREE)
-                model.fit(x[fit], y[fit], sample_weight=_weights(anchors[fit]))
+                model.fit(x[fit_q], y[fit_q], sample_weight=_weights(anchors[fit_q]))
                 model.booster_.save_model(str(model_dir / f"q{int(q * 100)}_{side}_{target}.txt"))
-                preds[q] = model.booster_.predict(x[val])
+                preds[q] = model.booster_.predict(x[val_q])
             lo, mid, hi = preds[0.25], preds[0.5], preds[0.75]
-            yv = y[val]
-            base = {q: float(np.quantile(y[fit], q)) for q in QUANTILES}
+            yv = y[val_q]
+            base = {q: float(np.quantile(y[fit_q], q)) for q in QUANTILES}
             pinball = lambda p, q: float(np.mean(np.maximum(q * (yv - p), (q - 1) * (yv - p))))
-            report["quantiles"][f"{side}_{target}"] = {
+            report["quantiles"][column] = {"fit_rows": int(len(fit_q)), "val_rows": int(len(val_q)),
                 "val_coverage_q25_q75_pct": round(float(((yv >= lo) & (yv <= hi)).mean() * 100), 2),
                 "val_pinball_q50_model": round(pinball(mid, 0.5), 5), "val_pinball_q50_constant": round(pinball(np.full(len(yv), base[0.5]), 0.5), 5),
                 "val_median_width_q75_q25": round(float(np.median(hi - lo)), 4)}

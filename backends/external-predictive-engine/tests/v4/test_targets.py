@@ -49,7 +49,8 @@ def reference(m1, anchor, n, funding, cost):
         out[f"{side}_final_time_exit_net_pct"] = gross - cost + (-fund if side == "long" else fund)
         k = next((j for j, f in enumerate(fav) if f >= cost), None)
         if k is None:
-            for f in ("time_to_first_positive_net_s", "max_adverse_before_profit_pct", "profit_bar_ambiguous", "peak_retracement_pct"):
+            for f in ("time_to_first_positive_net_s", "max_adverse_before_profit_pct", "profit_bar_ambiguous", "peak_retracement_pct",
+                      "pullback_before_continuation_pct"):
                 out[f"{side}_{f}"] = math.nan
             continue
         before = max([0.0] + adv[:k])
@@ -58,6 +59,9 @@ def reference(m1, anchor, n, funding, cost):
         out[f"{side}_profit_bar_ambiguous"] = 1.0 if adv[k] > before else 0.0
         retr = [max(fav[k:j]) + adv[j] for j in range(k + 1, n)]
         out[f"{side}_peak_retracement_pct"] = max(retr) if retr else math.nan
+        normal = [max(fav[k:j]) + adv[j] for j in range(k + 1, n) if j + 1 < n and max(fav[j + 1:]) > max(fav[k:j])]
+        continued = k + 1 < n and max(fav[k + 1:]) > fav[k]
+        out[f"{side}_pullback_before_continuation_pct"] = max(normal) if normal else (0.0 if continued else math.nan)
     return out
 
 
@@ -195,3 +199,12 @@ def test_vectorized_matches_reference_on_random_paths_with_gaps_and_any_chunk_si
                         assert math.isnan(got[key][i]), (horizon, i, key)
                     else:
                         assert got[key][i] == pytest.approx(value, rel=1e-9, abs=1e-9), (horizon, i, key)
+
+
+def test_normal_pullback_counts_only_dips_followed_by_a_new_peak():
+    # entry 100 -> 100.5 (profit) -> 101.0 -> dips to 100.7 -> new peak 101.5 -> final drop to 99.0
+    m1 = bars([(100, 100.5, 100, 100.4), (100.4, 101.0, 100.4, 100.9), (100.9, 100.9, 100.7, 100.8),
+               (100.8, 101.5, 100.8, 101.4), (101.4, 101.4, 99.0, 99.1)])
+    t = tg.build_targets(m1, np.array([T0]), 5)
+    assert t["long_pullback_before_continuation_pct"][0] == pytest.approx(0.3)   # 101.0 -> 100.7, then 101.5
+    assert t["long_peak_retracement_pct"][0] == pytest.approx(2.5)               # includes the final 101.5 -> 99.0

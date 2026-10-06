@@ -23,7 +23,11 @@ which something first happens, because the order inside one 1m bar is unknown):
                               bar unknown, so the true adverse-before-profit may be larger)
     peak_retracement_pct      after the profit bar: max over later bars j of
                               (highest high of bars [profit bar, j) - low_j) / E * 100;
-                              NaN if never profitable or no later bar
+                              NaN if never profitable or no later bar (includes the final reversal)
+    pullback_before_continuation_pct  same drop, but only for bars j that are FOLLOWED by a higher
+                              peak later in the path ("normal" pullback, the trailing target);
+                              0 if the path made new peaks without such a dip; NaN if never profitable
+                              or no new peak after the profit bar
     final_time_exit_gross_pct (close of the last bar / E - 1) * 100
     final_time_exit_net_pct   gross - cost_pct - funding_long
   SHORT is the mirror (favourable = down; net = -gross - cost_pct + funding_long).
@@ -51,6 +55,7 @@ VALID, GAP, OUT_OF_RANGE, SOURCE_CONFLICT = 0, 1, 2, 3
 SIDES = ("long", "short")
 FIELDS = ("mfe_pct", "mae_pct", "time_to_mfe_s", "time_to_mae_s", "time_to_first_positive_net_s",
           "max_adverse_before_profit_pct", "profit_bar_ambiguous", "peak_retracement_pct",
+          "pullback_before_continuation_pct",
           "final_time_exit_gross_pct", "final_time_exit_net_pct")
 
 
@@ -169,6 +174,17 @@ def build_targets(m1: dict[str, np.ndarray], anchors: np.ndarray, horizon_min: i
             retr = np.where(offsets[None, :] > k[:, None], peak_before + adv, -np.inf)   # peak% - low% (signed)
             best = retr.max(axis=1)
             out[p + "peak_retracement_pct"][sel] = np.where(ever & np.isfinite(best), best, np.nan)
+
+            # Normal pullback for trailing (D-026): the largest drop from the running peak (since the profit
+            # bar) to a bar's low that was FOLLOWED by a new, higher peak later in the path. A pullback
+            # with no continuation afterwards is the final reversal, not a "normal" pullback.
+            rev = np.maximum.accumulate(fav[:, ::-1], axis=1)[:, ::-1]            # max fav over [j, end]
+            after = np.concatenate([rev[:, 1:], np.full((len(sel), 1), -np.inf)], axis=1)   # max over (j, end]
+            qualifies = (offsets[None, :] > k[:, None]) & (after > peak_before)
+            pull = np.where(qualifies, retr, -np.inf).max(axis=1)
+            continued = after[np.arange(len(sel)), k] > fav[np.arange(len(sel)), k]       # a new peak after the profit bar
+            out[p + "pullback_before_continuation_pct"][sel] = np.where(
+                ever & np.isfinite(pull), pull, np.where(ever & continued, 0.0, np.nan))
     return out
 
 

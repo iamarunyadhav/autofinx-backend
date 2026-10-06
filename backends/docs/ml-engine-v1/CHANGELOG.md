@@ -133,7 +133,7 @@ Plan lock (same day, session d):
 - `tests/v4/test_policy.py` — 3 worst-case tests; `tests/v4/test_resolver.py` updated (49 tests).
 
 ## 2026-10-07 — P4B code prepared + stratified resolver (session k)
-- `app/Domain/Ml/Shadow/PatternFeatures.php` (new) — G1–G6 causal pattern features (60 features):
+- `app/Domain/Ml/Shadow/PatternFeatures.php` (new) — G1–G6 causal pattern features (57 features; earlier "60" was a miscount):
   confirmed swings (SWING_K = 3, L6), candle shape/sequence, RSI/MACD/EMA slopes on fixed 200-bar
   windows, ATR/Bollinger squeeze, 15m/1h/4h bars from COMPLETE UTC buckets only (L5), volume/taker.
 - `app/Domain/Ml/Shadow/ShadowFeatureBuilder.php` — research schema `qt-shadow-features-v4` = v3 + G1–G6;
@@ -151,3 +151,15 @@ Plan lock (same day, session d):
 - `external-predictive-engine/tests/v4/test_ablation.py` (new, 2 tests; 52 V4 tests total).
 - `ml-v4-local.ps1` — switch `-PatternFeatures` builds + exports schema v4 (opt-in env only for that
   process). Measured builder cost: v3 0.78 ms vs v4 4.48 ms per anchor (≈40 min per 5-year coin).
+
+## 2026-10-07 — Dynamic SL / trailing targets + manifest (session l, D-026)
+- `external-predictive-engine/v4/targets.py` — new Layer A field `pullback_before_continuation_pct`
+  (long/short); docstring definitions.
+- `external-predictive-engine/tests/v4/test_targets.py` — reference implementation extended to the new
+  field + a dedicated pullback test (53 V4 tests).
+- `external-predictive-engine/v4/train_v4.py` — conditional quantile models for
+  `max_adverse_before_profit_pct` (dynamic SL) and `pullback_before_continuation_pct` (dynamic trailing),
+  with fit/val row counts; skipped with a note if the column is missing.
+- Targets rebuilt for 6 coins × 5 horizons to add the column (existing columns unchanged).
+- `docs/ml-engine-v1/FEATURES_V4.md` (new) — feature manifest; `SPEC.md` §101 P5 row now includes the
+  final retrain under the frozen policy; `DECISIONS.md` D-026.

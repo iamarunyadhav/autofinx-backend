@@ -489,7 +489,7 @@ The owner's §101 phase list and review correction C10 merged into one order:
 | P2 | Layer A raw path targets + exact PHP features (§10–11, 46, 71–72, 74 steps 7–8; tests G, J, K) | sealed |
 | P3 | V3-vs-V4 label audit (§79), path distribution report (§80), policy laboratory: fixed + volatility baselines and V3 signals + new exits (§21–24, 59–61, 81; tests A–F, H, I, L) — **train/validation only**, diagnostic | sealed |
 | P4 | BUY/SELL probability classifiers + MFE/MAE quantile models + uncertainty (§28–34) | sealed |
-| P5 | Dynamic SL / activation / trailing calibration on validation, decision policy + gates (§35–40, 50–58, 82–84, 88; tests M–O), then **FREEZE** every value in DECISIONS.md | sealed |
+| P5 | Dynamic SL / activation / trailing calibration on validation, decision policy + gates (§35–40, 50–58, 82–84, 88; tests M–O); then **rebuild success outcomes under the frozen policy, retrain + recalibrate the final selected-feature models on development data (D-026 #5)**, then **FREEZE** every value in DECISIONS.md | sealed |
 | P6 | Purged walk-forward + ONE untouched final holdout (§41–42, 62–64) | opened once |
 | P7 | Cost / risk / parameter / delay stress (§49, 65) | — |
 | P8 | Final local reports, global table, statuses, command list, deliverables (§89–91, 94, 99) | — |

@@ -158,3 +158,20 @@ dev_train, expanding train, purge = H); score = mean BUY/SELL classifier AUC on 
 kept if median fold gain ≥ 0.002 AUC, gain > 0 in ≥ 2 of 3 folds, mean Brier not worse by > 0.0005,
 and total features ≤ 80; order G1→G6, a kept group joins the baseline. Economics are judged with the
 frozen policy in P5/P6, not in the ablation. dev_val and the holdout are not used.
+
+**D-026 · 2026-10-07 · owner (external review) + agent** —
+1. Confirmed: P4B ablation scores the V4 BUY-success / SELL-success targets (realizable path, net ≥
+   edge), not generic up/down. The 80-feature cap counts TOTAL model features incl. the V3 base.
+2. Dynamic SL target: side-specific quantile models (q25/q50/q75) of `max_adverse_before_profit_pct`,
+   trained/scored only on paths that became profitable (conditional), alongside full MAE.
+3. Dynamic trailing target: new Layer A field `pullback_before_continuation_pct` (largest drop from the
+   running peak that was followed by a higher peak — a "normal" pullback; the old `peak_retracement_pct`
+   also contains the final reversal and was too wide, R-009). Side-specific conditional quantile models.
+   P5 still compares this against a simpler causal volatility trailing policy and keeps the better one.
+4. MFE stays the reward / profit-activation input; it never becomes an exact hard TP.
+5. P5 final step (mandatory, before P6): after the dynamic SL + activation + trailing + EV/confidence
+   policy is selected and frozen on development data, rebuild the V4 success outcomes UNDER THAT FROZEN
+   POLICY, retrain and recalibrate the final selected-feature models on development data, freeze them,
+   and only then open the holdout. No training on one exit policy and evaluating on another.
+6. Feature manifest kept in `docs/ml-engine-v1/FEATURES_V4.md` (formula, lookback, knowable time,
+   confirmation lag, HTF boundary, test status). Pattern feature count is 57 (94 total), not 60.
