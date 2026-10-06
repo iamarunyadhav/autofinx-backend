@@ -85,4 +85,14 @@ class EnvDoctorTest extends TestCase
         $this->assertStringNotContainsString('overrides', $messages(['APP_ENV' => 'production', 'APP_KEY' => 'x', 'A' => '1', 'B' => '1'], [], ['A' => 'B']));
         $this->assertStringNotContainsString('overrides', $messages(['APP_ENV' => 'production', 'APP_KEY' => 'x', 'A' => '1', 'B' => ''], [], ['A' => 'B']));
     }
+
+    public function test_the_same_secret_under_a_testnet_and_a_live_name_fails_without_printing_it(): void
+    {
+        $effective = ['APP_ENV' => 'production', 'APP_KEY' => 'x', 'BINANCE_API_KEY' => 'samesecretvalue1', 'BINANCE_FUTURES_TESTNET_API_KEY' => 'samesecretvalue1', 'OTHER_TOKEN' => 'differentvalue99'];
+        $out = json_encode(EnvDoctor::findings($effective, array_keys($effective)));
+
+        $this->assertStringContainsString('"level":"FAIL"', (string) $out);
+        $this->assertStringContainsString('BINANCE_API_KEY, BINANCE_FUTURES_TESTNET_API_KEY hold the SAME secret', (string) $out);
+        $this->assertStringNotContainsString('samesecretvalue1', (string) $out);
+    }
 }

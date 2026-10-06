@@ -487,6 +487,8 @@ if ($schedulerEnabled && (bool) config('ml.enabled', false)) {
         ['ml:shadow:evaluate', 'everyFiveMinutes', 10],
         ['ml:trade-feedback:classify', 'hourly', 30],
         ['ml:funding:sync', 'hourly', 30],
+        // Training control plane: ends runs without a heartbeat, re-queues transient failures. Short expiry so a crashed reaper never blocks the next pass for long.
+        ['ml:training:reap', 'everyTwoMinutes', 3],
     ];
     foreach ($mlSchedule as [$mlCommand, $mlFrequency, $mlOverlapMinutes]) {
         Schedule::command($mlCommand)

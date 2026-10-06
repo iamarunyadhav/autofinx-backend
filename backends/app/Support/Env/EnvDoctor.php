@@ -221,7 +221,24 @@ final class EnvDoctor
         foreach ($aliases as $primary => $secondary) {
             if (trim((string) ($effective[$primary] ?? '')) !== '' && trim((string) ($effective[$secondary] ?? '')) !== ''
                 && $effective[$primary] !== $effective[$secondary]) {
-                $add('WARN', "{$primary}=".self::mask($primary, $effective[$primary])." overrides {$secondary}=".self::mask($secondary, $effective[$secondary]).' in config; the second one has no effect.');
+                $add('WARN', "{$primary}=".self::mask($primary, $effective[$primary])." overrides {$secondary}=".self::mask($secondary, $effective[$secondary]).' for that config key (the second one still applies wherever it is read directly).');
+            }
+        }
+
+        // The same secret under two names: a testnet key equal to a live key is a misconfiguration.
+        $byHash = [];
+        foreach ($effective as $name => $value) {
+            if (preg_match(self::SECRET_NAME, $name) && strlen((string) $value) >= 8) {
+                $byHash[sha1((string) $value)][] = $name;
+            }
+        }
+        foreach ($byHash as $names) {
+            if (count($names) > 1) {
+                sort($names);
+                $mixed = (bool) array_filter($names, static fn ($n) => stripos($n, 'TESTNET') !== false)
+                    && (bool) array_filter($names, static fn ($n) => stripos($n, 'TESTNET') === false);
+                $add($mixed ? 'FAIL' : 'INFO', implode(', ', $names).' hold the SAME secret value'
+                    .($mixed ? ': a testnet credential equal to a non-testnet one means one of them is wrong.' : '.'));
             }
         }
 

@@ -91,6 +91,30 @@ return [
         // Job timeout = this + 120s; must stay below the ml_training queue's
         // retry_after (2400s). A 5-year side classifier trains in ~3 minutes.
         'timeout_seconds' => (int) env('AUTOFINX_ML_TRAINING_TIMEOUT_SECONDS', 1800),
+        // Training control plane (ml_training_runs, `ml:training:reap`).
+        // A RUNNING run whose heartbeat is older than stall_seconds is reaped as
+        // INTERRUPTED. Auto-retry applies only to INTERRUPTED and python-crash
+        // failures, never REJECTED, TIMEOUT or STOPPED; backoff in minutes per attempt.
+        'stall_seconds' => (int) env('AUTOFINX_ML_TRAINING_STALL_SECONDS', 180),
+        'auto_retry' => (bool) env('AUTOFINX_ML_TRAINING_AUTO_RETRY', true),
+        'max_attempts' => (int) env('AUTOFINX_ML_TRAINING_MAX_ATTEMPTS', 3),
+        'retry_backoff_minutes' => array_values(array_filter(array_map('intval', explode(',', (string) env('AUTOFINX_ML_TRAINING_RETRY_BACKOFF_MINUTES', '2,4,8'))), static fn (int $m): bool => $m > 0)),
+        // While the python child runs the owning process writes heartbeat_at at
+        // least this often (must stay well below stall_seconds) and polls the
+        // cooperative cancel flag every poll_interval_ms.
+        'heartbeat_seconds' => (int) env('AUTOFINX_ML_TRAINING_HEARTBEAT_SECONDS', 5),
+        'poll_interval_ms' => (int) env('AUTOFINX_ML_TRAINING_POLL_INTERVAL_MS', 2000),
+        'log_tail_lines' => 40,
+        // Host-health thresholds shown on the dashboard (display only).
+        'system_thresholds' => [
+            'load_per_core_warn' => 1.5,
+            'load_per_core_critical' => 3.0,
+            'swap_used_pct_warn' => 50,
+            'swap_used_pct_critical' => 80,
+            'memory_used_pct_warn' => 85,
+            'memory_used_pct_critical' => 95,
+            'disk_free_gb_warn' => 5,
+        ],
         // Dedicated connection/queue (config/queue.php `ml_training`) so a long
         // training run never occupies a trading or analytics worker.
         'connection' => env('AUTOFINX_ML_TRAINING_CONNECTION', 'ml_training'),

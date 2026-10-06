@@ -124,6 +124,24 @@ Route::prefix('v1')->group(function () {
             Route::post('/experiments', [\App\Http\Controllers\Api\NexusController::class, 'experiment'])->middleware('throttle:4,1');
             Route::post('/candidates/{entry}/review', [\App\Http\Controllers\Api\NexusController::class, 'review'])->middleware('throttle:20,1');
         });
+        // ML Training dashboard (shadow-only control plane; reads need workspace membership, mutations owner/admin)
+        Route::prefix('workspaces/{workspace}/ml-training')->group(function () {
+            // Numeric throttles share ONE counter per user unless a prefix is given (key = user id only), so reads and
+            // mutations get their own buckets: otherwise dashboard polling would 429 the Start/Stop buttons.
+            $ml = \App\Http\Controllers\Api\MlTrainingController::class;
+            Route::get('/overview', [$ml, 'overview'])->middleware('throttle:120,1,ml-training-read');
+            Route::get('/system', [$ml, 'system'])->middleware('throttle:120,1,ml-training-read');
+            Route::get('/runs', [$ml, 'runs'])->middleware('throttle:120,1,ml-training-read');
+            Route::get('/runs/{run}', [$ml, 'run'])->middleware('throttle:120,1,ml-training-read');
+            Route::get('/candles/{symbol}', [$ml, 'candles'])->middleware('throttle:120,1,ml-training-read');
+            Route::get('/models', [$ml, 'models'])->middleware('throttle:120,1,ml-training-read');
+            Route::post('/runs', [$ml, 'startRun'])->middleware('throttle:10,1,ml-training-write');
+            Route::post('/batches', [$ml, 'startBatch'])->middleware('throttle:10,1,ml-training-write');
+            Route::post('/runs/{run}/stop', [$ml, 'stopRun'])->middleware('throttle:10,1,ml-training-write');
+            Route::post('/runs/{run}/retry', [$ml, 'retryRun'])->middleware('throttle:10,1,ml-training-write');
+            Route::post('/batches/{batch}/stop', [$ml, 'stopBatch'])->middleware('throttle:10,1,ml-training-write');
+            Route::post('/backfill/{symbol}/resume', [$ml, 'resumeBackfill'])->middleware('throttle:10,1,ml-training-write');
+        });
         // Market Context (shadow-only, read-only; flag AUTOFINX_MARKET_CONTEXT_ENABLED)
         Route::get('workspaces/{workspace}/market-context/{assetClass}/{instrument}', [\App\Http\Controllers\Api\MarketContextController::class, 'show'])->middleware('throttle:60,1');
         Route::post('workspaces', [WorkspaceController::class, 'store']);
