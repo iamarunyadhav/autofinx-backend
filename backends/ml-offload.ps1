@@ -32,7 +32,7 @@ param(
 $ErrorActionPreference = 'Continue'
 $repo = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ssh = "ssh -p $Port -o BatchMode=yes -o ConnectTimeout=20 -o ServerAliveInterval=30 -o ServerAliveCountMax=20"
-$artisanRemote = "cd $RemoteApp && nice -n 10 ionice -c2 -n6 runuser -u zcadmin -- /usr/local/bin/ea-php82 -d memory_limit=1024M artisan"
+$artisanRemote = "cd $RemoteApp && ionice -c2 -n6 runuser -u zcadmin -- /usr/local/bin/ea-php82 -d memory_limit=1024M artisan"
 $todo = New-Object System.Collections.Generic.List[string]
 
 function Step($n, $text) { Write-Host ""; Write-Host "=== STEP $n  $text ===" -ForegroundColor Cyan }
@@ -126,7 +126,7 @@ foreach ($sym in $Symbols) {
         $started = Get-Date
         Info "$sym : downloading (server runs it at low priority; a loaded server can take a while) attempt $try"
         $cmdFile = "$Work\fetch-$sym.cmd"
-        "@echo off`r`n$ssh $Server `"$artisanRemote ml:offload:export $sym | nice -n 10 gzip -1`" > `"$file`"" | Set-Content -Encoding ascii $cmdFile
+        "@echo off`r`n$ssh $Server `"$artisanRemote ml:offload:export $sym | gzip -1`" > `"$file`"" | Set-Content -Encoding ascii $cmdFile
         cmd /c $cmdFile
         $sizeMb = [math]::Round((Get-Item $file).Length / 1MB, 1)
         Info "$sym : downloaded $sizeMb MB in $([math]::Round(((Get-Date) - $started).TotalMinutes, 1)) min, importing..."
