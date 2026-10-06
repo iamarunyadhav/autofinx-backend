@@ -42,7 +42,11 @@ function Die($t) { Write-Host "  FAIL  $t" -ForegroundColor Red; exit 2 }
 function RemoteOut($command) { $o = cmd /c "$ssh $Server `"$command`" 2>nul"; return $o }
 
 if (-not (Test-Path (Join-Path $repo 'artisan'))) { Die "artisan not found next to this script ($repo). Run it from the backends folder." }
-New-Item -ItemType Directory -Force -Path $Work, "$Work\data", "$Work\logs", "$Work\exports" | Out-Null
+New-Item -ItemType Directory -Force -Path $Work, "$Work\data", "$Work\logs", "$Work\exports", "$Work\tmp", "$Work\pip-cache" | Out-Null
+# Keep every heavy or temporary file on the work drive (C: is nearly full).
+$env:TEMP = "$Work\tmp"
+$env:TMP = "$Work\tmp"
+$env:PIP_CACHE_DIR = "$Work\pip-cache"
 $driveName = (Split-Path -Qualifier $Work).TrimEnd(':')
 $freeGb = [math]::Round((Get-PSDrive $driveName).Free / 1GB, 1)
 
