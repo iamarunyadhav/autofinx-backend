@@ -64,3 +64,10 @@ def test_day_minutes_trades_keeps_only_requested_minutes_in_trade_order():
     files = {url: payload, url + ".CHECKSUM": f"{hashlib.sha256(payload).hexdigest()} *x".encode()}
     got = rs.day_minutes_trades("BTCUSDT", "2021-10-01", {T0}, get=lambda u: files[u])
     assert list(got) == [T0] and got[T0].tolist() == [100.0, 100.5, 101.0]
+
+
+def test_stratified_sample_covers_every_year_and_regime():
+    strata = {f"{y}-0{m}-01": f"{y}|{r}" for y in (2022, 2023, 2024) for m, r in ((1, "low_vol"), (2, "mid_vol"), (3, "high_vol"))}
+    strata.update({f"2022-0{m}-15": "2022|low_vol" for m in range(4, 10)})   # one crowded stratum
+    picked = rs.stratified_sample(strata, 9, seed=1)
+    assert len(picked) == 9 and {strata[d] for d in picked} == set(strata.values())

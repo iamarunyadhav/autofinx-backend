@@ -44,6 +44,9 @@ return [
     // and is never relabelled for another expiry. 15m is trained too (real
     // fee + slippage is ~0.12%, and fast news/event moves can make it useful
     // later) but is display-only: see autopilot.trade_horizons_minutes.
+    // Extra feature schemas to build besides v1 + the training schema (research only, e.g.
+    // qt-shadow-features-v4 on the local V4 PC). Empty on the server.
+    'extra_feature_schemas' => array_values(array_filter(array_map('trim', explode(',', (string) env('AUTOFINX_ML_EXTRA_FEATURE_SCHEMAS', ''))))),
     'horizons_minutes' => array_values(array_map('intval', array_filter(array_map('trim', explode(',', (string) env('AUTOFINX_ML_HORIZONS_MINUTES', '15,60,120,240,1440')))))),
     // Quick Trade expiries at or below this get the "costs exceed the typical
     // move" message instead of a model (1m-10m have no model; 15m has its own).

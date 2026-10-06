@@ -29,6 +29,9 @@ final class ShadowFeatureBuilder
 
     public const SCHEMA_V3 = 'qt-shadow-features-v3';
 
+    /** Research-only superset (v3 + PatternFeatures G1-G6). Never the serving/training default on the server. */
+    public const SCHEMA_V4 = 'qt-shadow-features-v4';
+
     /** Schema new models are trained on. */
     public const SCHEMA_VERSION = self::SCHEMA_V3;
 
@@ -67,12 +70,15 @@ final class ShadowFeatureBuilder
     public const FEATURES_V3 = [...self::FEATURES_V2, ...self::LONG_FEATURES];
 
     /** Features of the training schema. */
+    public const FEATURES_V4 = [...self::FEATURES_V3, ...PatternFeatures::NAMES];
+
     public const FEATURES = self::FEATURES_V3;
 
     public const SCHEMAS = [
         self::SCHEMA_V1 => self::FEATURES_V1,
         self::SCHEMA_V2 => self::FEATURES_V2,
         self::SCHEMA_V3 => self::FEATURES_V3,
+        self::SCHEMA_V4 => self::FEATURES_V4,
     ];
 
     /** Per schema: candles read (ending at the anchor) and how many need taker volume. */
@@ -80,6 +86,7 @@ final class ShadowFeatureBuilder
         self::SCHEMA_V1 => ['lookback' => self::LOOKBACK, 'taker' => 0],
         self::SCHEMA_V2 => ['lookback' => self::LOOKBACK, 'taker' => self::TAKER_WINDOW],
         self::SCHEMA_V3 => ['lookback' => self::LONG_LOOKBACK, 'taker' => 288],
+        self::SCHEMA_V4 => ['lookback' => self::LONG_LOOKBACK, 'taker' => 288],
     ];
 
     /** @return list<string> */
@@ -196,7 +203,7 @@ final class ShadowFeatureBuilder
             'dow_cos' => cos(2 * M_PI * $dow / 7),
         ];
 
-        if ($schema === self::SCHEMA_V2 || $schema === self::SCHEMA_V3) {
+        if (in_array($schema, [self::SCHEMA_V2, self::SCHEMA_V3, self::SCHEMA_V4], true)) {
             $ratio12 = self::takerRatio(array_slice($window, -12));
             $ratio48 = self::takerRatio(array_slice($window, -48));
             $features += [
@@ -206,8 +213,11 @@ final class ShadowFeatureBuilder
                 'taker_ratio_shift' => $ratio12 - $ratio48,
             ];
         }
-        if ($schema === self::SCHEMA_V3) {
+        if ($schema === self::SCHEMA_V3 || $schema === self::SCHEMA_V4) {
             $features += $this->longContext($long, (float) $features['vol_12']);
+        }
+        if ($schema === self::SCHEMA_V4) {
+            $features += PatternFeatures::compute($long, $intervalMs);
         }
 
         foreach ($features as $name => $value) {

@@ -99,6 +99,38 @@ def resimulate(window: dict[str, np.ndarray], ticks: dict[int, np.ndarray], side
     return ("TIME_EXIT_PROFIT" if net > pol.FLAT_PCT else "TIME_EXIT_LOSS" if net < -pol.FLAT_PCT else "TIME_EXIT_FLAT"), close, len(window["open"]) - 1
 
 
+def stratify_days(grid: dict[str, np.ndarray], days: list[str]) -> dict[str, str]:
+    """day -> stratum "YYYY|low_vol|mid_vol|high_vol" (daily realized vol of 1m log returns, terciles
+    over the candidate days). Spreads the sample across years and volatility regimes (review D-024)."""
+    start = int(grid["start"])
+    vols = {}
+    for day in days:
+        t0 = int(dt.datetime.fromisoformat(day).replace(tzinfo=dt.timezone.utc).timestamp() * 1000)
+        i = (t0 - start) // MINUTE
+        closes = grid["close"][max(i, 0):max(i, 0) + 1440]
+        closes = closes[np.isfinite(closes)]
+        vols[day] = float(np.std(np.diff(np.log(closes)))) if len(closes) > 10 else 0.0
+    q1, q2 = np.percentile(list(vols.values()), [33.3, 66.7]) if vols else (0.0, 0.0)
+    return {d: f"{d[:4]}|{'low_vol' if v < q1 else 'mid_vol' if v < q2 else 'high_vol'}" for d, v in vols.items()}
+
+
+def stratified_sample(strata: dict[str, str], days: int, seed: int) -> list[str]:
+    """Round-robin over strata (random order inside each), so every year x regime is represented."""
+    rng = random.Random(seed)
+    groups: dict[str, list[str]] = {}
+    for day, stratum in strata.items():
+        groups.setdefault(stratum, []).append(day)
+    for members in groups.values():
+        rng.shuffle(members)
+    keys = sorted(groups)
+    picked = []
+    while len(picked) < min(days, len(strata)):
+        for key in keys:
+            if groups[key] and len(picked) < days:
+                picked.append(groups[key].pop())
+    return sorted(picked)
+
+
 def run_sample(work: Path, symbol: str, horizons: list[int], days: int = 30, seed: int = 7, cost: float = 0.12, get=bd.http_get) -> dict:
     """Resolve the ambiguous minutes of executed REFERENCE / VOLATILITY trades on `days` random dev days."""
     import pyarrow.parquet as pq
@@ -143,8 +175,8 @@ def run_sample(work: Path, symbol: str, horizons: list[int], days: int = 30, see
                                                 "net": float(sim["net_pct"][i]), "fund": float(sim["funding_pct"][i]),
                                                 "reason": pol.REASONS[sim["reason"][i]], "move": float(sim["gross_pct"][i])}))
     all_days = sorted({c[0] for c in cases})
-    rng = random.Random(seed)
-    sample = sorted(rng.sample(all_days, min(days, len(all_days))))
+    strata = stratify_days(grid, all_days)
+    sample = stratified_sample(strata, days, seed)
     results, failed_days = [], []
     for n, day in enumerate(sample, 1):
         day_cases = [c for c in cases if c[0] == day]
@@ -180,6 +212,14 @@ def run_sample(work: Path, symbol: str, horizons: list[int], days: int = 30, see
             "resolved": len(g), "outcome_changed_pct": round(float(np.mean([r["exact_reason"] != r["reason"] for r in g]) * 100), 2),
             "avg_delta_net_pct": round(float(d.mean()), 4), "conservative_understates_pct": round(float((d > 1e-9).mean() * 100), 2),
             "conservative_overstates_pct": round(float((d < -1e-9).mean() * 100), 2)}
+    summary["strata_sampled"] = {}
+    for day in sample:
+        summary["strata_sampled"][strata[day]] = summary["strata_sampled"].get(strata[day], 0) + 1
+    summary["by_stratum"] = {}
+    for stratum in sorted({strata[r["day"]] for r in results}):
+        d = np.array([r["delta_net"] for r in results if strata[r["day"]] == stratum])
+        summary["by_stratum"][stratum] = {"resolved": int(len(d)), "avg_delta_net_pct": round(float(d.mean()), 4),
+                                          "changed_pct": round(float(np.mean(np.abs(d) > 1e-9) * 100), 2)}
     out = work / "reports" / "resolver"
     out.mkdir(parents=True, exist_ok=True)
     (out / f"{symbol}.json").write_text(json.dumps({"summary": summary, "cases": results}, indent=1), "utf-8")

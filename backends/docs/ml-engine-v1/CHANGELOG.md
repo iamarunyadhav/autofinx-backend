@@ -131,3 +131,17 @@ Plan lock (same day, session d):
 - `v4/resolver.py` — resimulate returns the exit bar; funding recomputed to the resolved exit;
   baseline uses worst-case evaluation.
 - `tests/v4/test_policy.py` — 3 worst-case tests; `tests/v4/test_resolver.py` updated (49 tests).
+
+## 2026-10-07 — P4B code prepared + stratified resolver (session k)
+- `app/Domain/Ml/Shadow/PatternFeatures.php` (new) — G1–G6 causal pattern features (60 features):
+  confirmed swings (SWING_K = 3, L6), candle shape/sequence, RSI/MACD/EMA slopes on fixed 200-bar
+  windows, ATR/Bollinger squeeze, 15m/1h/4h bars from COMPLETE UTC buckets only (L5), volume/taker.
+- `app/Domain/Ml/Shadow/ShadowFeatureBuilder.php` — research schema `qt-shadow-features-v4` = v3 + G1–G6;
+  `SCHEMA_VERSION` stays v3 (server unchanged).
+- `app/Domain/Ml/Shadow/FeatureLabelService.php` + `config/ml.php` — opt-in
+  `AUTOFINX_ML_EXTRA_FEATURE_SCHEMAS` (default empty) so only the local V4 PC builds v4.
+- `tests/Unit/Ml/PatternFeaturesTest.php` (new, 5 tests: append-only + finite, L6 swing confirmation,
+  L5 forming bucket never read, K leakage via FeatureLabelService, not built unless configured).
+  With `ShadowFeatureLabelTest`: 14/14 pass. Full backend suite still to run when the CPU is free.
+- `external-predictive-engine/v4/resolver.py` — stratified day sampling (year × volatility tercile) and
+  per-stratum report (D-024); `tests/v4/test_resolver.py` +1 test (50 V4 tests).

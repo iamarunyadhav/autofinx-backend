@@ -139,3 +139,15 @@ floor, chosen in P5 from the 9 pre-declared combos on validation, then frozen.
    rate is ~14.5%. D-021/D-022 are amended: EV / expected utility is the PRIMARY gate; the relative-lift
    floor is a SECONDARY candidate that may be "none" — candidate set lift ∈ {none, 1.25, 1.5, 2.0} ×
    margin ∈ {0, 0.03, 0.06}% (12 combos), chosen on dev validation / walk-forward, frozen in P5.
+
+**D-024 · 2026-10-07 · owner (external review) + agent** —
+1. P4B runs regardless of P4A verdicts: P4A only isolates the label/exit change on the old 37
+   features; P4B tests whether pattern features improve direction. A P4A reject is not a reason to skip P4B.
+2. Resolver days are STRATIFIED by year × daily-volatility tercile (round-robin), not plain random,
+   and the report breaks results down per stratum.
+3. If resolved rows are ever added to training truth, the affected P4A/P4B experiments are re-run.
+   Until then unresolved rows stay excluded (current P4A is clean/conservative).
+4. P4A/P4B are judged per coin × horizon on the full picture — AUC/Brier, trade count, avg/total net,
+   profit factor, t-stat, positive walk-forward folds, BUY/SELL balance, probability and EV
+   distributions, unresolved-exclusion % — never on AUC or avg net alone; few-trade results are weak
+   evidence. Code tests passing proves behaviour, not profitability; the verdict is P6 only.

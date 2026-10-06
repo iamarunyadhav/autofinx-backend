@@ -156,7 +156,8 @@ class FeatureLabelService
     {
         $championSchemas = DB::table('ml_champions as c')->join('ml_models as m', 'm.id', '=', 'c.model_id')
             ->distinct()->pluck('m.feature_schema_version')->all();
-        $wanted = [ShadowFeatureBuilder::SCHEMA_V1, ShadowFeatureBuilder::SCHEMA_VERSION, ...$championSchemas];
+        // Research schemas (e.g. v4 on the local V4 machine) only when explicitly configured; default none.
+        $wanted = [ShadowFeatureBuilder::SCHEMA_V1, ShadowFeatureBuilder::SCHEMA_VERSION, ...$championSchemas, ...(array) config('ml.extra_feature_schemas', [])];
 
         return array_values(array_filter(
             array_keys(ShadowFeatureBuilder::SCHEMAS),
