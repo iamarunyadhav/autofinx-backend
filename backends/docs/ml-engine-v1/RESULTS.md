@@ -99,3 +99,24 @@ are. Numbers are copied from real output, never estimated after the fact.
   (vs 2.7 s earlier). Four parallel transfers ran at about 3× the single-connection throughput, so
   monthly kline downloads now use 4 workers (`download.py WORKERS`). The STOP marker was exercised
   for real: the run stopped after the current file, kept 5 months, and resumed from there.
+
+## R-008 · 2026-10-06 · P2 Layer A + exact V3 features — BTCUSDT 5 years
+- Layer A definitions: `external-predictive-engine/v4/targets.py` docstring (entry = open of the 1m bar
+  starting at T0; path = 1m bars in [T0, T0+H); times = end of the first bar; cost 0.12%).
+- Tests: `tests/v4/test_targets.py` 13 tests incl. a slow per-anchor reference implementation compared
+  on random paths with gaps, funding and chunk sizes 3/1000 for H = 1, 15, 60 — all equal. Total V4
+  tests 24/24.
+- Run (BTC, 527,537 anchors, 2021-10 → 2026-10): h15 1.6 s, h60 3.6 s, h120 8.6 s, h240 12.9 s,
+  h1440 68.0 s (load 1.2 s); RAM estimate ≤ 330 MB (chunked, never N × H); 0 gap-invalid anchors;
+  out-of-range = the newest H minutes only. Targets on disk: 255 MB for 5 horizons.
+- Sanity on the **first 50% of anchors only** (holdout sealed): h15 long MFE p50 0.117% (≈ the 0.12%
+  cost), long time-exit net p50 −0.119%, reaches +cost at some point 49.1%, profit-bar ambiguous 17.8%;
+  h240 MFE p50 0.519%, MAE-before-profit p50 0.087% / p90 0.481%, reaches +cost 86.4%, ambiguous 10.2%.
+- Exact V3 features through the PHP builder (isolated sqlite `D:\autofinx-ml-v4\features\features.sqlite`):
+  527,537 native 5m candles imported; `ml:features:build --full` 533 s; exported 526,673 v3 rows
+  (= anchors − 865 lookback), 37 features, 0 NaN; 2,637,370 V3 label rows exported for the P3 audit.
+- Cross-check PHP V3 endpoint label vs Python Layer A time-exit gross (first 50%, 263,705 anchors):
+  corr 0.999985 (h15) / 0.999999 (h240), median |diff| 0.0000%, p99 0.005% (entry at the next 1m open
+  vs the anchor close). 100% of feature anchors exist in the targets.
+- Feature-side leakage test K already exists in PHP: `tests/Unit/Ml/ShadowFeatureLabelTest.php`
+  `test_future_candles_cannot_enter_the_feature_vector` (all schemas).

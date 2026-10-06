@@ -4,8 +4,13 @@ Last updated: 2026-10-06 by ml-engine-v1 (Claude Code session).
 
 ## Current state
 
-- **Current phase:** **P1 in progress.** Code + tests + BTC smoke done (RESULTS R-006); full six-coin
-  download/verify running locally (`D:\autofinx-ml-v4\logs\full-run-p1.log`).
+- **Current phase:** **P2 in progress** (owner said "go P2" 2026-10-06). Layer A generator + exact V3
+  feature export done and verified on BTC 5 years (RESULTS R-008). P1 full six-coin download (no
+  metrics) still running; when it finishes: record R-007, then run
+  `ml-v4-local.ps1 -TargetsOnly` to build features + targets for the other five coins, then P2 gate.
+- **Server:** ML paused with `ml-server-pause.sh --apply` on 2026-10-07 00:53 +08 (flag false, worker
+  autostart off, 1.4 GB exports removed). Load stayed ~27–29, so ML was not the main server load.
+  `--free-disk` (~16 GB) recommended, owner to decide.
 - **Owner action (server):** run `bash ml-server-pause.sh` (report) then `--apply` on the server to
   stop the server-side ML scheduler, training worker and batch scripts (D-001). Optional `--free-disk`.
 - **Next action:** when the full run finishes, record R-007 (rows, coverage, gaps, alignment, G7
@@ -38,7 +43,7 @@ Last updated: 2026-10-06 by ml-engine-v1 (Claude Code session).
 |---|---|---|
 | P0 Audit | ✅ done 2026-10-06 | RESULTS R-002 |
 | P1 Data (1m + 5m + funding, verify, runner skeleton) | 🔄 code done, smoke OK, full run running | R-006 |
-| P2 Layer A path targets + exact features | not started | holdout sealed |
+| P2 Layer A path targets + exact features | 🔄 BTC done (R-008), other coins after the download | holdout sealed |
 | P3 Label audit + path distribution + policy lab | not started | train/validation only |
 | P4A V4 models on V3 features | not started | holdout sealed |
 | P4B Feature schema v4, G1–G6 ablation (G7 optional) | not started | holdout sealed |
@@ -57,6 +62,9 @@ Last updated: 2026-10-06 by ml-engine-v1 (Claude Code session).
 
 ## Session log (newest first)
 
+- **2026-10-06 (f)** — P2: Layer A generator (24 tests incl. reference), BTC all horizons in ~95 s,
+  PHP feature bridge (526,673 v3 rows, 0 NaN), PHP-vs-Python endpoint cross-check corr 0.99999.
+  Runner gained features/targets stages. Server ML paused by the owner.
 - **2026-10-06 (e)** — P1 built: v4 data package, 11 tests pass, BTC 2-month smoke OK (0 alignment
   mismatches), runner `ml-v4-local.ps1`, `ml-server-pause.sh` for the server. Full run started.
 - **2026-10-06 (d)** — Owner approved §102 with locks L1–L8 (+ agent L9: Arm 2 is primary if no

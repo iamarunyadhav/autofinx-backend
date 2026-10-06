@@ -28,7 +28,9 @@ def _months(symbol: str, override: int | None) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="v4.cli")
-    parser.add_argument("command", choices=["download", "verify", "status"])
+    parser.add_argument("command", choices=["download", "verify", "status", "targets", "import-candles", "export-features"])
+    parser.add_argument("--horizons", default="15,60,120,240,1440")
+    parser.add_argument("--cost-pct", type=float, default=None, help="round-trip cost for Layer A (default 0.12, R-002)")
     parser.add_argument("--work", required=True, type=Path)
     parser.add_argument("--symbols", default="BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,XRPUSDT,SUIUSDT")
     parser.add_argument("--timeframes", default="1m,5m")
@@ -72,6 +74,23 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"   G7 metrics: days {g7.get('days_present')} present / {g7.get('days_missing')} missing, "
                           f"{g7.get('first_utc')} -> {g7.get('last_utc')}, step {g7.get('median_step_minutes')} min, gaps>15m {g7.get('gaps_over_15min')}")
                 worst = max(worst, {"OK": 0, "WARN": 1, "FAIL": 2}[v["status"]])
+            elif args.command == "import-candles":
+                from .features import import_candles
+                print(f"== {symbol}: {import_candles(args.work, symbol)} new 5m candles imported into the feature sqlite", flush=True)
+            elif args.command == "export-features":
+                from .features import export
+                meta = export(args.work, symbol)
+                print(f"== {symbol}: {meta['rows']} v3 feature rows ({len(meta['features'])} features, NaN cells {meta['nan_cells']}), "
+                      f"{meta['label_rows']} V3 label rows exported in {meta['seconds']}s", flush=True)
+            elif args.command == "targets":
+                from .targets import DEFAULT_COST_PCT, build_symbol
+                horizons = [int(h) for h in args.horizons.replace(";", ",").split(",") if h.strip()]
+                cost = args.cost_pct if args.cost_pct is not None else DEFAULT_COST_PCT
+                for meta in build_symbol(args.work, symbol, horizons, cost):
+                    c = meta["counts"]
+                    print(f"== {symbol} h{meta['horizon_minutes']}: anchors {c['anchors']}, valid {c['valid']}, "
+                          f"gap {c['invalid_gap']}, out of range {c['out_of_range']}, {meta['seconds']}s "
+                          f"(load {meta['load_seconds']}s, RAM est {meta['ram_estimate_mb']} MB)", flush=True)
             else:
                 manifest = bd.Manifest(args.work / "data" / symbol / "manifest.json")
                 done = sum(1 for k, v in manifest.data.items() if isinstance(v, dict))

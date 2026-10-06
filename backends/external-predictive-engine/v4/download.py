@@ -251,6 +251,8 @@ def download_metrics(work: Path, symbol: str, months: int, today: dt.date, get=b
     progress.done = len(days) - len(todo)
 
     def fetch(day: str) -> tuple[str, int]:
+        if (work / "STOP").exists():          # queued work is skipped at once on STOP
+            return day, -1
         url = f"{bd.BULK}/daily/metrics/{symbol}/{symbol}-metrics-{day}.zip"
         try:
             payload, _ = bd.fetch_verified_zip(url, get)
@@ -268,5 +270,7 @@ def download_metrics(work: Path, symbol: str, months: int, today: dt.date, get=b
             futures.append(pool.submit(fetch, day))
         for future in cf.as_completed(futures):
             _, nbytes = future.result()
-            progress.step(nbytes)
+            if nbytes >= 0:
+                progress.step(nbytes)
+    _check_stop(work)
     return {"days_requested": len(days)}

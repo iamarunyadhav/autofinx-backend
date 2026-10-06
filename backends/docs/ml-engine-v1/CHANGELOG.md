@@ -72,3 +72,18 @@ Plan lock (same day, session d):
 - `ml-v4-local.ps1` (new) — runner: CHECK, VENV, DOWNLOAD, VERIFY (P2+ stages later), resume,
   -Months smoke override, -DownloadOnly/-VerifyOnly/-Refetch/-NoMetrics, STOP marker, logs.
 - Local only (not in git): `D:\autofinx-ml-v4\venv`, `data\`, `reports\`, `logs\`.
+- `external-predictive-engine/v4/download.py` — monthly klines download with 4 parallel workers
+  (manifest written only by the main thread); metrics stage honours STOP for queued work.
+
+## 2026-10-06 — P2 Layer A + feature export (session f)
+- `external-predictive-engine/v4/targets.py` (new) — chunked vectorized Layer A path truth
+  (MFE, MAE, timings, MAE-before-profit, profit-bar ambiguity, peak retracement, time-exit gross/net,
+  funding), GAP / OUT_OF_RANGE status, per-horizon Parquet + JSON metadata.
+- `external-predictive-engine/v4/features.py` (new) — 5m candles → isolated sqlite, export of PHP-built
+  v3 features and V3 labels to Parquet (no Python feature code, §72).
+- `external-predictive-engine/v4/cli.py` — commands `targets`, `import-candles`, `export-features`.
+- `external-predictive-engine/tests/v4/test_targets.py` (new) — 13 tests incl. reference comparison.
+- `ml-v4-local.ps1` — stages BUILD_5M_FEATURES (PHP via env overrides) and BUILD_PATH_TARGETS;
+  options -Horizons, -TargetsOnly, -SkipFeatures, -ForceRebuildFeatures, -ForceRebuildTargets;
+  features/targets are not built when VERIFY fails.
+- Local only: `D:\autofinx-ml-v4\features\`, `targets\`.
