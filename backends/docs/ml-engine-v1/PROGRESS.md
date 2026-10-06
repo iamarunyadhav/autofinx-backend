@@ -4,8 +4,13 @@ Last updated: 2026-10-06 by ml-engine-v1 (Claude Code session).
 
 ## Current state
 
-- **Current phase:** P0 complete. Plan fully LOCKED (SPEC §0–102, D-014, D-015). **Gate:** owner
-  says "go P1" (or "start").
+- **Current phase:** **P1 in progress.** Code + tests + BTC smoke done (RESULTS R-006); full six-coin
+  download/verify running locally (`D:\autofinx-ml-v4\logs\full-run-p1.log`).
+- **Owner action (server):** run `bash ml-server-pause.sh` (report) then `--apply` on the server to
+  stop the server-side ML scheduler, training worker and batch scripts (D-001). Optional `--free-disk`.
+- **Next action:** when the full run finishes, record R-007 (rows, coverage, gaps, alignment, G7
+  coverage per symbol, runtime, disk); decide G7 inclusion per L3; then P1 gate → owner approves P2.
+  P1 detailed plan (kept for reference):
 - **Locked plan:** D-015 phase order; SPEC §102 L1–L9 constraints.
 - **Next action — P1 Data:**
   1. V4 venv `D:\autofinx-ml-v4\venv` with pinned lightgbm / numpy / scikit-learn / pyarrow (§93).
@@ -32,7 +37,7 @@ Last updated: 2026-10-06 by ml-engine-v1 (Claude Code session).
 | Phase | Status | Notes |
 |---|---|---|
 | P0 Audit | ✅ done 2026-10-06 | RESULTS R-002 |
-| P1 Data (1m + 5m + funding, verify, runner skeleton) | ⏳ ready, waiting for "go" | plan above |
+| P1 Data (1m + 5m + funding, verify, runner skeleton) | 🔄 code done, smoke OK, full run running | R-006 |
 | P2 Layer A path targets + exact features | not started | holdout sealed |
 | P3 Label audit + path distribution + policy lab | not started | train/validation only |
 | P4A V4 models on V3 features | not started | holdout sealed |
@@ -52,6 +57,8 @@ Last updated: 2026-10-06 by ml-engine-v1 (Claude Code session).
 
 ## Session log (newest first)
 
+- **2026-10-06 (e)** — P1 built: v4 data package, 11 tests pass, BTC 2-month smoke OK (0 alignment
+  mismatches), runner `ml-v4-local.ps1`, `ml-server-pause.sh` for the server. Full run started.
 - **2026-10-06 (d)** — Owner approved §102 with locks L1–L8 (+ agent L9: Arm 2 is primary if no
   feature group survives ablation). Locked as D-014; final phase order D-015. Waiting for "go P1".
 - **2026-10-06 (c)** — Reviewed owner proposal (pattern intelligence, P4A/P4B, four brains) against

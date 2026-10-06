@@ -1,0 +1,7 @@
+# V4 local research environment only (SPEC §93). Never installed on the production server.
+# Versions verified together on 2026-10-06 (Python 3.10, Windows).
+lightgbm==4.7.0
+numpy==2.2.6
+scikit-learn==1.7.2
+pyarrow==25.0.1
+pytest==9.1.1

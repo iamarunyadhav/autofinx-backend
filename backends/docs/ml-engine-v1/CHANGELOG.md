@@ -50,3 +50,25 @@ Plan lock (same day, session d):
 - `docs/ml-engine-v1/SPEC.md` — §102 status LOCKED, constraints L1–L9 + ablation keep rule.
 - `docs/ml-engine-v1/DECISIONS.md` — D-014 (§102 locked), D-015 (final phase order).
 - `docs/ml-engine-v1/PROGRESS.md` — gate "go P1", P1 step 5 G7 coverage audit, P4A/P4B rows.
+
+## 2026-10-06 — P1 implementation (session e)
+- `ml-server-pause.sh` (new) — production ML pause, dry-run by default: stops ML batch scripts, sets
+  `AUTOFINX_ML_SHADOW_ENABLED=false` (with .env backup) + config:cache + scheduler restart, stops the
+  ML training worker and sets autostart=false, removes ML temp/offload files; `--free-disk` empties
+  ml_feature_rows / ml_labels / ml_shadow_predictions. Trading code does not read ML tables (verified:
+  only MlShadowController and ML jobs do).
+- `external-predictive-engine/v4/__init__.py` (new) — package, schema/policy names.
+- `external-predictive-engine/v4/binance_data.py` (new) — HTTP with backoff + 404 handling, sha256
+  checksum verification, CSV parsing (header/no header, µs→ms), atomic Parquet, manifest, calendar.
+- `external-predictive-engine/v4/download.py` (new) — resumable monthly/daily/REST-tail klines,
+  funding (bulk + REST), G7 metrics; progress + ETA; STOP marker; never marks the last 2 months
+  "not listed".
+- `external-predictive-engine/v4/verify.py` (new) — integrity, gaps, coverage, 1m→5m alignment,
+  funding and G7 audits; verdict OK/WARN/FAIL; nothing repaired or interpolated.
+- `external-predictive-engine/v4/cli.py` (new) — `python -m v4.cli download|verify|status`.
+- `external-predictive-engine/requirements-v4.txt` (new) — pinned lightgbm 4.7.0, numpy 2.2.6,
+  scikit-learn 1.7.2, pyarrow 25.0.1, pytest 9.1.1 (local only).
+- `external-predictive-engine/tests/v4/test_data_layer.py` (new) — 11 tests.
+- `ml-v4-local.ps1` (new) — runner: CHECK, VENV, DOWNLOAD, VERIFY (P2+ stages later), resume,
+  -Months smoke override, -DownloadOnly/-VerifyOnly/-Refetch/-NoMetrics, STOP marker, logs.
+- Local only (not in git): `D:\autofinx-ml-v4\venv`, `data\`, `reports\`, `logs\`.

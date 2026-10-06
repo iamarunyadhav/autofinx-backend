@@ -80,3 +80,22 @@ are. Numbers are copied from real output, never estimated after the fact.
 - Binance bulk `futures/um/daily/metrics/BTCUSDT/…` files: HTTP 200 for 2021-10-06, 2022-01-01
   (5.6 KB), 2026-10-01; monthly metrics path 404 (daily files only). Coverage and granularity for all
   six symbols still to be verified in P1.
+
+## R-006 · 2026-10-06 · P1 smoke test — BTCUSDT, 2 months + current month (real Binance)
+- Formats confirmed: older bulk kline CSVs have no header, newer have one; `.CHECKSUM` = sha256
+  (verified, matches); current month only as daily files (monthly 404); funding monthly bulk =
+  `calc_time, funding_interval_hours, last_funding_rate` (calc_time can be +5 ms); metrics daily =
+  5-minute snapshots with `create_time` text timestamps.
+- Unit tests: `tests/v4/test_data_layer.py` 11/11 passed (V4 venv, pytest 9.1.1).
+- Download 2026-08-01 → now: 1m 96,044 rows, 5m 19,208, funding 201 (all 8 h), metrics 66/66 days,
+  step 5.0 min, 0 gaps > 15 min. Time 44.6 s first run; resume run 2.5 s (all cached).
+- Verify: status OK — 0 gaps, 0 duplicates, 0 invalid OHLC, 0 unclosed, coverage 100%;
+  **1m→5m alignment: 19,208 native 5m candles checked, 0 price and 0 volume mismatches.**
+- Disk: 7.9 MB for 2 months (→ roughly 0.25 GB per coin for 5 years, an estimate, not a promise).
+- Runner `ml-v4-local.ps1 -Symbols BTCUSDT -Months 2`: CHECK → VENV → DOWNLOAD → VERIFY, exit 0.
+- Full six-coin P1 run started in the background (log `D:\autofinx-ml-v4\logs\full-run-p1.log`);
+  results go to R-007.
+- Same evening the Binance CDN was much slower per connection: one 2 MB monthly file took 31–38 s
+  (vs 2.7 s earlier). Four parallel transfers ran at about 3× the single-connection throughput, so
+  monthly kline downloads now use 4 workers (`download.py WORKERS`). The STOP marker was exercised
+  for real: the run stopped after the current file, kept 5 months, and resumed from there.

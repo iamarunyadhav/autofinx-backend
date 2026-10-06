@@ -1,0 +1,86 @@
+"""V4 data CLI (P1). Usage (from external-predictive-engine/):
+
+  python -m v4.cli download --work D:\\autofinx-ml-v4 --symbols BTCUSDT,ETHUSDT [--months 2] [--metrics]
+  python -m v4.cli verify   --work D:\\autofinx-ml-v4 --symbols BTCUSDT [--months 2]
+  python -m v4.cli status   --work D:\\autofinx-ml-v4
+
+--months overrides the per-symbol history (SPEC §3) — use it only for smoke tests.
+Exit code: 0 ok, 1 warnings, 2 failures / stopped.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import sys
+import time
+from pathlib import Path
+
+from . import binance_data as bd
+from .download import Stopped, download_funding, download_klines, download_metrics
+from .verify import verify_symbol
+
+
+def _months(symbol: str, override: int | None) -> int:
+    return override if override else bd.HISTORY_MONTHS.get(symbol, 36)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="v4.cli")
+    parser.add_argument("command", choices=["download", "verify", "status"])
+    parser.add_argument("--work", required=True, type=Path)
+    parser.add_argument("--symbols", default="BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,XRPUSDT,SUIUSDT")
+    parser.add_argument("--timeframes", default="1m,5m")
+    parser.add_argument("--months", type=int, default=None)
+    parser.add_argument("--metrics", action="store_true", help="also download daily metrics for the G7 coverage audit")
+    args = parser.parse_args(argv)
+
+    symbols = [s.strip().upper() for s in args.symbols.replace(";", ",").split(",") if s.strip()]
+    today = dt.datetime.now(dt.timezone.utc).date()
+    reports = args.work / "reports"
+    reports.mkdir(parents=True, exist_ok=True)
+    worst = 0
+    try:
+        for symbol in symbols:
+            months = _months(symbol, args.months)
+            if args.command == "download":
+                started = time.monotonic()
+                print(f"== {symbol}: download {months} months (+ current month)", flush=True)
+                result = {"symbol": symbol, "months": months}
+                for timeframe in [t.strip() for t in args.timeframes.split(",") if t.strip()]:
+                    result[timeframe] = download_klines(args.work, symbol, timeframe, months, today)
+                result["funding"] = download_funding(args.work, symbol, months, today)
+                if args.metrics:
+                    result["metrics"] = download_metrics(args.work, symbol, months, today)
+                result["seconds"] = round(time.monotonic() - started, 1)
+                (reports / f"download_{symbol}.json").write_text(json.dumps(result, indent=1), "utf-8")
+                print(f"   done in {result['seconds']}s: {json.dumps({k: v for k, v in result.items() if k in ('1m', '5m')}, default=str)[:400]}", flush=True)
+            elif args.command == "verify":
+                report = verify_symbol(args.work, symbol, months, today)
+                (reports / f"data_{symbol}.json").write_text(json.dumps(report, indent=1), "utf-8")
+                v = report["verdict"]
+                print(f"== {symbol}: {v['status']}  1m rows {report['1m'].get('rows')}, 5m rows {report['5m'].get('rows')}, "
+                      f"funding {report['funding'].get('rows')}, coverage 1m {report['1m']['coverage'].get('coverage_pct')}%, "
+                      f"RAM est {report['ram_estimate_mb']} MB, {report['seconds']}s", flush=True)
+                for line in v["problems"]:
+                    print(f"   FAIL {line}")
+                for line in v["warnings"]:
+                    print(f"   WARN {line}")
+                if "metrics_g7" in report:
+                    g7 = report["metrics_g7"]
+                    print(f"   G7 metrics: days {g7.get('days_present')} present / {g7.get('days_missing')} missing, "
+                          f"{g7.get('first_utc')} -> {g7.get('last_utc')}, step {g7.get('median_step_minutes')} min, gaps>15m {g7.get('gaps_over_15min')}")
+                worst = max(worst, {"OK": 0, "WARN": 1, "FAIL": 2}[v["status"]])
+            else:
+                manifest = bd.Manifest(args.work / "data" / symbol / "manifest.json")
+                done = sum(1 for k, v in manifest.data.items() if isinstance(v, dict))
+                print(f"{symbol}: {done} files stored, not listed: {sum(1 for v in manifest.data.values() if v == 'not_listed')}")
+    except Stopped as stop:
+        print(f"STOPPED: {stop}. Everything already written is kept; run again to resume.")
+        return 2
+    return worst
+
+
+if __name__ == "__main__":
+    sys.exit(main())
