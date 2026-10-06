@@ -572,3 +572,33 @@ The four "brains" map to SPEC §32: Regime (features), Direction (A/B classifier
   folds (one big fold cannot hide worse folds), does not degrade calibration materially, and does
   not explode the feature count.
 
+## 103. P5 design — PROPOSED 2026-10-07 (D-027), awaiting owner review; not implemented yet
+Per symbol × horizon, development data only (holdout sealed). Inputs: the P4 models on the P4B-selected
+features (V3 base if no group survived): BUY/SELL classifiers, quantile models of MFE,
+MAE-before-profit (SL) and pullback-before-continuation (trailing).
+
+1. **Market SL cap (L2):** CAP = p90 of realized MAE-before-profit of profitable dev_train paths, per side.
+   One rule, no search. Predicted required SL > CAP ⇒ WAIT (§15).
+2. **Dynamic levels per anchor — small pre-registered family (12 exit policies):**
+   - SL = a × predicted q75(MAE-before-profit), a ∈ {1.0, 1.25}, clipped to [0.10%, CAP]
+   - Activation = max(cost + edge, b × predicted q25(MFE)), b ∈ {0.6, 0.8}
+   - Trailing ∈ {1.0 × q50(pullback), 1.5 × q50(pullback), 0.5 × σ_h volatility (§102 comparison)},
+     clipped to [0.05%, activation]
+   - Consistency gate (§84, fixed): activation > cost + edge, SL ≤ CAP, q50(MFE) / SL ≥ 1.0
+3. **Decision gate (D-021/22/23):** EV = p·avg_win + (1−p)·avg_other with avg_win/avg_other measured on the
+   calibration slice UNDER THE CANDIDATE POLICY; 12 gate combos (lift none/1.25/1.5/2.0 × margin
+   0/0.03/0.06%); conflict margin 0.02% ⇒ WAIT.
+4. **Two-stage selection to limit multiple testing:** stage 1 picks the exit policy (12) with a fixed default
+   gate (lift none, margin 0.03%); stage 2 picks the gate (12) for that policy — 24 evaluations, not 144.
+5. **Selection data:** dev_val split into 3 chronological folds (purged). Score = median fold average net
+   per trade after all costs; a candidate must have ≥ ⌈min_trades/3⌉ trades per fold (server min_trades
+   by horizon) and positive net in ≥ 2 of 3 folds. No candidate passes ⇒ symbol × horizon REJECTED
+   (WAIT forever), reported honestly.
+6. **Final retrain under the frozen policy (D-026 #5):** quantile predictions for every dev row by
+   5-block time cross-fitting (each block predicted by models trained without it, purged); rebuild V4
+   success labels with the frozen dynamic levels; retrain + recalibrate the classifiers on development
+   data; store artifacts with sha256.
+7. **Freeze record (DECISIONS):** per symbol × horizon — features, model hashes, policy (a, b, trailing
+   rule), CAP, gate (lift, margin), the pre-registered three arms with PRIMARY = Arm 3 (Arm 2 if no P4B
+   group survived, L9), and the stress matrix (L7). Then P6.
+

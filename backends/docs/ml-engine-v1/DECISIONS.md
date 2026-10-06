@@ -175,3 +175,10 @@ frozen policy in P5/P6, not in the ablation. dev_val and the holdout are not use
    and only then open the holdout. No training on one exit policy and evaluating on another.
 6. Feature manifest kept in `docs/ml-engine-v1/FEATURES_V4.md` (formula, lookback, knowable time,
    confirmation lag, HTF boundary, test status). Pattern feature count is 57 (94 total), not 60.
+
+**D-027 · 2026-10-07 · agent, PROPOSED — owner to review before any P5 code** — P5 design in SPEC §103:
+CAP = p90 MAE-before-profit (dev_train winners); 12 pre-registered exit policies (SL a ∈ {1.0, 1.25} ×
+q75 MAE-before-profit; activation b ∈ {0.6, 0.8} × q25 MFE floored at cost + edge; trailing model
+1.0/1.5 × q50 pullback or 0.5 σ volatility); 12 gate combos; two-stage selection (24 evaluations) on 3
+purged dev_val folds with min-trade and fold-consistency rules; REJECT when nothing passes; final retrain
+under the frozen policy with 5-block time cross-fitted quantile predictions; full freeze record.

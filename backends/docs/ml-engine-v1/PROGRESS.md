@@ -14,6 +14,7 @@ Last updated: 2026-10-06 by ml-engine-v1 (Claude Code session).
   P4A table (R-015); (2) run the full backend suite (`php artisan test`) for the P4B PHP changes;
   (3) `ml-v4-local.ps1 -TargetsOnly -PatternFeatures` (v4 features, ~3 h for 6 coins);
   (4) `python -m v4.cli p4b` ablation (D-025), BTC/ETH 15m first (SPEC §75); (5) report to the owner.
+  (6) owner reviews the P5 design (SPEC §103, D-027 PROPOSED) — P5 code starts only after that.
 - **Server:** ML paused with `ml-server-pause.sh --apply` on 2026-10-07 00:53 +08 (flag false, worker
   autostart off, 1.4 GB exports removed). Load stayed ~27–29, so ML was not the main server load.
   `--free-disk` (~16 GB) recommended, owner to decide.
