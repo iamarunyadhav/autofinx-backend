@@ -173,3 +173,10 @@ Plan lock (same day, session d):
   activation floor, consistency, uncertainty, OOD), EV/lift/conflict decision, nested P5-A/B/C windows,
   selection rule (min trades, 2/3 sub-folds, PF, t-stat) + simplicity tie-break, forward-chaining blocks.
 - `external-predictive-engine/tests/v4/test_p5.py` (new, 11 tests incl. SPEC §78 M, N, O); 64 V4 tests.
+- `external-predictive-engine/v4/p5_run.py` (new) — P5 orchestration per symbol × horizon: models on
+  dev_train, SL caps / uncertainty limit / OOD reference from dev_train, quality gate on P5-A, exit
+  policy (P5-A), gate (P5-B), confirmation (P5-C), REJECTED paths, forward-chaining final retrain under
+  the frozen policy, artifacts with sha256, report `reports/p5/<SYMBOL>_h<H>.json`. EV params cached
+  per candidate; worst-case evaluation everywhere.
+- `external-predictive-engine/v4/cli.py` — command `p5`.
+- Layer A targets rebuilt for all 6 coins × 5 horizons with `pullback_before_continuation_pct`.

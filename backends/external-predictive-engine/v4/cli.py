@@ -28,7 +28,7 @@ def _months(symbol: str, override: int | None) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="v4.cli")
-    parser.add_argument("command", choices=["download", "verify", "status", "targets", "import-candles", "export-features", "p3", "resolve", "p4a", "p4b"])
+    parser.add_argument("command", choices=["download", "verify", "status", "targets", "import-candles", "export-features", "p3", "resolve", "p4a", "p4b", "p5"])
     parser.add_argument("--schema", default="qt-shadow-features-v3", help="export-features: qt-shadow-features-v3 or -v4")
     parser.add_argument("--days", type=int, default=30, help="resolve: random development days to sample")
     parser.add_argument("--horizons", default="15,60,120,240,1440")
@@ -76,6 +76,14 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"   G7 metrics: days {g7.get('days_present')} present / {g7.get('days_missing')} missing, "
                           f"{g7.get('first_utc')} -> {g7.get('last_utc')}, step {g7.get('median_step_minutes')} min, gaps>15m {g7.get('gaps_over_15min')}")
                 worst = max(worst, {"OK": 0, "WARN": 1, "FAIL": 2}[v["status"]])
+            elif args.command == "p5":
+                from .p5_run import run as run_p5
+                for h in [int(v) for v in args.horizons.replace(";", ",").split(",") if v.strip()]:
+                    r = run_p5(args.work, symbol, h)
+                    print(f"== {symbol} h{h}: {r['status']} {r.get('reason', '')} ({r['features']}, {r['seconds']}s)", flush=True)
+                    if "frozen" in r:
+                        print(f"   frozen: {json.dumps(r['frozen']['exit_policy'])} gate {json.dumps(r['frozen']['gate'])}; P5-C: "
+                              f"{r['stages'].get('P5-C', {}).get('trades')} trades, avg {r['stages'].get('P5-C', {}).get('avg_net_pct')}", flush=True)
             elif args.command == "p4b":
                 from .ablation import run as run_p4b
                 for h in [int(v) for v in args.horizons.replace(";", ",").split(",") if v.strip()]:
