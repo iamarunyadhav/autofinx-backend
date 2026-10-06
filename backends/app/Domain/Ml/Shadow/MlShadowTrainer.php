@@ -294,7 +294,17 @@ class MlShadowTrainer
         }
         $rows = 0;
         try {
-            foreach ((clone $base)->orderBy('l.anchor_time_ms')->select(['l.anchor_time_ms', 'l.future_return', 'f.features'])->cursor() as $row) {
+            // Keyset pages, not cursor(): MySQL buffers a whole cursor() result in
+            // PHP memory (hundreds of MB for a long history on a small host).
+            $last = null;
+            while (true) {
+                $page = (clone $base)->when($last !== null, fn ($q) => $q->where('l.anchor_time_ms', '>', $last))
+                    ->orderBy('l.anchor_time_ms')->limit(2000)->select(['l.anchor_time_ms', 'l.future_return', 'f.features'])->get();
+                if ($page->isEmpty()) {
+                    break;
+                }
+                $last = (int) $page->last()->anchor_time_ms;
+                foreach ($page as $row) {
                 $features = json_decode((string) $row->features, true, 512, JSON_THROW_ON_ERROR);
                 fwrite($handle, json_encode([
                     't' => (int) $row->anchor_time_ms,
@@ -305,6 +315,7 @@ class MlShadowTrainer
                 $rows++;
                 if ($rows % 500 === 0) {
                     $this->exportBeat();
+                }
                 }
             }
         } finally {
