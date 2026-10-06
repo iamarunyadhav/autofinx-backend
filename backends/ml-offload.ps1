@@ -30,15 +30,18 @@ param(
     [Parameter(Mandatory = $true)][string]$Server,
     [int]$Port = 22,
     [string]$Work = 'D:\autofinx-ml',
-    [string[]]$Symbols = @('BTCUSDT', 'ETHUSDT'),
-    [int[]]$Horizons = @(240, 1440, 120, 60, 15),
+    [string]$Symbols = 'BTCUSDT,ETHUSDT',
+    [string]$Horizons = '240,1440,120,60,15',
     [string]$RemoteApp = '/home/zcadmin/public_html/api.autofinx.arunyadhav.dev/autofinx-backend/backends',
     [switch]$Install,
     [switch]$Refetch
 )
 
 $ErrorActionPreference = 'Continue'
-$repo = Split-Path -Parent $MyInvocation.MyCommand.Path
+# powershell -File passes a comma list as ONE string, so split it here.
+$Symbols = @($Symbols -split '[,; ]+' | Where-Object { $_ -ne '' } | ForEach-Object { $_.ToUpper() })
+$Horizons = @($Horizons -split '[,; ]+' | Where-Object { $_ -ne '' } | ForEach-Object { [int]$_ })
+$repo =Split-Path -Parent $MyInvocation.MyCommand.Path
 $ssh = "ssh -p $Port -o BatchMode=yes -o ConnectTimeout=20 -o ServerAliveInterval=30 -o ServerAliveCountMax=20"
 $artisanRemote = "cd $RemoteApp && ionice -c2 -n6 runuser -u zcadmin -- /usr/local/bin/ea-php82 -d memory_limit=1024M artisan"
 $todo = New-Object System.Collections.Generic.List[string]
