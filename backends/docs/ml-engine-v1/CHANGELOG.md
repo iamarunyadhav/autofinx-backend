@@ -145,3 +145,9 @@ Plan lock (same day, session d):
   With `ShadowFeatureLabelTest`: 14/14 pass. Full backend suite still to run when the CPU is free.
 - `external-predictive-engine/v4/resolver.py` — stratified day sampling (year × volatility tercile) and
   per-stratum report (D-024); `tests/v4/test_resolver.py` +1 test (50 V4 tests).
+- `external-predictive-engine/v4/ablation.py` (new) — P4B fold-consistent sequential ablation (D-025).
+- `external-predictive-engine/v4/features.py` — `export(..., schema)`; v4 → `features/<SYMBOL>/v4.parquet`.
+- `external-predictive-engine/v4/cli.py` — command `p4b`, option `--schema`.
+- `external-predictive-engine/tests/v4/test_ablation.py` (new, 2 tests; 52 V4 tests total).
+- `ml-v4-local.ps1` — switch `-PatternFeatures` builds + exports schema v4 (opt-in env only for that
+  process). Measured builder cost: v3 0.78 ms vs v4 4.48 ms per anchor (≈40 min per 5-year coin).

@@ -151,3 +151,10 @@ floor, chosen in P5 from the 9 pre-declared combos on validation, then frozen.
    profit factor, t-stat, positive walk-forward folds, BUY/SELL balance, probability and EV
    distributions, unresolved-exclusion % — never on AUC or avg net alone; few-trade results are weak
    evidence. Code tests passing proves behaviour, not profitability; the verdict is P6 only.
+
+**D-025 · 2026-10-07 · agent (pre-registered before any P4B result; owner may veto)** — P4B ablation
+rule (`v4/ablation.py`): folds INSIDE dev_train only (test windows 55–70%, 70–85%, 85–100% of
+dev_train, expanding train, purge = H); score = mean BUY/SELL classifier AUC on clean rows; a group is
+kept if median fold gain ≥ 0.002 AUC, gain > 0 in ≥ 2 of 3 folds, mean Brier not worse by > 0.0005,
+and total features ≤ 80; order G1→G6, a kept group joins the baseline. Economics are judged with the
+frozen policy in P5/P6, not in the ablation. dev_val and the holdout are not used.

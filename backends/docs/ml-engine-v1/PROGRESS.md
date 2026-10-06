@@ -10,9 +10,10 @@ Last updated: 2026-10-06 by ml-engine-v1 (Claude Code session).
 - **Running (one background chain, `D:utofinx-ml-v4\logs\chain-p3-resolve-p4a.log`):** full P3
   (6 coins x 5 horizons) -> BTC sampled aggTrade resolver (30 days, h15/h60) -> P4A all coins per
   horizon in SPEC 75 order (15, 60, 120, 240, 1440).
-- **Next action:** when the chain finishes, record P3 table (R-013), resolver bias (R-014), P4A table
-  V3 vs V4 per coin x horizon (R-015); decide with the owner whether P4B (pattern features) starts.
-  Decision gate for P5 = D-021/D-022 as amended by D-023 #6 (12 combos, lift optional).
+- **Next action:** when the chain finishes: (1) record P3 table (R-013), resolver bias by stratum (R-014),
+  P4A table (R-015); (2) run the full backend suite (`php artisan test`) for the P4B PHP changes;
+  (3) `ml-v4-local.ps1 -TargetsOnly -PatternFeatures` (v4 features, ~3 h for 6 coins);
+  (4) `python -m v4.cli p4b` ablation (D-025), BTC/ETH 15m first (SPEC §75); (5) report to the owner.
 - **Server:** ML paused with `ml-server-pause.sh --apply` on 2026-10-07 00:53 +08 (flag false, worker
   autostart off, 1.4 GB exports removed). Load stayed ~27–29, so ML was not the main server load.
   `--free-disk` (~16 GB) recommended, owner to decide.

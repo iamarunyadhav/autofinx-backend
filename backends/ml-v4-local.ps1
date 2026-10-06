@@ -27,7 +27,8 @@ param(
     [switch]$TargetsOnly,
     [switch]$SkipFeatures,
     [switch]$ForceRebuildFeatures,
-    [switch]$ForceRebuildTargets
+    [switch]$ForceRebuildTargets,
+    [switch]$PatternFeatures
 )
 
 $ErrorActionPreference = 'Continue'
@@ -117,6 +118,22 @@ if (-not $DownloadOnly -and -not $VerifyOnly) {
             & $py -m v4.cli export-features @symArg $s
             if ($LASTEXITCODE -ne 0) { Warn "$s : feature export failed"; $rc = 2; continue }
             Ok "$s features in $([math]::Round(((Get-Date) - $t).TotalMinutes, 1)) min -> $Work\features\$s\v3.parquet"
+        }
+        if ($PatternFeatures) {
+            # P4B research schema v4 (v3 + PatternFeatures G1-G6). Opt-in here only; the server never builds it.
+            $env:AUTOFINX_ML_EXTRA_FEATURE_SCHEMAS = 'qt-shadow-features-v4'
+            foreach ($s in $symList) {
+                if ((Test-Path "$Work\features\$s\v4.json") -and -not $ForceRebuildFeatures) { Ok "$s pattern features already built"; continue }
+                if (Test-Path "$Work\STOP") { Warn "STOP file found - stopping before $s."; Pop-Location; exit 2 }
+                $t = Get-Date
+                Write-Host "  $s : PHP pattern-feature (v4) build started $(Get-Date -Format HH:mm:ss)"
+                & php -d memory_limit=4096M artisan ml:features:build "--symbol=$s" --full
+                if ($LASTEXITCODE -ne 0) { Warn "$s : v4 feature build failed"; $rc = 2; continue }
+                & $py -m v4.cli export-features @symArg $s --schema qt-shadow-features-v4
+                if ($LASTEXITCODE -ne 0) { Warn "$s : v4 export failed"; $rc = 2; continue }
+                Ok "$s pattern features in $([math]::Round(((Get-Date) - $t).TotalMinutes, 1)) min -> $Work\features\$s\v4.parquet"
+            }
+            Remove-Item Env:AUTOFINX_ML_EXTRA_FEATURE_SCHEMAS -ErrorAction SilentlyContinue
         }
         Pop-Location
     }

@@ -23,6 +23,7 @@ import numpy as np
 from . import binance_data as bd
 
 FEATURE_SCHEMA = "qt-shadow-features-v3"
+PATTERN_SCHEMA = "qt-shadow-features-v4"   # research: v3 + PatternFeatures G1-G6 (SPEC §102)
 PROVIDER = "binance_futures"
 
 
@@ -50,12 +51,14 @@ def import_candles(work: Path, symbol: str) -> int:
     return int(after - before)
 
 
-def export(work: Path, symbol: str) -> dict:
+def export(work: Path, symbol: str, schema: str = FEATURE_SCHEMA) -> dict:
+    """schema v3 -> v3.parquet (+ V3 labels); schema v4 -> v4.parquet (features only)."""
+    tag = "v4" if schema == PATTERN_SCHEMA else "v3"
     started = time.monotonic()
     out_dir = work / "features" / symbol
     with sqlite3.connect(db_path(work)) as con:
         cur = con.execute("select anchor_time_ms, features from ml_feature_rows where symbol=? and timeframe='5m' "
-                          "and feature_schema_version=? order by anchor_time_ms", (symbol, FEATURE_SCHEMA))
+                          "and feature_schema_version=? order by anchor_time_ms", (symbol, schema))
         anchors, vectors, names = [], [], None
         for anchor, payload in cur:
             values = json.loads(payload)
@@ -66,12 +69,19 @@ def export(work: Path, symbol: str) -> dict:
         labels = con.execute("select anchor_time_ms, horizon_minutes, future_return, status from ml_labels "
                              "where symbol=? and timeframe='5m' order by horizon_minutes, anchor_time_ms", (symbol,)).fetchall()
     if not anchors:
-        raise RuntimeError(f"{symbol}: no {FEATURE_SCHEMA} feature rows in {db_path(work)} (did ml:features:build run?)")
+        raise RuntimeError(f"{symbol}: no {schema} feature rows in {db_path(work)} (did ml:features:build run?)")
     matrix = np.array(vectors, dtype=np.float64)
     columns = {"anchor_time_ms": np.array(anchors, np.int64)}
     for i, name in enumerate(names):
         columns[name] = matrix[:, i]
-    bd.write_parquet(out_dir / "v3.parquet", columns)
+    bd.write_parquet(out_dir / f"{tag}.parquet", columns)
+    if tag == "v4":
+        meta = {"symbol": symbol, "feature_schema": schema, "features": names, "rows": len(anchors),
+                "first_anchor_ms": anchors[0], "last_anchor_ms": anchors[-1], "nan_cells": int(np.isnan(matrix).sum()),
+                "source": "PHP ShadowFeatureBuilder + PatternFeatures via ml:features:build (sqlite)",
+                "seconds": round(time.monotonic() - started, 1)}
+        (out_dir / "v4.json").write_text(json.dumps(meta, indent=1), "utf-8")
+        return meta
     lab = np.array(labels, dtype=object) if labels else np.zeros((0, 4), dtype=object)
     bd.write_parquet(out_dir / "v3_labels.parquet", {
         "anchor_time_ms": lab[:, 0].astype(np.int64) if len(lab) else np.zeros(0, np.int64),
@@ -79,7 +89,7 @@ def export(work: Path, symbol: str) -> dict:
         "future_return": np.array([np.nan if v is None else float(v) for v in lab[:, 2]]) if len(lab) else np.zeros(0),
         "mature": np.array([s == "MATURE" for s in lab[:, 3]]) if len(lab) else np.zeros(0, bool),
     })
-    meta = {"symbol": symbol, "feature_schema": FEATURE_SCHEMA, "features": names, "rows": len(anchors),
+    meta = {"symbol": symbol, "feature_schema": schema, "features": names, "rows": len(anchors),
             "first_anchor_ms": anchors[0], "last_anchor_ms": anchors[-1], "label_rows": len(labels),
             "nan_cells": int(np.isnan(matrix).sum()), "source": "PHP ShadowFeatureBuilder via ml:features:build (sqlite)",
             "seconds": round(time.monotonic() - started, 1)}
