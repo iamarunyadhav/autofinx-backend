@@ -111,3 +111,31 @@ daily bulk aggTrades files are 17–60 MB/day for BTC (~150 GB for 6 coins × fu
 ambiguous minutes, measure how often the conservative rule was wrong and the P&L difference;
 (2) at P6: resolve every ambiguous minute of the executed holdout trades (one time, ~9 months).
 If (1) shows a small difference, conservative evaluation stays for P3–P5.
+
+**D-021 · 2026-10-07 · agent, PROPOSED — owner to confirm** — Replace the inherited absolute probability
+floor (0.55, V3) for V4 decisions. Why: V4 success = "net ≥ edge on the realizable path", whose base
+rate is ~11% at BTC h15 (R-011), so 0.55 almost never triggers; the economically right gate is expected
+net. Proposed P5 decision gate: (1) EV = p·avg_win + (1−p)·avg_other (costs + funding included) ≥
+min edge + margin; (2) relative confidence floor p ≥ lift × side base rate (calibration slice). Candidates
+fixed in advance: lift ∈ {1.25, 1.5, 2.0} × margin ∈ {0, 0.03, 0.06}% (9 combos), selected per horizon
+on dev_val + walk-forward folds with fold consistency, frozen in P5, never tuned on the holdout. Other
+gates (min trades, t-stat, cost stress, drawdown) unchanged.
+
+**D-022 · 2026-10-07 · owner** — D-021 CONFIRMED: V4 decision gate = EV gate + relative confidence
+floor, chosen in P5 from the 9 pre-declared combos on validation, then frozen.
+
+**D-023 · 2026-10-07 · owner (external review) + agent** — Corrections, all applied:
+1. `same_bar_trail` is NOT conservative by itself (low-first would keep the trade open). Evaluation now
+   explores both orders (`policy.worst_case_path` / `apply_worst_case`) and keeps the lower net;
+   V4 labels EXCLUDE unresolved rows (stop-vs-activation ambiguity and same-bar trailing) from fit,
+   calibration and label metrics until aggTrades resolve them. Supersedes the same-bar rule in D-017.
+2. Wording: "V3 endpoint labels are materially misaligned with the new SL/trailing execution policy" —
+   not "objectively wrong" (V3 never used an SL).
+3. AUC via `sklearn.metrics.roc_auc_score` (isotonic ties).
+4. Resolver returns the resolved exit bar and recomputes funding up to the resolved exit.
+5. `trade_stats` drawdown renamed `max_drawdown_additive_pct`: research diagnostic only, not account
+   drawdown, not a risk gate until position sizing / equity simulation exists.
+6. Agent correction: the earlier explanation "V3 base rate ~50%" was wrong — BTC h15 V3 positive base
+   rate is ~14.5%. D-021/D-022 are amended: EV / expected utility is the PRIMARY gate; the relative-lift
+   floor is a SECONDARY candidate that may be "none" — candidate set lift ∈ {none, 1.25, 1.5, 2.0} ×
+   margin ∈ {0, 0.03, 0.06}% (12 combos), chosen on dev validation / walk-forward, frozen in P5.

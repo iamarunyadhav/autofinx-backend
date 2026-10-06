@@ -167,3 +167,41 @@ def test_vectorized_simulator_matches_reference_on_random_paths(seed):
                         assert pol.REASONS[got["reason"][i]] == why, (n, side, sl, i)
                         assert got["gross_pct"][i] == pytest.approx(move, abs=1e-9), (n, side, sl, i)
                         assert got["exit_bar"][i] == j
+
+
+def _fund0(bar):
+    return 0.0
+
+
+def test_worst_case_takes_the_low_first_branch_when_it_is_worse():
+    # Bar 1 arms (+0.5%) and dips to +0.0%: branch A exits at +0.3% in bar 1; branch B (low first) stays
+    # open with the stop at +0.3%, and bar 2 GAPS below it (opens at -0.1%) -> fills at -0.1%: worse.
+    p = np.array([(100, 100.1, 99.9, 100.05), (100.05, 100.5, 100.0, 100.45), (99.9, 99.95, 99.4, 99.5)], float)
+    reason, move, bar = pol.worst_case_path(p[:, 0], p[:, 1], p[:, 2], p[:, 3], "long", 0.5, 0.4, 0.2, 0.12, _fund0)
+    assert pol.REASONS[reason] == "TRAILING_PROFIT" and move == pytest.approx(-0.1) and bar == 2
+
+
+def test_worst_case_keeps_the_same_bar_exit_when_continuing_is_better():
+    p = np.array([(100, 100.1, 99.9, 100.05), (100.05, 100.5, 100.0, 100.45), (100.45, 101.5, 100.45, 101.5)], float)
+    reason, move, bar = pol.worst_case_path(p[:, 0], p[:, 1], p[:, 2], p[:, 3], "long", 0.5, 0.4, 0.2, 0.12, _fund0)
+    assert pol.REASONS[reason] == "TRAILING_PROFIT" and move == pytest.approx(0.3) and bar == 1
+
+
+@pytest.mark.parametrize("seed", [11, 12])
+def test_apply_worst_case_never_improves_a_flagged_trade_and_leaves_others_untouched(seed):
+    rng = random.Random(seed)
+    price, prices = 100.0, []
+    for _ in range(500):
+        o = price * (1 + rng.gauss(0, 0.0004)); c = o * (1 + rng.gauss(0, 0.002))
+        prices.append((o, max(o, c) * (1 + abs(rng.gauss(0, 0.0015))), min(o, c) * (1 - abs(rng.gauss(0, 0.0015))), c)); price = c
+    m1 = bars(prices)
+    anchors = T0 + 5 * MIN * np.arange(90)
+    from v4.targets import dense_minutes
+    grid = dense_minutes(m1)
+    for side in ("long", "short"):
+        before = pol.simulate(m1, anchors, 30, side, 0.4, 0.25, 0.1, 0.12)
+        after = pol.apply_worst_case({k: v.copy() for k, v in before.items()}, grid, anchors, 30, side, 0.4, 0.25, 0.1, 0.12, None)
+        flagged = before["same_bar_trail"]
+        assert flagged.any()
+        assert np.all(after["net_pct"][flagged] <= before["net_pct"][flagged] + 1e-12)
+        np.testing.assert_array_equal(after["net_pct"][~flagged], before["net_pct"][~flagged])

@@ -67,8 +67,9 @@ def reference_levels(t: dict, train_rows: np.ndarray, side: str, cost: float, ed
 
 
 def run_policy(grid, anchors, rows, h, side, sl, act, trail, cost, funding, conflicts, train, val) -> dict:
-    sim = pol.simulate(None, anchors[rows], h, side, sl if np.ndim(sl) == 0 else sl[rows], act if np.ndim(act) == 0 else act[rows],
-                       trail if np.ndim(trail) == 0 else trail[rows], cost, funding, conflicts, grid=grid)
+    slr, actr, trailr = (v if np.ndim(v) == 0 else v[rows] for v in (sl, act, trail))
+    sim = pol.simulate(None, anchors[rows], h, side, slr, actr, trailr, cost, funding, conflicts, grid=grid)
+    sim = pol.apply_worst_case(sim, grid, anchors[rows], h, side, slr, actr, trailr, cost, funding)   # D-023
     out = {}
     for name, part in (("dev_train", train[rows]), ("dev_val", val[rows])):
         ok = part & (sim["status"] == VALID)
@@ -91,7 +92,7 @@ def audit(t: dict, rows: np.ndarray, sims: dict, cost: float, required: float, e
     for side, v3 in (("long", v3_long), ("short", v3_short)):
         s = sims[side]
         reason = s["reason"]
-        ambiguous = reason == pol.AMBIGUOUS_INTRABAR
+        ambiguous = (reason == pol.AMBIGUOUS_INTRABAR) | s["same_bar_trail"]   # unresolved order (D-023)
         opp = (s["net_pct"] >= edge) & ~ambiguous
         v4[side] = opp
         out[f"v4_{side}_opportunity"] = int(opp.sum())

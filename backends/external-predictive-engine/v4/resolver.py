@@ -49,9 +49,9 @@ def day_minutes_trades(symbol: str, day: str, minutes: set[int], get=bd.http_get
 
 
 def resimulate(window: dict[str, np.ndarray], ticks: dict[int, np.ndarray], side: str,
-               sl: float, act: float, trail: float, cost: float) -> tuple[str, float]:
+               sl: float, act: float, trail: float, cost: float) -> tuple[str, float, int]:
     """Exact re-simulation: bars with tick data are walked trade by trade, other bars use the
-    same conservative 1m rules as policy.simulate. Returns (reason, gross move %)."""
+    same conservative 1m rules as policy.simulate. Returns (reason, gross move %, exit bar)."""
     s = 1.0 if side == "long" else -1.0
     e = window["open"][0]
     def pct(x):
@@ -67,36 +67,36 @@ def resimulate(window: dict[str, np.ndarray], ticks: dict[int, np.ndarray], side
                 m = pct(price)
                 if not armed:
                     if m <= floor:
-                        return "HARD_STOP", m             # the trade that crossed the stop (gap aware)
+                        return "HARD_STOP", m, j          # the trade that crossed the stop (gap aware)
                     if m >= act:
                         armed, peak = True, m
                 else:
                     if m <= stop():
                         level = stop()
-                        return ("TRAILING_PROFIT" if level > floor + 1e-12 else "HARD_STOP"), m
+                        return ("TRAILING_PROFIT" if level > floor + 1e-12 else "HARD_STOP"), m, j
                     peak = max(peak, m)
             continue
         o, h, l = pct(window["open"][j]), window["high"][j], window["low"][j]
         fav, adv = (pct(h), pct(l)) if s > 0 else (pct(l), pct(h))
         if not armed:
             if adv <= floor:
-                return ("AMBIGUOUS_INTRABAR" if fav >= act else "HARD_STOP"), min(o, floor)
+                return ("AMBIGUOUS_INTRABAR" if fav >= act else "HARD_STOP"), min(o, floor), j
             if fav >= act:
                 armed, peak = True, fav
                 if adv <= stop():
                     level = stop()
-                    return ("TRAILING_PROFIT" if level > floor + 1e-12 else "HARD_STOP"), level
+                    return ("TRAILING_PROFIT" if level > floor + 1e-12 else "HARD_STOP"), level, j
             continue
         prev = stop()
         if adv <= prev:
-            return ("TRAILING_PROFIT" if prev > floor + 1e-12 else "HARD_STOP"), min(o, prev)
+            return ("TRAILING_PROFIT" if prev > floor + 1e-12 else "HARD_STOP"), min(o, prev), j
         peak = max(peak, fav)
         if adv <= stop():
             level = stop()
-            return ("TRAILING_PROFIT" if level > floor + 1e-12 else "HARD_STOP"), level
+            return ("TRAILING_PROFIT" if level > floor + 1e-12 else "HARD_STOP"), level, j
     close = pct(window["close"][-1])
     net = close - cost
-    return ("TIME_EXIT_PROFIT" if net > pol.FLAT_PCT else "TIME_EXIT_LOSS" if net < -pol.FLAT_PCT else "TIME_EXIT_FLAT"), close
+    return ("TIME_EXIT_PROFIT" if net > pol.FLAT_PCT else "TIME_EXIT_LOSS" if net < -pol.FLAT_PCT else "TIME_EXIT_FLAT"), close, len(window["open"]) - 1
 
 
 def run_sample(work: Path, symbol: str, horizons: list[int], days: int = 30, seed: int = 7, cost: float = 0.12, get=bd.http_get) -> dict:
@@ -107,6 +107,8 @@ def run_sample(work: Path, symbol: str, horizons: list[int], days: int = 30, see
     m5 = bd.load_klines(work, symbol, "5m")
     grid = dense_minutes(m1)
     funding = load_funding(work, symbol)
+    f_t = funding["funding_time"] if len(funding["funding_time"]) else None
+    f_cs = np.r_[0.0, np.cumsum(funding["funding_rate"] * 100.0)] if f_t is not None else None
     conflicts = conflict_buckets(m1, m5)
     feat = pq.read_table(work / "features" / symbol / "v3.parquet", columns=["anchor_time_ms", "vol_48"]).to_pydict()
     f_anchor, f_vol = np.asarray(feat["anchor_time_ms"], np.int64), np.asarray(feat["vol_48"], float)
@@ -130,6 +132,7 @@ def run_sample(work: Path, symbol: str, horizons: list[int], days: int = 30, see
             }.items():
                 slr, actr, trailr = (np.full(len(rows), float(v)) if np.ndim(v) == 0 else v[rows] for v in (sl, act, trail))
                 sim = pol.simulate(None, anchors[rows], h, side, slr, actr, trailr, cost, funding, conflicts, grid=grid)
+                sim = pol.apply_worst_case(sim, grid, anchors[rows], h, side, slr, actr, trailr, cost, funding)
                 chosen = pol.non_overlapping(anchors[rows], sim["status"] == VALID, sim["exit_time_ms"])
                 flagged = chosen[(sim["reason"][chosen] == pol.AMBIGUOUS_INTRABAR) | sim["same_bar_trail"][chosen]]
                 for i in flagged:
@@ -158,11 +161,14 @@ def run_sample(work: Path, symbol: str, horizons: list[int], days: int = 30, see
             bar = int((minute - c["anchor"]) // MINUTE)
             if bar not in range(n_bars) or minute not in ticks:
                 continue
-            why, move = resimulate(window, {bar: ticks[minute]}, c["side"], c["sl"], c["act"], c["trail"], cost)
+            why, move, exit_bar = resimulate(window, {bar: ticks[minute]}, c["side"], c["sl"], c["act"], c["trail"], cost)
             sign = 1.0 if c["side"] == "long" else -1.0
-            # Funding is kept as simulated (exit times differ by at most the remaining path).
-            net = move - cost - sign * c["fund"]
-            results.append({**c, "day": day, "exact_reason": why, "exact_net": net, "delta_net": net - c["net"]})
+            # Funding recomputed up to the RESOLVED exit time (the exact order can move the exit).
+            exit_ms = c["anchor"] + (exit_bar + 1) * MINUTE
+            fund = float(f_cs[np.searchsorted(f_t, exit_ms, side="right")] - f_cs[np.searchsorted(f_t, c["anchor"], side="right")]) if f_t is not None else 0.0
+            net = move - cost - sign * fund
+            results.append({**c, "day": day, "exact_reason": why, "exact_exit_bar": int(exit_bar), "exact_funding": fund,
+                            "exact_net": net, "delta_net": net - c["net"]})
         print(f"  {symbol} aggTrades day {n}/{len(sample)} {day}: {len(day_cases)} flagged trades", flush=True)
 
     summary = {"symbol": symbol, "days_sampled": len(sample), "days_with_flagged_trades": len(all_days),

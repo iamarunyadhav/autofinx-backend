@@ -14,8 +14,10 @@ Order inside one 1m bar is unknown, so (SPEC §25-26, conservative, never favour
     => AMBIGUOUS_INTRABAR, evaluated as the hard stop (the worse outcome) and flagged;
   * a stop already in force before the bar (previous peak) that the bar's low crosses => exit at
     that stop, or at the bar open if the bar gapped through it;
-  * a bar that makes a new peak AND crosses the stop implied by that new peak => exit at the new
-    stop (flag same_bar_trail) — the favourable order (low first, high later) is never assumed.
+  * a bar that makes a new peak AND crosses the stop implied by that new peak => the vectorized pass
+    exits at the new stop and flags same_bar_trail. That is NOT guaranteed conservative (low-first
+    would keep the trade open), so callers run apply_worst_case() on flagged rows (both orders
+    explored, the lower net kept) and P4 labels exclude them until aggTrades resolve them (D-023).
 Exit time = end of the exit bar (stops) or T0 + H (time exit). Funding is applied only for events
 with T0 < f <= exit time (tests H/I). net = gross - cost_pct - side * funding_long.
 """
@@ -144,6 +146,100 @@ def simulate(m1: dict[str, np.ndarray] | None, anchors: np.ndarray, horizon_min:
     return out
 
 
+def worst_case_path(o, h, l, c, side: str, sl: float, act: float, trail: float, cost: float,
+                    funding_to: "callable", max_branches: int = 4096) -> tuple[int, float, int]:
+    """Exact worst case over the unknown order inside same-bar trailing bars (D-023).
+
+    o/h/l/c are the raw prices of the path bars (entry = o[0]). When a bar arms or raises the trailing
+    stop AND crosses that new stop, the order is unknown: branch A = high first (exit at the new stop),
+    branch B = low first (no exit in this bar, peak = high, continue). Both are explored and the branch
+    with the lower NET (incl. funding up to its own exit) is returned as (reason, gross move %, exit bar).
+    Stop-vs-activation conflicts before arming stay AMBIGUOUS_INTRABAR at the stop (already the worst).
+    """
+    s = 1.0 if side == "long" else -1.0
+    e = o[0]
+    fav = ((h if s > 0 else l) / e - 1.0) * 100.0 * s
+    adv = ((l if s > 0 else h) / e - 1.0) * 100.0 * s
+    opn = (o / e - 1.0) * 100.0 * s
+    close = (c[-1] / e - 1.0) * 100.0 * s
+    floor = -sl
+    n = len(o)
+    budget = [max_branches]
+
+    def net(move: float, bar: int) -> float:
+        return move - cost - s * funding_to(bar)
+
+    def run(j: int, armed: bool, peak: float) -> tuple[int, float, int]:
+        while j < n:
+            if not armed:
+                if adv[j] <= floor:
+                    return (AMBIGUOUS_INTRABAR if fav[j] >= act else HARD_STOP), min(opn[j], floor), j
+                if fav[j] >= act:
+                    peak = fav[j]
+                    stop = max(floor, peak - trail)
+                    if adv[j] <= stop:
+                        a = ((TRAILING_PROFIT if stop > floor + 1e-12 else HARD_STOP), stop, j)
+                        if budget[0] <= 0:
+                            return a
+                        budget[0] -= 1
+                        b = run(j + 1, True, peak)
+                        return a if net(a[1], a[2]) <= net(b[1], b[2]) else b
+                    armed = True
+                j += 1
+                continue
+            prev = max(floor, peak - trail)
+            if adv[j] <= prev:
+                return (TRAILING_PROFIT if prev > floor + 1e-12 else HARD_STOP), min(opn[j], prev), j
+            new_peak = max(peak, fav[j])
+            stop = max(floor, new_peak - trail)
+            if adv[j] <= stop:
+                a = ((TRAILING_PROFIT if stop > floor + 1e-12 else HARD_STOP), stop, j)
+                if budget[0] <= 0:
+                    return a
+                budget[0] -= 1
+                b = run(j + 1, True, new_peak)
+                return a if net(a[1], a[2]) <= net(b[1], b[2]) else b
+            peak = new_peak
+            j += 1
+        nt = close - cost
+        return (TIME_EXIT_PROFIT if nt > FLAT_PCT else TIME_EXIT_LOSS if nt < -FLAT_PCT else TIME_EXIT_FLAT), close, n - 1
+
+    return run(0, False, 0.0)
+
+
+def apply_worst_case(sim: dict, grid: dict, anchors: np.ndarray, horizon_min: int, side: str, sl, act, trail,
+                     cost: float, funding: dict | None) -> dict:
+    """Re-evaluates every same_bar_trail row with worst_case_path (net, reason, exit time). The flag
+    stays True so P4 labels can exclude these rows (unresolved ambiguity, D-023)."""
+    rows = np.nonzero(sim["same_bar_trail"])[0]
+    if len(rows) == 0:
+        return sim
+    start = int(grid["start"])
+    sign = 1.0 if side == "long" else -1.0
+    f_t = funding["funding_time"] if funding is not None and len(funding["funding_time"]) else None
+    f_cs = np.r_[0.0, np.cumsum(funding["funding_rate"] * 100.0)] if f_t is not None else None
+    sl_a, act_a, trail_a = (np.broadcast_to(np.asarray(v, float), (len(anchors),)) for v in (sl, act, trail))
+    for i in rows:
+        a = int(anchors[i])
+        first = (a - start) // MINUTE
+        sl_i = slice(first, first + horizon_min)
+        def funding_to(bar: int, a=a) -> float:
+            if f_t is None:
+                return 0.0
+            end = a + (bar + 1) * MINUTE
+            return float(f_cs[np.searchsorted(f_t, end, side="right")] - f_cs[np.searchsorted(f_t, a, side="right")])
+        reason, move, bar = worst_case_path(grid["open"][sl_i], grid["high"][sl_i], grid["low"][sl_i], grid["close"][sl_i],
+                                            side, float(sl_a[i]), float(act_a[i]), float(trail_a[i]), cost, funding_to)
+        fund = funding_to(bar)
+        sim["reason"][i] = reason
+        sim["gross_pct"][i] = move
+        sim["exit_bar"][i] = bar
+        sim["exit_time_ms"][i] = a + (bar + 1) * MINUTE
+        sim["funding_pct"][i] = fund
+        sim["net_pct"][i] = move - cost - sign * fund
+    return sim
+
+
 def non_overlapping(anchors: np.ndarray, take: np.ndarray, exit_time_ms: np.ndarray) -> np.ndarray:
     """Indices of executed trades: one open position at a time (SPEC §60)."""
     chosen = []
@@ -156,7 +252,9 @@ def non_overlapping(anchors: np.ndarray, take: np.ndarray, exit_time_ms: np.ndar
 
 
 def trade_stats(net: np.ndarray, reasons: np.ndarray | None = None) -> dict:
-    """§62 metrics for a list of executed trades (percent per trade, compounding ignored)."""
+    """§62 metrics for a list of executed trades (percent per trade, compounding ignored).
+    The drawdown is ADDITIVE in trade percent — a research diagnostic, not account/equity drawdown,
+    and not a risk gate until position sizing / equity simulation exists."""
     net = np.asarray(net, float)
     n = len(net)
     if n == 0:
@@ -173,7 +271,7 @@ def trade_stats(net: np.ndarray, reasons: np.ndarray | None = None) -> dict:
     out = {
         "trades": n, "total_net_pct": round(float(net.sum()), 4), "avg_net_pct": round(float(net.mean()), 5),
         "median_net_pct": round(float(np.median(net)), 5), "win_rate_pct": round(float((net > 0).mean() * 100), 2),
-        "profit_factor": round(float(gp / gl), 3) if gl > 0 else None, "max_drawdown_pct": round(float(drawdown.max()), 4),
+        "profit_factor": round(float(gp / gl), 3) if gl > 0 else None, "max_drawdown_additive_pct": round(float(drawdown.max()), 4),
         "max_single_loss_pct": round(float(net.min()), 4), "max_consecutive_losses": int(best),
         "loss_p95_pct": round(float(np.percentile(net, 5)), 4),
         "t_stat": round(float(net.mean() / (std / np.sqrt(n))), 3) if n > 1 and std > 0 else None,

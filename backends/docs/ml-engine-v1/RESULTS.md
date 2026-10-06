@@ -120,6 +120,26 @@ are. Numbers are copied from real output, never estimated after the fact.
 - G7 metrics: BTC 1,350 days fetched before the run switched to `-NoMetrics` (2021-10-01 → 2026-10-05,
   5-min step, 8 gaps > 15 min). Remaining days/coins later, before P4B.
 
+## R-012 · 2026-10-07 · Corrections D-023 — BTCUSDT h15 P4A old vs corrected (dev_val)
+- Tests 49/49 (adds worst-case branch tests; resolver returns exit bar).
+- Unresolved intrabar rows excluded from V4 labels: 7.97% (long) / 7.77% (short) of dev_train.
+- | Item | Before D-023 | After D-023 |
+  |---|---|---|
+  | V3 AUC long/short | 0.7055 / 0.7090 | 0.7058 / 0.7091 |
+  | V4 AUC long/short | 0.6397 / 0.6462 | 0.6527 / 0.6491 |
+  | V4 label base rate long | 10.76% | 9.65% (clean rows only) |
+  | ARM2_V4 (floor 0.55) | 4 trades, −0.044% | 31 trades, −0.053%, t −1.43 |
+  | V3 signal + new exits | 78 trades, −0.128% | 78 trades, −0.135% (worst-case) |
+  | EV-only V3 endpoint (diag) | 996 trades, −0.094% | 996 trades, −0.094% |
+  | EV-only V4 (diag) | 5 trades, −0.089% | 32 trades, −0.034% |
+- Reading: BTC h15 shows no tradable edge on dev_val; more trades (EV-only) lose more. Corrections made
+  evaluation stricter, not rosier.
+- Wording correction for R-009: read "endpoint label materially misstates what is realizable" as "V3
+  endpoint labels are materially misaligned with the new SL/trailing execution policy" (D-023 #2).
+- R-009 / R-011 drawdown numbers are additive trade-% diagnostics, not account drawdown (D-023 #5).
+- The P3 full run and BTC resolver sample from before D-023 were stopped/ignored and are re-run with the
+  corrected code.
+
 ## R-011 · 2026-10-07 · P4A first result — BTCUSDT h15 (development data only)
 - Owner said "go P4A" while the full P3 run was still running (BTC P3 reports were complete).
 - Rows: fit 249,998 · calibration 62,501 · dev_val 134,416 (holdout asserted untouched). 531 s.

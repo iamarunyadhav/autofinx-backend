@@ -66,12 +66,11 @@ def predict(booster, iso, x):
 
 
 def auc(y: np.ndarray, p: np.ndarray) -> float | None:
-    pos, neg = y == 1, y == 0
-    if pos.sum() == 0 or neg.sum() == 0:
+    """sklearn roc_auc_score (ties handled correctly; isotonic outputs have many ties)."""
+    from sklearn.metrics import roc_auc_score
+    if len(np.unique(y)) < 2:
         return None
-    order = np.argsort(p, kind="mergesort")
-    ranks = np.empty(len(p)); ranks[order] = np.arange(1, len(p) + 1)
-    return float((ranks[pos].sum() - pos.sum() * (pos.sum() + 1) / 2) / (pos.sum() * neg.sum()))
+    return float(roc_auc_score(y, p))
 
 
 def decide(p_buy, p_sell, ev_buy, ev_sell, floor: float = FLOOR) -> np.ndarray:
@@ -127,12 +126,18 @@ def run(work: Path, symbol: str, horizon: int) -> dict:
     grid, funding, conflicts = dense_minutes(m1), load_funding(work, symbol), conflict_buckets(m1, m5)
     train_rows_all = np.nonzero(train_m & (t["status"] == VALID))[0]
     ref = {side: reference_levels(t, train_rows_all, side, COST, MIN_EDGE) for side in ("long", "short")}
-    path = {side: pol.simulate(None, anchors, horizon, side, ref[side]["sl"], ref[side]["act"], ref[side]["trail"], COST, funding, conflicts, grid=grid)
-            for side in ("long", "short")}
+    path = {}
+    for side in ("long", "short"):
+        sim = pol.simulate(None, anchors, horizon, side, ref[side]["sl"], ref[side]["act"], ref[side]["trail"], COST, funding, conflicts, grid=grid)
+        path[side] = pol.apply_worst_case(sim, grid, anchors, horizon, side, ref[side]["sl"], ref[side]["act"], ref[side]["trail"], COST, funding)
     never = 1e9
     endpoint = {side: pol.simulate(None, anchors, horizon, side, never, never, never, COST, funding, conflicts, grid=grid) for side in ("long", "short")}
 
-    y_v4 = {s: ((path[s]["net_pct"] >= MIN_EDGE) & (path[s]["reason"] != pol.AMBIGUOUS_INTRABAR)).astype(int) for s in ("long", "short")}
+    # V4 labels: clean outcomes only. Rows whose intrabar order is unresolved (stop-vs-activation or
+    # same-bar trailing) are EXCLUDED from fitting, calibration and label metrics (D-023), not labelled 0.
+    y_v4 = {s: (path[s]["net_pct"] >= MIN_EDGE).astype(int) for s in ("long", "short")}
+    clean_v4 = {s: (path[s]["reason"] != pol.AMBIGUOUS_INTRABAR) & ~path[s]["same_bar_trail"] for s in ("long", "short")}
+    clean_v3 = {s: np.ones(len(anchors), bool) for s in ("long", "short")}
     gross = t["long_final_time_exit_gross_pct"][rows]; fund = t["funding_long_pct"][rows]
     y_v3 = {"long": (gross > REQUIRED + fund).astype(int), "short": (-gross > REQUIRED - fund).astype(int)}
 
@@ -148,23 +153,30 @@ def run(work: Path, symbol: str, horizon: int) -> dict:
     model_dir.mkdir(parents=True, exist_ok=True)
 
     signals = {}
-    for arm, ys, outcome in (("V3", y_v3, endpoint), ("V4", y_v4, path)):
+    report["v4_unresolved_excluded_pct"] = {s: round(float((~clean_v4[s][tr]).mean() * 100), 2) for s in ("long", "short")}
+    for arm, ys, outcome, clean in (("V3", y_v3, endpoint, clean_v3), ("V4", y_v4, path, clean_v4)):
         p_val, ev_val = {}, {}
         for side in ("long", "short"):
             y = ys[side]
-            booster, iso = fit_classifier(x, y, anchors, fit, cal)
+            ok = clean[side]
+            fit_s, cal_s, val_s = fit[ok[fit]], cal[ok[cal]], val[ok[val]]
+            booster, iso = fit_classifier(x, y, anchors, fit_s, cal_s)
             booster.save_model(str(model_dir / f"{arm.lower()}_{side}.txt"))
-            p_cal = predict(booster, iso, x[cal]); p_v = predict(booster, iso, x[val])
+            p_v = predict(booster, iso, x[val])                      # every val row gets a decision
+            # EV parameters from the calibration slice; worst-case nets keep unresolved rows honest.
             net_cal = outcome[side]["net_pct"][cal]
-            avg_win = float(net_cal[y[cal] == 1].mean()) if (y[cal] == 1).any() else 0.0
-            avg_other = float(net_cal[y[cal] == 0].mean()) if (y[cal] == 0).any() else 0.0
+            win_cal = y[cal] == 1
+            avg_win = float(net_cal[win_cal].mean()) if win_cal.any() else 0.0
+            avg_other = float(net_cal[~win_cal].mean()) if (~win_cal).any() else 0.0
             p_val[side], ev_val[side] = p_v, p_v * avg_win + (1 - p_v) * avg_other
-            report["label_base_rates_train"][f"{arm}_{side}"] = round(float(y[tr].mean() * 100), 2)
+            p_vs = predict(booster, iso, x[val_s])
+            report["label_base_rates_train"][f"{arm}_{side}"] = round(float(y[tr][ok[tr]].mean() * 100), 2)
             report["classifiers"][f"{arm}_{side}"] = {
-                "val_auc": round(auc(y[val], p_v), 4) if auc(y[val], p_v) is not None else None,
-                "val_base_rate_pct": round(float(y[val].mean() * 100), 2),
-                "val_brier": round(float(np.mean((p_v - y[val]) ** 2)), 5),
-                "val_brier_climatology": round(float(np.mean((y[cal].mean() - y[val]) ** 2)), 5),
+                "val_auc": round(auc(y[val_s], p_vs), 4) if auc(y[val_s], p_vs) is not None else None,
+                "val_rows_scored": int(len(val_s)),
+                "val_base_rate_pct": round(float(y[val_s].mean() * 100), 2),
+                "val_brier": round(float(np.mean((p_vs - y[val_s]) ** 2)), 5),
+                "val_brier_climatology": round(float(np.mean((y[cal_s].mean() - y[val_s]) ** 2)), 5),
                 "avg_win_net_pct": round(avg_win, 4), "avg_other_net_pct": round(avg_other, 4),
                 "val_rows_p_ge_floor_pct": round(float((p_v >= FLOOR).mean() * 100), 3)}
         signals[arm] = decide(p_val["long"], p_val["short"], ev_val["long"], ev_val["short"])

@@ -4,13 +4,15 @@ Last updated: 2026-10-06 by ml-engine-v1 (Claude Code session).
 
 ## Current state
 
-- **Current phase:** **P3 in progress** (owner: "go P3" 2026-10-07). P3 code + 42 tests done; BTC h15/h240
-  results in RESULTS R-009. P2 background job (features for ETH..SUI + targets for all) running
-  (`D:utofinx-ml-v4\logs\p2-features-targets.log`).
-- **Next action:** when P2 finishes, record the P2 gate (counts per coin) and run
-  `python -m v4.cli p3 --work D:utofinx-ml-v4` for all six coins x five horizons; then report the P3
-  SUMMARY to the owner. Owner to confirm D-016 (splits) and decide on the aggTrade resolver (§26)
-  before P5. Still open in P3: V3 signals + new exits (needs a dev-train-only V3 predictor).
+- **Current phase:** **P4A in progress** (P3 diagnostics re-running). Review corrections D-023 applied
+  (worst-case same-bar evaluation, unresolved rows excluded from V4 labels, sklearn AUC, resolver
+  funding, additive drawdown labelled). 49 tests pass. BTC h15 old-vs-corrected in RESULTS R-012.
+- **Running (one background chain, `D:utofinx-ml-v4\logs\chain-p3-resolve-p4a.log`):** full P3
+  (6 coins x 5 horizons) -> BTC sampled aggTrade resolver (30 days, h15/h60) -> P4A all coins per
+  horizon in SPEC 75 order (15, 60, 120, 240, 1440).
+- **Next action:** when the chain finishes, record P3 table (R-013), resolver bias (R-014), P4A table
+  V3 vs V4 per coin x horizon (R-015); decide with the owner whether P4B (pattern features) starts.
+  Decision gate for P5 = D-021/D-022 as amended by D-023 #6 (12 combos, lift optional).
 - **Server:** ML paused with `ml-server-pause.sh --apply` on 2026-10-07 00:53 +08 (flag false, worker
   autostart off, 1.4 GB exports removed). Load stayed ~27–29, so ML was not the main server load.
   `--free-disk` (~16 GB) recommended, owner to decide.

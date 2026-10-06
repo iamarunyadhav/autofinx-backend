@@ -38,17 +38,17 @@ def test_without_ticks_resimulate_equals_the_conservative_simulator():
         sim = pol.simulate(m1, anchors, 15, side, 0.3, 0.2, 0.1, 0.12)
         for i in range(70):
             w = window(prices[i * 5:i * 5 + 15])
-            why, move = rs.resimulate(w, {}, side, 0.3, 0.2, 0.1, 0.12)
+            why, move, bar = rs.resimulate(w, {}, side, 0.3, 0.2, 0.1, 0.12)
             assert why == pol.REASONS[sim["reason"][i]] and move == pytest.approx(sim["gross_pct"][i], abs=1e-9)
 
 
 def test_ticks_decide_the_order_inside_an_ambiguous_bar():
     bars = [(100, 100.6, 99.4, 100.2), (100.2, 100.3, 100.1, 100.2)]          # touches -0.5 stop and +0.4 activation
-    conservative, _ = rs.resimulate(window(bars), {}, "long", 0.5, 0.4, 0.2, 0.12)
+    conservative, _, _ = rs.resimulate(window(bars), {}, "long", 0.5, 0.4, 0.2, 0.12)
     assert conservative == "AMBIGUOUS_INTRABAR"
-    stop_first, move = rs.resimulate(window(bars), {0: np.array([100, 99.4, 100.6, 100.2])}, "long", 0.5, 0.4, 0.2, 0.12)
+    stop_first, move, _ = rs.resimulate(window(bars), {0: np.array([100, 99.4, 100.6, 100.2])}, "long", 0.5, 0.4, 0.2, 0.12)
     assert stop_first == "HARD_STOP" and move == pytest.approx(-0.6)
-    profit_first, move = rs.resimulate(window(bars), {0: np.array([100, 100.6, 100.35, 100.2])}, "long", 0.5, 0.4, 0.2, 0.12)
+    profit_first, move, _ = rs.resimulate(window(bars), {0: np.array([100, 100.6, 100.35, 100.2])}, "long", 0.5, 0.4, 0.2, 0.12)
     assert profit_first == "TRAILING_PROFIT" and move == pytest.approx(0.35)    # first trade at/below the 0.4 stop
 
 

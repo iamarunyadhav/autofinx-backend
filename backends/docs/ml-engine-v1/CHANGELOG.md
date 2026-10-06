@@ -121,3 +121,13 @@ Plan lock (same day, session d):
   ARM2_V4 / always-take baselines, plus EV-only diagnostic arms. Models in
   `D:\autofinx-ml-v4\models\<SYMBOL>\h<H>\`, reports in `reports\p4a\`. Status P4A_DEV_ONLY_NOT_FROZEN.
 - `external-predictive-engine/v4/cli.py` — command `p4a`.
+
+## 2026-10-07 — Review corrections D-023 (session j)
+- `v4/policy.py` — `worst_case_path()` + `apply_worst_case()` (both intrabar orders, lower net kept);
+  drawdown key renamed `max_drawdown_additive_pct`; docstring corrected.
+- `v4/lab.py` — worst-case applied to every policy run; label audit treats same-bar rows as ambiguous.
+- `v4/train_v4.py` — sklearn AUC; worst-case path outcomes; V4 labels exclude unresolved rows;
+  EV-only diagnostic arms; report field `v4_unresolved_excluded_pct`.
+- `v4/resolver.py` — resimulate returns the exit bar; funding recomputed to the resolved exit;
+  baseline uses worst-case evaluation.
+- `tests/v4/test_policy.py` — 3 worst-case tests; `tests/v4/test_resolver.py` updated (49 tests).
