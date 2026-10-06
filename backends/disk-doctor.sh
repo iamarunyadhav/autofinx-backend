@@ -16,9 +16,7 @@ for base in /home /var /var/lib /usr /opt /root /backup /tmp; do
   [ -d "$base" ] && timeout 60 nice -n 19 ionice -c3 du -xh --max-depth=1 "$base" 2>/dev/null | sort -rh | sed -n '2,5p'
 done
 echo; echo "== Files over 300 MB (90s limit)"
-timeout 90 nice -n 19 ionice -c3 find / -xdev -type f -size +300M -printf '%s %p
-' 2>/dev/null | sort -rn | head -12 | awk '{printf "  %6d MB  %s
-", $1/1048576, $2}'
+timeout 90 nice -n 19 ionice -c3 find / -xdev -type f -size +300M -exec stat -c '%s %n' {} + 2>/dev/null | sort -rn | head -12 | while read -r sz path; do echo "  $((sz / 1048576)) MB  $path"; done
 echo; echo "== Known big spots"
 for d in /var/lib/mysql /var/log /var/lib/mysql/*binlog* /backup /home/backup /home/zcadmin /tmp "$APP/storage/logs" "$APP/storage/app/ml-shadow"; do
   [ -e "$d" ] && printf '  %8s  %s\n' "$(du -sh "$d" 2>/dev/null | cut -f1)" "$d"
