@@ -124,6 +124,8 @@ Route::prefix('v1')->group(function () {
             Route::post('/experiments', [\App\Http\Controllers\Api\NexusController::class, 'experiment'])->middleware('throttle:4,1');
             Route::post('/candidates/{entry}/review', [\App\Http\Controllers\Api\NexusController::class, 'review'])->middleware('throttle:20,1');
         });
+        // Market Context (shadow-only, read-only; flag AUTOFINX_MARKET_CONTEXT_ENABLED)
+        Route::get('workspaces/{workspace}/market-context/{assetClass}/{instrument}', [\App\Http\Controllers\Api\MarketContextController::class, 'show'])->middleware('throttle:60,1');
         Route::post('workspaces', [WorkspaceController::class, 'store']);
         Route::get('workspaces/{workspace}', [WorkspaceController::class, 'show']);
         Route::put('workspaces/{workspace}', [WorkspaceController::class, 'update']);

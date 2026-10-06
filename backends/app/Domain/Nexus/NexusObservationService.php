@@ -40,6 +40,8 @@ final class NexusObservationService
             ->where('settled_at', '>=', now()->subDay())->whereNotNull('profit_loss')
             ->selectRaw('symbol, source, mode, timeframe, expiry_seconds, quote_currency, COUNT(*) AS samples, SUM(profit_loss) AS booked_net_pnl, SUM(fees_total) AS booked_fees')
             ->groupBy('symbol', 'source', 'mode', 'timeframe', 'expiry_seconds', 'quote_currency')->limit(100)->get()->map(fn ($r) => (array) $r)->all();
+        // Additive, read-only: latest stored Market Context snapshot summaries (DISABLED when the flag is off).
+        $result['market_context'] = app(\App\Domain\MarketContext\MarketContextObservation::class)->summary();
         $result['limitations'] = ['Rolling observations are bounded, not a complete historical dataset.',
             'Booked accounting may be awaiting fee reconciliation; no inferred profitability.',
             'Modules lacking a direct workspace column require a reviewed ownership adapter.'];

@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/" xmlns:media="http://search.yahoo.com/mrss/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:wfw="http://wellformedweb.org/CommentAPI/" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:sy="http://purl.org/rss/1.0/modules/syndication/" xmlns:slash="http://purl.org/rss/1.0/modules/slash/">
+  <channel>
+    <title>Cointelegraph.com News</title>
+    <link>https://cointelegraph.com</link>
+    <atom:link href="https://cointelegraph.com/rss" rel="self" type="application/rss+xml"/>
+    <description>Cointelegraph covers fintech, blockchain and Bitcoin bringing you the latest crypto news and analyses on the future of money.</description>
+    <generator>cointelegraph.com</generator>
+    <lastBuildDate>Tue, 06 Oct 2026 02:09:49 +0000</lastBuildDate>
+    <language>en</language>
+    <sy:updatePeriod>hourly</sy:updatePeriod>
+    <sy:updateFrequency>1</sy:updateFrequency>
+    <image>
+      <title>Cointelegraph.com News</title>
+      <link>https://cointelegraph.com</link>
+      <url>https://s3.cointelegraph.com/storage/uploads/view/b9ea15d46738b4df64e6e100ab59b373.png</url>
+      <description>Cointelegraph covers fintech, blockchain and Bitcoin bringing you the latest crypto news and analyses on the future of money.</description>
+    </image>
+    <item>
+      <title>Chinese crime network laundered over $1B for Lazarus: ZachXBT</title>
+      <pubDate>Tue, 06 Oct 2026 01:47:24 +0000</pubDate>
+      <atom:updated>Tue, 06 Oct 2026 02:06:59 +0000</atom:updated>
+      <guid isPermaLink="true">https://cointelegraph.com/news/chinese-crime-network-laundered-over-1b-for-lazarus-zachxbt</guid>
+      <link><![CDATA[https://cointelegraph.com/news/chinese-crime-network-laundered-over-1b-for-lazarus-zachxbt?utm_source=rss_feed&utm_medium=rss&utm_campaign=rss_partner_inbound]]></link>
+      <description><![CDATA[<p style="float:right; margin:0 0 10px 15px; width:240px;"><img src="https://s3-images.ctmedia.io/media/article-covers/2026/10/01M47E98M7WF0617YMCEA467EH/laundering.jpg" alt="Chinese crime network laundered over $1B for Lazarus: ZachXBT" class="type:primaryImage"></p><p>ZachXBT says he infiltrated the network by posing as a customer, gaining information that helped trace funds from the $1.5 billion Bybit hack. </p>]]></description>
+      <dc:creator>Cointelegraph by Felix Ng</dc:creator>
+      <media:content url="https://s3-images.ctmedia.io/media/article-covers/2026/10/01M47E98M7WF0617YMCEA467EH/laundering.jpg" fileSize="360637" type="image/jpeg" medium="image" height="966" width="1450">
+        <credit>Cointelegraph</credit>
+        <media:credit role="publishing company">Cointelegraph</media:credit>
+      </media:content>
+      <enclosure url="https://s3-images.ctmedia.io/media/article-covers/2026/10/01M47E98M7WF0617YMCEA467EH/laundering.jpg" length="360637" type="image/jpeg"/>
+      <category>Latest News</category>
+    </item>
+    <item>
+      <title>Crypto PAC announces support for 32 House candidates in US midterms</title>
+      <pubDate>Mon, 05 Oct 2026 21:42:30 +0000</pubDate>
+      <atom:updated>Tue, 06 Oct 2026 01:21:03 +0000</atom:updated>
+      <guid isPermaLink="true">https://cointelegraph.com/news/crypto-pac-fairshake-house-endorsements-us-midterms</guid>
+      <link><![CDATA[https://cointelegraph.com/news/crypto-pac-fairshake-house-endorsements-us-midterms?utm_source=rss_feed&utm_medium=rss&utm_campaign=rss_partner_inbound]]></link>
+      <description><![CDATA[<p style="float:right; margin:0 0 10px 15px; width:240px;"><img src="https://s3-images.ctmedia.io/media/article-covers/2026/10/01M46WXGBMXWCHCDF4G7K9W92T/hi-crypto-for-america-cryptocurrencies-in-campaign-finance-2.jpg" alt="Crypto PAC announces support for 32 House candidates in US midterms" class="type:primaryImage"></p><p>Fairshake said it would financially back 32 House candidates who all voted in favor of the CLARITY market structure bill in 2025, as the legislation remains in limbo in the Senate.</p>]]></description>
+      <dc:creator>Cointelegraph by Turner Wright</dc:creator>
+      <media:content url="https://s3-images.ctmedia.io/media/article-covers/2026/10/01M46WXGBMXWCHCDF4G7K9W92T/hi-crypto-for-america-cryptocurrencies-in-campaign-finance-2.jpg" fileSize="272580" type="image/jpeg" medium="image" height="966" width="1450">
+        <credit>Cointelegraph</credit>
+        <media:credit role="publishing company">Cointelegraph</media:credit>
+      </media:content>
+      <enclosure url="https://s3-images.ctmedia.io/media/article-covers/2026/10/01M46WXGBMXWCHCDF4G7K9W92T/hi-crypto-for-america-cryptocurrencies-in-campaign-finance-2.jpg" length="272580" type="image/jpeg"/>
+      <category>Latest News</category>
+    </item>
+
+  </channel>
+</rss>

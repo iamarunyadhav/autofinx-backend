@@ -39,6 +39,12 @@ $schedulerEnabled = (bool) config('autofinx.scheduler.enabled', true);
 if ($schedulerEnabled && config('nexus.enabled', false)) {
     Schedule::command('nexus:run-cycle')->everyFifteenMinutes()->onOneServer()->withoutOverlapping(5)->runInBackground();
 }
+// Market Context (shadow-only). Interval >= 10 min, SHORT overlap-lock expiry (the default 24h lock once froze other schedules), no daemon.
+if ($schedulerEnabled && config('market_context.enabled', false)) {
+    Schedule::command('market-context:collect')->everyFifteenMinutes()->onOneServer()->withoutOverlapping(10)->runInBackground();
+    Schedule::command('market-context:snapshot')->cron('2,17,32,47 * * * *')->onOneServer()->withoutOverlapping(10)->runInBackground();
+    Schedule::command('market-context:prune')->dailyAt('04:23')->onOneServer()->withoutOverlapping(30)->runInBackground();
+}
 $supervisorRuntime = (bool) config('autofinx.runtime.supervisor', false);
 $allowMarketConsumers = (bool) config('autofinx.scheduler.market_consumers', false);
 $allowBinanceRest = (bool) config('autofinx.scheduler.binance_rest', false);
