@@ -2,27 +2,35 @@
   ml-offload.ps1 - train the AutoFinX ML shadow models on THIS PC instead of the production server.
 
   ONE command (PowerShell, from the backends folder):
-      powershell -ExecutionPolicy Bypass -File .\ml-offload.ps1 -Server root@YOUR_SERVER_IP
+      powershell -ExecutionPolicy Bypass -File .\ml-offload.ps1 -Server root@62.72.45.72 -Port 333
+
+  Default: BTCUSDT + ETHUSDT, horizons 15 / 60 / 120 / 240 / 1440 minutes.
+  More:    -Symbols BTCUSDT,ETHUSDT,BNBUSDT   -Horizons 15,45,60,120,240,1440
 
   What it does, in order (re-runnable: finished parts are skipped, so it resumes after a stop):
     1  checks SSH (key login), PHP, Python
     2  creates a Python venv on D: and installs lightgbm / numpy / scikit-learn
     3  reads the cost + promotion settings from the server, so verdicts match the server
     4  creates an ISOLATED sqlite database on D: (your local MySQL / .env are never touched)
-    5  downloads each symbol training data from the server (streamed, gzip, low priority, no disk used on the server)
-    6  trains every symbol x horizon locally, one model at a time (full history, no row cap issues)
+    5  downloads the 5m candles + funding rates straight from Binance public API to THIS PC
+       (the server is NOT used for data, so the loaded server is not touched at all),
+       then builds features and labels locally with the same code the server uses
+    6  trains every symbol x horizon locally, one model at a time
     7  packs the trained models, uploads them, and shows what the server would install
        (-Install actually installs them: shadow only, checksums verified, never replaces an existing champion)
 
-  Safe: reads training tables on the server only; trading tables are never touched; nothing is installed
-  on the server unless you pass -Install. Stop any time with Ctrl+C, or create the file  D:\autofinx-ml\STOP
+  Safe: trading tables and the server database are never read or written; nothing is installed on the
+  server unless you pass -Install. Stop any time with Ctrl+C, or create the file  D:\autofinx-ml\STOP
   to finish the current model and stop.
+
+  Note on 45m: the server does not predict a 45-minute horizon (config ml.horizons_minutes). A 45m model
+  can be trained and judged here, but the server only uses it after 45 is added to that setting.
 #>
 param(
     [Parameter(Mandatory = $true)][string]$Server,
     [int]$Port = 22,
     [string]$Work = 'D:\autofinx-ml',
-    [string[]]$Symbols = @('ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT', 'SUIUSDT'),
+    [string[]]$Symbols = @('BTCUSDT', 'ETHUSDT'),
     [int[]]$Horizons = @(240, 1440, 120, 60, 15),
     [string]$RemoteApp = '/home/zcadmin/public_html/api.autofinx.arunyadhav.dev/autofinx-backend/backends',
     [switch]$Install,
@@ -53,7 +61,7 @@ $freeGb = [math]::Round((Get-PSDrive $driveName).Free / 1GB, 1)
 
 Step 1 "Checks"
 Info "work folder $Work ($freeGb GB free on drive ${driveName}:)"
-if ($freeGb -lt 15) { Warn "Less than 15 GB free on ${driveName}: - 5 coins need roughly 8-10 GB." }
+if ($freeGb -lt 10) { Warn "Less than 10 GB free on ${driveName}:." }
 $null = cmd /c "$ssh $Server echo ssh-ok 2>nul"
 if ($LASTEXITCODE -ne 0) {
     Write-Host ""
@@ -92,6 +100,13 @@ foreach ($line in $settings) {
 }
 if ($count -lt 10) { Die "Could not read the settings from the server (got $count lines). Is the code pulled on the server (git pull)?" }
 Ok "$count settings copied (saved in $Work\settings.txt)."
+# Horizons asked for here are added to the server ones (e.g. 45), so their labels get built.
+$serverHorizons = @(([string]$env:AUTOFINX_ML_HORIZONS_MINUTES).Split(',') | Where-Object { $_ -ne '' } | ForEach-Object { [int]$_ })
+$allHorizons = @($serverHorizons + $Horizons | Sort-Object -Unique)
+$env:AUTOFINX_ML_HORIZONS_MINUTES = ($allHorizons -join ',')
+$extra = @($Horizons | Where-Object { $serverHorizons -notcontains $_ })
+if ($extra.Count -gt 0) { Warn "Horizon(s) $($extra -join ',') are not predicted by the server today; they are trained and judged here only." }
+$env:AUTOFINX_ML_SYMBOLS = ((@(([string]$env:AUTOFINX_ML_SYMBOLS).Split(',')) + $Symbols) | Where-Object { $_ -ne '' } | Sort-Object -Unique) -join ','
 
 # Isolated local runtime: everything below overrides .env for THIS process only.
 $env:DB_CONNECTION = 'sqlite'
@@ -117,25 +132,26 @@ if (-not (Test-Path "$Work\ml.sqlite")) { New-Item -ItemType File -Path "$Work\m
 if ($LASTEXITCODE -ne 0) { Pop-Location; Die "Local migration failed (see output above)." }
 Ok "Local database ready: $Work\ml.sqlite  (your local MySQL is not used)."
 
-Step 5 "Download + import training data from the server"
+Step 5 "Candles + funding from Binance (public API, straight to this PC) and local features/labels"
 foreach ($sym in $Symbols) {
-    $file = "$Work\data\$sym.ndjson.gz"
-    $marker = "$Work\data\$sym.imported"
-    if ((Test-Path $marker) -and -not $Refetch) { Ok "$sym already imported (use -Refetch to download again)."; continue }
-    for ($try = 1; $try -le 2; $try++) {
-        $started = Get-Date
-        Info "$sym : downloading (server runs it at low priority; a loaded server can take a while) attempt $try"
-        $cmdFile = "$Work\fetch-$sym.cmd"
-        "@echo off`r`n$ssh $Server `"$artisanRemote ml:offload:export $sym | gzip -1`" > `"$file`"" | Set-Content -Encoding ascii $cmdFile
-        cmd /c $cmdFile
-        $sizeMb = [math]::Round((Get-Item $file).Length / 1MB, 1)
-        Info "$sym : downloaded $sizeMb MB in $([math]::Round(((Get-Date) - $started).TotalMinutes, 1)) min, importing..."
-        & php -d memory_limit=1024M artisan ml:offload:import $file --yes-local
-        if ($LASTEXITCODE -eq 0) { Set-Content -Path $marker -Value (Get-Date).ToString('s'); break }
-        Warn "$sym : import failed (cut download?) - trying again."
-        Remove-Item $file -Force -ErrorAction SilentlyContinue
+    $marker = "$Work\data\$sym.built"
+    if ($Refetch) { Remove-Item $marker -Force -ErrorAction SilentlyContinue }
+    if (Test-Path $marker) { Ok "$sym : data already built (use -Refetch to redo)."; continue }
+    $started = Get-Date
+    $completed = $false
+    for ($run = 1; ($run -le 8) -and (-not $completed); $run++) {
+        Info "$sym : downloading candles from Binance (run $run; resumes from its checkpoint)"
+        $out = & php -d memory_limit=2048M artisan ml:candles:backfill --symbol=$sym --no-build 2>&1 | ForEach-Object { Write-Host "    $_"; $_ }
+        if (($out -join "`n") -match "${sym}: COMPLETED") { $completed = $true }
     }
-    if (-not (Test-Path $marker)) { Warn "$sym : could not be downloaded; skipped. Run the script again later."; $todo.Add("Re-run the script: $sym data was not downloaded.") }
+    if (-not $completed) { Warn "$sym : candle download did not complete; run the script again to resume."; $todo.Add("Re-run the script: $sym candles incomplete."); continue }
+    Info "$sym : funding rates"
+    & php -d memory_limit=1024M artisan ml:funding:sync --symbol=$sym --force
+    Info "$sym : building features + labels locally (several minutes per coin)"
+    & php -d memory_limit=4096M artisan ml:features:build --symbol=$sym --full
+    if ($LASTEXITCODE -ne 0) { Warn "$sym : feature build failed (see above)."; $todo.Add("Feature build failed: $sym"); continue }
+    Set-Content -Path $marker -Value (Get-Date).ToString('s')
+    Ok "$sym : data ready in $([math]::Round(((Get-Date) - $started).TotalMinutes, 1)) min."
 }
 
 Step 6 "Train locally (one model at a time)"
@@ -146,7 +162,7 @@ $resultsFile = "$Work\results.txt"
 $stopped = $false
 foreach ($h in $Horizons) {
     foreach ($sym in $Symbols) {
-        if (-not (Test-Path "$Work\data\$sym.imported")) { continue }
+        if (-not (Test-Path "$Work\data\$sym.built")) { continue }
         $key = "${sym}:$h"
         if ((Get-Content $doneFile) -contains $key) { Info "$sym h$h : already trained (skipped)."; continue }
         if (Test-Path "$Work\STOP") { $stopped = $true; break }
