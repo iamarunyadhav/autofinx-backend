@@ -39,8 +39,8 @@ param(
 
 $ErrorActionPreference = 'Continue'
 # powershell -File passes a comma list as ONE string, so split it here.
-$Symbols = @($Symbols -split '[,; ]+' | Where-Object { $_ -ne '' } | ForEach-Object { $_.ToUpper() })
-$Horizons = @($Horizons -split '[,; ]+' | Where-Object { $_ -ne '' } | ForEach-Object { [int]$_ })
+$symList = @($Symbols -split '[,; ]+' | Where-Object { $_ -ne '' } | ForEach-Object { $_.ToUpper() })
+$horList = @($Horizons -split '[,; ]+' | Where-Object { $_ -ne '' } | ForEach-Object { [int]$_ })
 $repo =Split-Path -Parent $MyInvocation.MyCommand.Path
 $ssh = "ssh -p $Port -o BatchMode=yes -o ConnectTimeout=20 -o ServerAliveInterval=30 -o ServerAliveCountMax=20"
 $artisanRemote = "cd $RemoteApp && ionice -c2 -n6 runuser -u zcadmin -- /usr/local/bin/ea-php82 -d memory_limit=1024M artisan"
@@ -105,11 +105,11 @@ if ($count -lt 10) { Die "Could not read the settings from the server (got $coun
 Ok "$count settings copied (saved in $Work\settings.txt)."
 # Horizons asked for here are added to the server ones (e.g. 45), so their labels get built.
 $serverHorizons = @(([string]$env:AUTOFINX_ML_HORIZONS_MINUTES).Split(',') | Where-Object { $_ -ne '' } | ForEach-Object { [int]$_ })
-$allHorizons = @($serverHorizons + $Horizons | Sort-Object -Unique)
+$allHorizons = @($serverHorizons + $horList | Sort-Object -Unique)
 $env:AUTOFINX_ML_HORIZONS_MINUTES = ($allHorizons -join ',')
-$extra = @($Horizons | Where-Object { $serverHorizons -notcontains $_ })
+$extra = @($horList | Where-Object { $serverHorizons -notcontains $_ })
 if ($extra.Count -gt 0) { Warn "Horizon(s) $($extra -join ',') are not predicted by the server today; they are trained and judged here only." }
-$env:AUTOFINX_ML_SYMBOLS = ((@(([string]$env:AUTOFINX_ML_SYMBOLS).Split(',')) + $Symbols) | Where-Object { $_ -ne '' } | Sort-Object -Unique) -join ','
+$env:AUTOFINX_ML_SYMBOLS = ((@(([string]$env:AUTOFINX_ML_SYMBOLS).Split(',')) + $symList) | Where-Object { $_ -ne '' } | Sort-Object -Unique) -join ','
 
 # Isolated local runtime: everything below overrides .env for THIS process only.
 $env:DB_CONNECTION = 'sqlite'
@@ -136,7 +136,7 @@ if ($LASTEXITCODE -ne 0) { Pop-Location; Die "Local migration failed (see output
 Ok "Local database ready: $Work\ml.sqlite  (your local MySQL is not used)."
 
 Step 5 "Candles + funding from Binance (public API, straight to this PC) and local features/labels"
-foreach ($sym in $Symbols) {
+foreach ($sym in $symList) {
     $marker = "$Work\data\$sym.built"
     if ($Refetch) { Remove-Item $marker -Force -ErrorAction SilentlyContinue }
     if (Test-Path $marker) { Ok "$sym : data already built (use -Refetch to redo)."; continue }
@@ -163,8 +163,8 @@ $doneFile = "$Work\done.txt"
 if (-not (Test-Path $doneFile)) { New-Item -ItemType File -Path $doneFile | Out-Null }
 $resultsFile = "$Work\results.txt"
 $stopped = $false
-foreach ($h in $Horizons) {
-    foreach ($sym in $Symbols) {
+foreach ($h in $horList) {
+    foreach ($sym in $symList) {
         if (-not (Test-Path "$Work\data\$sym.built")) { continue }
         $key = "${sym}:$h"
         if ((Get-Content $doneFile) -contains $key) { Info "$sym h$h : already trained (skipped)."; continue }
@@ -193,6 +193,8 @@ $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $bundle = "$Work\bundle-$stamp"
 & php artisan ml:offload:pack $bundle
 if (-not (Test-Path "$bundle\bundle.json")) { Pop-Location; Die "Nothing was packed." }
+$packed = @((Get-Content "$bundle\bundle.json" -Raw | ConvertFrom-Json).models).Count
+if ($packed -eq 0) { Warn "No trained models yet - nothing to send to the server."; Pop-Location; Write-Host ''; Write-Host '=== SUMMARY ===' -ForegroundColor Cyan; if ($todo.Count -gt 0) { $i = 1; foreach ($t in $todo) { Write-Host "   $i. $t"; $i++ } }; exit 1 }
 $remoteDir = "/home/zcadmin/ml-offload/$stamp"
 $null = cmd /c "$ssh $Server `"mkdir -p /home/zcadmin/ml-offload`""
 cmd /c "scp -P $Port -o BatchMode=yes -r `"$bundle`" ${Server}:$remoteDir"
