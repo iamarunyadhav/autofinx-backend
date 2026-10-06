@@ -20,6 +20,7 @@
 #>
 param(
     [Parameter(Mandatory = $true)][string]$Server,
+    [int]$Port = 22,
     [string]$Work = 'D:\autofinx-ml',
     [string[]]$Symbols = @('ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT', 'SUIUSDT'),
     [int[]]$Horizons = @(240, 1440, 120, 60, 15),
@@ -30,7 +31,7 @@ param(
 
 $ErrorActionPreference = 'Continue'
 $repo = Split-Path -Parent $MyInvocation.MyCommand.Path
-$ssh = "ssh -o BatchMode=yes -o ConnectTimeout=20 -o ServerAliveInterval=30 -o ServerAliveCountMax=20"
+$ssh = "ssh -p $Port -o BatchMode=yes -o ConnectTimeout=20 -o ServerAliveInterval=30 -o ServerAliveCountMax=20"
 $artisanRemote = "cd $RemoteApp && nice -n 19 ionice -c3 runuser -u zcadmin -- /usr/local/bin/ea-php82 -d memory_limit=1024M artisan"
 $todo = New-Object System.Collections.Generic.List[string]
 
@@ -57,8 +58,8 @@ $null = cmd /c "$ssh $Server echo ssh-ok 2>nul"
 if ($LASTEXITCODE -ne 0) {
     Write-Host ""
     Write-Host "  SSH key login to $Server does not work yet. One-time setup (enter the server password when asked):" -ForegroundColor Yellow
-    Write-Host '      if (-not (Test-Path $HOME\.ssh\id_ed25519)) { ssh-keygen -t ed25519 -N "" -f $HOME\.ssh\id_ed25519 }'
-    Write-Host "      type `$HOME\.ssh\id_ed25519.pub | ssh $Server `"mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys`""
+    Write-Host '      if (-not (Test-Path $HOME\.ssh\id_ed25519)) { ssh-keygen -t ed25519 -N ''""'' -f $HOME\.ssh\id_ed25519 }'
+    Write-Host "      type `$HOME\.ssh\id_ed25519.pub | ssh -p $Port $Server `"mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys`""
     Write-Host "  Then run this script again."
     exit 2
 }
@@ -175,7 +176,7 @@ $bundle = "$Work\bundle-$stamp"
 if (-not (Test-Path "$bundle\bundle.json")) { Pop-Location; Die "Nothing was packed." }
 $remoteDir = "/home/zcadmin/ml-offload/$stamp"
 $null = cmd /c "$ssh $Server `"mkdir -p /home/zcadmin/ml-offload`""
-cmd /c "scp -o BatchMode=yes -r `"$bundle`" ${Server}:$remoteDir"
+cmd /c "scp -P $Port -o BatchMode=yes -r `"$bundle`" ${Server}:$remoteDir"
 if ($LASTEXITCODE -ne 0) { Pop-Location; Die "Upload failed. The bundle stays in $bundle ; copy it with scp and run the install command below by hand." }
 $null = cmd /c "$ssh $Server `"chown -R zcadmin:zcadmin /home/zcadmin/ml-offload`""
 Ok "Bundle uploaded to $remoteDir"
@@ -184,7 +185,7 @@ if ($Install) { $applyFlag = ' --apply' }
 Write-Host ""
 Write-Host "  Server install$(if ($Install) { ' (APPLYING)' } else { ' (report only)' }):" -ForegroundColor Cyan
 cmd /c "$ssh $Server `"$artisanRemote ml:offload:install $remoteDir$applyFlag`""
-if (-not $Install) { $todo.Add("Happy with the report above? Install: powershell -ExecutionPolicy Bypass -File .\ml-offload.ps1 -Server $Server -Install   (nothing is retrained; it only packs and installs)") }
+if (-not $Install) { $todo.Add("Happy with the report above? Install: powershell -ExecutionPolicy Bypass -File .\ml-offload.ps1 -Server $Server -Port $Port -Install   (nothing is retrained; it only packs and installs)") }
 Pop-Location
 
 Write-Host ""
