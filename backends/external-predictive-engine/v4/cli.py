@@ -28,7 +28,7 @@ def _months(symbol: str, override: int | None) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="v4.cli")
-    parser.add_argument("command", choices=["download", "verify", "status", "targets", "import-candles", "export-features"])
+    parser.add_argument("command", choices=["download", "verify", "status", "targets", "import-candles", "export-features", "p3"])
     parser.add_argument("--horizons", default="15,60,120,240,1440")
     parser.add_argument("--cost-pct", type=float, default=None, help="round-trip cost for Layer A (default 0.12, R-002)")
     parser.add_argument("--work", required=True, type=Path)
@@ -74,6 +74,15 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"   G7 metrics: days {g7.get('days_present')} present / {g7.get('days_missing')} missing, "
                           f"{g7.get('first_utc')} -> {g7.get('last_utc')}, step {g7.get('median_step_minutes')} min, gaps>15m {g7.get('gaps_over_15min')}")
                 worst = max(worst, {"OK": 0, "WARN": 1, "FAIL": 2}[v["status"]])
+            elif args.command == "p3":
+                from .lab import markdown_summary, run_symbol
+                horizons = [int(h) for h in args.horizons.replace(";", ",").split(",") if h.strip()]
+                for r in run_symbol(args.work, symbol, horizons):
+                    a = r["label_audit_dev"]
+                    print(f"== {symbol} h{r['horizon_minutes']}: dev valid {a['valid_anchors']}, V4 WAIT {a['v4_wait_pct']}%, "
+                          f"V3 buy+ {a['v3_buy_positive']} vs V4 long opp {a['v4_long_opportunity']}, "
+                          f"long disagree {a['long_v3_v4_disagree_pct']}%, {r['seconds']}s", flush=True)
+                (args.work / "reports" / "p3" / "SUMMARY.md").write_text(markdown_summary(args.work), "utf-8")
             elif args.command == "import-candles":
                 from .features import import_candles
                 print(f"== {symbol}: {import_candles(args.work, symbol)} new 5m candles imported into the feature sqlite", flush=True)

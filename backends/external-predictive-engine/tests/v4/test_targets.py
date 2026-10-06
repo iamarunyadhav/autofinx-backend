@@ -121,6 +121,17 @@ def test_G_missing_future_bar_is_invalid_never_filled():
     assert math.isnan(t["long_mfe_pct"][0]) and math.isnan(t["entry_price"][0])
 
 
+def test_source_conflict_marks_anchor_candle_and_path_but_not_others():
+    m1 = bars(flat(40))
+    conflict = np.array([T0 + 10 * MIN])                  # 5m bucket [10, 15) minutes
+    anchors = np.array([T0 + 5 * MIN, T0 + 15 * MIN, T0 + 20 * MIN])
+    t = tg.build_targets(m1, anchors, 5, conflicts=conflict)
+    # path [5,10) clean; anchor 15's own 5m candle is [10,15) -> conflict; anchor 20 clean
+    assert t["status"].tolist() == [tg.VALID, tg.SOURCE_CONFLICT, tg.VALID]
+    t = tg.build_targets(m1, np.array([T0 + 5 * MIN]), 10, conflicts=conflict)   # path [5,15) crosses it
+    assert t["status"][0] == tg.SOURCE_CONFLICT
+
+
 def test_path_beyond_data_is_out_of_range():
     t = tg.build_targets(bars(flat(5)), np.array([T0 + 3 * MIN]), 5)
     assert t["status"][0] == tg.OUT_OF_RANGE

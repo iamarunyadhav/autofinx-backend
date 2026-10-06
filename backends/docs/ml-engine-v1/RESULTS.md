@@ -100,6 +100,47 @@ are. Numbers are copied from real output, never estimated after the fact.
   monthly kline downloads now use 4 workers (`download.py WORKERS`). The STOP marker was exercised
   for real: the run stopped after the current file, kept 5 months, and resumed from there.
 
+## R-007 · 2026-10-07 · P1 full data run — six coins (no G7 metrics)
+- Runtime 66.4 min (slow Binance CDN evening; 4 parallel workers). Exit 1 = warnings only.
+- | Symbol | 1m rows | 5m rows | funding | coverage 1m | 1m→5m mismatches (price / volume) |
+  |---|---|---|---|---|---|
+  | BTCUSDT (60 m) | 2,637,685 | 527,537 | 5,496 | 100.0% | 6 / 10 of 527,537 |
+  | ETHUSDT (60 m) | 2,637,700 | 527,540 | 5,496 | 100.0% | 5 / 9 |
+  | BNBUSDT (60 m) | 2,637,715 | 527,543 | 5,496 | 100.0% | 4 / 7 |
+  | SOLUSDT (36 m) | 1,586,527 | 317,305 | 3,306 | 100.0% | 3 / 3 |
+  | XRPUSDT (36 m) | 1,586,542 | 317,308 | 3,306 | 100.0% | 3 / 3 |
+  | SUIUSDT (36 m) | 1,586,549 | 317,310 | 3,306 | 100.0% | 5 / 4 |
+- 0 gaps, 0 duplicates, 0 invalid OHLC, 0 unclosed candles for every symbol. All six have the full
+  requested history (SUI listed 2023-05, inside its 36-month window).
+- The few 1m→5m mismatches sit on the SAME timestamps across coins (e.g. 2023-11-10/14,
+  2024-10-28 21:10, 2025-01-14 13:30/15:00, 2025-01-29 01:35; BTC 2022-06/08 volume only) → Binance
+  archive events, not our code. Largest price diff: SUI open 2.4% on one bar. Not repaired (§46): Layer A
+  now marks any anchor whose own 5m candle or path touches such a bucket as `SOURCE_CONFLICT`
+  (status 3) and excludes it.
+- G7 metrics: BTC 1,350 days fetched before the run switched to `-NoMetrics` (2021-10-01 → 2026-10-05,
+  5-min step, 8 gaps > 15 min). Remaining days/coins later, before P4B.
+
+## R-009 · 2026-10-07 · P3 first results — BTCUSDT h15 and h240 (development data only)
+- Split (D-016 proposed): dev 2021-10-01 → 2026-01-03 23:15; holdout sealed from 2026-01-04 23:15
+  (79,131 rows, untouched). 447,254 valid dev anchors with a causal feature row.
+- Tests: Layer B simulator 16 tests (SPEC §78 A–F, G, H, I, L + gap fill + reference simulator on
+  random paths, 4 seeds × 2 horizons × 2 sides × 3 policies × 2 chunk sizes); splits test; 42 V4 tests total.
+- **Label audit (§79), reference policy (SL = p75 MAE-before-profit from dev-train, activation 0.18%):**
+  - h240: V3 BUY-positive 169,981; of these **81,970 (48%) hit the stop first** on the realizable path;
+    endpoint missed 5,649 profitable paths; V4 long opportunities 87,473; V4 WAIT 61.4%.
+  - h15: V3 BUY-positive 71,337; 12,005 (17%) stop first; endpoint missed 3,323; V4 WAIT 78.5%.
+  - ⇒ the endpoint label materially misstates what is realizable (first evidence for the V4 redesign).
+- **Policy lab (always-LONG / always-SHORT, non-overlapping):** every policy (endpoint, reference,
+  2×2 grid, volatility) averages ≈ −0.12% per trade (≈ the cost) on both dev_train and dev_val, e.g.
+  h15 long endpoint val −0.119%, volatility val −0.127%; h240 long endpoint val −0.106%. The exit
+  engine creates no fake performance; without a signal there is no edge (diagnostic only, C3).
+- Weakness found in the reference: Layer A `peak_retracement` (max drop from peak to the path end)
+  is too wide as a trailing reference (h240 p50 ≈ 1.0%), which makes activation irrelevant (GRID act1 =
+  act2 identical at h240). P4/P5 need a "pullback before continuation" measure instead.
+- Same-bar trailing ambiguity: up to 15% of trades (volatility policy, h15); 6% for the reference.
+  Material — candidate for the optional aggTrade resolver (§26), owner decision before P5.
+- Reports: `D:\autofinx-ml-v4\reports\p3\BTCUSDT_h15.json`, `BTCUSDT_h240.json`.
+
 ## R-008 · 2026-10-06 · P2 Layer A + exact V3 features — BTCUSDT 5 years
 - Layer A definitions: `external-predictive-engine/v4/targets.py` docstring (entry = open of the 1m bar
   starting at T0; path = 1m bars in [T0, T0+H); times = end of the first bar; cost 0.12%).

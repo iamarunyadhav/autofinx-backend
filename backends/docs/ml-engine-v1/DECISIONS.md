@@ -81,3 +81,17 @@ quantiles, probability thresholds, market SL caps, activation, trailing, risk/re
 gates, costs, stress matrix, 3 arms + primary) → P6 one holdout opening, all arms, same timestamps /
 costs / engine → P7 pre-registered stress → P8 reports (ACCEPT / REJECT / FRAGILE) → STOP. Holdout
 sealed P2–P5.
+
+**D-016 · 2026-10-07 · agent, PROPOSED — owner to confirm** — V4 splits (`v4/splits.py`): holdout =
+newest 15% of each symbol's anchors (same fraction as V3; for BTC 2026-01-04 23:15 → now, 79,131 rows);
+development = everything before holdout start minus 1440 minutes (purge for the longest path, all
+horizons); dev_train / dev_val = 70% / 30% of development with the same purge. P3+ code must use
+`dev_mask`; the P3 lab asserts no holdout row is used. Why: matches V3 for the pre-registered
+comparison (L1) and keeps every horizon's path out of the holdout.
+
+**D-017 · 2026-10-07 · agent** — Same-1m-bar conservative rules for Layer B (policy.py docstring): a bar
+touching both the hard stop and activation before arming ⇒ AMBIGUOUS_INTRABAR evaluated as the stop;
+a bar making a new peak and crossing the stop implied by it ⇒ exit at that new stop (flag
+`same_bar_trail`), including the arming bar; a bar gapping through an existing stop ⇒ fill at its open.
+Trail distance is measured in % of the entry price. Why: SPEC §25-26 forbids favourable ordering; the
+rates are reported so the owner can decide on an aggTrade resolver (§26).

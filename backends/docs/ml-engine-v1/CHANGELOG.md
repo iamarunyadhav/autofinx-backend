@@ -87,3 +87,21 @@ Plan lock (same day, session d):
   options -Horizons, -TargetsOnly, -SkipFeatures, -ForceRebuildFeatures, -ForceRebuildTargets;
   features/targets are not built when VERIFY fails.
 - Local only: `D:\autofinx-ml-v4\features\`, `targets\`.
+
+## 2026-10-07 — P1 result + source-conflict handling (session g)
+- `external-predictive-engine/v4/verify.py` — `conflict_buckets()`: 5m buckets where Binance 1m and 5m
+  archives disagree.
+- `external-predictive-engine/v4/targets.py` — status `SOURCE_CONFLICT` (3) for anchors whose own
+  5m candle or path touches a conflict bucket; conflict list stored in each target JSON.
+- `external-predictive-engine/tests/v4/test_targets.py` — conflict test (25 tests total).
+
+## 2026-10-07 — P3 start (session h; owner said "go P3")
+- `external-predictive-engine/v4/splits.py` (new) — holdout / dev / dev_train / dev_val with purge (D-016).
+- `external-predictive-engine/v4/policy.py` (new) — Layer B simulator (hard stop, activation, trailing,
+  time exit, conservative same-bar rules, gap fills, funding to exit), non-overlapping execution,
+  §62 trade statistics.
+- `external-predictive-engine/v4/targets.py` — `entry_status()` shared by Layer A and Layer B.
+- `external-predictive-engine/v4/lab.py` (new) — P3 label audit, path distributions (incl. by
+  volatility regime), policy lab with pre-declared baselines; asserts no holdout rows.
+- `external-predictive-engine/v4/cli.py` — command `p3` (+ `reports/p3/SUMMARY.md`).
+- Tests: `tests/v4/test_policy.py` (16), `tests/v4/test_splits.py` (1).

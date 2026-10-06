@@ -66,6 +66,18 @@ def aggregate_1m_to_5m(m1: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
     }
 
 
+def conflict_buckets(m1: dict[str, np.ndarray], m5: dict[str, np.ndarray]) -> np.ndarray:
+    """5m open_times where Binance's own 1m and 5m archives disagree (R-007). Never repaired;
+    Layer A marks every anchor/path that touches one as SOURCE_CONFLICT (SPEC §46)."""
+    agg = aggregate_1m_to_5m(m1)
+    common, ia, ib = np.intersect1d(agg["open_time"], m5["open_time"], return_indices=True)
+    bad = np.zeros(len(common), bool)
+    for key in ("open", "high", "low", "close"):
+        bad |= np.abs(agg[key][ia] - m5[key][ib]) / np.maximum(np.abs(m5[key][ib]), 1e-12) > 1e-9
+    bad |= np.abs(agg["volume"][ia] - m5["volume"][ib]) / np.maximum(np.abs(m5["volume"][ib]), 1e-12) > 1e-6
+    return common[bad].astype(np.int64)
+
+
 def alignment_check(m1: dict[str, np.ndarray], m5: dict[str, np.ndarray]) -> dict:
     agg = aggregate_1m_to_5m(m1)
     common, ia, ib = np.intersect1d(agg["open_time"], m5["open_time"], return_indices=True)

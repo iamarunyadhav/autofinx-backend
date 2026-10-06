@@ -47,7 +47,7 @@ TARGET_SCHEMA = "qt-path-targets-v4"
 MINUTE = 60_000
 DEFAULT_COST_PCT = 0.12
 CELL_BUDGET = 2_000_000
-VALID, GAP, OUT_OF_RANGE = 0, 1, 2
+VALID, GAP, OUT_OF_RANGE, SOURCE_CONFLICT = 0, 1, 2, 3
 SIDES = ("long", "short")
 FIELDS = ("mfe_pct", "mae_pct", "time_to_mfe_s", "time_to_mae_s", "time_to_first_positive_net_s",
           "max_adverse_before_profit_pct", "profit_bar_ambiguous", "peak_retracement_pct",
@@ -68,6 +68,26 @@ def dense_minutes(m1: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
     return out
 
 
+def entry_status(grid: dict[str, np.ndarray], anchors: np.ndarray, n: int,
+                 conflicts: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
+    """Entry bar index + validity, shared by Layer A and Layer B so the rules can never differ."""
+    anchors = np.asarray(anchors, np.int64)
+    start = int(grid["start"])
+    size = len(grid["open"])
+    entry_idx = ((anchors - start) // MINUTE).astype(np.int64)
+    in_range = ((anchors - start) % MINUTE == 0) & (entry_idx >= 0) & (entry_idx + n <= size)
+    missing_cum = np.r_[0, np.cumsum(np.isnan(grid["high"]).astype(np.int64))]
+    safe = np.where(in_range, entry_idx, 0)
+    gaps = np.where(in_range, missing_cum[np.minimum(safe + n, size)] - missing_cum[safe], 1)
+    status = np.where(~in_range, OUT_OF_RANGE, np.where(gaps > 0, GAP, VALID)).astype(np.int8)
+    if conflicts is not None and len(conflicts):
+        # The anchor's own 5m candle [T0-5m, T0) or any path minute [T0, T0+H) in a conflicting bucket.
+        c = np.sort(np.asarray(conflicts, np.int64))
+        touched = np.searchsorted(c, anchors + n * MINUTE, side="left") - np.searchsorted(c, anchors - 300_000, side="left")
+        status = np.where((status == VALID) & (touched > 0), SOURCE_CONFLICT, status).astype(np.int8)
+    return entry_idx, status
+
+
 def anchors_from_5m(m5: dict[str, np.ndarray]) -> np.ndarray:
     return (m5["open_time"] + 300_000).astype(np.int64)
 
@@ -85,21 +105,12 @@ def funding_sums(anchors: np.ndarray, horizon_ms: int, funding: dict[str, np.nda
 
 def build_targets(m1: dict[str, np.ndarray], anchors: np.ndarray, horizon_min: int,
                   funding: dict[str, np.ndarray] | None = None, cost_pct: float = DEFAULT_COST_PCT,
-                  chunk: int = 4000) -> dict[str, np.ndarray]:
+                  chunk: int = 4000, conflicts: np.ndarray | None = None) -> dict[str, np.ndarray]:
     """Vectorized in chunks of anchors: memory is chunk x horizon, never N x horizon (§76)."""
     grid = dense_minutes(m1)
-    start = int(grid["start"])
-    size = len(grid["open"])
     n = int(horizon_min)
     count = len(anchors)
-    entry_idx = ((anchors - start) // MINUTE).astype(np.int64)
-    in_range = ((anchors - start) % MINUTE == 0) & (entry_idx >= 0) & (entry_idx + n <= size)
-
-    missing = np.isnan(grid["high"]).astype(np.int64)
-    missing_cum = np.r_[0, np.cumsum(missing)]
-    safe = np.where(in_range, entry_idx, 0)
-    gaps = np.where(in_range, missing_cum[np.minimum(safe + n, size)] - missing_cum[safe], 1)
-    status = np.where(~in_range, OUT_OF_RANGE, np.where(gaps > 0, GAP, VALID)).astype(np.int8)
+    entry_idx, status = entry_status(grid, anchors, n, conflicts)
 
     out: dict[str, np.ndarray] = {
         "anchor_time_ms": anchors.astype(np.int64),
@@ -168,7 +179,13 @@ def summarize(targets: dict[str, np.ndarray]) -> dict:
     return {
         "anchors": int(len(status)), "valid": int(valid.sum()),
         "invalid_gap": int((status == GAP).sum()), "out_of_range": int((status == OUT_OF_RANGE).sum()),
+        "source_conflict": int((status == SOURCE_CONFLICT).sum()),
     }
+
+
+def dt_utc(ms) -> str:
+    import datetime as dt
+    return dt.datetime.fromtimestamp(int(ms) / 1000, dt.timezone.utc).strftime("%Y-%m-%d %H:%M")
 
 
 def build_symbol(work: Path, symbol: str, horizons: list[int], cost_pct: float = DEFAULT_COST_PCT) -> list[dict]:
@@ -178,11 +195,13 @@ def build_symbol(work: Path, symbol: str, horizons: list[int], cost_pct: float =
     m5 = bd.load_klines(work, symbol, "5m")
     funding = load_funding(work, symbol)
     anchors = anchors_from_5m(m5)
+    from .verify import conflict_buckets
+    conflicts = conflict_buckets(m1, m5)
     load_s = round(time.monotonic() - t0, 1)
     reports = []
     for h in horizons:
         started = time.monotonic()
-        targets = build_targets(m1, anchors, h, funding, cost_pct)
+        targets = build_targets(m1, anchors, h, funding, cost_pct, conflicts=conflicts)
         path = work / "targets" / symbol / f"h{h}.parquet"
         bd.write_parquet(path, targets)
         meta = {
@@ -191,6 +210,7 @@ def build_symbol(work: Path, symbol: str, horizons: list[int], cost_pct: float =
             "path": "1m bars with open_time in [T0, T0+H)", "time_unit": "end of the first bar (seconds after entry)",
             "first_anchor_ms": int(anchors[0]) if len(anchors) else None, "last_anchor_ms": int(anchors[-1]) if len(anchors) else None,
             "counts": summarize(targets), "seconds": round(time.monotonic() - started, 1), "load_seconds": load_s,
+            "source_conflict_buckets_utc": [dt_utc(x) for x in conflicts],
             "ram_estimate_mb": round(min(4000 * h, CELL_BUDGET) * 8 * 14 / 1e6 + len(m1["open_time"]) * 5 * 8 / 1e6, 1),
             "note": "Holdout rows are included here as raw data only; no statistic over the holdout is reported before P6.",
         }

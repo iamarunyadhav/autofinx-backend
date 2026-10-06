@@ -4,20 +4,23 @@ Last updated: 2026-10-06 by ml-engine-v1 (Claude Code session).
 
 ## Current state
 
-- **Current phase:** **P2 in progress** (owner said "go P2" 2026-10-06). Layer A generator + exact V3
-  feature export done and verified on BTC 5 years (RESULTS R-008). P1 full six-coin download (no
-  metrics) still running; when it finishes: record R-007, then run
-  `ml-v4-local.ps1 -TargetsOnly` to build features + targets for the other five coins, then P2 gate.
+- **Current phase:** **P3 in progress** (owner: "go P3" 2026-10-07). P3 code + 42 tests done; BTC h15/h240
+  results in RESULTS R-009. P2 background job (features for ETH..SUI + targets for all) running
+  (`D:utofinx-ml-v4\logs\p2-features-targets.log`).
+- **Next action:** when P2 finishes, record the P2 gate (counts per coin) and run
+  `python -m v4.cli p3 --work D:utofinx-ml-v4` for all six coins x five horizons; then report the P3
+  SUMMARY to the owner. Owner to confirm D-016 (splits) and decide on the aggTrade resolver (§26)
+  before P5. Still open in P3: V3 signals + new exits (needs a dev-train-only V3 predictor).
 - **Server:** ML paused with `ml-server-pause.sh --apply` on 2026-10-07 00:53 +08 (flag false, worker
   autostart off, 1.4 GB exports removed). Load stayed ~27–29, so ML was not the main server load.
   `--free-disk` (~16 GB) recommended, owner to decide.
 - **Owner action (server):** run `bash ml-server-pause.sh` (report) then `--apply` on the server to
   stop the server-side ML scheduler, training worker and batch scripts (D-001). Optional `--free-disk`.
-- **Next action:** when the full run finishes, record R-007 (rows, coverage, gaps, alignment, G7
+- (done 2026-10-07) P1: when the full run finishes, record R-007 (rows, coverage, gaps, alignment, G7
   coverage per symbol, runtime, disk); decide G7 inclusion per L3; then P1 gate → owner approves P2.
   P1 detailed plan (kept for reference):
 - **Locked plan:** D-015 phase order; SPEC §102 L1–L9 constraints.
-- **Next action — P1 Data:**
+- P1 plan (done, kept for reference):
   1. V4 venv `D:\autofinx-ml-v4\venv` with pinned lightgbm / numpy / scikit-learn / pyarrow (§93).
   2. Python downloader (in `external-predictive-engine/v4/`): Binance futures UM klines 1m + native
      5m from data.binance.vision monthly zips (+ daily zips for the current month) + REST tail,
@@ -42,9 +45,9 @@ Last updated: 2026-10-06 by ml-engine-v1 (Claude Code session).
 | Phase | Status | Notes |
 |---|---|---|
 | P0 Audit | ✅ done 2026-10-06 | RESULTS R-002 |
-| P1 Data (1m + 5m + funding, verify, runner skeleton) | 🔄 code done, smoke OK, full run running | R-006 |
+| P1 Data (1m + 5m + funding, verify, runner skeleton) | ✅ done 2026-10-07 (G7 metrics partial) | R-006, R-007 |
 | P2 Layer A path targets + exact features | 🔄 BTC done (R-008), other coins after the download | holdout sealed |
-| P3 Label audit + path distribution + policy lab | not started | train/validation only |
+| P3 Label audit + path distribution + policy lab | 🔄 code + BTC h15/h240 done (R-009) | dev data only |
 | P4A V4 models on V3 features | not started | holdout sealed |
 | P4B Feature schema v4, G1–G6 ablation (G7 optional) | not started | holdout sealed |
 | P5 Policy calibration → FREEZE (incl. 3 arms, primary = Arm 3) | not started | every frozen value in DECISIONS |
