@@ -142,7 +142,7 @@ return [
         'recency_half_life_days' => (float) env('AUTOFINX_ML_RECENCY_HALF_LIFE_DAYS', 180),
         'schedule_utc' => env('AUTOFINX_ML_RETRAIN_SCHEDULE_UTC', '03:05'),
         'artifact_dir' => env('AUTOFINX_ML_ARTIFACT_DIR', storage_path('app/ml-shadow/models')),
-        'export_dir' => storage_path('app/ml-shadow/exports'),
+        'export_dir' => env('AUTOFINX_ML_EXPORT_DIR', storage_path('app/ml-shadow/exports')),
         // The python service reads the CHAMPION copies from here.
         'champion_dir' => env('AUTOFINX_ML_CHAMPION_DIR', storage_path('app/ml-shadow/champions')),
     ],
