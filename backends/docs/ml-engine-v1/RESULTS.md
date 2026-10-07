@@ -120,6 +120,29 @@ are. Numbers are copied from real output, never estimated after the fact.
 - G7 metrics: BTC 1,350 days fetched before the run switched to `-NoMetrics` (2021-10-01 → 2026-10-05,
   5-min step, 8 gaps > 15 min). Remaining days/coins later, before P4B.
 
+## R-019 · 2026-10-07 · Strategy Lab candidate #1 "AutoFinX v13" Pine — S0 standalone (development data only)
+- Owner upload, audited in `strategy-lab/candidates/autofinx-v13/AUDIT.md`: causal, no lookahead; the HTF
+  read differs between TradingView historical and live; webhook built for live Future Trade.
+  Script defaults, 0 variants, AutoFinX execution (1m path, worst-case same minute, 0.12% + funding).
+  Holdout cut off before the simulation.
+- Avg net per trade (dev_train / dev_val), trades, PF, t:
+  | Sym | 5m dev_train | 5m dev_val | 15m dev_train | 15m dev_val |
+  |---|---|---|---|---|
+  | BTC | 14,322 · −0.117% · PF 0.52 · t −31 | 6,117 · −0.117% · 0.45 · −25 | 4,539 · −0.098% · 0.73 · −8.5 | 1,979 · −0.113% · 0.64 · −8.2 |
+  | ETH | 13,272 · −0.119% · 0.60 · −23 | 5,811 · −0.117% · 0.63 · −15 | 4,443 · −0.097% · 0.79 · −6.5 | 1,901 · −0.106% · 0.78 · −4.5 |
+  | BNB | 14,483 · −0.115% · 0.58 · −25 | 6,484 · −0.119% · 0.53 · −21 | 4,777 · −0.122% · 0.72 · −8.8 | 2,148 · −0.123% · 0.69 · −7.0 |
+  | SOL | 8,835 · −0.123% · 0.70 · −14 | 3,679 · −0.134% · 0.61 · −12 | 2,874 · −0.089% · 0.86 · −3.5 | 1,208 · −0.103% · 0.80 · −3.2 |
+  | XRP | 7,230 · −0.108% · 0.70 · −11 | 3,180 · −0.118% · 0.63 · −10 | 2,373 · −0.175% · 0.72 · −5.9 | 1,023 · −0.067% · 0.87 · −1.8 |
+  | SUI | 8,891 · −0.109% · 0.77 · −10 | 3,632 · −0.135% · 0.65 · −10 | 2,938 · −0.117% · 0.85 · −3.7 | 1,169 · −0.105% · 0.82 · −2.8 |
+- Negative in all 24 cells and in every calendar year. BTC 5m gross is +0.003%/trade, so the entries
+  carry ≈ zero direction edge, and costs alone decide the result. Even at TradingView's 0.08% cost and
+  no funding, every cell is still negative (e.g. BTC 5m −0.077%).
+- BTC 5m exits (dev_train): TP1/TRAIL 37%, STOP/STOP 30%, STOP/TRAIL 18%, FLIP 15%. Average hold 57 min.
+- Verdict S0: **REJECTED_NO_VALUE** as a standalone strategy. If it is running live through the
+  Future Trade pine-webhook, this evidence says it loses after costs (owner decision; nothing changed).
+- S1 (v13 components as soft features, 22 columns, no hard filter) is queued for the P4B-style ablation
+  once P4B finishes. Its verdict comes from that ablation, not from S0.
+
 ## R-017 · 2026-10-07 · P5 smoke — BTCUSDT h60 / h240 + EV diagnostics (development data only)
 - Both ran end to end (543 s / 676 s, CPU shared with the P3 chain), V3 base features. Quality gate passed
   for all components. SL caps: h60 long 0.324% / short 0.317%; h240 0.513% / 0.509%.
@@ -140,9 +163,10 @@ are. Numbers are copied from real output, never estimated after the fact.
   the base rate, and the V3 base features do not separate those rows. Honest REJECT. P5-B, P5-C and the
   final retrain are still not exercised on real data.
 
-## R-015 · 2026-10-07 · P4A all coins — h15 / h60 / h120 (dev_val, development data only; h240/h1440 pending)
+## R-015 · 2026-10-07 · P4A all coins × all horizons (dev_val, development data only)
 - The chain was killed at XRP h120 by a Windows power-off event (06:55, no traceback). The rest (XRP/SUI h120,
-  all h240, h1440) restarted with `run-p4a-resume.sh` → `logs/chain-p4a-resume.log`.
+  all h240, h1440) were resumed with `run-p4a-resume.sh` (07:01 → 09:00, `logs/chain-p4a-resume.log`).
+  All 30 symbol × horizon reports present.
 - Trades / avg net % / t-stat on dev_val (non-overlapping, worst-case exits, 0.12% cost + funding):
   | Sym | H | AUC V3 L/S | AUC V4 L/S | ARM1_V3 | V3 signal + new exit | ARM2_V4 | EV-only V4 (diag) |
   |---|---|---|---|---|---|---|---|
@@ -162,11 +186,27 @@ are. Numbers are copied from real output, never estimated after the fact.
   | ETH | 120 | .552/.551 | .550/.554 | 247 / −0.236 / −2.8 | 744 / −0.153 / −9.6 | 0 | 54 / −0.183 / −4.8 |
   | BNB | 120 | .561/.553 | .534/.541 | 203 / −0.153 / −1.6 | 608 / −0.114 / −5.9 | 2 / −0.086 | 2 / −0.086 |
   | SOL | 120 | .529/.509 | .542/.541 | 84 / +0.651 / 1.8 | 260 / −0.022 / −0.4 | 15 / +0.133 / 0.6 | 37 / −0.059 / −0.7 |
-- Reading: no V4 arm is positive with t ≥ 1 anywhere so far. Every "V3 signal + new exit" row is negative
-  (t −0.4 to −13.7), so the V3 signal does not survive realistic SL/trailing exits. A few ARM1_V3 cells
-  look positive (SUI h60 t 1.9, SOL h120 t 1.8, BTC h60 t 1.3), but they use the endpoint exit, have
-  small samples, and are 3 of 16 cells tried — expected by chance, not an edge. AUC falls as the horizon
-  grows; V4 path labels are harder to rank than V3 endpoint labels.
+  | XRP | 120 | .552/.536 | .542/.547 | 171 / −0.182 / −1.4 | 781 / −0.160 / −9.3 | 0 | 0 |
+  | SUI | 120 | .519/.520 | .551/.542 | 101 / +0.462 / 2.3 | 276 / −0.032 / −0.6 | 112 / −0.111 / −2.4 | 1483 / −0.117 / −7.6 |
+  | BTC | 240 | .559/.554 | .542/.547 | 459 / −0.124 / −1.9 | 1218 / −0.114 / −7.7 | 0 | 394 / −0.110 / −5.5 |
+  | ETH | 240 | .542/.542 | .546/.548 | 81 / −0.117 / −0.5 | 203 / −0.117 / −2.6 | 0 | 233 / −0.084 / −2.1 |
+  | BNB | 240 | .536/.536 | .546/.548 | 537 / −0.135 / −2.0 | 2001 / −0.108 / −7.7 | 0 | 0 |
+  | SOL | 240 | .516/.509 | .527/.538 | 646 / −0.102 / −1.4 | 2077 / −0.108 / −5.9 | 0 | 789 / −0.104 / −4.2 |
+  | XRP | 240 | .530/.522 | .554/.541 | 67 / −0.440 / −1.2 | 367 / −0.157 / −4.3 | 11 / +0.143 / 0.5 | 107 / −0.078 / −1.4 |
+  | SUI | 240 | .519/.509 | .545/.541 | 46 / +0.302 / 0.8 | 153 / −0.052 / −0.6 | 0 | 774 / −0.127 / −4.8 |
+  | BTC | 1440 | .512/.536 | .509/.521 | 145 / −0.033 / −0.2 | 357 / −0.094 / −1.9 | 0 | 792 / −0.137 / −4.4 |
+  | ETH | 1440 | .499/.523 | .537/.520 | 36 / −0.037 / −0.1 | 139 / −0.105 / −1.2 | 0 | 210 / −0.103 / −1.2 |
+  | BNB | 1440 | .500/.512 | .533/.556 | 176 / −0.008 / −0.0 | 859 / −0.111 / −2.6 | 0 | 1138 / −0.108 / −3.5 |
+  | SOL | 1440 | .506/.513 | .495/.512 | 102 / −0.294 / −0.7 | 598 / −0.100 / −1.5 | 0 | 201 / −0.038 / −0.4 |
+  | XRP | 1440 | .494/.496 | .514/.512 | 74 / +0.519 / 0.7 | 354 / −0.106 / −1.7 | 13 / +0.527 / 0.5 | 15 / +0.377 / 0.5 |
+  | SUI | 1440 | .514/.516 | .526/.521 | 114 / −0.171 / −0.4 | 637 / −0.155 / −2.3 | 0 | 1647 / −0.153 / −3.9 |
+- Reading (30 cells): no V4 arm is positive with t ≥ 1 anywhere (best: XRP h1440 ARM2 13 trades t 0.5).
+  "V3 signal + new exit" is negative in all 30 cells, so the V3 signal does not survive realistic
+  SL/trailing exits. AUC falls toward 0.5 as the horizon grows (h1440 ≈ 0.50–0.55, i.e. no ranking).
+  Five ARM1_V3 cells (endpoint exit, no SL) show t > 1: SUI h120 2.3, SUI h60 1.9, SOL h120 1.8,
+  BTC h60 1.3, BNB h60 1.2. SUI recurs (h15/h60/h120/h240 all positive), but these cells use the
+  non-realizable endpoint exit, the same SUI signal loses with stops (all SUI "new exit" cells negative),
+  and with 30 cells tried, one or two at t ≈ 2 are expected by chance. Noted as a lead for P4B, not an edge.
 
 ## R-014 · 2026-10-07 · Stratified aggTrades resolver — BTCUSDT h15/h60 (30 random dev days)
 - 2,343 flagged (intrabar-ambiguous) trades resolved from aggTrades, out of 122,787 flagged in dev. 684 s.
@@ -182,7 +222,8 @@ are. Numbers are copied from real output, never estimated after the fact.
   h60 REFERENCE samples are small (55/60).
 
 ## R-013 · 2026-10-07 · P3 all coins × horizons (development data only)
-- Full table: `D:utofinx-ml-v4eports\p3\SUMMARY.md` (6 coins × 5 horizons, D-023 code).
+- Full table: `D:utofinx-ml-v4
+eports\p3\SUMMARY.md` (6 coins × 5 horizons, D-023 code).
 - V4 WAIT share 60–87% (highest at h15 and h1440). V3 endpoint "buy+" rows are 2–3× the V4 long
   opportunities. The share where they disagree grows with the horizon (15% at h15 → 41% at h1440 for SOL).
 - Always-take baselines on dev_val: negative everywhere from h15 to h240 (−0.05% to −0.12% per trade). At

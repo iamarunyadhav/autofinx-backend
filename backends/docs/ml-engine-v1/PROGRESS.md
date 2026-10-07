@@ -10,12 +10,18 @@ Last updated: 2026-10-06 by ml-engine-v1 (Claude Code session).
 - **Running (one background chain, `D:utofinx-ml-v4\logs\chain-p3-resolve-p4a.log`):** full P3
   (6 coins x 5 horizons) -> BTC sampled aggTrade resolver (30 days, h15/h60) -> P4A all coins per
   horizon in SPEC 75 order (15, 60, 120, 240, 1440).
-- **Next action:** (1) P3 (R-013), resolver (R-014), P4A h15–h120 (R-015) recorded; P4A h240/h1440
-  resuming (`run-p4a-resume.sh`, chain killed by a Windows power-off at 06:55) → add to R-015; (2) run the full backend suite (`php artisan test`) for the P4B PHP changes;
-  (3) `ml-v4-local.ps1 -TargetsOnly -PatternFeatures` (v4 features, ~3 h for 6 coins);
+- **Next action:** (1) P3 (R-013), resolver (R-014), P4A all 30 cells (R-015) recorded — no V4 edge; (2) full backend suite done 2026-10-07: 2068 passed, 1 skipped;
+  (3)+(4) owner "go P4B" 2026-10-07 09:10: `D:utofinx-ml-v4
+un-p4b.sh` running (v4 pattern features for
+  6 coins, then p4b in SPEC §75 order) → `logs/chain-p4b.log`; record as R-018;
   (4) `python -m v4.cli p4b` ablation (D-025), BTC/ETH 15m first (SPEC §75); (5) report to the owner.
   (6) P5 built (`v4/p5.py`, `v4/p5_run.py`); BTC h15/h60/h240 smoke all REJECTED in P5-A (R-016, R-017).
-  Owner to approve or revert D-029 (per-candidate re-calibration). Full P5 runs after P4B.
+  D-029 (per-candidate re-calibration) KEPT. Full P5 runs after P4B.
+- **Candidate autofinx-v13 (owner Pine):** S0 done (R-019, rejected standalone); S1 soft-feature ablation
+  queued after P4B (extend `ablation.py` to take `v13.parquet` as one extra group, D-025 rule, no hard filter).
+- **Queued after P4B (owner proposal 2026-10-07, PROPOSED):** Strategy Lab + Tradeability Intelligence —
+  see `strategy-lab/README.md` (summary, agent review, order). Next: SL0 read-only audit → draft SPEC
+  §104/§105 + D-030/D-031 PROPOSED → STOP. No build before "approve Strategy Lab build".
 - **Server:** ML paused with `ml-server-pause.sh --apply` on 2026-10-07 00:53 +08 (flag false, worker
   autostart off, 1.4 GB exports removed). Load stayed ~27–29, so ML was not the main server load.
   `--free-disk` (~16 GB) recommended, owner to decide.

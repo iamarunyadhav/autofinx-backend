@@ -188,3 +188,15 @@ Plan lock (same day, session d):
   `*_p_mean_tradeable`, `*_ev_max_tradeable`, `*_ev_ge_gate`).
 - V4 tests 64/64. RESULTS R-017; DECISIONS D-029 (proposed).
 - RESULTS R-013 (P3 all coins), R-014 (BTC resolver), R-015 (P4A h15–h120 all coins). `D:utofinx-ml-v4  run-p4a-resume.sh` resumes P4A after the chain was killed by a Windows power-off event.
+- R-015 completed with h120 (XRP/SUI), h240 and h1440 for all coins (30/30). `D:utofinx-ml-v4\status.ps1`
+  (read-only progress check) added.
+- Full backend suite after the PatternFeatures PHP changes: 2068 passed, 1 skipped (345 s).
+- Owner "go P4B": `D:utofinx-ml-v4
+un-p4b.sh` (pattern features → ablation BTC/ETH 15m first, then all).
+- D-029 marked KEPT (owner delegated the decision).
+- `docs/ml-engine-v1/strategy-lab/README.md` (new): owner Strategy Lab / Tradeability proposal summary, agent
+  review (7 corrections), proposed order. Nothing built.
+- Strategy Lab candidate #1 (owner Pine "AutoFinX v13"): `strategy-lab/candidates/autofinx-v13/` (source.pine
+  verbatim + sha256, AUDIT.md); `external-predictive-engine/v4/strategy_v13.py` (Pine-semantics translation,
+  S0 simulation, S1 feature export); `tests/v4/test_strategy_v13.py` (12 tests); CLI `lab-v13`;
+  RESULTS R-019 (S0 REJECTED_NO_VALUE, 24/24 cells negative). Features: `D:/autofinx-ml-v4/features/<SYM>/v13.parquet`.

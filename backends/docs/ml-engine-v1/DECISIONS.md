@@ -192,7 +192,7 @@ comparison; forward-chaining (past-only) cross-fitting for the final retrain; mu
 LONG/SHORT. Agent note: nesting reduces the data per stage (BTC dev_val ≈ 15 months split 40/30/30), so
 some symbol × horizons may be REJECTED for too few trades — accepted as the honest outcome.
 
-**D-029 · 2026-10-07 · agent, PROPOSED — owner to approve or revert** — P5 EV consistency: the success
+**D-029 · 2026-10-07 · agent proposal; KEPT 2026-10-07 (owner delegated the call to the agent: "neeye sollu")** — P5 EV consistency: the success
 probability used in EV = p·avg_win + (1−p)·avg_other must describe success under the SAME candidate exit
 policy as avg_win / avg_other. The REFERENCE-policy classifier's raw score is re-calibrated per (candidate
 policy, side) with isotonic regression on the dev_train calibration slice (out of fit; no dev_val, holdout
@@ -200,3 +200,6 @@ sealed), and the lift gate uses that candidate's base rate. No model retrain. Al
 `v4/p5_run.py` (`ev_params`); revert = restore the reference isotonic. Effect on BTC h240: verdict unchanged
 (R-017). A stronger alternative (one classifier per candidate policy) is not proposed — the recalibrated
 score shows almost no signal, so it is unlikely to change the verdict and it costs 12× training.
+D-029 decision note: kept because (1) EV needs p and win/loss measured under the same exit policy, (2) it made
+results stricter, not rosier (BTC h240 max EV −0.083% → −0.12%), (3) no retrain cost, (4) P4B/P5 results
+will be computed correctly if an edge appears.

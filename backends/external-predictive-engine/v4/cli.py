@@ -28,7 +28,7 @@ def _months(symbol: str, override: int | None) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="v4.cli")
-    parser.add_argument("command", choices=["download", "verify", "status", "targets", "import-candles", "export-features", "p3", "resolve", "p4a", "p4b", "p5"])
+    parser.add_argument("command", choices=["download", "verify", "status", "targets", "import-candles", "export-features", "p3", "resolve", "p4a", "p4b", "p5", "lab-v13", "export-g7t", "layers"])
     parser.add_argument("--schema", default="qt-shadow-features-v3", help="export-features: qt-shadow-features-v3 or -v4")
     parser.add_argument("--days", type=int, default=30, help="resolve: random development days to sample")
     parser.add_argument("--horizons", default="15,60,120,240,1440")
@@ -84,6 +84,37 @@ def main(argv: list[str] | None = None) -> int:
                     if "frozen" in r:
                         print(f"   frozen: {json.dumps(r['frozen']['exit_policy'])} gate {json.dumps(r['frozen']['gate'])}; P5-C: "
                               f"{r['stages'].get('P5-C', {}).get('trades')} trades, avg {r['stages'].get('P5-C', {}).get('avg_net_pct')}", flush=True)
+            elif args.command == "export-g7t":
+                from .optional_layers import export_g7t
+                print(f"== {symbol}: tradeability features -> {export_g7t(args.work, symbol)}", flush=True)
+            elif args.command == "layers":
+                from .optional_layers import run as run_layers
+                for h in [int(v) for v in args.horizons.replace(";", ",").split(",") if v.strip()]:
+                    r = run_layers(args.work, symbol, h)
+                    print(f"== {symbol} h{h}: baseline {r['baseline']['features']} AUC {r['baseline']['fold_auc']} ({r['seconds']}s)", flush=True)
+                    for name, L in r["layers"].items():
+                        if "feature" not in L:
+                            print(f"   {name}: {L.get('status')}", flush=True)
+                            continue
+                        print(f"   {name} FEATURE gains {L['feature']['fold_gain']} -> {L['feature']['verdict']} ({L['feature']['reason']})", flush=True)
+                        for side, w in L["wait"].items():
+                            for key, v in w.items():
+                                if key.startswith("keep_top"):
+                                    on = [f["executed_on"]["avg_net_pct"] for f in v["folds"]]
+                                    off = [f["executed_off"]["avg_net_pct"] for f in v["folds"]]
+                                    print(f"   {name} WAIT {side} {key}: off {off} on {on} -> {v['verdict']}", flush=True)
+                        for key, v in L.get("rule", {}).items():
+                            print(f"   {name} RULE {key}: on {[f['executed_on']['avg_net_pct'] for f in v['folds']]} -> {v['verdict']}", flush=True)
+            elif args.command == "lab-v13":
+                from .strategy_v13 import run as run_v13
+                r = run_v13(args.work, symbol)
+                for tf, ch in r["charts"].items():
+                    for part in ("dev_train", "dev_val"):
+                        s = ch[part]
+                        print(f"== {symbol} v13 {tf} {part}: trades {s.get('trades', 0)}  avg net {s.get('avg_net_pct', 0):+.4f}%  "
+                              f"PF {s.get('profit_factor')}  win {s.get('win_rate_pct')}%  t {s.get('t_stat')}  "
+                              f"(TradingView cost avg {s.get('avg_net_tradingview_cost_pct')}%)", flush=True)
+                print(f"   {r['seconds']}s, features -> features/{symbol}/v13.parquet", flush=True)
             elif args.command == "p4b":
                 from .ablation import run as run_p4b
                 for h in [int(v) for v in args.horizons.replace(";", ",").split(",") if v.strip()]:
