@@ -77,3 +77,8 @@ Corrections / risks to resolve before SL2:
    owner.
 4. Owner choices: (a) run SL10 tradeability experiment first (recommended), (b) where Strategy Lab
    runs (point 2), (c) `"approve Strategy Lab build"` for SL2+.
+
+## 4. Owner decision 2026-10-07 (D-030)
+Layers stay independent and optional (default OFF, toggle only after evidence + owner approval); no hard
+filter; the V4 pipeline is never changed by them. SL10 (tradeability) runs first, together with candidate
+autofinx-v13 S1/S4 — `v4/optional_layers.py`.

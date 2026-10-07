@@ -142,6 +142,21 @@ Route::prefix('v1')->group(function () {
             Route::post('/batches/{batch}/stop', [$ml, 'stopBatch'])->middleware('throttle:10,1,ml-training-write');
             Route::post('/backfill/{symbol}/resume', [$ml, 'resumeBackfill'])->middleware('throttle:10,1,ml-training-write');
         });
+        // Strategy Lab (research only; reads need membership, mutations owner/admin; no order path — SPEC §105)
+        Route::prefix('workspaces/{workspace}/strategy-lab')->group(function () {
+            $lab = \App\Http\Controllers\Api\StrategyLabController::class;
+            Route::get('/candidates', [$lab, 'candidates'])->middleware('throttle:120,1,strategy-lab-read');
+            Route::get('/candidates/{candidate}', [$lab, 'candidate'])->middleware('throttle:120,1,strategy-lab-read');
+            Route::get('/runs/{run}', [$lab, 'run'])->middleware('throttle:120,1,strategy-lab-read');
+            Route::get('/runs/{run}/chart', [$lab, 'chart'])->middleware('throttle:60,1,strategy-lab-read');
+            Route::post('/candidates', [$lab, 'createCandidate'])->middleware('throttle:20,1,strategy-lab-write');
+            Route::post('/candidates/{candidate}/versions', [$lab, 'addVersion'])->middleware('throttle:20,1,strategy-lab-write');
+            Route::post('/candidates/{candidate}/archive', [$lab, 'archive'])->middleware('throttle:20,1,strategy-lab-write');
+            Route::post('/versions/{version}/quick-test', [$lab, 'quickTest'])->middleware('throttle:10,1,strategy-lab-write');
+            Route::post('/versions/{version}/deep-test', [$lab, 'deepTest'])->middleware('throttle:10,1,strategy-lab-write');
+            Route::post('/runs/{run}/cancel', [$lab, 'cancel'])->middleware('throttle:20,1,strategy-lab-write');
+            Route::post('/runs/{run}/decision', [$lab, 'decide'])->middleware('throttle:20,1,strategy-lab-write');
+        });
         // Market Context (shadow-only, read-only; flag AUTOFINX_MARKET_CONTEXT_ENABLED)
         Route::get('workspaces/{workspace}/market-context/{assetClass}/{instrument}', [\App\Http\Controllers\Api\MarketContextController::class, 'show'])->middleware('throttle:60,1');
         Route::post('workspaces', [WorkspaceController::class, 'store']);

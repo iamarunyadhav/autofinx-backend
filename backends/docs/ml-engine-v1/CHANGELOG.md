@@ -200,3 +200,19 @@ un-p4b.sh` (pattern features → ablation BTC/ETH 15m first, then all).
   verbatim + sha256, AUDIT.md); `external-predictive-engine/v4/strategy_v13.py` (Pine-semantics translation,
   S0 simulation, S1 feature export); `tests/v4/test_strategy_v13.py` (12 tests); CLI `lab-v13`;
   RESULTS R-019 (S0 REJECTED_NO_VALUE, 24/24 cells negative). Features: `D:/autofinx-ml-v4/features/<SYM>/v13.parquet`.
+- D-030 (owner): optional independent layers. `external-predictive-engine/v4/optional_layers.py` (new: G7-T
+  noise/chop features, FEATURE / WAIT / RULE evaluation OFF vs ON on dev_train folds), CLI `export-g7t`,
+  `layers`; `tests/v4/test_optional_layers.py` (4 tests; V4 suite 80/80). `D:/autofinx-ml-v4/run-layers.sh`.
+- SPEC §104 / §105; D-031 (Strategy Lab). Backend: `config/strategy_lab.php`, migration
+  `2026_10_13_000000_create_strategy_lab_tables.php` (NOT applied), models StrategyLabCandidate / Version / Run /
+  Approval, `app/Domain/StrategyLab/` (PineAuditor, StrategyLabService, StrategyLabRunner, StrategyLabException),
+  `app/Jobs/RunStrategyLabTestJob.php`, `Api/StrategyLabController.php`, routes `workspaces/{ws}/strategy-lab/*`,
+  `.env.example` entries, `tests/Feature/StrategyLab/StrategyLabApiTest.php` (11 tests). Python:
+  `v4/lab_runner.py` (QUICK_V1 / DEEP_V1, scorecard, verdict rule), `v4/strategy_v13.py` (load_sealed, s0_trades,
+  trade prices), `tests/v4/test_lab_runner.py` (V4 suite 84/84).
+- Strategy Lab frontend (autofinx-front/frontends): `src/lib/strategyLab.ts`, `src/hooks/useStrategyLab.ts`,
+  `src/components/strategy-lab/` (LabShell, SourceInput, NewCandidateDialog, RunPanel, ResultView, LabChart),
+  `src/pages/strategy-lab/` (StrategyLabPage, CandidatePage); routes `/strategy-lab`, `/strategy-lab/:candidateId`
+  in App.tsx; module `strategy-lab` in module-access.ts; sidebar icon. `npm run build` OK, eslint 0 errors (29
+  pre-existing warnings, none new). Not yet clicked through live (migration pending). Controller `cancel` now
+  wrapped in guard().

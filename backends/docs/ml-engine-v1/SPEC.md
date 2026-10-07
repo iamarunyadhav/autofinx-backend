@@ -627,3 +627,27 @@ LONG and SHORT within a symbol × horizon; predictions and caps are side-specifi
     (a, b, trailing rule), gate (lift, margin), uncertainty / OOD / conflict thresholds, quality-gate
     results, the three arms with PRIMARY = Arm 3 (Arm 2 if no P4B group survived, L9), and the stress
     matrix (L7). Then P6.
+
+## 104. Tradeability / Noise Intelligence — optional layer (D-030, owner 2026-10-07)
+Noise/chop is never deleted from history; it is learned as WAIT evidence in an INDEPENDENT optional layer
+(`v4/optional_layers.py`) that never changes the V4 pipeline. G7-T features (trend efficiency 12/48,
+choppiness 14/48, direction-flip rate, range overlap, failed breakouts, EMA compression, body/wick means,
+path ratio; G4/G5 duplicates excluded) plus any Strategy Lab component file are evaluated OFF vs ON in three
+roles — FEATURE (P4B rule D-025), WAIT (tradeability TAKE/SKIP model, keep top 50% / 30%), RULE (a script's
+own gate) — on dev_train folds only. Pre-registered WAIT verdicts: USEFUL_AS_WAIT_LAYER, PROFITABLE_WITH_LAYER,
+OVER_FILTERED, NO_VALUE. Default OFF; ON only with a passing verdict and explicit owner approval. Accuracy is
+never a criterion; loss avoidance, profit retention, false-WAIT and executed after-cost net are.
+
+## 105. Strategy Research Lab (D-031, owner "approve Strategy Lab build" 2026-10-07)
+Research only, no order path (tested). Flow: upload/paste source (stored as text, sha256, immutable
+versions) → static audit (`App\Domain\StrategyLab\PineAuditor`: CAUSAL / CAUSAL_IF_LAGGED / REPAINT_RISK /
+UNSUPPORTED / INVALID, indicator inventory vs V4 groups, overfit hint) → Quick Test (async job, Python
+`v4.lab_runner`, sample policy QUICK_V1 = BTC+ETH 15m, last 25% of dev_train) → owner decision → Deep Test
+(DEEP_V1 = 6 coins, 5m+15m, all dev_train, cost 0.12 and 0.18 stress, optional-layer components) → owner
+decision (EXPERIMENT permission only). Arbitrary Pine is never interpreted: a version is testable only when
+its normalized source matches a reviewed translation (`config/strategy_lab.php` adapters ↔ Python
+`lab_runner.ADAPTERS`); otherwise NEEDS_TRANSLATION. Verdicts (fixed rule, win rate unused):
+PROMISING_FOR_DEEP_TEST / PROMISING, WEAK, FRAGILE, NO_VALUE / REJECTED_NO_VALUE, TOO_FEW_TRADES,
+REJECTED_COST_FRAGILE. dev_val (P5) and the holdout are never used. Where it runs: the research PC that holds
+the data (`AUTOFINX_STRATEGY_LAB_WORK_DIR`); other hosts refuse tests with RUNNER_UNAVAILABLE. Shadow / paper
+stages are reserved and not reachable in this build.

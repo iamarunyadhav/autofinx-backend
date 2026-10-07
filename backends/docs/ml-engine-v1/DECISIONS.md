@@ -203,3 +203,24 @@ score shows almost no signal, so it is unlikely to change the verdict and it cos
 D-029 decision note: kept because (1) EV needs p and win/loss measured under the same exit policy, (2) it made
 results stricter, not rosier (BTC h240 max EV −0.083% → −0.12%), (3) no retrain cost, (4) P4B/P5 results
 will be computed correctly if an edge appears.
+
+**D-030 · 2026-10-07 · owner — optional, independent research layers (tradeability / noise + Strategy Lab)**:
+noise/chop and external-strategy logic are built as INDEPENDENT optional layers (`v4/optional_layers.py`,
+`v4/strategy_v13.py`). They never change the V4 pipeline (P4B/P5 code, selections, splits). Default OFF.
+Every layer is reported OFF vs ON in three roles: FEATURE (P4B rule D-025), WAIT (a tradeability TAKE/SKIP
+model on the layer columns, keep top 50% / 30%), and RULE (a script's own gates, e.g. v13 chop ≤ 62). No
+hard filter is assumed. Evidence: dev_train folds only (dev_val reserved for P5, holdout sealed). A layer is
+switched ON (later: a UI toggle) only with a passing verdict AND explicit owner approval. Pre-registered
+WAIT verdicts: USEFUL_AS_WAIT_LAYER (ON beats OFF in executed avg net by ≥ 0.01%/trade in ≥ 2/3 folds with
+profit retention ≥ 50%), PROFITABLE_WITH_LAYER (also ON net > 0 in ≥ 2/3 folds), OVER_FILTERED, NO_VALUE.
+Strategy Lab product build (DB/API/UI, SL2+) still waits for "approve Strategy Lab build".
+
+**D-031 · 2026-10-07 · owner ("approve Strategy Lab build") — Strategy Lab architecture (SPEC §105)**: built
+as Laravel control plane (4 new tables: candidates, immutable versions, runs, immutable approvals; API under
+`workspaces/{ws}/strategy-lab`; owner/admin for mutations) + Python runner (`v4.lab_runner`) + React UI.
+Agent choices recorded for review: (1) tests run where the 5-year data lives (research PC, option a);
+production refuses with RUNNER_UNAVAILABLE until a runner exists there (option b later); (2) Pine is audited
+statically and tested only through reviewed translations matched by normalized sha256 — no Pine interpreter;
+(3) Quick Test uses dev_train only (not dev_val) so P5 nested selection stays clean; (4) the verdict rule is
+fixed in code and never uses win rate / accuracy. Migration `2026_10_13_000000_create_strategy_lab_tables`
+is written but NOT applied (owner approval needed per environment).

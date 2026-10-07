@@ -350,7 +350,9 @@ def simulate(bars: dict, ind: dict, grid: dict, funding: dict, chart_ms: int, sy
         trades.append({"entry_time": cur["time"], "side": side, "exit_time": max(cur["exit"]["A"][1], cur["exit"]["B"][1]),
                        "gross_pct": gross, "funding_pct": fund, "net_pct": gross - COST_AUTOFINX - fund,
                        "net_tv_cost_pct": gross - COST_TRADINGVIEW,
-                       "reason_a": cur["exit"]["A"][2], "reason_b": cur["exit"]["B"][2]})
+                       "reason_a": cur["exit"]["A"][2], "reason_b": cur["exit"]["B"][2],
+                       "entry_price": abs(entry_n), "exit_price_a": abs(cur["exit"]["A"][0]),
+                       "exit_price_b": abs(cur["exit"]["B"][0])})
 
     for i in range(len(t)):
         bar_end = int(t[i] + chart_ms)
@@ -442,6 +444,42 @@ def _summary(trades: list[dict], lo: int, hi: int) -> dict:
         years.setdefault(time.strftime("%Y", time.gmtime(x["entry_time"] / 1000)), []).append(x["net_pct"])
     out["by_year"] = {y: {"trades": len(v), "avg_net_pct": round(float(np.mean(v)), 4)} for y, v in sorted(years.items())}
     return out
+
+
+def load_sealed(work: Path, symbol: str) -> dict:
+    """5m bars, 1m grid and funding with everything from the holdout start removed, plus the split windows."""
+    m5 = bd.load_klines(work, symbol, "5m")
+    if len(m5["open_time"]) == 0:
+        raise FileNotFoundError(f"no 5m data for {symbol} under {work}")
+    anchors = anchors_from_5m(m5)
+    hold = splits.holdout_start_ms(anchors)
+    train_m, val_m = splits.dev_train_val(anchors)
+    keep = anchors <= hold
+    base = {k: m5[k][keep] for k in ("open_time", "open", "high", "low", "close", "volume")}
+    m1 = bd.load_klines(work, symbol, "1m")
+    m1 = {k: v[m1["open_time"] < hold] for k, v in m1.items()}
+    funding = load_funding(work, symbol)
+    funding = {k: v[funding["funding_time"] < hold] for k, v in funding.items()}
+    return {"base": base, "grid": dense_minutes(m1), "funding": funding, "holdout_start": hold,
+            "dev_end": splits.dev_end_ms(anchors), "train_start": int(anchors[train_m].min()),
+            "train_end": int(anchors[train_m].max()), "val_start": int(anchors[val_m].min())}
+
+
+def chart_bars(base: dict, tf: str) -> dict:
+    if tf == "5m":
+        return base
+    ms = CHART_MS[tf]
+    bars = resample(base, ms)
+    whole = bars["count"] == ms // 300_000
+    return {k: v[whole] for k, v in bars.items()}
+
+
+def s0_trades(data: dict, symbol: str, tf: str) -> tuple[dict, dict, list[dict]]:
+    bars = chart_bars(data["base"], tf)
+    ind = compute(bars, data["base"], symbol)
+    trades = simulate(bars, ind, data["grid"], data["funding"], CHART_MS[tf], symbol)
+    assert all(x["exit_time"] <= data["holdout_start"] for x in trades), "holdout leaked into S0"
+    return bars, ind, trades
 
 
 def run(work: Path, symbol: str, chart_tfs=("5m", "15m")) -> dict:

@@ -17,6 +17,14 @@ un-p4b.sh` running (v4 pattern features for
   (4) `python -m v4.cli p4b` ablation (D-025), BTC/ETH 15m first (SPEC §75); (5) report to the owner.
   (6) P5 built (`v4/p5.py`, `v4/p5_run.py`); BTC h15/h60/h240 smoke all REJECTED in P5-A (R-016, R-017).
   D-029 (per-candidate re-calibration) KEPT. Full P5 runs after P4B.
+- **Strategy Lab (D-031) built, not deployed:** backend + Python runner + tests done; frontend being built.
+  Owner actions: approve `php artisan migrate` (local first; migration 2026_10_13_000000), set
+  `AUTOFINX_STRATEGY_LAB_WORK_DIR` / `_PYTHON_BIN` on the research PC, run a queue worker for queue
+  `strategy_lab`. A real-data Quick Test smoke failed once for RAM while P4B ran (commit headroom ~2 GB) —
+  re-run after P4B.
+- **Optional layers (D-030):** G7-T noise/chop features exported for 6 coins (`features/<SYM>/g7t.parquet`);
+  `run-layers.sh` waits for P4B BTC/ETH h15 then runs `v4.cli layers` (g7t + v13, FEATURE/WAIT/RULE) →
+  `reports/optional-layers/`, `logs/layers.log`; record as R-020.
 - **Candidate autofinx-v13 (owner Pine):** S0 done (R-019, rejected standalone); S1 soft-feature ablation
   queued after P4B (extend `ablation.py` to take `v13.parquet` as one extra group, D-025 rule, no hard filter).
 - **Queued after P4B (owner proposal 2026-10-07, PROPOSED):** Strategy Lab + Tradeability Intelligence —
