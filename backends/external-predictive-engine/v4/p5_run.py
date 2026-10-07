@@ -54,12 +54,12 @@ def _predict_q(models, x) -> dict[float, np.ndarray]:
 class Context:
     """Everything one symbol x horizon needs, loaded once."""
 
-    def __init__(self, work: Path, symbol: str, horizon: int):
+    def __init__(self, work: Path, symbol: str, horizon: int, arm: str = "arm3"):
         import pyarrow.parquet as pq
         self.work, self.symbol, self.h = work, symbol, horizon
         sel_path = work / "reports" / "p4b" / f"{symbol}_h{horizon}.json"
         v4_path = work / "features" / symbol / "v4.parquet"
-        if sel_path.exists() and v4_path.exists():
+        if arm == "arm3" and sel_path.exists() and v4_path.exists():
             selected = json.loads(sel_path.read_text("utf-8"))["selected_groups"]
             table = pq.read_table(v4_path).to_pydict()
             names = [n for n in table if n != "anchor_time_ms" and (not n.startswith(("g1", "g2", "g3", "g4", "g5", "g6")) or n[:2] in selected)]
@@ -108,11 +108,12 @@ def _execute(anchors, signal, outcome) -> np.ndarray:
     return np.asarray(nets)
 
 
-def run(work: Path, symbol: str, horizon: int) -> dict:
+def run(work: Path, symbol: str, horizon: int, arm: str = "arm3") -> dict:
+    """arm3 = V4 labels + P4B-selected features (PRIMARY, L1); arm2 = V4 labels + V3 features (benchmark)."""
     started = time.monotonic()
-    c = Context(work, symbol, horizon)
-    report = {"symbol": symbol, "horizon_minutes": horizon, "features": c.feature_source, "feature_count": len(c.names),
-              "status": None, "stages": {}}
+    c = Context(work, symbol, horizon, arm)
+    report = {"symbol": symbol, "horizon_minutes": horizon, "arm": arm, "features": c.feature_source, "feature_count": len(c.names),
+              "feature_names": c.names, "status": None, "stages": {}}
 
     # 1. models on dev_train
     ref = {s: reference_levels({f"{s}_{k}": c.t[f"{s}_{k}"] for k in ("max_adverse_before_profit_pct", "peak_retracement_pct")},
@@ -288,7 +289,9 @@ def run(work: Path, symbol: str, horizon: int) -> dict:
         predicted[predict_rows] = True
     rows = np.nonzero(predicted)[0]
     final = {"rows_labelled": int(len(rows)), "artifacts": {}}
-    out_dir = work / "models" / symbol / f"h{horizon}" / "p5_final"
+    out_dir = work / "models" / symbol / f"h{horizon}" / ("p5_final" if arm == "arm3" else f"p5_final_{arm}")
+    decision = {"feature_names": c.names, "exit_policy": report["frozen"]["exit_policy"], "gate": report["frozen"]["gate"],
+                "caps": cap, "uncertainty_limit": unc_limit, "ood_mean": mean.tolist(), "ood_std": std.tolist(), "sides": {}}
     out_dir.mkdir(parents=True, exist_ok=True)
     for s in ("long", "short"):
         o = oof[s]
@@ -303,6 +306,16 @@ def run(work: Path, symbol: str, horizon: int) -> dict:
         cut = lab[int(len(lab) * 0.8)]
         fit_rows, cal_rows = lab[c.anchors[lab] < c.anchors[cut] - horizon * MINUTE], lab[c.anchors[lab] >= c.anchors[cut]]
         booster, iso = fit_classifier(c.x, y, c.anchors, fit_rows, cal_rows)
+        # Frozen decision inputs for P6 (D-032): calibration map, EV params and base rate from the final
+        # calibration slice under the frozen policy — the holdout only applies them.
+        cal_ok = cal_rows[np.isin(cal_rows, rows[tradeable])]
+        pos_of = {int(r): i for i, r in enumerate(rows[tradeable])}
+        net_cal = np.array([sim["net_pct"][pos_of[int(r)]] for r in cal_ok]) if len(cal_ok) else np.zeros(0)
+        win_cal = net_cal >= MIN_EDGE
+        decision["sides"][s] = {"iso_x": iso.X_thresholds_.tolist(), "iso_y": iso.y_thresholds_.tolist(),
+                                "avg_win": float(net_cal[win_cal].mean()) if win_cal.any() else 0.0,
+                                "avg_other": float(net_cal[~win_cal].mean()) if (~win_cal).any() else 0.0,
+                                "base_rate": float(win_cal.mean()) if len(win_cal) else 1.0}
         path = out_dir / f"classifier_{s}.txt"
         booster.save_model(str(path))
         final["artifacts"][path.name] = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -313,6 +326,9 @@ def run(work: Path, symbol: str, horizon: int) -> dict:
                 qp = out_dir / f"q{int(q * 100)}_{s}_{k}.txt"
                 m.save_model(str(qp))
                 final["artifacts"][qp.name] = hashlib.sha256(qp.read_bytes()).hexdigest()
+    dpath = out_dir / "decision.json"
+    dpath.write_text(json.dumps(decision), "utf-8")
+    final["artifacts"][dpath.name] = hashlib.sha256(dpath.read_bytes()).hexdigest()
     report["final_retrain"] = final
     report["status"] = "FROZEN_FOR_P6"
     return _finish(work, report, started)
@@ -322,5 +338,6 @@ def _finish(work: Path, report: dict, started: float) -> dict:
     report["seconds"] = round(time.monotonic() - started, 1)
     out = work / "reports" / "p5"
     out.mkdir(parents=True, exist_ok=True)
-    (out / f"{report['symbol']}_h{report['horizon_minutes']}.json").write_text(json.dumps(report, indent=1, default=str), "utf-8")
+    suffix = "" if report.get("arm", "arm3") == "arm3" else f"_{report['arm']}"
+    (out / f"{report['symbol']}_h{report['horizon_minutes']}{suffix}.json").write_text(json.dumps(report, indent=1, default=str), "utf-8")
     return report

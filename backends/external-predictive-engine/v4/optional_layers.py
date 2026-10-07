@@ -50,7 +50,8 @@ KEEP_SHARES = (0.5, 0.3)
 MIN_IMPROVEMENT = 0.01            # % per executed trade
 MIN_PROFIT_RETENTION = 50.0       # % of gross winning net kept
 G7T = ("g7t_eff_12", "g7t_eff_48", "g7t_chop_14", "g7t_chop_48", "g7t_flip_24", "g7t_overlap_12",
-       "g7t_failed_bo_48", "g7t_ema_compress", "g7t_body_mean_12", "g7t_wick_mean_12", "g7t_path_ratio_48")
+       "g7t_failed_bo_48", "g7t_ema_compress", "g7t_body_mean_12", "g7t_wick_mean_12", "g7t_path_ratio_48",
+       "g7t_flip_48", "g7t_range_pos_48", "g7t_vol_confirm_12", "g7t_persistence_12")
 
 
 # ---------------------------------------------------------------- G7-T tradeability features (causal)
@@ -96,9 +97,27 @@ def tradeability_features(bars: dict) -> dict[str, np.ndarray]:
         body = np.where(rng > 0, np.abs(c - o) / rng, np.nan)
         wick = np.where(rng > 0, (rng - np.abs(c - o)) / rng, np.nan)
         path_ratio = _rolling_sum(rng, 48) / (v13.highest(h, 48) - v13.lowest(l, 48))
+        flip_48 = _rolling_sum(flips, 48) / 48.0
+        hi48, lo48 = v13.highest(h, 48), v13.lowest(l, 48)
+        range_pos = (c - lo48) / (hi48 - lo48)
+        net12 = np.sign(c - v13.shift(c, 12))
+        up, dn = (d > 0).astype(float), (d < 0).astype(float)
+        if "volume" in bars:
+            v = np.asarray(bars["volume"], float)
+            v_up = _rolling_sum(v * up, 12) / _rolling_sum(up, 12)
+            v_dn = _rolling_sum(v * dn, 12) / _rolling_sum(dn, 12)
+            ratio = np.log(v_up / v_dn)                          # >0: up-bars carry more volume
+            vol_confirm = np.where(np.isfinite(ratio), ratio * net12, np.nan)
+        else:
+            vol_confirm = np.full(len(c), np.nan)
+        # share of the last 12 bars that moved WITH the 12-bar net direction
+        persistence = (_rolling_sum(up, 12) * (net12 > 0) + _rolling_sum(dn, 12) * (net12 < 0)) / 12.0
+        persistence = np.where(np.isfinite(net12), persistence, np.nan)
     return {"g7t_eff_12": eff[12], "g7t_eff_48": eff[48], "g7t_chop_14": _chop(h, l, c, 14), "g7t_chop_48": _chop(h, l, c, 48),
             "g7t_flip_24": flip_24, "g7t_overlap_12": overlap_12, "g7t_failed_bo_48": failed_48, "g7t_ema_compress": compress,
-            "g7t_body_mean_12": v13.sma(body, 12), "g7t_wick_mean_12": v13.sma(wick, 12), "g7t_path_ratio_48": path_ratio}
+            "g7t_body_mean_12": v13.sma(body, 12), "g7t_wick_mean_12": v13.sma(wick, 12), "g7t_path_ratio_48": path_ratio,
+            "g7t_flip_48": flip_48, "g7t_range_pos_48": range_pos, "g7t_vol_confirm_12": vol_confirm,
+            "g7t_persistence_12": persistence}
 
 
 def export_g7t(work: Path, symbol: str) -> Path:
@@ -164,11 +183,14 @@ def wait_metrics(net: np.ndarray, keep: np.ndarray, anchors: np.ndarray, exit_ms
 
 
 def _wait_verdict(fold_metrics: list[dict]) -> str:
+    # D-030 rev (2026-10-07): winners must be kept at least in proportion to the trades kept (a fixed 50 %
+    # floor made OVER_FILTERED automatic for a 30 % keep share).
+    def proportional(m):
+        return (m["profit_retention_pct"] or 0) >= m.get("trade_retention_pct", MIN_PROFIT_RETENTION)
     better = [m for m in fold_metrics if m["executed_on"]["avg_net_pct"] is not None and m["executed_off"]["avg_net_pct"] is not None
-              and m["executed_on"]["avg_net_pct"] - m["executed_off"]["avg_net_pct"] >= MIN_IMPROVEMENT
-              and (m["profit_retention_pct"] or 0) >= MIN_PROFIT_RETENTION]
+              and m["executed_on"]["avg_net_pct"] - m["executed_off"]["avg_net_pct"] >= MIN_IMPROVEMENT and proportional(m)]
     if len(better) < 2:
-        over = sum(1 for m in fold_metrics if (m["profit_retention_pct"] or 0) < MIN_PROFIT_RETENTION)
+        over = sum(1 for m in fold_metrics if not proportional(m))
         return "OVER_FILTERED" if over >= 2 else "NO_VALUE"
     positive = sum(1 for m in fold_metrics if (m["executed_on"]["avg_net_pct"] or -1) > 0)
     return "PROFITABLE_WITH_LAYER" if positive >= 2 else "USEFUL_AS_WAIT_LAYER"

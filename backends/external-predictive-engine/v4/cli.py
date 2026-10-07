@@ -28,11 +28,12 @@ def _months(symbol: str, override: int | None) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="v4.cli")
-    parser.add_argument("command", choices=["download", "verify", "status", "targets", "import-candles", "export-features", "p3", "resolve", "p4a", "p4b", "p5", "lab-v13", "export-g7t", "layers"])
+    parser.add_argument("command", choices=["download", "verify", "status", "targets", "import-candles", "export-features", "p3", "resolve", "p4a", "p4b", "p5", "lab-v13", "export-g7t", "layers", "p4b-audit", "meta"])
     parser.add_argument("--schema", default="qt-shadow-features-v3", help="export-features: qt-shadow-features-v3 or -v4")
     parser.add_argument("--days", type=int, default=30, help="resolve: random development days to sample")
     parser.add_argument("--horizons", default="15,60,120,240,1440")
     parser.add_argument("--cost-pct", type=float, default=None, help="round-trip cost for Layer A (default 0.12, R-002)")
+    parser.add_argument("--arm", default="arm3", choices=["arm3", "arm2"], help="p5: arm3 = selected V4 features (primary), arm2 = V3 features")
     parser.add_argument("--work", required=True, type=Path)
     parser.add_argument("--symbols", default="BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,XRPUSDT,SUIUSDT")
     parser.add_argument("--timeframes", default="1m,5m")
@@ -40,6 +41,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--metrics", action="store_true", help="also download daily metrics for the G7 coverage audit")
     args = parser.parse_args(argv)
 
+    if args.command == "p4b-audit":
+        from .p4b_audit import run as run_audit
+        r = run_audit(args.work)
+        print(f"== P4B audit: {sum(1 for c in r['cells'] if 'selected' in c)}/30 cells -> reports/p4b_audit/AUDIT.md", flush=True)
+        return 0
     symbols = [s.strip().upper() for s in args.symbols.replace(";", ",").split(",") if s.strip()]
     today = dt.datetime.now(dt.timezone.utc).date()
     reports = args.work / "reports"
@@ -79,11 +85,23 @@ def main(argv: list[str] | None = None) -> int:
             elif args.command == "p5":
                 from .p5_run import run as run_p5
                 for h in [int(v) for v in args.horizons.replace(";", ",").split(",") if v.strip()]:
-                    r = run_p5(args.work, symbol, h)
+                    r = run_p5(args.work, symbol, h, args.arm)
                     print(f"== {symbol} h{h}: {r['status']} {r.get('reason', '')} ({r['features']}, {r['seconds']}s)", flush=True)
                     if "frozen" in r:
                         print(f"   frozen: {json.dumps(r['frozen']['exit_policy'])} gate {json.dumps(r['frozen']['gate'])}; P5-C: "
                               f"{r['stages'].get('P5-C', {}).get('trades')} trades, avg {r['stages'].get('P5-C', {}).get('avg_net_pct')}", flush=True)
+            elif args.command == "meta":
+                from .meta_label import run as run_meta
+                for h in [int(v) for v in args.horizons.replace(";", ",").split(",") if v.strip()]:
+                    r = run_meta(args.work, symbol, h)
+                    print(f"== {symbol} h{h} meta/cost: {r['verdicts']} ({r['seconds']}s)", flush=True)
+                    for i, f in enumerate(r["folds"]):
+                        if "c0" not in f:
+                            print(f"   fold {i}: {f.get('status')} {f['proposals']}", flush=True)
+                            continue
+                        line = "  ".join(f"{k} {v['executed_off']['avg_net_pct']}->{v['executed_on']['avg_net_pct']} ({v['executed_on']['trades']})"
+                                         for k, v in f["c0"].items())
+                        print(f"   fold {i} C0: {line} | C1 fill {f['c1_fill_rate_pct']}% meta AUC {f['meta_auc_test']}", flush=True)
             elif args.command == "export-g7t":
                 from .optional_layers import export_g7t
                 print(f"== {symbol}: tradeability features -> {export_g7t(args.work, symbol)}", flush=True)

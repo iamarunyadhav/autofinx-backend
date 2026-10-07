@@ -42,8 +42,10 @@ def _as_col(value, rows: np.ndarray) -> np.ndarray:
 def simulate(m1: dict[str, np.ndarray] | None, anchors: np.ndarray, horizon_min: int, side: str,
              sl_pct, act_pct, trail_pct, cost_pct: float, funding: dict[str, np.ndarray] | None = None,
              conflicts: np.ndarray | None = None, grid: dict[str, np.ndarray] | None = None,
-             chunk: int = 4000) -> dict[str, np.ndarray]:
-    """sl/act/trail: scalars or per-anchor arrays (dynamic policies). Returns per-anchor outcome."""
+             chunk: int = 4000, entry_price: np.ndarray | None = None) -> dict[str, np.ndarray]:
+    """sl/act/trail: scalars or per-anchor arrays (dynamic policies). Returns per-anchor outcome.
+    entry_price (optional, per anchor): fill price instead of the anchor minute's open (D-035 maker entry;
+    the whole fill minute still counts as after entry, which is the conservative reading)."""
     if side not in ("long", "short"):
         raise ValueError("side must be long or short")
     grid = grid if grid is not None else dense_minutes(m1)
@@ -72,7 +74,7 @@ def simulate(m1: dict[str, np.ndarray] | None, anchors: np.ndarray, horizon_min:
         sel = rows[begin:begin + chunk]
         k = len(sel)
         win = entry_idx[sel][:, None] + offsets[None, :]
-        e = grid["open"][entry_idx[sel]][:, None]
+        e = (grid["open"][entry_idx[sel]] if entry_price is None else np.asarray(entry_price, float)[sel])[:, None]
         hi = (grid["high"][win] / e - 1.0) * 100.0
         lo = (grid["low"][win] / e - 1.0) * 100.0
         op = (grid["open"][win] / e - 1.0) * 100.0
@@ -147,7 +149,7 @@ def simulate(m1: dict[str, np.ndarray] | None, anchors: np.ndarray, horizon_min:
 
 
 def worst_case_path(o, h, l, c, side: str, sl: float, act: float, trail: float, cost: float,
-                    funding_to: "callable", max_branches: int = 4096) -> tuple[int, float, int]:
+                    funding_to: "callable", max_branches: int = 4096, entry: float | None = None) -> tuple[int, float, int]:
     """Exact worst case over the unknown order inside same-bar trailing bars (D-023).
 
     o/h/l/c are the raw prices of the path bars (entry = o[0]). When a bar arms or raises the trailing
@@ -157,7 +159,7 @@ def worst_case_path(o, h, l, c, side: str, sl: float, act: float, trail: float, 
     Stop-vs-activation conflicts before arming stay AMBIGUOUS_INTRABAR at the stop (already the worst).
     """
     s = 1.0 if side == "long" else -1.0
-    e = o[0]
+    e = o[0] if entry is None else entry
     fav = ((h if s > 0 else l) / e - 1.0) * 100.0 * s
     adv = ((l if s > 0 else h) / e - 1.0) * 100.0 * s
     opn = (o / e - 1.0) * 100.0 * s
@@ -208,7 +210,7 @@ def worst_case_path(o, h, l, c, side: str, sl: float, act: float, trail: float, 
 
 
 def apply_worst_case(sim: dict, grid: dict, anchors: np.ndarray, horizon_min: int, side: str, sl, act, trail,
-                     cost: float, funding: dict | None) -> dict:
+                     cost: float, funding: dict | None, entry_price: np.ndarray | None = None) -> dict:
     """Re-evaluates every same_bar_trail row with worst_case_path (net, reason, exit time). The flag
     stays True so P4 labels can exclude these rows (unresolved ambiguity, D-023)."""
     rows = np.nonzero(sim["same_bar_trail"])[0]
@@ -229,7 +231,8 @@ def apply_worst_case(sim: dict, grid: dict, anchors: np.ndarray, horizon_min: in
             end = a + (bar + 1) * MINUTE
             return float(f_cs[np.searchsorted(f_t, end, side="right")] - f_cs[np.searchsorted(f_t, a, side="right")])
         reason, move, bar = worst_case_path(grid["open"][sl_i], grid["high"][sl_i], grid["low"][sl_i], grid["close"][sl_i],
-                                            side, float(sl_a[i]), float(act_a[i]), float(trail_a[i]), cost, funding_to)
+                                            side, float(sl_a[i]), float(act_a[i]), float(trail_a[i]), cost, funding_to,
+                                            entry=None if entry_price is None else float(entry_price[i]))
         fund = funding_to(bar)
         sim["reason"][i] = reason
         sim["gross_pct"][i] = move

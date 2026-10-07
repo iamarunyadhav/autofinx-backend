@@ -224,3 +224,52 @@ statically and tested only through reviewed translations matched by normalized s
 (3) Quick Test uses dev_train only (not dev_val) so P5 nested selection stays clean; (4) the verdict rule is
 fixed in code and never uses win rate / accuracy. Migration `2026_10_13_000000_create_strategy_lab_tables`
 is written but NOT applied (owner approval needed per environment).
+
+**D-033 · 2026-10-07 · agent, PROPOSED — owner to approve before code runs — TAKE/SKIP meta-label (Stage E)**:
+- *Proposals:* per symbol × horizon, every anchor whose P5 level gates pass (reason 0) on the side with
+  the higher candidate-calibrated probability, under P5-A's chosen exit policy (or a1.0_b0.8_vol when P5-A
+  qualified none — this is stated in advance, not picked after results).
+- *Meta label:* the SAME candidate policy's worst-case net ≥ MIN_EDGE (D-029 semantics; ambiguous rows
+  kept in economics, excluded from fitting).
+- *Meta inputs (all known at T0):* raw + calibrated p_long / p_short, their margin, EV, MFE q25/q50/q75,
+  adverse q75, pullback q50, reward/cost, reward/adverse, uncertainty width, OOD z-share, G7-T columns.
+- *Model:* LightGBM classifier + isotonic.
+- *Evaluation:* dev_train ablation folds (55–70 / 70–85 / 85–100 %) only. ON keeps proposals whose meta
+  score is in the top 50 % / 30 % of the fold-train distribution; the rest become WAIT_META_SKIP.
+- *Verdict (as D-030 WAIT):* USEFUL if executed avg net ON − OFF ≥ 0.01 %/trade in ≥ 2/3 folds with
+  profit retention ≥ 50 %. PROFITABLE if, in addition, ON net > 0 in ≥ 2/3 folds. Otherwise
+  NO_VALUE / OVER_FILTERED. False-WAIT, loss avoidance and trade retention are reported.
+- *Integration:* only a USEFUL verdict lets P5 add "meta ON (share 50 / 30)" to its P5-B gate candidates.
+
+**D-035 · 2026-10-07 · agent, PROPOSED — owner to approve — execution-cost scenarios (Stage G)**:
+- Same predictions and the same exits in every scenario; only the execution changes.
+- *C0 (current):* taker entry + taker exit, 0.12 % round trip + funding.
+- *C1:* maker entry + taker exit.
+  - At the signal (T0) a post-only limit order sits at the T0 reference price for F = 2 minutes.
+  - It fills only if a 1m bar trades THROUGH the price (long: low < limit; short: high > limit), at the
+    limit, from that minute.
+  - A missed fill = no trade (reported as MISSED, never as a free WAIT).
+  - Cost = maker 0.02 % + taker 0.05 % + 0.01 % exit slippage = 0.08 %, plus funding.
+  - SL / trailing / time exits stay taker.
+  - Reported: fill rate; filled vs unfilled outcome of the same proposals (adverse-selection check);
+    C0 vs C1 avg net, PF and t.
+- *C2 (maker exits):* deferred — the V4 exits are stop / trailing / time; none is a resting take-profit,
+  so a maker exit does not apply without changing the exit design.
+- *Fees:* assumed Binance USDⓈ-M VIP0 public rates (maker 0.02 % / taker 0.05 %). The owner confirms
+  the real account tier; stress keeps C0 and +25 / +50 % cost.
+- *Validation:* an aggTrades sample check of the 1m trade-through fill rule (like R-014) before any
+  conclusion.
+
+**D-033 / D-035 · 2026-10-07 · owner "continue" (taken as the go for the dev-only experiments) — amended
+before any run:**
+- (1) The verdict uses "profit retention >= trade retention" instead of a fixed 50 % floor. The same
+  revision applies to the D-030 WAIT verdict, because the fixed floor made OVER_FILTERED automatic at a
+  30 % keep share (R-020).
+- (2) Meta-label folds are forward-chained inside each D-025 fold's train rows:
+  - base 60 %: direction, quantiles, cap, calibration;
+  - meta 40 %, purged by H: out-of-sample proposals → meta fit;
+  - fold test: evaluation.
+- (3) Arms on the fold test proposals: OFF, EV_GATE (P5-style), META_50, META_30. Each runs under C0
+  (0.12 %) and C1 (maker entry, trade-through, 0.08 %). C1 reports the fill rate and the C0 net of filled
+  vs missed proposals (adverse-selection check).
+- Code: `v4/execution.py`, `v4/meta_label.py`, `policy.simulate(entry_price=...)`, CLI `meta`.

@@ -120,6 +120,57 @@ are. Numbers are copied from real output, never estimated after the fact.
 - G7 metrics: BTC 1,350 days fetched before the run switched to `-NoMetrics` (2021-10-01 → 2026-10-05,
   5-min step, 8 gaps > 15 min). Remaining days/coins later, before P4B.
 
+## R-020 · 2026-10-07 · Optional layers h15 (D-030): G7-T (15 cols) and v13 components, 6 coins (dev_train folds)
+- Baseline = the P4B selection per coin.
+- **FEATURE role:**
+  - NO_VALUE in 11 of 12 layer × coin cases.
+  - Only XRP G7-T was USEFUL_AS_FEATURE (gains +0.0032 / +0.0021 / −0.0002 AUC).
+  - v13 was never useful.
+- **WAIT role (tradeability TAKE/SKIP on the layer columns):**
+  - Tradeability AUC 0.51–0.59.
+  - Every verdict was NO_VALUE or OVER_FILTERED.
+  - Keeping the top 30 % moved the executed avg net from about −0.13 % to about −0.125 %/trade: still
+    ≈ −cost. The always-take reference stream has ≈ 0 gross edge, so filtering it cannot create profit.
+- **RULE role (v13 own gates):** chop ≤ 62 gave NO_VALUE (≈ no change); TREND regime gave OVER_FILTERED
+  and was slightly worse.
+- **Caveat (design flaw found):**
+  - With keep share 30 % and the profit-retention floor at 50 %, OVER_FILTERED is near-automatic unless
+    the winners are concentrated.
+  - The rule should compare retention to the keep share (D-030 revision proposed).
+  - Conclusion unchanged: the net improvement is ≤ 0.007 %/trade everywhere.
+
+## R-018 · 2026-10-07 · P4B all 30 cells + Stage B audit (dev_train folds only)
+- 30/30 cells. 9 runs were lost to out-of-memory / fork failures and re-run one symbol × horizon per
+  process; the code and the rule (D-025) were unchanged. Audit: `D:/autofinx-ml-v4/reports/p4b_audit/AUDIT.md`.
+- Selected groups:
+  | Sym | h15 | h60 | h120 | h240 | h1440 |
+  |---|---|---|---|---|---|
+  | BTC | g5 | g3+g5 | g3+g5 | g3+g6 | none |
+  | ETH | g4 | g5 | g2 | g1 | g1+g4 |
+  | BNB | g4 | none | none | g1 | g1 |
+  | SOL | g2 | none | none | g1 | none |
+  | XRP | none | none | g1 | none | g1+g2+g3 |
+  | SUI | g5 | none | none | g3+g5 | g1+g5 |
+- Group stats (kept / tried · median fold AUC gain · cells positive in all 3 folds):
+  - g1 8/30 · +0.0005 · 6
+  - g2 3/30 · +0.0003 · 5
+  - g3 5/30 · +0.0002 · 6
+  - g4 3/30 · −0.0004 · 2
+  - g5 7/30 · +0.0006 · 4
+  - g6 1/30 · −0.0007 · 0
+- Overlap (median max |Spearman| vs the other groups, same for every coin within ±0.03):
+  - g3 momentum ≈ 0.91 and g4 volatility ≈ 0.89: mostly duplicates of the base / other groups.
+  - g6 volume ≈ 0.84.
+  - base ≈ 0.80, v13 ≈ 0.74, g1 ≈ 0.70, g5 ≈ 0.64, g2 ≈ 0.49.
+  - **g7t ≈ 0.40: the most novel information.**
+- Reading:
+  - Pattern groups add very little (median gain +0.0002–0.0006 AUC). No group is consistently useful
+    across coins or horizons.
+  - Baseline AUC falls from ~0.60–0.72 (h15) to ~0.50–0.54 (h1440). Selections at h1440 sit on a near-random
+    baseline and are likely noise.
+  - v13's components largely duplicate existing features (0.74).
+  - G7-T is mostly new information, so the optional-layer test of G7-T is the more informative next step.
+
 ## R-019 · 2026-10-07 · Strategy Lab candidate #1 "AutoFinX v13" Pine — S0 standalone (development data only)
 - Owner upload, audited in `strategy-lab/candidates/autofinx-v13/AUDIT.md`: causal, no lookahead; the HTF
   read differs between TradingView historical and live; webhook built for live Future Trade.

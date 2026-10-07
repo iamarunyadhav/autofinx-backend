@@ -216,3 +216,19 @@ un-p4b.sh` (pattern features → ablation BTC/ETH 15m first, then all).
   in App.tsx; module `strategy-lab` in module-access.ts; sidebar icon. `npm run build` OK, eslint 0 errors (29
   pre-existing warnings, none new). Not yet clicked through live (migration pending). Controller `cancel` now
   wrapped in guard().
+- `v4/p5_run.py`: `arm` parameter (arm3 primary / arm2 V3-features benchmark, report suffix `_arm2`), feature
+  names in the report, `decision.json` in the final-retrain dir (isotonic map, EV params, base rate, OOD
+  mean/std, caps, uncertainty limit) with sha256; CLI `--arm`. V4 tests 84/84.
+- `docs/ml-engine-v1/STATUS_REPORT_2026-10-07.md` (owner full status). `D:/autofinx-ml-v4/run-p4b-p5.sh`
+  (missing P4B → layers → P5, per-process, memory guard). PROGRESS rewritten to the current state.
+- `PLAN_PROFITABILITY_2026-10-07.md` (owner plan review: mapping to code, 5 corrections). Runner restarted detached
+  (Start-Process) so it survives a Claude session end.
+- G7-T +4 features (flip_48, range_pos_48, vol_confirm_12, persistence_12) in `v4/optional_layers.py`, tests;
+  g7t.parquet re-exported (15 columns). `v4/p4b_audit.py` (Stage B: selection table, group gain stats,
+  Spearman overlap incl. G7-T / v13) + CLI `p4b-audit` + test. V4 suite 86/86. DECISIONS D-033, D-035 PROPOSED.
+- RESULTS R-018 (P4B 30 cells + audit), R-020 (optional layers h15). `CROSSCHECK_HANDOFF_2026-10-07.md` (full
+  handoff for an independent reviewer).
+- D-035 C1 maker entry: `v4/execution.py` (trade-through fills, 0.08 %), `policy.simulate` / `apply_worst_case` /
+  `worst_case_path` optional entry price (default unchanged); `tests/v4/test_execution.py`.
+- D-033 TAKE/SKIP: `v4/meta_label.py` (forward-chained base/meta/test inside the D-025 folds, C0 vs C1 arms,
+  verdict), CLI `meta`. D-030 WAIT verdict revised (retention vs keep share). V4 suite 90/90.

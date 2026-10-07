@@ -11,7 +11,8 @@ def _bars(n, seed=5):
     c = 100.0 * np.exp(np.cumsum(rng.normal(0, 0.002, n)))
     o = np.r_[c[0], c[:-1]]
     return {"open_time": np.arange(n, dtype=np.int64) * 300_000, "open": o,
-            "high": np.maximum(o, c) * 1.0005, "low": np.minimum(o, c) * 0.9995, "close": c}
+            "high": np.maximum(o, c) * 1.0005, "low": np.minimum(o, c) * 0.9995, "close": c,
+            "volume": rng.uniform(10, 20, n)}
 
 
 def test_g7t_is_causal():
@@ -21,6 +22,7 @@ def test_g7t_is_causal():
     k = 1500
     for key in ("open", "high", "low", "close"):
         late[key][k:] *= 1.07
+    late["volume"][k:] *= 5
     z = ol.tradeability_features(late)
     for name in ol.G7T:
         assert np.allclose(a[name][:k], z[name][:k], equal_nan=True), name
@@ -56,3 +58,23 @@ def test_wait_verdict_rules():
     assert ol._wait_verdict([fold(-0.1, 0.02, 60)] * 3) == "PROFITABLE_WITH_LAYER"
     assert ol._wait_verdict([fold(-0.1, 0.02, 20)] * 3) == "OVER_FILTERED"
     assert ol._wait_verdict([fold(-0.1, -0.1, 80)] * 3) == "NO_VALUE"
+
+
+def test_g7t_persistence_and_range_position():
+    n = 200
+    line = np.linspace(100, 120, n)
+    b = {"open_time": np.arange(n, dtype=np.int64) * 300_000, "open": line, "high": line + 0.01, "low": line - 0.01,
+         "close": line, "volume": np.r_[np.full(n, 10.0)]}
+    f = ol.tradeability_features(b)
+    assert np.allclose(f["g7t_persistence_12"][60:], 1.0)          # every bar moves with the 12-bar trend
+    assert np.all(f["g7t_range_pos_48"][60:] > 0.99)               # close at the top of the 48-bar range
+    assert np.allclose(f["g7t_flip_48"][60:], 0.0)
+
+
+def test_p4b_audit_overlap_detects_duplicates():
+    from v4 import p4b_audit as au
+    rng = np.random.default_rng(1)
+    a = rng.normal(size=2000)
+    x = np.column_stack([a, a * 2 + 1, rng.normal(size=2000)])
+    o = au.group_overlap(["a", "a2", "z"], {"g1": ["a"], "g2": ["a2"], "g3": ["z"]}, x)
+    assert o["g1"] > 0.99 and o["g2"] > 0.99 and o["g3"] < 0.1

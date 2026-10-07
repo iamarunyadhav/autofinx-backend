@@ -1,30 +1,34 @@
 # PROGRESS
 
-Last updated: 2026-10-06 by ml-engine-v1 (Claude Code session).
+Last updated: 2026-10-07 17:50 SLST by ml-engine-v1 (Claude Code session).
 
 ## Current state
 
-- **Current phase:** **P4A in progress** (P3 diagnostics re-running). Review corrections D-023 applied
-  (worst-case same-bar evaluation, unresolved rows excluded from V4 labels, sklearn AUC, resolver
-  funding, additive drawdown labelled). 49 tests pass. BTC h15 old-vs-corrected in RESULTS R-012.
-- **Running (one background chain, `D:utofinx-ml-v4\logs\chain-p3-resolve-p4a.log`):** full P3
-  (6 coins x 5 horizons) -> BTC sampled aggTrade resolver (30 days, h15/h60) -> P4A all coins per
-  horizon in SPEC 75 order (15, 60, 120, 240, 1440).
-- **Next action:** (1) P3 (R-013), resolver (R-014), P4A all 30 cells (R-015) recorded — no V4 edge; (2) full backend suite done 2026-10-07: 2068 passed, 1 skipped;
-  (3)+(4) owner "go P4B" 2026-10-07 09:10: `D:utofinx-ml-v4
-un-p4b.sh` running (v4 pattern features for
-  6 coins, then p4b in SPEC §75 order) → `logs/chain-p4b.log`; record as R-018;
-  (4) `python -m v4.cli p4b` ablation (D-025), BTC/ETH 15m first (SPEC §75); (5) report to the owner.
-  (6) P5 built (`v4/p5.py`, `v4/p5_run.py`); BTC h15/h60/h240 smoke all REJECTED in P5-A (R-016, R-017).
-  D-029 (per-candidate re-calibration) KEPT. Full P5 runs after P4B.
-- **Strategy Lab (D-031) built, not deployed:** backend + Python runner + tests done; frontend being built.
-  Owner actions: approve `php artisan migrate` (local first; migration 2026_10_13_000000), set
-  `AUTOFINX_STRATEGY_LAB_WORK_DIR` / `_PYTHON_BIN` on the research PC, run a queue worker for queue
-  `strategy_lab`. A real-data Quick Test smoke failed once for RAM while P4B ran (commit headroom ~2 GB) —
-  re-run after P4B.
-- **Optional layers (D-030):** G7-T noise/chop features exported for 6 coins (`features/<SYM>/g7t.parquet`);
-  `run-layers.sh` waits for P4B BTC/ETH h15 then runs `v4.cli layers` (g7t + v13, FEATURE/WAIT/RULE) →
-  `reports/optional-layers/`, `logs/layers.log`; record as R-020.
+- **Current phase:** **P4B done 30/30 (R-018); optional layers done, no value (R-020); P5 T0 baseline running.** Reviewer handoff: `CROSSCHECK_HANDOFF_2026-10-07.md`. Full owner status report:
+  `STATUS_REPORT_2026-10-07.md`.
+- **Running:** `D:/autofinx-ml-v4/run-p4b-p5.sh` → `logs/p4b-p5.log`. One symbol × horizon per python
+  process, waits for >= 6 GB free commit memory: (1) 7 missing P4B cells (BTC h120/h240, ETH h240,
+  BNB h120/h240, SOL h240, SUI h1440 — lost to out-of-memory / fork failures); (2) optional layers h15
+  (g7t + v13, D-030); (3) P5 arm3 for all 30 cells. P5 now also writes `p5_final/decision.json`
+  (calibration map, EV params, base rate, OOD stats) so P6 only applies frozen inputs; `--arm arm2`
+  added for the Arm 2 benchmark.
+- **Owner plan 2026-10-07 (Profitability Intelligence):** accepted as direction; review + mapping in
+  `PLAN_PROFITABILITY_2026-10-07.md` (new IDs D-032..D-035). The queued P5 full run = T0 baseline only.
+- **Owner "start" 2026-10-07 19:10:** G7-T now 15 features (flip_48, range_pos_48, vol_confirm_12,
+  persistence_12 added; re-exported before the layers run). Stage B audit code ready (`v4.cli p4b-audit`,
+  runs when P4B is 30/30). D-033 (TAKE/SKIP) and D-035 (cost C0/C1) PROPOSED — owner approval needed.
+- **D-033 / D-035 code done** (90 tests); BTC h60 smoke running (`logs/meta-smoke-btc60.log`); full
+  30-cell run after the P5 baseline.
+- **Gate before P6:** owner approves D-032 (holdout pass rule + P7 classification, pre-registered BEFORE
+  the holdout is opened). P6/P7/P8 code not written yet. If P5 freezes no cell, the holdout stays sealed
+  and P8 is the honest "no edge" report.
+- **Next action:** when the runner finishes: record R-018 (P4B 30 cells), R-020 (optional layers),
+  R-021 (P5 30 cells); write P6/P7/P8 code; propose D-032; report to the owner.
+- **Strategy Lab (D-031):** backend deployed + migrated on the server (flag on, no WORK_DIR there →
+  RUNNER_UNAVAILABLE by design); frontend built (build + eslint clean), production deploy pending; PC
+  setup (`AUTOFINX_STRATEGY_LAB_WORK_DIR`, `_PYTHON_BIN`, local migrate, queue worker) after training.
+- **Candidate autofinx-v13 (owner Pine):** S0 REJECTED_NO_VALUE (R-019); components tested in optional
+  layers (FEATURE / WAIT / RULE) in step (2) above.
 - **Candidate autofinx-v13 (owner Pine):** S0 done (R-019, rejected standalone); S1 soft-feature ablation
   queued after P4B (extend `ablation.py` to take `v13.parquet` as one extra group, D-025 rule, no hard filter).
 - **Queued after P4B (owner proposal 2026-10-07, PROPOSED):** Strategy Lab + Tradeability Intelligence —
