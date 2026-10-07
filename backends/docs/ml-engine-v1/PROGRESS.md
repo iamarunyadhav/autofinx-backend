@@ -10,11 +10,12 @@ Last updated: 2026-10-06 by ml-engine-v1 (Claude Code session).
 - **Running (one background chain, `D:utofinx-ml-v4\logs\chain-p3-resolve-p4a.log`):** full P3
   (6 coins x 5 horizons) -> BTC sampled aggTrade resolver (30 days, h15/h60) -> P4A all coins per
   horizon in SPEC 75 order (15, 60, 120, 240, 1440).
-- **Next action:** when the chain finishes: (1) record P3 table (R-013), resolver bias by stratum (R-014),
-  P4A table (R-015); (2) run the full backend suite (`php artisan test`) for the P4B PHP changes;
+- **Next action:** (1) P3 (R-013), resolver (R-014), P4A h15–h120 (R-015) recorded; P4A h240/h1440
+  resuming (`run-p4a-resume.sh`, chain killed by a Windows power-off at 06:55) → add to R-015; (2) run the full backend suite (`php artisan test`) for the P4B PHP changes;
   (3) `ml-v4-local.ps1 -TargetsOnly -PatternFeatures` (v4 features, ~3 h for 6 coins);
   (4) `python -m v4.cli p4b` ablation (D-025), BTC/ETH 15m first (SPEC §75); (5) report to the owner.
-  (6) P5 design LOCKED (SPEC §103, D-028) — implement `v4/p5.py` + tests; run after P4A/P4B results.
+  (6) P5 built (`v4/p5.py`, `v4/p5_run.py`); BTC h15/h60/h240 smoke all REJECTED in P5-A (R-016, R-017).
+  Owner to approve or revert D-029 (per-candidate re-calibration). Full P5 runs after P4B.
 - **Server:** ML paused with `ml-server-pause.sh --apply` on 2026-10-07 00:53 +08 (flag false, worker
   autostart off, 1.4 GB exports removed). Load stayed ~27–29, so ML was not the main server load.
   `--free-disk` (~16 GB) recommended, owner to decide.

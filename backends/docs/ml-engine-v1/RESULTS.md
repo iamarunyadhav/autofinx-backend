@@ -120,6 +120,88 @@ are. Numbers are copied from real output, never estimated after the fact.
 - G7 metrics: BTC 1,350 days fetched before the run switched to `-NoMetrics` (2021-10-01 → 2026-10-05,
   5-min step, 8 gaps > 15 min). Remaining days/coins later, before P4B.
 
+## R-017 · 2026-10-07 · P5 smoke — BTCUSDT h60 / h240 + EV diagnostics (development data only)
+- Both ran end to end (543 s / 676 s, CPU shared with the P3 chain), V3 base features. Quality gate passed
+  for all components. SL caps: h60 long 0.324% / short 0.317%; h240 0.513% / 0.509%.
+- **h60 REJECTED**: 1.0k–5.8k rows per side pass the level gates, 0 trades for all 12 exit policies.
+- **h240 REJECTED**: 21k–34k long / 20k–32k short rows pass the level gates, 0 trades.
+- EV diagnostics, h240, policy a1.0_b0.8_vol (all 12 similar):
+  | Side | avg win | avg other | candidate base rate | break-even p | max EV on tradeable rows |
+  |---|---|---|---|---|---|
+  | long | +0.310% | −0.266% | 23.8% | ≈ 46% | −0.12% |
+  | short | +0.295% | −0.267% | 22.4% | ≈ 48% | −0.14% |
+- Consistency check (D-029, proposed): the classifier was trained on REFERENCE-policy labels while the EV
+  parameters come from each candidate policy. Its score was re-calibrated per candidate on the dev_train
+  calibration slice. Before: mean p 0.19, max EV −0.083%. After: mean p 0.24, max EV −0.12%. The
+  calibrated probability never rises much above the base rate, so the classifier score carries almost no
+  information about candidate-policy success.
+- Reading: the zero trades are a real result, not a proxy artifact. Under these exit policies a BTC 4h trade
+  wins about 1 in 4, and a win is only slightly larger than a loss. EV would need p ≈ 0.46, about twice
+  the base rate, and the V3 base features do not separate those rows. Honest REJECT. P5-B, P5-C and the
+  final retrain are still not exercised on real data.
+
+## R-015 · 2026-10-07 · P4A all coins — h15 / h60 / h120 (dev_val, development data only; h240/h1440 pending)
+- The chain was killed at XRP h120 by a Windows power-off event (06:55, no traceback). The rest (XRP/SUI h120,
+  all h240, h1440) restarted with `run-p4a-resume.sh` → `logs/chain-p4a-resume.log`.
+- Trades / avg net % / t-stat on dev_val (non-overlapping, worst-case exits, 0.12% cost + funding):
+  | Sym | H | AUC V3 L/S | AUC V4 L/S | ARM1_V3 | V3 signal + new exit | ARM2_V4 | EV-only V4 (diag) |
+  |---|---|---|---|---|---|---|---|
+  | BTC | 15 | .706/.709 | .653/.649 | 57 / +0.033 / 0.25 | 78 / −0.135 / −6.6 | 31 / −0.053 / −1.4 | 32 / −0.034 / −0.8 |
+  | ETH | 15 | .638/.632 | .612/.608 | 130 / −0.049 / −0.4 | 189 / −0.112 / −5.5 | 0 | 0 |
+  | BNB | 15 | .685/.673 | .625/.613 | 184 / −0.010 / −0.1 | 319 / −0.146 / −13.7 | 0 | 2 / −0.270 |
+  | SOL | 15 | .612/.604 | .570/.561 | 83 / −0.217 / −1.3 | 133 / −0.142 / −6.7 | 0 | 0 |
+  | XRP | 15 | .636/.628 | .592/.596 | 125 / +0.116 / 0.5 | 208 / −0.148 / −8.1 | 13 / −0.146 / −2.8 | 17 / −0.132 / −3.1 |
+  | SUI | 15 | .582/.588 | .546/.558 | 52 / +0.063 / 0.1 | 88 / −0.101 / −2.6 | 0 | 0 |
+  | BTC | 60 | .617/.616 | .559/.564 | 25 / +0.558 / 1.3 | 48 / −0.154 / −4.8 | 0 | 40 / −0.167 / −4.8 |
+  | ETH | 60 | .578/.565 | .555/.558 | 150 / −0.178 / −1.3 | 506 / −0.140 / −9.6 | 14 / −0.111 / −2.4 | 52 / −0.132 / −4.2 |
+  | BNB | 60 | .600/.584 | .543/.541 | 44 / +0.289 / 1.2 | 122 / −0.133 / −4.9 | 39 / −0.174 / −5.1 | 54 / −0.186 / −5.9 |
+  | SOL | 60 | .555/.531 | .546/.541 | 17 / +1.548 / 1.0 | 34 / −0.151 / −1.4 | 19 / −0.141 / −2.3 | 39 / −0.157 / −4.1 |
+  | XRP | 60 | .570/.557 | .547/.551 | 252 / −0.027 / −0.1 | 958 / −0.145 / −12.5 | 0 | 0 |
+  | SUI | 60 | .531/.534 | .544/.552 | 140 / +0.382 / 1.9 | 375 / −0.108 / −3.1 | 91 / −0.089 / −1.9 | 697 / −0.111 / −6.8 |
+  | BTC | 120 | .583/.586 | .547/.549 | 71 / −0.040 / −0.4 | 138 / −0.044 / −1.0 | 0 | 286 / −0.115 / −6.6 |
+  | ETH | 120 | .552/.551 | .550/.554 | 247 / −0.236 / −2.8 | 744 / −0.153 / −9.6 | 0 | 54 / −0.183 / −4.8 |
+  | BNB | 120 | .561/.553 | .534/.541 | 203 / −0.153 / −1.6 | 608 / −0.114 / −5.9 | 2 / −0.086 | 2 / −0.086 |
+  | SOL | 120 | .529/.509 | .542/.541 | 84 / +0.651 / 1.8 | 260 / −0.022 / −0.4 | 15 / +0.133 / 0.6 | 37 / −0.059 / −0.7 |
+- Reading: no V4 arm is positive with t ≥ 1 anywhere so far. Every "V3 signal + new exit" row is negative
+  (t −0.4 to −13.7), so the V3 signal does not survive realistic SL/trailing exits. A few ARM1_V3 cells
+  look positive (SUI h60 t 1.9, SOL h120 t 1.8, BTC h60 t 1.3), but they use the endpoint exit, have
+  small samples, and are 3 of 16 cells tried — expected by chance, not an edge. AUC falls as the horizon
+  grows; V4 path labels are harder to rank than V3 endpoint labels.
+
+## R-014 · 2026-10-07 · Stratified aggTrades resolver — BTCUSDT h15/h60 (30 random dev days)
+- 2,343 flagged (intrabar-ambiguous) trades resolved from aggTrades, out of 122,787 flagged in dev. 684 s.
+  | Policy / side | resolved | outcome changed | avg net change | conservative understated / overstated |
+  |---|---|---|---|---|
+  | h15 REFERENCE long / short | 340 / 340 | 14.7% / 12.9% | +0.120% / +0.117% | 66% / 9% · 63% / 14% |
+  | h15 VOLATILITY long / short | 600 / 646 | 10.0% / 7.3% | +0.060% / +0.056% | 59% / 12% · 57% / 16% |
+  | h60 REFERENCE long / short | 55 / 60 | 21.8% / 20.0% | +0.105% / +0.156% | 38% / 35% · 48% / 22% |
+  | h60 VOLATILITY long / short | 135 / 167 | 2.2% / 1.2% | +0.085% / +0.098% | 60% / 12% · 65% / 11% |
+- Reading: the conservative same-bar rule is pessimistic on ambiguous trades (it understates net by
+  ~0.06–0.16% per ambiguous trade). The 1m evaluation is therefore a lower bound, not a rosy one. This
+  bias applies only to the ambiguous subset and is far too small to turn the R-015 / R-017 negatives positive.
+  h60 REFERENCE samples are small (55/60).
+
+## R-013 · 2026-10-07 · P3 all coins × horizons (development data only)
+- Full table: `D:utofinx-ml-v4eports\p3\SUMMARY.md` (6 coins × 5 horizons, D-023 code).
+- V4 WAIT share 60–87% (highest at h15 and h1440). V3 endpoint "buy+" rows are 2–3× the V4 long
+  opportunities. The share where they disagree grows with the horizon (15% at h15 → 41% at h1440 for SOL).
+- Always-take baselines on dev_val: negative everywhere from h15 to h240 (−0.05% to −0.12% per trade). At
+  h1440 only short positives (SOL +0.045%, XRP +0.090%, SUI +0.299%, 281 trades), which matches a falling
+  dev_val market rather than a model signal.
+- Same-bar trail 0% everywhere; ambiguous long rows from 31k (BNB h15) down to ~0.9k (SOL h1440).
+
+## R-016 · 2026-10-07 · P5 smoke — BTCUSDT h15 (code check, development data only)
+- `p5_run` ran end to end without errors (665 s, CPU shared with the P3 chain), V3 base features
+  (no P4B report yet). Windows (dev_val): P5-A 53,766 · P5-B 40,323 · P5-C 40,323 rows.
+- SL caps (p90 Layer A adverse-before-profit, dev_train, unambiguous): long 0.200%, short 0.197%.
+- Quantile quality gate: all 6 components PASSED (MFE, adverse-before-profit, pullback × 2 sides):
+  pinball better than the constant baseline in 3/3 sub-folds, q25–q75 coverage 46–49%, crossing 0%.
+- Result: **REJECTED** — 0 trades for all 12 exit policies in P5-A. Reading: at 15m, whenever the
+  conservative predicted reward (q25 MFE) clears cost + edge (0.18%), the required stop exceeds the cap,
+  so every row is WAIT. Per-side WAIT-reason counts are now recorded in the stage reports to make the
+  cause explicit (added after this run).
+- Not a verdict on other horizons; BTC h60/h240 smoke started to exercise P5-B/C and the final retrain.
+
 ## R-012 · 2026-10-07 · Corrections D-023 — BTCUSDT h15 P4A old vs corrected (dev_val)
 - Tests 49/49 (adds worst-case branch tests; resolver returns exit bar).
 - Unresolved intrabar rows excluded from V4 labels: 7.97% (long) / 7.77% (short) of dev_train.

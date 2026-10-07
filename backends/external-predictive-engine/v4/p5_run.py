@@ -173,16 +173,23 @@ def run(work: Path, symbol: str, horizon: int) -> dict:
             if use.sum() < 50:
                 ev_cache[key] = None
             else:
+                from sklearn.isotonic import IsotonicRegression
                 simc = c.simulate(c.cal[use], s, lvc["sl"][use], lvc["act"][use], lvc["trail"][use])
                 win = simc["net_pct"] >= MIN_EDGE
+                # Probabilities must describe success UNDER THIS CANDIDATE POLICY (not the reference policy
+                # the classifier was trained on): re-calibrate the classifier's raw score to the candidate's
+                # realized success on the calibration slice (out-of-fit predictions, so no leakage).
+                iso = IsotonicRegression(y_min=0.0, y_max=1.0, out_of_bounds="clip")
+                iso.fit(clf[s][0].predict(c.x[c.cal[use]]), win.astype(int))
                 ev_cache[key] = (float(simc["net_pct"][win].mean()) if win.any() else 0.0,
-                                 float(simc["net_pct"][~win].mean()) if (~win).any() else 0.0)
+                                 float(simc["net_pct"][~win].mean()) if (~win).any() else 0.0,
+                                 iso, float(win.mean()))
         return ev_cache[key]
 
     def evaluate(rows, policy, gate):
         preds = {s: {k: _predict_q(quant[s][k], c.x[rows]) for k in QUANT_TARGETS} for s in ("long", "short")}
         ood = p5.ood_flags(c.x[rows], mean, std)
-        lv, outcome, ev, prob = {}, {}, {}, {}
+        lv, outcome, ev, prob, cand_base = {}, {}, {}, {}, {}
         for s in ("long", "short"):
             pr = preds[s]
             lv[s] = p5.levels(policy, pr["mfe"][0.25], pr["mfe"][0.5], pr["mfe"][0.75], pr["adv"][0.75], pr["pull"][0.5],
@@ -190,30 +197,47 @@ def run(work: Path, symbol: str, horizon: int) -> dict:
             sl = np.where(lv[s]["reason"] == 0, lv[s]["sl"], 1.0); act = np.where(lv[s]["reason"] == 0, lv[s]["act"], 1.0)
             trail = np.where(lv[s]["reason"] == 0, lv[s]["trail"], 0.5)
             outcome[s] = c.simulate(rows, s, sl, act, trail)
-            prob[s] = predict(*clf[s], c.x[rows])
             params = ev_params(policy, s)
-            ev[s] = np.full(len(rows), -np.inf) if params is None else prob[s] * params[0] + (1 - prob[s]) * params[1]
-        signal = p5.decide(prob["long"], prob["short"], ev["long"], ev["short"], base_rate["long"], base_rate["short"],
+            if params is None:
+                prob[s] = np.zeros(len(rows)); ev[s] = np.full(len(rows), -np.inf); cand_base[s] = 1.0
+            else:
+                prob[s] = params[2].predict(clf[s][0].predict(c.x[rows]))
+                ev[s] = prob[s] * params[0] + (1 - prob[s]) * params[1]
+                cand_base[s] = params[3]
+        signal = p5.decide(prob["long"], prob["short"], ev["long"], ev["short"], cand_base["long"], cand_base["short"],
                            gate[0], gate[1], lv["long"]["reason"] == 0, lv["short"]["reason"] == 0, MIN_EDGE)
-        waits = {code: int(((lv["long"]["reason"] == i) & (lv["short"]["reason"] == i)).sum()) for i, code in enumerate(p5.WAIT_CODES)}
+        waits = {f"{s}_{code}": int((lv[s]["reason"] == i).sum()) for s in ("long", "short") for i, code in enumerate(p5.WAIT_CODES)}
         amb = float(np.mean([(o["reason"] == pol.AMBIGUOUS_INTRABAR) | o["same_bar_trail"] for o in outcome.values()]))
+        for s in ("long", "short"):
+            ok = lv[s]["reason"] == 0
+            params = ev_params(policy, s)
+            waits[f"{s}_ev_params"] = None if params is None else [round(params[0], 4), round(params[1], 4), round(params[3], 4)]
+            waits[f"{s}_p_mean_tradeable"] = round(float(prob[s][ok].mean()), 4) if ok.any() else None
+            waits[f"{s}_ev_max_tradeable"] = round(float(ev[s][ok].max()), 4) if ok.any() and np.isfinite(ev[s][ok]).any() else None
+            waits[f"{s}_ev_ge_gate"] = int((ok & (ev[s] >= MIN_EDGE + gate[1])).sum())
         return signal, outcome, waits, amb
 
     def stage(window, candidates):
         scored = []
         rows_info = {}
         for key, policy, gate, complexity in candidates:
-            fold_nets, ambs = [], []
+            fold_nets, ambs, wait_tot = [], [], {}
             for part in p5.sub_folds(c.anchors, window):
                 signal, outcome, waits, amb_part = evaluate(part, policy, gate)
                 fold_nets.append(_execute(c.anchors[part], signal, outcome))
                 ambs.append(amb_part)
+                for code, n in waits.items():
+                    if isinstance(n, (int, np.integer)):
+                        wait_tot[code] = wait_tot.get(code, 0) + int(n)
+                    else:
+                        wait_tot[code] = n                    # diagnostics: keep the last sub-fold value
             amb = float(np.mean(ambs)) if ambs else 0.0
             ok, score, why = p5.qualifies(fold_nets, horizon)
             allnet = np.concatenate(fold_nets) if fold_nets else np.zeros(0)
             rows_info[key] = {"qualified": ok, "reason": why, "score": None if not np.isfinite(score) else round(score, 5),
                               "trades": int(len(allnet)), "avg_net": round(float(allnet.mean()), 5) if len(allnet) else None,
-                              "fold_avg": [round(float(f.mean()), 5) if len(f) else None for f in fold_nets]}
+                              "fold_avg": [round(float(f.mean()), 5) if len(f) else None for f in fold_nets],
+                              "rows_by_level_reason": wait_tot}
             if ok:
                 scored.append((score, complexity, amb, key))
         return p5.pick(scored), rows_info
@@ -240,7 +264,7 @@ def run(work: Path, symbol: str, horizon: int) -> dict:
     # P5-C: confirmation only
     signal, outcome, waits, amb = evaluate(windows["C"], chosen_policy, chosen_gate)
     nets_c = _execute(c.anchors[windows["C"]], signal, outcome)
-    report["stages"]["P5-C"] = {**pol.trade_stats(nets_c), "wait_reasons_both_sides": waits, "ambiguity_rate": round(amb, 4)}
+    report["stages"]["P5-C"] = {**pol.trade_stats(nets_c), "rows_by_level_reason": waits, "ambiguity_rate": round(amb, 4)}
     report["frozen"] = {"exit_policy": {"a": chosen_policy.a, "b": chosen_policy.b, "trail": chosen_policy.trail},
                         "gate": {"lift": chosen_gate[0], "margin": chosen_gate[1]}, "cost": COST, "edge": MIN_EDGE,
                         "caps": report["caps"], "uncertainty_limit": report["uncertainty_limit"],

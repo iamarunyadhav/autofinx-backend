@@ -180,3 +180,11 @@ Plan lock (same day, session d):
   per candidate; worst-case evaluation everywhere.
 - `external-predictive-engine/v4/cli.py` — command `p5`.
 - Layer A targets rebuilt for all 6 coins × 5 horizons with `pullback_before_continuation_pct`.
+
+## 2026-10-07 — P5 smoke h60/h240 + EV consistency (session m, D-029 proposed)
+- `external-predictive-engine/v4/p5_run.py` — per-candidate isotonic re-calibration of the classifier
+  score inside `ev_params` (cached per policy × side); `decide` lift uses the candidate base rate; stage
+  reports gain WAIT-reason counts and EV diagnostics (`*_ev_params` [avg win, avg other, base rate],
+  `*_p_mean_tradeable`, `*_ev_max_tradeable`, `*_ev_ge_gate`).
+- V4 tests 64/64. RESULTS R-017; DECISIONS D-029 (proposed).
+- RESULTS R-013 (P3 all coins), R-014 (BTC resolver), R-015 (P4A h15–h120 all coins). `D:utofinx-ml-v4  run-p4a-resume.sh` resumes P4A after the chain was killed by a Windows power-off event.
