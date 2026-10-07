@@ -46,6 +46,11 @@ def _fit_quantiles(x, y, rows, anchors) -> dict[float, object]:
     return models
 
 
+def _predict_q_raw(models, x) -> dict[float, np.ndarray]:
+    """Unrepaired predictions: the quality gate measures crossing on these (D-036 P0 fix B)."""
+    return {q: models[q].predict(x) for q in QS}
+
+
 def _predict_q(models, x) -> dict[float, np.ndarray]:
     lo, mid, hi, _ = p5.repair_crossing(models[0.25].predict(x), models[0.5].predict(x), models[0.75].predict(x))
     return {0.25: lo, 0.5: mid, 0.75: hi}
@@ -148,7 +153,7 @@ def run(work: Path, symbol: str, horizon: int, arm: str = "arm3") -> dict:
             folds = []
             for part in p5.sub_folds(c.anchors, windows["A"]):
                 y = c.t[col][part]; ok = np.isfinite(y)
-                pr = _predict_q(quant[s][comp], c.x[part][ok])
+                pr = _predict_q_raw(quant[s][comp], c.x[part][ok])
                 const = {q: float(np.nanquantile(c.t[col][c.fit], q)) for q in QS}
                 folds.append({"y": y[ok], "q25": pr[0.25], "q50": pr[0.5], "q75": pr[0.75], "const": const})
             gates[f"{s}_{comp}"] = p5.quality_gate(folds, q_used)
@@ -335,7 +340,9 @@ def run(work: Path, symbol: str, horizon: int, arm: str = "arm3") -> dict:
 
 
 def _finish(work: Path, report: dict, started: float) -> dict:
+    from .runinfo import stamp
     report["seconds"] = round(time.monotonic() - started, 1)
+    report["identity"] = stamp()
     out = work / "reports" / "p5"
     out.mkdir(parents=True, exist_ok=True)
     suffix = "" if report.get("arm", "arm3") == "arm3" else f"_{report['arm']}"

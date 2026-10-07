@@ -120,7 +120,67 @@ are. Numbers are copied from real output, never estimated after the fact.
 - G7 metrics: BTC 1,350 days fetched before the run switched to `-NoMetrics` (2021-10-01 → 2026-10-05,
   5-min step, 8 gaps > 15 min). Remaining days/coins later, before P4B.
 
-## R-020 · 2026-10-07 · Optional layers h15 (D-030): G7-T (15 cols) and v13 components, 6 coins (dev_train folds)
+## R-023 · 2026-10-07 · P2 event setups (D-037, fixed rules) — BTC/ETH h60/h240, dev_train, cost 0.12
+- Avg gross / net per executed trade (non-overlapping), exit E1 (stop 1.5 ATR + time) unless noted:
+  | Setup | BTC h60 | BTC h240 | ETH h60 | ETH h240 |
+  |---|---|---|---|---|
+  | S1 trend pullback long | +0.001 / −0.120 | +0.010 / −0.112 | +0.007 / −0.114 | +0.016 / −0.107 |
+  | S1 trend pullback short | −0.007 / −0.127 | −0.011 / −0.129 | +0.004 / −0.116 | +0.016 / −0.104 |
+  | S2 range reversion long | −0.019 / −0.140 | −0.019 / −0.141 | −0.014 / −0.134 | −0.019 / −0.141 |
+  | S2 range reversion short | +0.013 / −0.107 | +0.022 / −0.096 | −0.014 / −0.134 | +0.004 / −0.114 |
+  | context only (S1 long) | +0.002 / −0.119 | +0.002 / −0.120 | +0.003 / −0.118 | +0.004 / −0.118 |
+  | always long | +0.000 / −0.120 | −0.002 / −0.124 | −0.001 / −0.122 | −0.003 / −0.125 |
+- E2 (activation + 1 ATR trail) is worse everywhere: gross −0.02 to −0.04. Early trailing cuts winners.
+- Every bootstrap interval is below 0. **No setup is promising** under the D-037 rule (net > 0 with
+  CI > 0, ≥ 3/4 slices, beats context).
+- Triggers move gross by at most ~+0.01–0.02 % versus context/always. The conditioning does not create a
+  move large enough to pay the 0.12 % cost.
+- Reading:
+  - With OHLCV-derived conditions, the expected gross move per trade stays ≈ 0 at 1–4 h. This repeats
+    the P4A / P1 picture with completely different (rule-based) entries.
+  - Per the D-036 stop rule, P3 payoff modelling on these setups is not justified. The next step needs
+    either new information (P4 context: cross-asset, funding, open interest / taker metrics) or
+    materially cheaper execution with real fee data (P5).
+
+## R-022 · 2026-10-07 · P1 direction-signal diagnostics — BTC/ETH h60/h240 (dev_train D-025 folds, V3 base, P0 code)
+- Paired test: model-chosen side minus opposite side, same anchors, same REFERENCE exits (gross, costs cancel),
+  1-day block bootstrap 90 %.
+  | Cell | AUC long/short (3 folds) | paired lift %/opportunity (CI90) | P1 rule |
+  |---|---|---|---|
+  | BTC h60 | .59/.60 · .55/.55 · .54/.55 | +0.002 (−0.005..0.008) · **+0.010 (0.002..0.018)** · **+0.008 (0.002..0.015)** | **pass (2/3)** |
+  | BTC h240 | .55/.53 · .54/.55 · .54/.53 | −0.009 · +0.016 · +0.008 (all CIs include 0) | fail |
+  | ETH h60 | .56/.58 · .53/.52 · .53/.53 | +0.007 · −0.003 · +0.003 (CIs include 0) | fail |
+  | ETH h240 | .50/.52 · .55/.53 · .53/.53 | −0.018 · +0.016 · −0.019 | fail |
+- BTC h60 by margin decile: the top decile lift is +0.034 / +0.019 % in folds 2 and 3, i.e. the signal
+  concentrates where the model is most confident.
+- Executed (non-overlapping) BTC h60 top-margin 10 %: −0.110 / −0.113 %/trade, against always-long −0.122 /
+  −0.126. About 0.01–0.015 better, but still about −0.11 after cost. Cost 0.15 / 0.18 only makes it worse.
+- Reading:
+  - A **statistically detectable but economically tiny** direction signal exists at BTC h60. It is
+    ~0.01 %/opportunity, about one tenth of the 0.12 % round-trip cost.
+  - 1 of 4 cells passed, so multiple testing applies.
+  - The rule allows P2 for BTC h60. The economic gap says P2 must find setups where the move size per
+    trade is much larger (event-conditioned entries), not finer ranking of every anchor.
+
+## R-021 · 2026-10-07 · D-033 TAKE/SKIP + D-035 maker entry — smoke BTCUSDT h60 (dev_train folds) — **SUPERSEDED in part (D-036): C1 numbers used the defective fill-minute simulation (fix A); meta used the P4B selection (fix D)**
+- Runs end to end (772 s). Proposals on the fold tests: 3,260 / 9,915 / 7,442. Executed OFF trades:
+  1,584 / 5,460 / 4,482.
+- **Meta model:**
+  - Test AUC 0.518 / 0.522 / 0.530: almost no information beyond the base models.
+  - META_50 / META_30 change the executed avg net by −0.007 to +0.011 %/trade. All NO_VALUE.
+- **EV_GATE (P5-style):** 0–6 trades. Same picture as the P5 smoke.
+- **C0 vs C1 on the same proposals (OFF arm):**
+  - C0: −0.137 / −0.146 / −0.147 %/trade.
+  - C1: −0.105 / −0.113 / −0.113 %/trade (fill rate 93–96 %).
+- **Adverse selection is strong:**
+  - Proposals that filled: C0 net −0.141 / −0.149 / −0.155.
+  - Proposals the limit missed: −0.009 / −0.008 / −0.026. The missed ones were the good ones.
+  - The 0.04 % fee saving is partly eaten: C1 helps by about 0.03 %/trade but stays clearly negative.
+- Gross per proposal is ≈ −0.02 %: the level-gated proposals carry no positive gross edge at h60.
+- No implementation problem seen. The 30-cell run starts automatically after the P5 baseline
+  (`run-meta-after-p5.sh`).
+
+## R-020 · 2026-10-07 · Optional layers h15 (D-030): G7-T (15 cols) and v13 components, 6 coins (dev_train folds) — **pre-P0 (fix D, verdict rev); replay pending**
 - Baseline = the P4B selection per coin.
 - **FEATURE role:**
   - NO_VALUE in 11 of 12 layer × coin cases.
@@ -139,7 +199,7 @@ are. Numbers are copied from real output, never estimated after the fact.
   - The rule should compare retention to the keep share (D-030 revision proposed).
   - Conclusion unchanged: the net improvement is ≤ 0.007 %/trade everywhere.
 
-## R-018 · 2026-10-07 · P4B all 30 cells + Stage B audit (dev_train folds only)
+## R-018 · 2026-10-07 · P4B all 30 cells + Stage B audit (dev_train folds only) — **pre-P0: reference levels leaked across folds (fix C), overlap ranks mishandled ties (fix E); replay pending**
 - 30/30 cells. 9 runs were lost to out-of-memory / fork failures and re-run one symbol × horizon per
   process; the code and the rule (D-025) were unchanged. Audit: `D:/autofinx-ml-v4/reports/p4b_audit/AUDIT.md`.
 - Selected groups:

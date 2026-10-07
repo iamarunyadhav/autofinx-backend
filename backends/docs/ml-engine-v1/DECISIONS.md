@@ -273,3 +273,36 @@ before any run:**
   (0.12 %) and C1 (maker entry, trade-through, 0.08 %). C1 reports the fill rate and the C0 net of filled
   vs missed proposals (adverse-selection check).
 - Code: `v4/execution.py`, `v4/meta_label.py`, `policy.simulate(entry_price=...)`, CLI `meta`.
+
+**D-036 · 2026-10-07 · owner ("ok rendum") — adopt the independent review (Codex) and its roadmap**
+(`REVIEW_CODEX_2026-10-07.md`).
+- (a) The automatic 30-cell meta / maker run was cancelled before it started.
+- (b) The roadmap P0 → P6 replaces the PLAN_PROFITABILITY order where they differ:
+  - TAKE/SKIP (D-033) and continuation (D-034) move behind P1/P2 and must beat simpler executable
+    baselines first;
+  - maker cost (D-035) moves to P5 with the repaired simulator.
+- P0 done: fixes A–E + identity stamps + regression tests (V4 suite 97/97).
+- The running P5 T0 baseline continues from the frozen code snapshot `D:/autofinx-ml-v4/snapshots/
+  p5-baseline-20261007` (MANIFEST.sha256). Its reports carry the pre-fix B behaviour (quality gate crossing)
+  and are labelled "pre-P0" in RESULTS.
+- Replays after the baseline (from a new frozen snapshot): P4B 30 cells (fix C), audit (fix E), optional
+  layers h15 (fix D + D-030 rev verdict).
+
+**D-037 · 2026-10-07 · agent, under D-036 roadmap P2 (owner "continue") — pre-registered event setups, rule-only:**
+- **S1 TREND_PULLBACK:**
+  - context: 1h close > EMA20 > EMA50, last COMPLETE 1h bucket;
+  - pullback: low of the last 6 bars touched the 5m EMA20, and the 24-bar high minus that low ≥ 1 ATR14;
+  - trigger: close > previous high and close > EMA20.
+  - Short mirrored.
+- **S2 RANGE_REVERSION:**
+  - context: 1h ADX14 < 20;
+  - trigger: the bar pierced the previous 48-bar low and closed back above it.
+  - Short mirrored.
+- **Exits:** E1 = stop 1.5 ATR + time exit at H; E2 = stop 1.5 ATR, activation 1 ATR, trail 1 ATR.
+- **Baselines:** CONTEXT_ONLY and ALWAYS, same side and exits.
+- **Data:** BTC/ETH h60/h240 first, dev_train only. Cost 0.12 (stress 0.15 / 0.18). Non-overlapping execution,
+  1-day block bootstrap.
+- **No parameter search.** A setup is "promising" only if net > 0 with the bootstrap 90 % interval above 0,
+  ≥ 3 of 4 chronological slices positive, and it beats CONTEXT_ONLY. Only then does it go on to P3 payoff
+  modelling and to the other coins (same fixed rules).
+- Code: `v4/p2_setups.py`, CLI `p2`.

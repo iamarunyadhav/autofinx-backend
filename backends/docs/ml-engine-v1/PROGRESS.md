@@ -19,6 +19,9 @@ Last updated: 2026-10-07 17:50 SLST by ml-engine-v1 (Claude Code session).
   runs when P4B is 30/30). D-033 (TAKE/SKIP) and D-035 (cost C0/C1) PROPOSED — owner approval needed.
 - **D-033 / D-035 code done** (90 tests); BTC h60 smoke running (`logs/meta-smoke-btc60.log`); full
   30-cell run after the P5 baseline.
+- **D-036 (owner): Codex review adopted.** Roadmap P0→P6 in `REVIEW_CODEX_2026-10-07.md`. P0 fixes A–E done
+  (97 tests). Meta waiter cancelled. P5 baseline continues from the frozen snapshot (`logs/p5-baseline.log`).
+  Next: replay P4B / audit / layers from a P0 snapshot after the baseline; build P1 signal diagnostics.
 - **Gate before P6:** owner approves D-032 (holdout pass rule + P7 classification, pre-registered BEFORE
   the holdout is opened). P6/P7/P8 code not written yet. If P5 freezes no cell, the holdout stays sealed
   and P8 is the honest "no edge" report.

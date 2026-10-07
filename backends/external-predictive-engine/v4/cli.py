@@ -28,7 +28,7 @@ def _months(symbol: str, override: int | None) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="v4.cli")
-    parser.add_argument("command", choices=["download", "verify", "status", "targets", "import-candles", "export-features", "p3", "resolve", "p4a", "p4b", "p5", "lab-v13", "export-g7t", "layers", "p4b-audit", "meta"])
+    parser.add_argument("command", choices=["download", "verify", "status", "targets", "import-candles", "export-features", "p3", "resolve", "p4a", "p4b", "p5", "lab-v13", "export-g7t", "layers", "p4b-audit", "meta", "p1", "p2"])
     parser.add_argument("--schema", default="qt-shadow-features-v3", help="export-features: qt-shadow-features-v3 or -v4")
     parser.add_argument("--days", type=int, default=30, help="resolve: random development days to sample")
     parser.add_argument("--horizons", default="15,60,120,240,1440")
@@ -90,6 +90,30 @@ def main(argv: list[str] | None = None) -> int:
                     if "frozen" in r:
                         print(f"   frozen: {json.dumps(r['frozen']['exit_policy'])} gate {json.dumps(r['frozen']['gate'])}; P5-C: "
                               f"{r['stages'].get('P5-C', {}).get('trades')} trades, avg {r['stages'].get('P5-C', {}).get('avg_net_pct')}", flush=True)
+            elif args.command == "p2":
+                from .p2_setups import run as run_p2
+                for h in [int(v) for v in args.horizons.replace(";", ",").split(",") if v.strip()]:
+                    r = run_p2(args.work, symbol, h)
+                    print(f"== {symbol} h{h} P2 ({r['seconds']}s)", flush=True)
+                    for name, e in r["setups"].items():
+                        parts = []
+                        for ex in ("E1", "E2"):
+                            st = e.get(ex, {}).get("cost_0.12", {})
+                            parts.append(f"{ex} {st.get('trades', 0)}t gross {st.get('avg_gross_pct')} net {st.get('avg_net_pct')} "
+                                         f"PF {st.get('pf')} ci {st.get('boot90')}")
+                        print(f"   {name:16s} ev {e['events']:6d} | " + " | ".join(parts), flush=True)
+            elif args.command == "p1":
+                from .p1_signal import run as run_p1
+                for h in [int(v) for v in args.horizons.replace(";", ",").split(",") if v.strip()]:
+                    r = run_p1(args.work, symbol, h)
+                    print(f"== {symbol} h{h} P1: {r['p1_rule']} ({r['seconds']}s)", flush=True)
+                    for i, f in enumerate(r["folds"]):
+                        b = f["baselines"]
+                        print(f"   fold {i}: AUC {f['auc']} paired {f['paired']['mean_chosen_minus_other_gross']} {f['paired']['boot90']} | "
+                              f"top10 {b['model_side_top_margin_10pct']['cost_0.12'].get('avg_net_pct')} "
+                              f"all {b['model_side_all']['cost_0.12'].get('avg_net_pct')} "
+                              f"mom {b['momentum_1h']['cost_0.12'].get('avg_net_pct')} "
+                              f"long {b['always_long']['cost_0.12'].get('avg_net_pct')}", flush=True)
             elif args.command == "meta":
                 from .meta_label import run as run_meta
                 for h in [int(v) for v in args.horizons.replace(";", ",").split(",") if v.strip()]:

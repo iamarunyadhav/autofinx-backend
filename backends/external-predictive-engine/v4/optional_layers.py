@@ -47,6 +47,9 @@ from .train_v4 import COST, MIN_EDGE, TREE, _weights, auc
 from .verify import conflict_buckets
 
 KEEP_SHARES = (0.5, 0.3)
+# D-036 P0 fix D: the P4B selection has already seen these folds' outcomes, so the baseline here is the
+# fixed V3 base schema. Set True only to reproduce the pre-fix R-020 numbers.
+USE_P4B_SELECTION = False
 MIN_IMPROVEMENT = 0.01            # % per executed trade
 MIN_PROFIT_RETENTION = 50.0       # % of gross winning net kept
 G7T = ("g7t_eff_12", "g7t_eff_48", "g7t_chop_14", "g7t_chop_48", "g7t_flip_24", "g7t_overlap_12",
@@ -147,7 +150,7 @@ def _load_layer(path: Path, anchors: np.ndarray) -> tuple[list[str], np.ndarray]
 def _baseline(work: Path, symbol: str, horizon: int, anchors: np.ndarray) -> tuple[str, list[str], np.ndarray]:
     """P4B-selected features if that report exists (read only), else the V3 base."""
     sel = work / "reports" / "p4b" / f"{symbol}_h{horizon}.json"
-    if sel.exists() and (work / "features" / symbol / "v4.parquet").exists():
+    if USE_P4B_SELECTION and sel.exists() and (work / "features" / symbol / "v4.parquet").exists():
         groups = json.loads(sel.read_text("utf-8"))["selected_groups"]
         names, x = _load_layer(work / "features" / symbol / "v4.parquet", anchors)
         keep = [j for j, n in enumerate(names) if not n.startswith(("g1", "g2", "g3", "g4", "g5", "g6")) or n[:2] in groups]
@@ -274,6 +277,8 @@ def run(work: Path, symbol: str, horizon: int, layers=("g7t", "v13")) -> dict:
                     out["rule"][f"{rname}_{side}"] = {"folds": m, "verdict": _wait_verdict(m)}
         report["layers"][layer] = out
     report["seconds"] = round(time.monotonic() - started, 1)
+    from .runinfo import stamp
+    report["identity"] = stamp()
     dest = work / "reports" / "optional-layers"
     dest.mkdir(parents=True, exist_ok=True)
     (dest / f"{symbol}_h{horizon}.json").write_text(json.dumps(report, indent=1), "utf-8")

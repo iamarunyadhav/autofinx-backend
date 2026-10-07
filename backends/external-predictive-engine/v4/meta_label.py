@@ -190,7 +190,7 @@ def _fold(c: Context, g7t: np.ndarray, train_rows: np.ndarray, test: np.ndarray)
 
 def run(work: Path, symbol: str, horizon: int) -> dict:
     started = time.monotonic()
-    c = Context(work, symbol, horizon, "arm3")
+    c = Context(work, symbol, horizon, "arm2")          # fixed V3 base schema (D-036 P0 fix D)
     gp = work / "features" / symbol / "g7t.parquet"
     g7t = _load_layer(gp, c.anchors)[1] if gp.exists() else np.zeros((len(c.anchors), 0))
     tr = np.nonzero(c.is_train)[0]
@@ -205,6 +205,8 @@ def run(work: Path, symbol: str, horizon: int) -> dict:
             for arm in done[0][cost]:
                 report["verdicts"][f"{cost}_{arm}"] = verdict([f[cost][arm] for f in done])
     report["seconds"] = round(time.monotonic() - started, 1)
+    from .runinfo import stamp
+    report["identity"] = stamp()
     out = work / "reports" / "meta"
     out.mkdir(parents=True, exist_ok=True)
     (out / f"{symbol}_h{horizon}.json").write_text(json.dumps(report, indent=1, default=str), "utf-8")

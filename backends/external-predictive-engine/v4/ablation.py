@@ -64,15 +64,19 @@ def keep_group(gains: list[float], brier_delta: float, n_features: int) -> tuple
     return True, "kept"
 
 
-def score(x, y_by_side, clean_by_side, anchors, fold_list) -> tuple[list[float], float]:
+def score(x, y_by_side, clean_by_side, anchors, fold_list, horizon: int = 0) -> tuple[list[float], float]:
+    """y_by_side / clean_by_side: either one array per side, or a list (one per fold) of such dicts
+    (fold-specific labels, D-036 P0 fix C). The internal fit/calibration boundary is purged by H."""
     aucs, briers = [], []
-    for train_rows, test in fold_list:
+    for k, (train_rows, test) in enumerate(fold_list):
         fold_auc, fold_brier = [], []
+        yk = y_by_side[k] if isinstance(y_by_side, list) else y_by_side
+        ck = clean_by_side[k] if isinstance(clean_by_side, list) else clean_by_side
         for side in ("long", "short"):
-            y, ok = y_by_side[side], clean_by_side[side]
+            y, ok = yk[side], ck[side]
             tr = train_rows[ok[train_rows]]
             cut = tr[int(len(tr) * 0.8)]
-            fit = tr[anchors[tr] < anchors[cut]]
+            fit = tr[anchors[tr] < anchors[cut] - horizon * MINUTE]
             cal = tr[anchors[tr] >= anchors[cut]]
             te = test[ok[test]]
             booster, iso = fit_classifier(x, y, anchors, fit, cal)
@@ -104,25 +108,28 @@ def run(work: Path, symbol: str, horizon: int) -> dict:
 
     m1 = bd.load_klines(work, symbol, "1m"); m5 = bd.load_klines(work, symbol, "5m")
     grid, funding, conflicts = dense_minutes(m1), load_funding(work, symbol), conflict_buckets(m1, m5)
-    y, clean = {}, {}
-    for side in ("long", "short"):
-        ref = reference_levels(t, rows, side, COST, MIN_EDGE)
-        sim = pol.simulate(None, anchors, horizon, side, ref["sl"], ref["act"], ref["trail"], COST, funding, conflicts, grid=grid)
-        sim = pol.apply_worst_case(sim, grid, anchors, horizon, side, ref["sl"], ref["act"], ref["trail"], COST, funding)
-        y[side] = (sim["net_pct"] >= MIN_EDGE).astype(int)
-        clean[side] = (sim["reason"] != pol.AMBIGUOUS_INTRABAR) & ~sim["same_bar_trail"]
-
     fold_list = folds(anchors, np.arange(len(anchors)), horizon)
+    # Labels per fold: the REFERENCE levels come only from that fold's training rows (D-036 P0 fix C).
+    y, clean = [], []
+    for train_rows, test in fold_list:
+        yk, ck = {}, {}
+        for side in ("long", "short"):
+            ref = reference_levels(t, rows[train_rows], side, COST, MIN_EDGE)
+            sim = pol.simulate(None, anchors, horizon, side, ref["sl"], ref["act"], ref["trail"], COST, funding, conflicts, grid=grid)
+            sim = pol.apply_worst_case(sim, grid, anchors, horizon, side, ref["sl"], ref["act"], ref["trail"], COST, funding)
+            yk[side] = (sim["net_pct"] >= MIN_EDGE).astype(int)
+            ck[side] = (sim["reason"] != pol.AMBIGUOUS_INTRABAR) & ~sim["same_bar_trail"]
+        y.append(yk); clean.append(ck)
     current = list(base)
     x = np.column_stack([matrix[n] for n in current])
-    base_auc, base_brier = score(x, y, clean, anchors, fold_list)
+    base_auc, base_brier = score(x, y, clean, anchors, fold_list, horizon)
     report = {"symbol": symbol, "horizon_minutes": horizon, "rule": {"min_gain": MIN_GAIN, "brier_tolerance": BRIER_TOLERANCE,
               "feature_cap": FEATURE_CAP, "folds": FOLD_STARTS, "fold_length": FOLD_LENGTH},
               "baseline": {"features": len(base), "fold_auc": [round(a, 4) for a in base_auc], "brier": round(base_brier, 5)}, "steps": []}
     for g in GROUPS:
         candidate = current + groups[g]
         x = np.column_stack([matrix[n] for n in candidate])
-        cand_auc, cand_brier = score(x, y, clean, anchors, fold_list)
+        cand_auc, cand_brier = score(x, y, clean, anchors, fold_list, horizon)
         gains = [c - b for c, b in zip(cand_auc, base_auc)]
         kept, why = keep_group(gains, cand_brier - base_brier, len(candidate))
         report["steps"].append({"group": g, "features_added": len(groups[g]), "fold_auc": [round(a, 4) for a in cand_auc],
@@ -133,6 +140,8 @@ def run(work: Path, symbol: str, horizon: int) -> dict:
     report["selected_groups"] = [s["group"] for s in report["steps"] if s["kept"]]
     report["selected_feature_count"] = len(current)
     report["seconds"] = round(time.monotonic() - started, 1)
+    from .runinfo import stamp
+    report["identity"] = stamp()
     out = work / "reports" / "p4b"
     out.mkdir(parents=True, exist_ok=True)
     (out / f"{symbol}_h{horizon}.json").write_text(json.dumps(report, indent=1), "utf-8")

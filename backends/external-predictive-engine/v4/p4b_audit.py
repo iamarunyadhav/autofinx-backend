@@ -24,14 +24,9 @@ SAMPLE_ROWS, SEED = 40_000, 7
 
 
 def _ranks(x: np.ndarray) -> np.ndarray:
-    out = np.empty_like(x)
-    for j in range(x.shape[1]):
-        col = x[:, j]
-        order = np.argsort(col, kind="stable")
-        r = np.empty(len(col))
-        r[order] = np.arange(len(col))
-        out[:, j] = r
-    return out
+    """Average ranks for ties (D-036 P0 fix E)."""
+    from scipy.stats import rankdata
+    return np.column_stack([rankdata(x[:, j], method="average") for j in range(x.shape[1])])
 
 
 def spearman_matrix(x: np.ndarray) -> np.ndarray:
@@ -40,8 +35,13 @@ def spearman_matrix(x: np.ndarray) -> np.ndarray:
     if len(x) < 100:
         return np.full((x.shape[1], x.shape[1]), np.nan)
     r = _ranks(x)
-    r = (r - r.mean(axis=0)) / np.where(r.std(axis=0) > 0, r.std(axis=0), 1.0)
-    return (r.T @ r) / len(r)
+    sd = r.std(axis=0)
+    r = (r - r.mean(axis=0)) / np.where(sd > 0, sd, 1.0)
+    rho = (r.T @ r) / len(r)
+    const = sd == 0                                          # Spearman with a constant is undefined
+    rho[const, :] = np.nan
+    rho[:, const] = np.nan
+    return rho
 
 
 def group_overlap(names: list[str], groups: dict[str, list[str]], x: np.ndarray) -> dict[str, float | None]:

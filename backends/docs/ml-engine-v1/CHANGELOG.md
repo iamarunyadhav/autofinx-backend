@@ -232,3 +232,15 @@ un-p4b.sh` (pattern features → ablation BTC/ETH 15m first, then all).
   `worst_case_path` optional entry price (default unchanged); `tests/v4/test_execution.py`.
 - D-033 TAKE/SKIP: `v4/meta_label.py` (forward-chained base/meta/test inside the D-025 folds, C0 vs C1 arms,
   verdict), CLI `meta`. D-030 WAIT verdict revised (retention vs keep share). V4 suite 90/90.
+- D-036 P0 fixes (Codex review): A `execution.simulate_c1` fill-minute ordering + signal+H expiry; B raw quantiles to
+  the P5 quality gate (`_predict_q_raw`); C P4B per-fold reference levels + purged fit/cal; D meta / layers on the
+  fixed V3 base schema; E tie-aware Spearman, constants excluded. `v4/runinfo.py` identity stamp in P4B / P5 /
+  layers / meta reports. `tests/v4/test_p0_fixes.py` (7). V4 suite 97/97. P5 baseline moved to frozen snapshot
+  `snapshots/p5-baseline-20261007` (`run-p5-baseline.sh`). `REVIEW_CODEX_2026-10-07.md`. RESULTS R-018/R-020/R-021
+  marked pre-P0 / superseded.
+- P1 (D-036): `v4/p1_signal.py` (paired chosen-vs-opposite side under identical exits, margin / score deciles,
+  volatility terciles, executed baselines at cost 0.12/0.15/0.18, 1-day block bootstrap), CLI `p1`, test. V4 98/98.
+  Running BTC/ETH h60/h240 (`logs/p1-btc-eth.log`). P0 replay queued from snapshot `snapshots/p0-20261007`
+  (`run-p0-replay.sh`, `logs/p0-replay.log`) after the P5 baseline.
+- D-037 P2 setups: `v4/p2_setups.py` (S1 trend pullback, S2 range reversion, E1/E2 exits, context/always baselines), CLI
+  `p2`, `tests/v4/test_p2_setups.py`. RESULTS R-022 (P1).
