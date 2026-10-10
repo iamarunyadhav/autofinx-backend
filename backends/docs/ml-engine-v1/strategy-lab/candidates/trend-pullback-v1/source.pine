@@ -1,0 +1,177 @@
+//@version=6
+// Research candidate, not an optimized or validated trading system.
+// Start testing on standard BTCUSDT/ETHUSDT linear USDT charts: 1h chart, 4h HTF.
+// No live market snapshot is embedded. Direction is calculated from your chart.
+// Commission 0.06% per side is an ASSUMPTION; slippage is 2 ticks per fill.
+// Update Properties for your venue. Funding is NOT included in Strategy Tester.
+// Use standard candles, not Heikin Ashi/Renko. Test unseen periods and paper trade.
+strategy("AutoFinx Trend Pullback v1 [Research]", overlay=true, initial_capital=1000,
+     currency=currency.USD, pyramiding=0, default_qty_type=strategy.fixed,
+     commission_type=strategy.commission.percent, commission_value=0.06,
+     slippage=2, margin_long=100, margin_short=100,
+     calc_on_every_tick=false, calc_on_order_fills=false, process_orders_on_close=false)
+
+// Signals use closed chart bars and the PREVIOUS confirmed HTF bar.
+htf = input.timeframe("240", "Higher timeframe", group="Trend")
+fastLen = input.int(20, "Pullback EMA", minval=2, group="Trend")
+slowLen = input.int(50, "Trend EMA", minval=3, group="Trend")
+biasLen = input.int(200, "HTF bias EMA", minval=20, group="Trend")
+allowLong = input.bool(true, "Allow long", group="Trend")
+allowShort = input.bool(true, "Allow short (futures only)", group="Trend")
+adxMin = input.float(20, "Minimum ADX", minval=0, group="Entry")
+touchBars = input.int(5, "Pullback valid for bars", minval=1, maxval=20, group="Entry")
+maxStretch = input.float(1.0, "Max entry distance from fast EMA (ATR)", minval=0.1, group="Entry")
+minAtrPct = input.float(0.30, "Minimum ATR %", minval=0, step=0.05, group="Entry")
+useVolume = input.bool(false, "Require volume above 20-bar average", group="Entry")
+cooldown = input.int(3, "Bars to wait after exit", minval=0, group="Entry")
+riskPct = input.float(0.5, "Planned risk % of equity", minval=0.1, maxval=2, step=0.1, group="Risk")
+maxExposure = input.float(90, "Maximum notional % of equity", minval=1, maxval=95, group="Risk")
+stopAtr = input.float(2.0, "Initial stop ATR", minval=0.5, step=0.25, group="Risk")
+targetR = input.float(3.0, "Profit target R", minval=1, step=0.25, group="Risk")
+trailStartR = input.float(1.5, "Activate trailing after close reaches R", minval=0.5, group="Risk")
+trailAtr = input.float(2.0, "Trailing distance ATR", minval=0.5, step=0.25, group="Risk")
+costBudget = input.float(0.16, "Round-trip cost budget % for sizing", minval=0, step=0.01, group="Risk",
+     tooltip="Sizing allowance only. Does not change Properties commission/slippage and does not model funding.")
+startT = input.time(timestamp("01 Jan 2022 00:00 +0000"), "Start", group="Test window")
+endT = input.time(timestamp("01 Jan 2030 00:00 +0000"), "End", group="Test window")
+
+if barstate.isfirst
+    if timeframe.in_seconds(htf) <= timeframe.in_seconds(timeframe.period)
+        runtime.error("Higher timeframe must be above chart timeframe. Use 240 on a 60-minute chart, D on a 240-minute chart.")
+    if fastLen >= slowLen
+        runtime.error("Pullback EMA length must be smaller than Trend EMA length.")
+    if startT >= endT
+        runtime.error("Start must be earlier than End.")
+
+fast = ta.ema(close, fastLen)
+slow = ta.ema(close, slowLen)
+atr = ta.atr(14)
+[plusDI, minusDI, adx] = ta.dmi(14, 14)
+[htfClose, htfEma, htfEmaPrev] = request.security(syminfo.tickerid, htf,
+     [close[1], ta.ema(close, biasLen)[1], ta.ema(close, biasLen)[2]],
+     gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+volAvg = ta.sma(volume, 20)
+ready = not na(htfEmaPrev) and not na(adx) and not na(atr) and bar_index >= slowLen
+up = ready and htfClose > htfEma and htfEma > htfEmaPrev and fast > slow and slow > slow[3]
+down = ready and htfClose < htfEma and htfEma < htfEmaPrev and fast < slow and slow < slow[3]
+quality = ready and adx >= adxMin and atr / close * 100 >= minAtrPct
+volumeOk = not useVolume or (not na(volume) and volume > volAvg)
+windowOk = time >= startT and time_close < endT
+
+// A touch arms a setup. A later candle must reclaim the fast EMA and break
+// the previous candle's high/low. Setups expire and clear when trend is lost.
+var int longTouch = na
+var int shortTouch = na
+var int lastExit = na
+var float riskDistance = na
+var float activeStop = na
+var float activeTarget = na
+var float bestClose = na
+var bool trailActive = false
+
+closedNow = strategy.closedtrades > nz(strategy.closedtrades[1])
+if closedNow
+    lastExit := bar_index
+    longTouch := na
+    shortTouch := na
+if strategy.position_size == 0
+    activeStop := na
+    activeTarget := na
+    bestClose := na
+    trailActive := false
+
+if not up or (not na(longTouch) and bar_index - longTouch > touchBars)
+    longTouch := na
+if not down or (not na(shortTouch) and bar_index - shortTouch > touchBars)
+    shortTouch := na
+
+canEnter = barstate.isconfirmed and windowOk and strategy.position_size == 0 and not closedNow and (na(lastExit) or bar_index - lastExit > cooldown)
+longSignal = canEnter and allowLong and up and quality and volumeOk and plusDI > minusDI and not na(longTouch) and bar_index > longTouch and close > fast and close > high[1] and close > open and close - fast <= maxStretch * atr
+shortSignal = canEnter and allowShort and down and quality and volumeOk and minusDI > plusDI and not na(shortTouch) and bar_index > shortTouch and close < fast and close < low[1] and close < open and fast - close <= maxStretch * atr
+
+if longSignal or shortSignal
+    // Relative tick exits are anchored by the emulator to ACTUAL entry fill.
+    // Quantity uses signal equity/price; gaps and real slippage can exceed planned risk.
+    stopTicks = math.max(1, int(math.ceil(stopAtr * atr / syminfo.mintick)))
+    targetTicks = math.max(1, int(math.round(stopTicks * targetR)))
+    riskDistance := stopTicks * syminfo.mintick
+    cashRisk = math.max(0, strategy.equity) * riskPct / 100
+    unitRisk = (riskDistance + close * costBudget / 100) * syminfo.pointvalue
+    riskQty = unitRisk > 0 ? cashRisk / unitRisk : 0
+    capQty = math.max(0, strategy.equity) * maxExposure / 100 / (close * syminfo.pointvalue)
+    qtyStep = syminfo.mincontract
+    qty = math.floor(math.min(riskQty, capQty) / qtyStep) * qtyStep
+    if qty > 0
+        if longSignal
+            strategy.entry("L", strategy.long, qty=qty, alert_message="AFX LONG entry filled")
+            strategy.exit("LX", "L", loss=stopTicks, profit=targetTicks, alert_message="AFX LONG bracket exit filled")
+        else
+            strategy.entry("S", strategy.short, qty=qty, alert_message="AFX SHORT entry filled")
+            strategy.exit("SX", "S", loss=stopTicks, profit=targetTicks, alert_message="AFX SHORT bracket exit filled")
+    longTouch := na
+    shortTouch := na
+
+if canEnter and not longSignal and not shortSignal
+    if up and low <= fast and close > slow and na(longTouch)
+        longTouch := bar_index
+    if down and high >= fast and close < slow and na(shortTouch)
+        shortTouch := bar_index
+
+// Updates happen on bar close and apply going FORWARD, never retroactively
+// to that candle's high/low. One bracket owns the whole position.
+if strategy.position_size > 0
+    entry = strategy.position_avg_price
+    activeStop := na(activeStop) ? entry - riskDistance : activeStop
+    activeTarget := entry + math.round(riskDistance / syminfo.mintick * targetR) * syminfo.mintick
+    bestClose := na(bestClose) ? math.max(entry, close) : math.max(bestClose, close)
+    trailActive := trailActive or bestClose >= entry + trailStartR * riskDistance
+    if trailActive
+        activeStop := math.max(activeStop, bestClose - trailAtr * atr)
+    strategy.exit("LX", "L", stop=activeStop, limit=activeTarget, alert_message="AFX LONG bracket exit filled")
+    if close < slow and close[1] < slow[1]
+        strategy.close("L", comment="Trend lost", alert_message="AFX LONG trend exit filled")
+
+if strategy.position_size < 0
+    entry = strategy.position_avg_price
+    activeStop := na(activeStop) ? entry + riskDistance : activeStop
+    activeTarget := entry - math.round(riskDistance / syminfo.mintick * targetR) * syminfo.mintick
+    bestClose := na(bestClose) ? math.min(entry, close) : math.min(bestClose, close)
+    trailActive := trailActive or bestClose <= entry - trailStartR * riskDistance
+    if trailActive
+        activeStop := math.min(activeStop, bestClose + trailAtr * atr)
+    strategy.exit("SX", "S", stop=activeStop, limit=activeTarget, alert_message="AFX SHORT bracket exit filled")
+    if close > slow and close[1] > slow[1]
+        strategy.close("S", comment="Trend lost", alert_message="AFX SHORT trend exit filled")
+
+if time_close >= endT
+    strategy.close_all(comment="Test window end", alert_message="AFX window exit filled")
+
+plot(fast, "Pullback EMA", color=color.orange)
+plot(slow, "Trend EMA", color=color.blue, linewidth=2)
+plot(htfEma, "Confirmed HTF EMA", color=color.purple)
+plot(strategy.position_size != 0 ? activeStop : na, "Active stop", color=color.red, style=plot.style_linebr)
+plot(strategy.position_size != 0 ? activeTarget : na, "Target", color=color.green, style=plot.style_linebr)
+bgcolor(up ? color.new(color.green, 94) : down ? color.new(color.red, 94) : na)
+plotshape(longSignal, title="Long setup", text="L setup", style=shape.triangleup, location=location.belowbar, color=color.lime, size=size.tiny)
+plotshape(shortSignal, title="Short setup", text="S setup", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.tiny)
+
+var table dash = table.new(position.top_right, 2, 6, border_width=1)
+if barstate.islast
+    direction = not ready ? "WARMUP" : up ? "UP" : down ? "DOWN" : "MIXED / RANGE"
+    state = strategy.position_size > 0 ? "LONG OPEN" : strategy.position_size < 0 ? "SHORT OPEN" : longSignal ? "LONG SETUP" : shortSignal ? "SHORT SETUP" : "WAIT"
+    table.cell(dash, 0, 0, "AutoFinx", text_color=color.white, bgcolor=color.navy)
+    table.cell(dash, 1, 0, "RESEARCH v1", text_color=color.white, bgcolor=color.navy)
+    table.cell(dash, 0, 1, "Direction")
+    table.cell(dash, 1, 1, direction, bgcolor=up ? color.new(color.green, 60) : down ? color.new(color.red, 60) : color.new(color.gray, 60))
+    table.cell(dash, 0, 2, "Action")
+    table.cell(dash, 1, 2, state)
+    table.cell(dash, 0, 3, "ADX / ATR %")
+    table.cell(dash, 1, 3, str.tostring(adx, "#.0") + " / " + str.tostring(atr / close * 100, "#.00"))
+    table.cell(dash, 0, 4, "Closed trades")
+    table.cell(dash, 1, 4, str.tostring(strategy.closedtrades))
+    table.cell(dash, 0, 5, "Validation")
+    table.cell(dash, 1, 5, "UNTESTED; funding excluded", bgcolor=color.new(color.orange, 50))
+
+// TradingView alert: select this strategy, Order fills only.
+// Message example: {{ticker}} {{interval}} {{strategy.order.alert_message}}
+// Alerts report simulated fills, not exchange confirmations. No execution webhook supplied.

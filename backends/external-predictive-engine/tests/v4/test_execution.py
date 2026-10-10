@@ -50,3 +50,15 @@ def test_meta_verdict_rule():
     assert verdict([fold(-0.12, 0.02, 35, 30)] * 3) == "PROFITABLE"
     assert verdict([fold(-0.12, -0.10, 25, 30)] * 3) == "NO_VALUE"      # winners cut more than trades
     assert verdict([fold(-0.12, -0.115, 40, 30)] * 3) == "NO_VALUE"     # improvement below 0.01
+
+
+def test_costs_default_and_account_override(tmp_path, monkeypatch):
+    import json
+    from v4 import costs
+    monkeypatch.delenv("AUTOFINX_V4_FEES", raising=False)
+    assert costs.round_trip_pct("taker") == 0.12 and costs.round_trip_pct("maker_entry") == 0.08
+    (tmp_path / "fees.json").write_text(json.dumps({"maker": 0.00018, "taker": 0.00045, "slippage_per_leg": 0.0001}))
+    assert costs.round_trip_pct("taker", tmp_path) == 0.12                     # file ignored unless opted in
+    monkeypatch.setenv("AUTOFINX_V4_FEES", "account")
+    assert abs(costs.round_trip_pct("taker", tmp_path) - 0.11) < 1e-9          # 2 x (0.045 + 0.01)
+    assert abs(costs.round_trip_pct("maker_entry", tmp_path) - 0.073) < 1e-9   # 0.018 + 0.045 + 0.01

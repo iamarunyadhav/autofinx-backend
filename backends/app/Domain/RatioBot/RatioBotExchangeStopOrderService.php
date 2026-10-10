@@ -2,6 +2,7 @@
 
 namespace App\Domain\RatioBot;
 
+use App\Domain\Exchange\BinanceConditionalOrderException;
 use App\Domain\Exchange\BinanceFuturesClient;
 use App\Domain\Integrations\IntegrationManager;
 use App\Models\Integration;
@@ -109,8 +110,16 @@ class RatioBotExchangeStopOrderService
             $response = $this->client($integration, $workspaceConfig)
                 ->placeReduceOnlyStopOrder($config->normalizedSymbol(), $side, 'STOP_MARKET', $stopPrice, $clientOrderId);
         } catch (Throwable $e) {
-            Log::warning('[RatioBotStopOrder] Failed to place exchange-side stop', [
+            // Logging only (no behaviour change): the exact Binance code/message and a critical line
+            // so "position has no exchange-side stop" is never a silent warning.
+            $conditional = $e instanceof BinanceConditionalOrderException ? $e : null;
+            Log::critical('[RatioBotStopOrder] Failed to place exchange-side stop - position has NO confirmed exchange-side stop', [
                 'config_id' => $config->id,
+                'client_order_id' => $clientOrderId,
+                'binance_code' => $conditional?->binanceCode,
+                'binance_msg' => $conditional?->binanceMsg,
+                'endpoint' => $conditional?->endpoint,
+                'outcome' => $conditional?->outcome,
                 'error' => $e->getMessage(),
             ]);
             return;

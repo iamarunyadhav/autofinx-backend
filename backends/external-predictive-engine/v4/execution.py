@@ -16,7 +16,9 @@ from . import policy as pol
 from .targets import MINUTE
 
 WAIT_MINUTES = 2
-COST_C0, COST_C1 = 0.12, 0.08
+from .costs import round_trip_pct
+
+COST_C0, COST_C1 = round_trip_pct("taker"), round_trip_pct("maker_entry")   # 0.12 / 0.08 by default (v4/costs.py)
 
 
 def maker_fills(grid: dict, anchors: np.ndarray, side: str, wait_minutes: int = WAIT_MINUTES):

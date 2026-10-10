@@ -40,13 +40,71 @@ class FutureTradeSignalStabilityService
 
     /**
      * Deterministic newClientOrderId so a retry never produces a second exchange order.
-     * Binance limits clientOrderId to ~36 chars; we use "ft-{kind}-{hash16}".
+     * Binance limits clientOrderId to 36 chars (algo clientAlgoId: ^[.A-Z:/a-z0-9_-]{1,36}$) and
+     * requires it to be unique among OPEN orders, so every order kind gets its own prefix:
+     *
+     *   entry     ftx-entry-<key24>      (UNCHANGED format: idempotency / dedupe / matching rely on it)
+     *   exit      ftx-exit-<key24>
+     *   sl        ftx-sl-<key24>         initial exchange-side stop loss
+     *   tp        ftx-tp-<key24>         exchange-side take profit
+     *   sl-t<N>   ftx-tsl-<N>-<key>      N-th trailing SL replacement (N >= 1)
+     *
+     * Trailing uniqueness invariant (see FutureTradeBotService::maybeUpdateExchangeTrailingSL):
+     * N = persisted sl_update_count + 1 and is persisted only after the new stop is placed; the
+     * previous stop (initial `ftx-sl-` or `ftx-tsl-<N-1>-`) is cancelled BEFORE the new one is
+     * placed and an uncancellable previous stop aborts the replacement. So an id is never placed
+     * while an order with the same id is still open, and a different N or kind is always a
+     * different id even if a cancel were delayed.
+     *
+     * Legacy (before 2026-10-10) every kind but `exit` produced `ftx-entry-<key24>`; see
+     * FutureTradeUserStreamService::protectiveFillKind() for how those old ids are still recognised.
      */
     public function deterministicClientOrderId(string $signalKey, string $kind = 'entry'): string
     {
-        $kind = strtolower($kind) === 'exit' ? 'exit' : 'entry';
+        $kind = strtolower($kind);
         $short = substr($signalKey, 0, 24);
-        return substr(sprintf('ftx-%s-%s', $kind, $short), 0, 36);
+
+        if ($kind === 'entry' || $kind === 'exit') {
+            return substr(sprintf('ftx-%s-%s', $kind, $short), 0, 36);
+        }
+
+        // Non-entry/exit kinds must satisfy the algo charset even if the signal key is not hex.
+        $safe = preg_replace('/[^A-Za-z0-9_\-.:\/]/', '_', $short) ?? '';
+        if ($safe === '') {
+            throw new \InvalidArgumentException('Cannot derive a client order id from an empty signal key.');
+        }
+
+        if ($kind === 'sl' || $kind === 'tp') {
+            return sprintf('ftx-%s-%s', $kind, $safe);
+        }
+
+        if (preg_match('/^sl-t(\d+)$/', $kind, $m) === 1 && (int) $m[1] >= 1) {
+            $prefix = sprintf('ftx-tsl-%d-', (int) $m[1]);
+            $room = 36 - strlen($prefix);
+            if ($room < 12) {
+                throw new \InvalidArgumentException('Trailing counter too large for a 36-char client order id.');
+            }
+
+            return $prefix.substr($safe, 0, $room);
+        }
+
+        throw new \InvalidArgumentException("Unknown Future Trade client order id kind '{$kind}'.");
+    }
+
+    /**
+     * Which protective order a client order id belongs to by its prefix: 'SL' (initial or
+     * trailing), 'TP', or null (entry/exit/foreign/legacy shared id: not decidable by prefix).
+     */
+    public static function protectiveKindFromClientOrderId(string $clientOrderId): ?string
+    {
+        if (str_starts_with($clientOrderId, 'ftx-sl-') || str_starts_with($clientOrderId, 'ftx-tsl-')) {
+            return 'SL';
+        }
+        if (str_starts_with($clientOrderId, 'ftx-tp-')) {
+            return 'TP';
+        }
+
+        return null;
     }
 
     /**

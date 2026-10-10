@@ -39,5 +39,8 @@
         <env name="PULSE_ENABLED" value="false"/>
         <env name="TELESCOPE_ENABLED" value="false"/>
         <env name="NIGHTWATCH_ENABLED" value="false"/>
+        <!-- Pre-existing tests fake the legacy conditional-order endpoint; the algo paths have their own tests
+             (tests/Feature/BinanceAlgo) that set the mode explicitly. -->
+        <env name="BINANCE_CONDITIONAL_ORDER_MODE" value="legacy"/>
     </php>
 </phpunit>

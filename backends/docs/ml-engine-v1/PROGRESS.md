@@ -1,10 +1,24 @@
 # PROGRESS
 
-Last updated: 2026-10-07 17:50 SLST by ml-engine-v1 (Claude Code session).
+- **2026-10-10 Experiment F POC v1 DONE (R-034, D-053): INCONCLUSIVE, substantively no edge.** BTC 2023-2025, 4H+1H trend + 15m close-based BOS: UP 106 / DOWN 68 / WAIT 99.83 % of 105,216 bars; accuracy 43.1 % (below chance), net -0.096 % per trade at 0.12 %; HTF alignment does not help (-1.2 pp, CI wide); ETH / SOL same. REUSED HISTORICAL EVALUATION; holdout sealed. API / UI not built (owner re-scope). **Next action: owner review of `market_structure_results.txt` (`D:\autofinx-ml-v4\experiment_f_v1\poc\`); no automatic follow-up.**
+- **2026-10-10 COLLECTOR SERVER BUNDLE READY (D-052):** `collector/deploy/linux/` + portability fixes + 12 new tests (collector 27 passed). Owner runs it himself (no agent server access). **Next action (owner):** read `README_DEPLOY.md`, pick a separate VPS (NOT the loaded production host), run `install.sh`, start, verify with `check_streams.sh` / `check_clock.sh`, run both collectors 1-2 h in parallel, then stop the laptop one. Windows collector still running old code (restart needed for the new code, not required). Laptop C: drive had only 0.09 GB free when checked (D: 89 GB, fine for collector data).
+
+Last updated: 2026-10-10 by ml-engine-v1 (Claude Code session, owner freeze D-050 + Rule Baseline v1).
 
 ## Current state
 
-- **Current phase:** **P4B done 30/30 (R-018); optional layers done, no value (R-020); P5 T0 baseline running.** Reviewer handoff: `CROSSCHECK_HANDOFF_2026-10-07.md`. Full owner status report:
+- **STATE (2026-10-10):** V4 research CLOSED at P8 (30/30 REJECTED, holdout sealed) + Edge Search v1 (0 survivors) + v2 pilot (INCONCLUSIVE) + M1 REJECTED; **D-046: directional-prediction research concluded** (no after-cost edge; full v2 declined). **Live collector (Track B, D-045) is running its 30-day pilot** on the PC (`D:utofinx-collector`; do not stop; quality / descriptive checks only). **Regime + Tradeability v1 DONE (R-029, D-047): no after-cost edge from the regime / WAIT rules; only a volatility effect (LOWVOL_COMPRESSION -> ~25-35 % smaller forward moves) is real; 4h filter effects INCONCLUSIVE.** Details `REGIME_TRADEABILITY_V1_RESULT.md`.
+- **2026-10-10 Quick Trade Replay v1 DONE (R-030, D-048):** pre-registered replay of Quick Trade decisions (live presets 5m/3600, 5m/1800, 15m/3600; random-direction null; SL/TP, trailing/BE, MAE/MFE stops; volatility / tradeability / regime gates). 0 LEAD in 1,071 items; every futures variant loses ~the round-trip cost (0 of 2,337 rows net-positive); stops cut the worst trade 60-80 % at an unchanged mean; the code's G1 gate cuts trades, not per-trade loss; PAPER binary hit rate of a Bollinger fade 55-57 % (report-only, decaying). Details `QUICK_TRADE_REPLAY_V1_RESULT.md`.
+- **2026-10-10 OWNER DECISION D-050:** Experiment E closed INCONCLUSIVE / NO PROFIT EVIDENCE; the LightGBM directional research is FROZEN (artifacts kept; no threshold re-tuning; ML confidence % is not a success probability and not a sizing input; volatility is the only validated finding; fee-aware WAIT and volatility stop = risk-control candidates only; production execution unchanged). Then: one pre-registered rule baseline (RULE_BASELINE_V1) and an LLM-shadow DESIGN (no execution). Status lines for both follow below when they finish.
+- **2026-10-10 Rule Baseline v1 DONE (R-032, D-051): FAIL.** EMA200 + 20-bar breakout + confirmed-swing stop + 2R on the three live presets (BTC/ETH/BNB/SOL pool, XRP/SUI report-only): gross +0.002..+0.007 % per trade, net -0.113..-0.118 % at 0.12 % (no cost variant positive), beats the matched random-side null by only +0.002..+0.007 % (CI includes 0), 36/36 items FAIL, MDE <= 0.018 %. REUSED HISTORICAL EVALUATION - NOT A FRESH FINAL HOLDOUT; holdout sealed. Details `RULE_BASELINE_V1_RESULT.md`. LLM-analyst shadow DESIGN written (`LLM_SHADOW_DESIGN_V1.md`, design only, nothing run). **Next action: owner review of RULE_BASELINE_V1_RESULT.md and the LLM design checklist; no automatic follow-up.**
+- **2026-10-10 Experiment E v1 DONE (R-031, D-049): calibrated probability + Quick Trade decision intelligence.** No genuine OOF predictions existed; regenerated walk-forward OOF of the existing V3 / V4 LightGBM recipes (annual test folds 2023 / 2024 / 2025, 6-month calibration window, 24 h embargo, every number labelled REUSED HISTORICAL EVALUATION - NOT A FRESH FINAL HOLDOUT; holdout reads 0). Verdict **INCONCLUSIVE** by the frozen rules (primary MDE 0.085 % > 0.06 %), substantively NO: raw probabilities overconfident, Platt gives a small real information gain (mostly volatility) but fails the strict calibration rule, calibrated probability never reaches 75 % (max 0.7075), no policy net profitable (primary Q-EVp -0.060 % per trade, CI90 [-0.110, -0.009]; full-power Q-SIDE -0.117 % FAIL). Details `EXPERIMENT_E_V1_RESULT.md`. **Next action: owner review of `EXPERIMENT_E_V1_RESULT.md`; no automatic follow-up; nothing here supports a paper forward test of an ML decision policy; holdout stays sealed; nothing live touched.**
+- (superseded by the Experiment E entry above) **Next action:** owner review of `QUICK_TRADE_REPLAY_V1_RESULT.md`. Optional, only on owner decision and with a new pre-registered plan: (a) a PAPER-mode forward test of the mean-reversion hit-rate hypothesis, (b) a stop-loss-as-risk-control recommendation for the Quick Trade UI, (c) review the collector pilot at ~30 days. (Previous: owner review of `REGIME_TRADEABILITY_V1_RESULT.md`.) No automatic follow-up; holdout stays sealed; nothing live is touched.
+
+- (history; its Next action is superseded by D-046) **2026-10-08 Edge Search v2 PILOT DONE (R-028, D-045): INCONCLUSIVE, 48/60 inconclusive, 12 FAIL, 0 leads, holdout never read. PC rebooted at 15:03 during the run (resumed from markers, no repeated work). Next action: owner decides whether to run the full multi-year v2 (~12-16 h, aggTrades 2021-10..2025-12 + bookDepth 2023-01..2025-12) with a re-registered plan; see EDGE_SEARCH_V2_PILOT_RESULT.md.**
+
+- **FINAL: P8 report written (owner "p8 final", 2026-10-07): `FINAL_REPORT_P8_2026-10-07.md`. 30/30 cells
+  REJECTED; holdout never opened. STOP after P8 (SPEC §101).**
+- **Current phase (before P8):** **P4B done 30/30 (R-018); optional layers done, no value (R-020); P5 T0 baseline running.** Reviewer handoff: `CROSSCHECK_HANDOFF_2026-10-07.md`. Full owner status report:
   `STATUS_REPORT_2026-10-07.md`.
 - **Running:** `D:/autofinx-ml-v4/run-p4b-p5.sh` → `logs/p4b-p5.log`. One symbol × horizon per python
   process, waits for >= 6 GB free commit memory: (1) 7 missing P4B cells (BTC h120/h240, ETH h240,
@@ -22,6 +36,18 @@ Last updated: 2026-10-07 17:50 SLST by ml-engine-v1 (Claude Code session).
 - **D-036 (owner): Codex review adopted.** Roadmap P0→P6 in `REVIEW_CODEX_2026-10-07.md`. P0 fixes A–E done
   (97 tests). Meta waiter cancelled. P5 baseline continues from the frozen snapshot (`logs/p5-baseline.log`).
   Next: replay P4B / audit / layers from a P0 snapshot after the baseline; build P1 signal diagnostics.
+- **2026-10-07 22:00 — every development experiment on the current data FAILED its pre-registered rule:**
+  - P4A (R-015), P4B (R-018), optional layers (R-020), P1 (R-022: only a tiny BTC h60 lift ~0.01 %),
+    P2 setups (R-023), P4 context (R-024), P3 economics (R-025), V5-lite (R-026).
+  - The real account fee is verified (D-040).
+  - The holdout was never opened and must stay sealed (nothing frozen).
+  - Recommended next: the P8 final report for the OHLCV + public-positioning family, and an owner decision
+    on new data / approach.
+  - Still running: the P5 baseline (pre-P0 record) → P0 replay.
+- **2026-10-08 Track B (V6 live collector) RUNNING on the PC** (D-045): `external-predictive-engine/collector/`, doc `COLLECTOR_V1.md`.
+  Data `D:\autofinx-collector\data\`, status `cd external-predictive-engine; D:\autofinx-collector\venv\Scripts\python.exe -m collector status`.
+  30-day pilot: no pass/fail claim. Next for Track B: check status daily for the first days, read the daily reports, review at ~30 days.
+  Finding: this PC's clock is ~6 s behind Binance (clock.jsonl); analysis must use exchange event time or correct by the logged offset.
 - **Gate before P6:** owner approves D-032 (holdout pass rule + P7 classification, pre-registered BEFORE
   the holdout is opened). P6/P7/P8 code not written yet. If P5 freezes no cell, the holdout stays sealed
   and P8 is the honest "no edge" report.
@@ -104,3 +130,12 @@ Last updated: 2026-10-07 17:50 SLST by ml-engine-v1 (Claude Code session).
   rules (D-013). P1 ready.
 - **2026-10-06 (a)** — Audit of V3 done; V4 spec 0–73 + corrections C1–C10 locked; agent pack
   `docs/ml-engine-v1/` created with Claude Code wrappers.
+
+
+## 2026-10-08 ? M1 momentum-candle breakout
+
+M1 COMPLETE: 18 cells, three pooled reports, raw signal diagnostics and full trade records persisted. All three timeframes REJECTED under frozen gates; 1h positive but t=1.843<2. Next action: owner review of M1_FROZEN_DEV_RESULT_2026-10-08.md; no automatic tuning. ZEC pilot remains a separate unfinished task; its download completed, evaluator verdict not produced here.
+- **2026-10-08 owner decision D-046: directional-prediction research concluded (no after-cost edge); full v2 run declined; next = risk / regime / volatility / execution-cost uses of the data. Collector keeps running (pilot).**
+
+## 2026-10-10 � Trend Pullback v1 complete
+Tested source in the local Strategy Lab translation; report and all per-coin trade rows are persisted. Status: REJECTED. No live code or execution path changed.

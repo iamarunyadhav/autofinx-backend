@@ -2,6 +2,7 @@
 
 namespace App\Domain\FutureTrade;
 
+use App\Domain\Exchange\BinanceAlgoOrderApi;
 use App\Domain\Exchange\BinanceFuturesClient;
 use App\Models\FutureTradeBotConfig;
 use Throwable;
@@ -28,6 +29,15 @@ class FutureTradeOrderRouter
             ? (bool) $settings['orderWebSocketEnabled']
             : (bool) config('future_trade.order_router.websocket_enabled', false);
 
+        // Conditional (stop/take-profit) types live on Binance's Algo Order service and are sent over
+        // REST by BinanceFuturesClient::placeConditionalOrder(). mode=legacy keeps the old path untouched.
+        $conditional = BinanceAlgoOrderApi::isConditionalType((string) ($payload['type'] ?? ''))
+            && $client->conditionalOrderMode() !== 'legacy';
+        if ($conditional && $transport === 'websocket') {
+            $transport = 'rest';
+            $context['transport_fallback_reason'] = 'conditional_orders_use_rest_algo_endpoint';
+        }
+
         if ($transport === 'websocket' && ! $websocketEnabled) {
             $transport = 'rest';
             $context['transport_fallback_reason'] = 'websocket_order_transport_disabled';
@@ -44,9 +54,11 @@ class FutureTradeOrderRouter
         ]);
 
         try {
-            $response = $transport === 'websocket'
-                ? $client->placeOrderViaWebSocket($payload)
-                : $client->placeOrder($payload);
+            $response = $conditional
+                ? $client->placeConditionalOrder($payload)
+                : ($transport === 'websocket'
+                    ? $client->placeOrderViaWebSocket($payload)
+                    : $client->placeOrder($payload));
             $latency = $this->latency->finish($trace, 'ok', [
                 'binance_order_id' => $response['orderId'] ?? null,
                 'client_order_id' => $response['clientOrderId'] ?? $payload['newClientOrderId'] ?? null,

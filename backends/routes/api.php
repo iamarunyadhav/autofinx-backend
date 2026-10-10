@@ -235,6 +235,16 @@ Route::prefix('v1')->group(function () {
         Route::get('quick-trade/forecast/multi-window/accuracy-report', [MultiWindowForecastController::class, 'accuracyReport'])->middleware('throttle:30,1');
         Route::post('quick-trade/place', [QuickTradeController::class, 'place']);
         Route::post('quick-trade/settle-due', [QuickTradeController::class, 'settleDue']);
+        // Quick Trade "Manual SL/TP" mode (no expiry, exchange-native stop). Behind two feature flags, default OFF.
+        Route::get('workspaces/{workspace}/quick-trade-manual/status', [\App\Http\Controllers\Api\QuickTradeManualController::class, 'status']);
+        Route::put('workspaces/{workspace}/quick-trade-manual/enabled', [\App\Http\Controllers\Api\QuickTradeManualController::class, 'setEnabled'])->middleware('throttle:10,1');
+        Route::post('workspaces/{workspace}/quick-trade-manual/preview', [\App\Http\Controllers\Api\QuickTradeManualController::class, 'preview'])->middleware('throttle:30,1');
+        Route::post('workspaces/{workspace}/quick-trade-manual/positions', [\App\Http\Controllers\Api\QuickTradeManualController::class, 'open'])->middleware('throttle:10,1');
+        Route::get('workspaces/{workspace}/quick-trade-manual/positions', [\App\Http\Controllers\Api\QuickTradeManualController::class, 'index']);
+        Route::get('workspaces/{workspace}/quick-trade-manual/positions/{position}', [\App\Http\Controllers\Api\QuickTradeManualController::class, 'show']);
+        Route::post('workspaces/{workspace}/quick-trade-manual/positions/{position}/refresh', [\App\Http\Controllers\Api\QuickTradeManualController::class, 'refresh'])->middleware('throttle:30,1');
+        Route::post('workspaces/{workspace}/quick-trade-manual/positions/{position}/close-preview', [\App\Http\Controllers\Api\QuickTradeManualController::class, 'closePreview'])->middleware('throttle:30,1');
+        Route::post('workspaces/{workspace}/quick-trade-manual/positions/{position}/close', [\App\Http\Controllers\Api\QuickTradeManualController::class, 'close'])->middleware('throttle:20,1');
         Route::get('workspaces/{workspace}/quick-trades/active', [QuickTradeController::class, 'active']);
         Route::get('workspaces/{workspace}/quick-trades/history', [QuickTradeController::class, 'history']);
         Route::get('workspaces/{workspace}/quick-trades/research', [\App\Http\Controllers\Api\QuickTradeResearchController::class, 'index'])->middleware('throttle:30,1');

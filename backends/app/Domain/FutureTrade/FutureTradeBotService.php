@@ -11418,12 +11418,16 @@ class FutureTradeBotService
             $slResponse = (array) $routed['response'];
             $metaUpdate['sl_client_order_id'] = $slClientId;
             $metaUpdate['sl_exchange_order_id'] = (string) ($slResponse['orderId'] ?? '');
+            if (array_key_exists('algo', $slResponse)) {
+                $metaUpdate['sl_algo'] = (bool) $slResponse['algo'];   // which API owns the stop (cancel routing)
+            }
             $this->log($config->fresh('state'), 'EXCHANGE_SL_PLACED', $symbol, null, 0,
                 "Exchange-side SL placed at {$slPrice} (clientOrderId: {$slClientId})",
                 ['orderId' => $slResponse['orderId'] ?? null, 'price' => $slPrice]);
         } catch (Throwable $e) {
             $this->log($config->fresh('state'), 'EXCHANGE_SL_FAILED', $symbol, null, 0,
-                'Exchange-side SL placement failed (server loop is backup): '.$e->getMessage());
+                'Exchange-side SL placement failed (server loop is backup): '.$e->getMessage(),
+                $this->exchangeStopFailureContext($e, 'STOP_MARKET', $slClientId));
         }
 
         try {
@@ -11434,17 +11438,45 @@ class FutureTradeBotService
             $tpResponse = (array) $routed['response'];
             $metaUpdate['tp_client_order_id'] = $tpClientId;
             $metaUpdate['tp_exchange_order_id'] = (string) ($tpResponse['orderId'] ?? '');
+            if (array_key_exists('algo', $tpResponse)) {
+                $metaUpdate['tp_algo'] = (bool) $tpResponse['algo'];
+            }
             $this->log($config->fresh('state'), 'EXCHANGE_TP_PLACED', $symbol, null, 0,
                 "Exchange-side TP placed at {$tpPrice} (clientOrderId: {$tpClientId})",
                 ['orderId' => $tpResponse['orderId'] ?? null, 'price' => $tpPrice]);
         } catch (Throwable $e) {
             $this->log($config->fresh('state'), 'EXCHANGE_TP_FAILED', $symbol, null, 0,
-                'Exchange-side TP placement failed (server loop is backup): '.$e->getMessage());
+                'Exchange-side TP placement failed (server loop is backup): '.$e->getMessage(),
+                $this->exchangeStopFailureContext($e, 'TAKE_PROFIT_MARKET', $tpClientId));
         }
 
         if ($metaUpdate !== []) {
             $logical->update(['meta' => array_merge((array) ($logical->meta ?? []), $metaUpdate + ['sl_base_key' => $baseKey])]);
         }
+    }
+
+    /**
+     * Structured detail for an exchange-side SL/TP placement failure: the exact Binance code/message
+     * and endpoint (when the client could classify it), and a distinct critical log line so a
+     * position running WITHOUT an exchange-side stop can be alerted on. Logging only; the bot
+     * keeps its existing "server loop is backup" behaviour.
+     */
+    private function exchangeStopFailureContext(Throwable $e, string $type, string $clientOrderId): array
+    {
+        $context = [
+            'stop_type' => $type,
+            'client_order_id' => $clientOrderId,
+            'binance_code' => $e instanceof \App\Domain\Exchange\BinanceConditionalOrderException ? $e->binanceCode : null,
+            'binance_msg' => $e instanceof \App\Domain\Exchange\BinanceConditionalOrderException ? $e->binanceMsg : null,
+            'endpoint' => $e instanceof \App\Domain\Exchange\BinanceConditionalOrderException ? $e->endpoint : null,
+            'outcome' => $e instanceof \App\Domain\Exchange\BinanceConditionalOrderException ? $e->outcome : null,
+            'protection' => 'NO_EXCHANGE_SIDE_STOP_CONFIRMED',
+        ];
+        Log::critical('[FT EXCHANGE STOP NOT PLACED] position may be running without an exchange-side stop', $context + [
+            'error' => mb_substr($e->getMessage(), 0, 500),
+        ]);
+
+        return $context;
     }
 
     /**
@@ -11528,7 +11560,9 @@ class FutureTradeBotService
         // Cancel old SL — if this fails the old order is likely already filled,
         // so we abort to avoid placing a stale new order.
         try {
-            $client->cancelOrder($symbol, null, $currentSlClientId);
+            // Invariant: the previous stop is cancelled BEFORE the next id is placed, and a failed cancel aborts
+            // (return below), so a trailing id is never placed while the id before it may still be open.
+            $client->cancelOrder($symbol, null, $currentSlClientId, isset($meta['sl_algo']) ? (bool) $meta['sl_algo'] : null);
         } catch (Throwable $e) {
             $this->log($config->fresh('state'), 'TRAILING_SL_CANCEL_FAILED', $symbol, null, 0,
                 'Old SL cancel failed during trailing update (may already be filled): '.$e->getMessage());
@@ -11547,6 +11581,7 @@ class FutureTradeBotService
             $logical->update(['meta' => array_merge($meta, [
                 'sl_client_order_id' => $newSlClientId,
                 'sl_exchange_order_id' => (string) ($slResponse['orderId'] ?? ''),
+                'sl_algo' => array_key_exists('algo', $slResponse) ? (bool) $slResponse['algo'] : null,
                 'sl_update_peak' => $currentPeak,
                 'sl_update_price' => $newSlFmt,
                 'sl_update_count' => $updateCount,
@@ -11560,7 +11595,8 @@ class FutureTradeBotService
         } catch (Throwable $e) {
             // Old order already cancelled — server-side trailing is now the only protection.
             $this->log($config->fresh('state'), 'TRAILING_SL_PLACE_FAILED', $symbol, null, 0,
-                'Failed to place new trailed SL (server loop is backup): '.$e->getMessage());
+                'Failed to place new trailed SL (server loop is backup): '.$e->getMessage(),
+                $this->exchangeStopFailureContext($e, 'STOP_MARKET', $newSlClientId));
         }
     }
 
@@ -11579,6 +11615,7 @@ class FutureTradeBotService
                     $symbol,
                     isset($order['orderId']) ? (string) $order['orderId'] : null,
                     isset($order['clientOrderId']) ? (string) $order['clientOrderId'] : null,
+                    (bool) ($order['algo'] ?? false),
                 );
                 $cancelled++;
             } catch (Throwable $e) {
@@ -11639,6 +11676,24 @@ class FutureTradeBotService
                 'symbol' => $symbol, 'error' => $e->getMessage(),
             ]);
             $openOrdersPayload = [];
+            $openOrdersSnapshotAvailable = false;
+        }
+
+        // Binance conditional (algo) orders are NOT in /fapi/v1/openOrders. Merge them in so the
+        // reduce-only cancel-before-close step still sees (and cancels) exchange-side stops.
+        // A failed algo lookup flags the open-orders snapshot unavailable, never "no stops".
+        try {
+            $algoOrders = $client->fetchOpenAlgoOrders($symbol);
+            if ($algoOrders !== []) {
+                $openOrdersPayload = array_merge(
+                    is_array($openOrdersPayload) && array_is_list($openOrdersPayload) ? $openOrdersPayload : [],
+                    $algoOrders
+                );
+            }
+        } catch (Throwable $e) {
+            Log::warning('[FT EXCHANGE SNAPSHOT] fetchOpenAlgoOrders failed', [
+                'symbol' => $symbol, 'error' => $e->getMessage(),
+            ]);
             $openOrdersSnapshotAvailable = false;
         }
 

@@ -1,0 +1,105 @@
+MARKET STRUCTURE POC - BTCUSDT (plan EXPERIMENT_F_POC_V1.md sha256 4e4ced03d76877ff6674bed4d04ba9c283405158b6354eb9c56c1dbf0b180a28)
+REUSED HISTORICAL EVALUATION - NOT A FRESH FINAL HOLDOUT (2023-2025 was examined by earlier experiments and this hypothesis was chosen after seeing those results; the sealed 2026 holdout is not read)
+
+VERDICT: INCONCLUSIVE
+  primary accuracy item (RULE 15m): INCONCLUSIVE; net items RULE: {'15m': 'INCONCLUSIVE', '1h': 'INCONCLUSIVE', '4h': 'INCONCLUSIVE'}; HTF-helps items: {'15m': 'INCONCLUSIVE', '1h': 'INCONCLUSIVE', '4h': 'INCONCLUSIVE'}
+
+=== Horizon 15m (eligible closed 15m bars 105216) ===
+[RULE] coverage: UP 106 DOWN 68 WAIT 105042 (WAIT share 99.83 %); signals 174, flat 0
+   accuracy (WAIT and flat excluded) 43.10 %  Wilson95 [35.97 %, 50.53 %]  UP 46.23 % (n 106)  DOWN 38.24 % (n 68)
+   baselines on the same signal bars: always-UP 52.30 %, always-DOWN 47.70 %, majority(UP) 52.30 %; all eligible bars: up-share 50.24 %
+   random sides (1000 seeds): mean 49.85 % sd 3.842 %; share of seeds >= rule: p_dir 0.970
+   by year (signals / accuracy / excess vs random): 2023: 44 / 47.73 % / -2.27 %; 2024: 73 / 36.99 % / -13.01 %; 2025: 57 / 47.37 % / -2.63 %
+   profit @0.12% (fees 0.10 + slippage 0.02; funding 0.0000): trades 174, gross 0.0243 %, net -0.0957 % per trade, win 25.3 %, PF 0.484, maxDD 19.2 pp
+   profit @0.14% (fees 0.10 + slippage 0.04; funding 0.0000): trades 174, gross 0.0243 %, net -0.1157 % per trade, win 23.6 %, PF 0.423, maxDD 22.4 pp
+   random-side null (same entries, net @0.12): mean -0.1202 sd 0.0304; rule better in 0.782 of seeds (p_dir 0.218)
+   net by year @0.12: 2023: n 44 net -0.0657; 2024: n 73 net -0.1299; 2025: n 57 net -0.0751
+   halves @0.12: 2023-24: n 117 net -0.1058; 2025: n 57 net -0.0751
+[NOHTF] coverage: UP 1149 DOWN 893 WAIT 103174 (WAIT share 98.06 %); signals 2042, flat 0
+   accuracy (WAIT and flat excluded) 44.32 %  Wilson95 [42.18 %, 46.48 %]  UP 44.56 % (n 1149)  DOWN 44.01 % (n 893)
+   baselines on the same signal bars: always-UP 49.56 %, always-DOWN 50.44 %, majority(UP) 49.56 %; all eligible bars: up-share 50.24 %
+   random sides (1000 seeds): mean 50.03 % sd 1.147 %; share of seeds >= rule: p_dir 1.000
+   by year (signals / accuracy / excess vs random): 2023: 616 / 45.78 % / -4.22 %; 2024: 669 / 43.20 % / -6.80 %; 2025: 757 / 44.12 % / -5.88 %
+   profit @0.12% (fees 0.10 + slippage 0.02; funding -0.0000): trades 2042, gross 0.0064 %, net -0.1136 % per trade, win 24.6 %, PF 0.384, maxDD 232.1 pp
+   profit @0.14% (fees 0.10 + slippage 0.04; funding -0.0000): trades 2042, gross 0.0064 %, net -0.1336 % per trade, win 22.7 %, PF 0.331, maxDD 272.8 pp
+   random-side null (same entries, net @0.12): mean -0.1202 sd 0.0078; rule better in 0.799 of seeds (p_dir 0.201)
+   net by year @0.12: 2023: n 616 net -0.0972; 2024: n 669 net -0.1169; 2025: n 757 net -0.1240
+   halves @0.12: 2023-24: n 1285 net -0.1074; 2025: n 757 net -0.1240
+
+=== Horizon 1h (eligible closed 15m bars 105213) ===
+[RULE] coverage: UP 106 DOWN 68 WAIT 105039 (WAIT share 99.83 %); signals 174, flat 0
+   accuracy (WAIT and flat excluded) 43.68 %  Wilson95 [36.52 %, 51.11 %]  UP 49.06 % (n 106)  DOWN 35.29 % (n 68)
+   baselines on the same signal bars: always-UP 55.17 %, always-DOWN 44.83 %, majority(UP) 55.17 %; all eligible bars: up-share 50.75 %
+   random sides (1000 seeds): mean 49.90 % sd 3.824 %; share of seeds >= rule: p_dir 0.956
+   by year (signals / accuracy / excess vs random): 2023: 44 / 38.64 % / -11.36 %; 2024: 73 / 41.10 % / -8.90 %; 2025: 57 / 50.88 % / 0.88 %
+   profit @0.12% (fees 0.10 + slippage 0.02; funding 0.0007): trades 174, gross -0.0458 %, net -0.1665 % per trade, win 28.7 %, PF 0.463, maxDD 34.3 pp
+   profit @0.14% (fees 0.10 + slippage 0.04; funding 0.0007): trades 174, gross -0.0458 %, net -0.1865 % per trade, win 28.2 %, PF 0.425, maxDD 37.4 pp
+   random-side null (same entries, net @0.12): mean -0.1201 sd 0.0497; rule better in 0.178 of seeds (p_dir 0.822)
+   net by year @0.12: 2023: n 44 net -0.0882; 2024: n 73 net -0.2999; 2025: n 57 net -0.0560
+   halves @0.12: 2023-24: n 117 net -0.2203; 2025: n 57 net -0.0560
+[NOHTF] coverage: UP 1149 DOWN 893 WAIT 103171 (WAIT share 98.06 %); signals 2042, flat 2
+   accuracy (WAIT and flat excluded) 43.14 %  Wilson95 [41.00 %, 45.30 %]  UP 45.73 % (n 1149)  DOWN 39.80 % (n 893)
+   baselines on the same signal bars: always-UP 52.06 %, always-DOWN 47.94 %, majority(UP) 52.06 %; all eligible bars: up-share 50.75 %
+   random sides (1000 seeds): mean 50.02 % sd 1.105 %; share of seeds >= rule: p_dir 1.000
+   by year (signals / accuracy / excess vs random): 2023: 616 / 41.72 % / -8.28 %; 2024: 669 / 41.41 % / -8.59 %; 2025: 757 / 45.83 % / -4.16 %
+   profit @0.12% (fees 0.10 + slippage 0.02; funding 0.0002): trades 2040, gross 0.0014 %, net -0.1188 % per trade, win 29.8 %, PF 0.557, maxDD 252.0 pp
+   profit @0.14% (fees 0.10 + slippage 0.04; funding 0.0002): trades 2040, gross 0.0014 %, net -0.1388 % per trade, win 28.2 %, PF 0.508, maxDD 291.2 pp
+   random-side null (same entries, net @0.12): mean -0.1199 sd 0.0133; rule better in 0.516 of seeds (p_dir 0.484)
+   net by year @0.12: 2023: n 616 net -0.0891; 2024: n 668 net -0.1484; 2025: n 756 net -0.1168
+   halves @0.12: 2023-24: n 1284 net -0.1199; 2025: n 756 net -0.1168
+
+=== Horizon 4h (eligible closed 15m bars 105201) ===
+[RULE] coverage: UP 106 DOWN 68 WAIT 105027 (WAIT share 99.83 %); signals 174, flat 0
+   accuracy (WAIT and flat excluded) 40.23 %  Wilson95 [33.23 %, 47.65 %]  UP 48.11 % (n 106)  DOWN 27.94 % (n 68)
+   baselines on the same signal bars: always-UP 57.47 %, always-DOWN 42.53 %, majority(UP) 57.47 %; all eligible bars: up-share 51.39 %
+   random sides (1000 seeds): mean 49.74 % sd 3.889 %; share of seeds >= rule: p_dir 0.994
+   by year (signals / accuracy / excess vs random): 2023: 44 / 40.91 % / -9.09 %; 2024: 73 / 42.47 % / -7.53 %; 2025: 57 / 36.84 % / -13.16 %
+   profit @0.12% (fees 0.10 + slippage 0.02; funding 0.0013): trades 148, gross -0.0696 %, net -0.1909 % per trade, win 36.5 %, PF 0.630, maxDD 34.3 pp
+   profit @0.14% (fees 0.10 + slippage 0.04; funding 0.0013): trades 148, gross -0.0696 %, net -0.2109 % per trade, win 35.8 %, PF 0.601, maxDD 36.9 pp
+   random-side null (same entries, net @0.12): mean -0.1221 sd 0.0981; rule better in 0.240 of seeds (p_dir 0.760)
+   net by year @0.12: 2023: n 38 net -0.1648; 2024: n 60 net -0.3343; 2025: n 50 net -0.0386
+   halves @0.12: 2023-24: n 98 net -0.2686; 2025: n 50 net -0.0386
+[NOHTF] coverage: UP 1149 DOWN 893 WAIT 103159 (WAIT share 98.06 %); signals 2042, flat 0
+   accuracy (WAIT and flat excluded) 41.09 %  Wilson95 [38.97 %, 43.24 %]  UP 42.99 % (n 1149)  DOWN 38.63 % (n 893)
+   baselines on the same signal bars: always-UP 51.03 %, always-DOWN 48.97 %, majority(UP) 51.03 %; all eligible bars: up-share 51.39 %
+   random sides (1000 seeds): mean 49.98 % sd 1.118 %; share of seeds >= rule: p_dir 1.000
+   by year (signals / accuracy / excess vs random): 2023: 616 / 39.29 % / -10.71 %; 2024: 669 / 39.61 % / -10.39 %; 2025: 757 / 43.86 % / -6.14 %
+   profit @0.12% (fees 0.10 + slippage 0.02; funding 0.0007): trades 1644, gross -0.0455 %, net -0.1662 % per trade, win 34.4 %, PF 0.631, maxDD 283.9 pp
+   profit @0.14% (fees 0.10 + slippage 0.04; funding 0.0007): trades 1644, gross -0.0455 %, net -0.1862 % per trade, win 33.3 %, PF 0.599, maxDD 315.1 pp
+   random-side null (same entries, net @0.12): mean -0.1211 sd 0.0253; rule better in 0.030 of seeds (p_dir 0.970)
+   net by year @0.12: 2023: n 506 net -0.1201; 2024: n 533 net -0.2514; 2025: n 605 net -0.1297
+   halves @0.12: 2023-24: n 1039 net -0.1874; 2025: n 605 net -0.1297
+
+=== Declared items (one BH-FDR family, 15 items; accuracy in percentage points, net in % per trade) ===
+ACC|RULE|15m   effect -6.8966 CI90 [-13.1346, -0.6585] MDE 10.6179 p 0.9655 q 1.0000 n 174 years [-2.2727, -13.0137, -2.6316] -> INCONCLUSIVE   (fraction)
+NET|RULE|15m   effect -0.0957 CI90 [-0.1440, -0.0475] MDE 0.0821 p 0.9994 q 1.0000 n 174 years [-0.0657, -0.1299, -0.0751] -> INCONCLUSIVE   (% per trade)
+ACC|NOHTF|15m  effect -5.6807 CI90 [-7.4896, -3.8718] MDE 3.0789 p 1.0000 q 1.0000 n 2042 years [-4.2208, -6.8012, -5.8785] -> INCONCLUSIVE   (fraction)
+NET|NOHTF|15m  effect -0.1136 CI90 [-0.1262, -0.1009] MDE 0.0215 p 1.0000 q 1.0000 n 2042 years [-0.0972, -0.1169, -0.124] -> FAIL   (% per trade)
+HTF|15m        effect -1.2158 CI90 [-7.3782, 4.9466] MDE 10.4892 p 0.6272 q 1.0000 n 174 years [1.9481, -6.2125, 3.2469] -> INCONCLUSIVE   (fraction (RULE excess minus NOHTF excess))
+ACC|RULE|1h    effect -6.3218 CI90 [-12.5756, -0.0681] MDE 10.6446 p 0.9518 q 1.0000 n 174 years [-11.3636, -8.9041, 0.8772] -> INCONCLUSIVE   (fraction)
+NET|RULE|1h    effect -0.1665 CI90 [-0.2411, -0.0919] MDE 0.1270 p 0.9999 q 1.0000 n 174 years [-0.0882, -0.2999, -0.056] -> INCONCLUSIVE   (% per trade)
+ACC|NOHTF|1h   effect -6.8560 CI90 [-8.7361, -4.9759] MDE 3.2002 p 1.0000 q 1.0000 n 2042 years [-8.2792, -8.5949, -4.1612] -> INCONCLUSIVE   (fraction)
+NET|NOHTF|1h   effect -0.1188 CI90 [-0.1409, -0.0967] MDE 0.0377 p 1.0000 q 1.0000 n 2040 years [-0.0891, -0.1484, -0.1168] -> FAIL   (% per trade)
+HTF|1h         effect 0.5342 CI90 [-5.3662, 6.4346] MDE 10.0432 p 0.4408 q 1.0000 n 174 years [-3.0844, -0.3092, 5.0384] -> INCONCLUSIVE   (fraction (RULE excess minus NOHTF excess))
+ACC|RULE|4h    effect -9.7701 CI90 [-16.4679, -3.0723] MDE 11.4006 p 0.9918 q 1.0000 n 174 years [-9.0909, -7.5342, -13.1579] -> INCONCLUSIVE   (fraction)
+NET|RULE|4h    effect -0.1909 CI90 [-0.3451, -0.0367] MDE 0.2625 p 0.9791 q 1.0000 n 148 years [-0.1648, -0.3343, -0.0386] -> INCONCLUSIVE   (% per trade)
+ACC|NOHTF|4h   effect -8.9128 CI90 [-10.8065, -7.0191] MDE 3.2233 p 1.0000 q 1.0000 n 2042 years [-10.7143, -10.3886, -6.1427] -> INCONCLUSIVE   (fraction)
+NET|NOHTF|4h   effect -0.1662 CI90 [-0.2099, -0.1225] MDE 0.0743 p 1.0000 q 1.0000 n 1644 years [-0.1201, -0.2514, -0.1297] -> INCONCLUSIVE   (% per trade)
+HTF|4h         effect -0.8573 CI90 [-7.1177, 5.4031] MDE 10.6560 p 0.5891 q 1.0000 n 174 years [1.6234, 2.8544, -7.0152] -> INCONCLUSIVE   (fraction (RULE excess minus NOHTF excess))
+
+=== Robustness (report-only, not in the family, not in the verdict) ===
+ETHUSDT 15m RULE: UP 129 DOWN 70 WAIT 99.8 %; accuracy 42.71 % (n 199); trades 199 gross -0.0005 net@0.12 -0.1204
+ETHUSDT 15m NOHTF: UP 1145 DOWN 966 WAIT 98.0 %; accuracy 42.32 % (n 2110); trades 2111 gross -0.0003 net@0.12 -0.1203
+ETHUSDT 1h RULE: UP 129 DOWN 70 WAIT 99.8 %; accuracy 44.22 % (n 199); trades 198 gross -0.0728 net@0.12 -0.1935
+ETHUSDT 1h NOHTF: UP 1145 DOWN 966 WAIT 98.0 %; accuracy 44.48 % (n 2111); trades 2101 gross -0.0021 net@0.12 -0.1222
+ETHUSDT 4h RULE: UP 129 DOWN 70 WAIT 99.8 %; accuracy 38.69 % (n 199); trades 164 gross -0.1740 net@0.12 -0.2968
+ETHUSDT 4h NOHTF: UP 1145 DOWN 966 WAIT 98.0 %; accuracy 44.22 % (n 2110); trades 1652 gross -0.0101 net@0.12 -0.1309
+SOLUSDT 15m RULE: UP 126 DOWN 53 WAIT 99.8 %; accuracy 38.55 % (n 179); trades 179 gross -0.0408 net@0.12 -0.1613
+SOLUSDT 15m NOHTF: UP 969 DOWN 808 WAIT 97.8 %; accuracy 43.21 % (n 1768); trades 1777 gross -0.0221 net@0.12 -0.1422
+SOLUSDT 1h RULE: UP 126 DOWN 53 WAIT 99.8 %; accuracy 42.46 % (n 179); trades 179 gross -0.1058 net@0.12 -0.2275
+SOLUSDT 1h NOHTF: UP 969 DOWN 808 WAIT 97.8 %; accuracy 44.19 % (n 1774); trades 1771 gross -0.0292 net@0.12 -0.1495
+SOLUSDT 4h RULE: UP 126 DOWN 53 WAIT 99.8 %; accuracy 42.46 % (n 179); trades 141 gross -0.1368 net@0.12 -0.2596
+SOLUSDT 4h NOHTF: UP 969 DOWN 807 WAIT 97.8 %; accuracy 46.37 % (n 1775); trades 1364 gross -0.0953 net@0.12 -0.2158
+
+Not tested: stops / targets / sizing / leverage, other pivot parameters, other timeframes, order-book / flow data, the sealed 2026 holdout (reads 0).
+This is a proof of concept on a REUSED development window; a PROMISING verdict would only justify a pre-registered forward paper test, never live use.

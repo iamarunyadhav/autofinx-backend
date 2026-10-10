@@ -37,5 +37,21 @@ return [
             'label' => 'AutoFinX v13 (Final) — owner Pine, translated 2026-10-07',
             'normalized_sha256' => ['21ff22ddfd13f524db3f9cc45b7b1c2feeed169ea63777d8b9367668d1846fe7'],
         ],
+        'v1' => [
+            'label' => 'AutoFinX v10.1 Smart Short (translated 2026-10-08)',
+            'normalized_sha256' => ['5709908d30fa5b4462b8fc9594be2a9079030a5cd1132afc26ff989fb1f6ba2d'],
+        ],
+        'v2' => [
+            'label' => 'AutoFinX UT Bot Pro v6 (translated 2026-10-08)',
+            'normalized_sha256' => ['4b724f5e36995e79f1e04dfca431df4c23746067cc51f21cc6c1f1bdbc5bfa7e'],
+        ],
+        'v3' => [
+            'label' => 'AutoFinX TF-1 Donchian Trend v1 (translated 2026-10-08)',
+            'normalized_sha256' => ['414fd84f0d386f7af01c7e3904af719a4c85d12c5f631cd084960cbeea56e3af'],
+        ],
+        'v4' => [
+            'label' => 'AutoFinX TF-1 Donchian Trend v2 filtered (translated 2026-10-08)',
+            'normalized_sha256' => ['1e10fb1386a4cb3ed1d2f20d589acd1baba8f8b054d15f5b2c817e96027a1416'],
+        ],
     ],
 ];

@@ -1,0 +1,711 @@
+//@version=6
+strategy(
+     title                   = "BTC AutoFinX Prime v10.1 - Smart Short",
+     shorttitle               = "BTC AutoFinX v10.1",
+     overlay                  = true,
+     pyramiding               = 0,
+     initial_capital          = 10000,
+     default_qty_type         = strategy.percent_of_equity,
+     default_qty_value        = 10,
+     commission_type          = strategy.commission.percent,
+     commission_value         = 0.04,
+     process_orders_on_close  = true,
+     calc_on_every_tick       = true,
+     calc_on_order_fills      = true
+)
+
+// 
+//  WEBHOOK
+// 
+grpA = "=== YOUR APP WEBHOOK ==="
+appToken     = input.string("YOUR_PINE_WEBHOOK_TOKEN",      "App Token",    group=grpA)
+appDomain    = input.string("https://YOUR_DOMAIN",          "App Domain",   group=grpA)
+appWorkspace = input.string("YOUR_WORKSPACE_ID",            "Workspace ID", group=grpA)
+appProfile   = input.string("autofinx_prime_v6_1_7_crypto", "Profile",      group=grpA)
+
+grpC = "=== 3COMMAS ==="
+use3Commas   = input.bool(false,               "Enable 3Commas", group=grpC)
+commasBotId  = input.string("YOUR_BOT_ID",     "Bot ID",         group=grpC)
+commasEmail  = input.string("YOUR_EMAIL_TOKEN","Email Token",    group=grpC)
+commasPairPfx= input.string("BINANCE_FUTURES_","Pair Prefix",    group=grpC)
+
+// 
+//  SIGNAL CONFIG
+// 
+grp1 = "=== SIGNAL ==="
+tradeSide      = input.string("Short Only","Direction", options=["Both","Long Only","Short Only"], group=grp1)
+scoreThreshold = input.float(65,"Score Threshold", minval=50, maxval=95, group=grp1)
+watchThreshold = input.float(52,"Watch Threshold", minval=30, maxval=80, group=grp1)
+cooldownBars   = input.int(4,  "Cooldown Bars",    minval=0,  maxval=50, group=grp1)
+
+grp2 = "=== TIMEFRAMES ==="
+htf1 = input.timeframe("60",  "HTF 1 (1H)",  group=grp2)
+htf2 = input.timeframe("240", "HTF 2 (4H)",  group=grp2)
+htf3 = input.timeframe("D",   "HTF 3 (1D)  NEW v10.1 macro filter", group=grp2)
+
+grp3 = "=== EMA ==="
+emaFastLen = input.int(9,   "EMA Fast",  minval=1, group=grp3)
+emaSlowLen = input.int(21,  "EMA Slow",  minval=1, group=grp3)
+emaTrndLen = input.int(50,  "EMA Trend", minval=1, group=grp3)
+emaMajLen  = input.int(200, "EMA 200",   minval=1, group=grp3)
+slopeBack  = input.int(5,   "Slope Lookback", minval=1, group=grp3)
+
+// 
+//  HARD FILTERS v10.1
+// 
+grp4 = "=== HARD FILTERS ==="
+useChop      = input.bool(true,  "Chop Filter",  group=grp4)
+chopLen      = input.int(14,     "Chop Length",  group=grp4, minval=5)
+chopMax      = input.float(61.0, "Max Choppiness", group=grp4, minval=30, maxval=85,
+     tooltip="61.0 balanced. Tighter=fewer trades, higher quality.")
+useSuptrHard = input.bool(true,  "Supertrend Hard", group=grp4)
+useDailyFilter= input.bool(true, "Daily Trend Filter (NEW)", group=grp4,
+     tooltip="v10.1 KEY: Daily close below Daily EMA50 = macro bear. Prevents shorting bull markets!")
+useLowerHigh  = input.bool(true, "Lower High Structure (NEW)", group=grp4,
+     tooltip="v10.1 KEY: Current high < prev high. Only short when structure is already bearish.")
+useBearVolume = input.bool(true, "Bear Volume Pressure (NEW)", group=grp4,
+     tooltip="v10.1: Recent down-bar volume > up-bar volume = bears in control.")
+volHardMin    = input.float(0.75,"Min Volume (hard)", group=grp4, minval=0.3, maxval=2.0, step=0.05)
+useSessionFilter = input.bool(true,"Session Filter", group=grp4)
+
+// 
+//  INDICATORS
+// 
+grp5 = "=== INDICATORS ==="
+rsiLen   = input.int(14,   "RSI Length",  group=grp5)
+adxLen   = input.int(14,   "ADX Length",  group=grp5)
+adxSmooth= input.int(14,   "ADX Smooth",  group=grp5)
+volLen   = input.int(20,   "Volume MA",   group=grp5)
+stFactor = input.float(3.0,"ST Factor",   group=grp5, minval=1.0, maxval=6.0, step=0.5)
+stPeriod = input.int(7,    "ST Period",   group=grp5, minval=3, maxval=20)
+macdFast = input.int(12,   "MACD Fast",   group=grp5)
+macdSlow = input.int(26,   "MACD Slow",   group=grp5)
+macdSig  = input.int(9,    "MACD Signal", group=grp5)
+donLen   = input.int(14,   "Donchian",    group=grp5, minval=5)
+bodyMin  = input.float(0.35,"Min Body",   group=grp5, minval=0.1, maxval=0.9, step=0.05)
+
+// 
+//  BACKTEST RISK
+// 
+grp7 = "=== BACKTEST RISK ==="
+tp1RR     = input.float(1.5, "TP1 R:R",   group=grp7, minval=0.5, maxval=10.0, step=0.1,
+     tooltip="v10.1: Back to proven 1.5x. Sweet spot for crypto 15M.")
+tp2RR     = input.float(3.0, "TP2 R:R",   group=grp7, minval=1.0, maxval=20.0, step=0.5,
+     tooltip="v10.1: 3.0x for trailing half.")
+trailMult = input.float(1.0, "Trail ATR", group=grp7, minval=0.3, maxval=3.0, step=0.1)
+exitOnFlip    = input.bool(true, "Exit On Flip", group=grp7)
+flipThreshold = input.float(76.0,"Flip Score",   group=grp7)
+
+// 
+//  DISPLAY
+// 
+grp9 = "=== DISPLAY ==="
+showDash  = input.bool(true, "Dashboard",       group=grp9)
+showSigs  = input.bool(true, "BUY/SELL Labels", group=grp9)
+showWatch = input.bool(true, "Watch Dots",      group=grp9)
+colorBars = input.bool(true, "Color Bars",      group=grp9)
+showLog   = input.bool(true, "Trade Log",       group=grp9)
+logRows   = input.int(8,     "Log Rows", minval=3, maxval=15, group=grp9)
+
+// 
+//  ASSET DETECTION
+// 
+tickerUP   = str.upper(syminfo.ticker)
+tickerNorm = str.replace(str.replace(tickerUP, ".P", ""), "PERP", "")
+isBTC      = str.contains(tickerUP,"BTC")
+isETH      = str.contains(tickerUP,"ETH")
+isSOL      = str.contains(tickerUP,"SOL")
+isBNB      = str.contains(tickerUP,"BNB")
+isAlt      = str.contains(tickerUP,"DOGE") or str.contains(tickerUP,"XRP") or str.contains(tickerUP,"ADA") or str.contains(tickerUP,"SHIB")
+isCrypto   = syminfo.type == "crypto" or isBTC or isETH or isSOL or isBNB or isAlt
+isGold     = str.contains(tickerUP,"XAU") or str.contains(tickerUP,"GOLD")
+isOil      = str.contains(tickerUP,"OIL") or str.contains(tickerUP,"WTI")
+isForex    = syminfo.type == "forex" and not isCrypto and not isGold and not isOil
+symbolOk   = tickerNorm == "ETHUSDT" or tickerNorm == "BTCUSDT" or tickerNorm == "SOLUSDT" or tickerNorm == "BNBUSDT"
+assetCat   = isBTC?"BTC":isETH?"ETH":isSOL?"SOL":isBNB?"BNB":isAlt?"ALT":isGold?"GOLD":isOil?"OIL":isForex?"FOREX":"CRYPTO"
+
+adxMin = isForex?22.0:isBTC?20.0:isETH?20.0:18.0
+slMult = isBTC?1.8:isETH?2.0:isAlt?2.5:isGold?2.2:isOil?2.0:isForex?1.5:2.0
+
+longRsiMin  = isForex?38.0:32.0
+longRsiMax  = isForex?78.0:82.0
+shortRsiMin = isForex?22.0:18.0
+shortRsiMax = isForex?62.0:68.0
+
+hourUTC  = hour(time,"UTC")
+inLondon = hourUTC >= 8  and hourUTC < 17
+inNY     = hourUTC >= 13 and hourUTC < 22
+inSession= isCrypto or not useSessionFilter or inLondon or inNY
+
+// 
+//  BASE INDICATORS
+// 
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+emaTrnd = ta.ema(close, emaTrndLen)
+emaMaj  = ta.ema(close, emaMajLen)
+vwapVal = ta.vwap(hlc3)
+rsiVal  = ta.rsi(close, rsiLen)
+[diPlus, diMinus, adxVal] = ta.dmi(adxLen, adxSmooth)
+atrVal  = ta.atr(14)
+atrAvg  = ta.sma(atrVal, 20)
+volAvg  = ta.sma(volume, volLen)
+relVol  = not na(volAvg) and volAvg > 0 ? volume / volAvg : 1.0
+
+[stLine, stDir] = ta.supertrend(stFactor, stPeriod)
+stBull = stDir < 0
+stBear = stDir > 0
+
+[macdLine, macdSigLine, macdHist] = ta.macd(close, macdFast, macdSlow, macdSig)
+macdBull     = macdLine > macdSigLine and macdHist > 0
+macdBear     = macdLine < macdSigLine and macdHist < 0
+macdNeutBull = macdLine > macdSigLine
+macdNeutBear = macdLine < macdSigLine
+macdCrossUp  = ta.crossover(macdLine, macdSigLine)
+macdCrossDn  = ta.crossunder(macdLine, macdSigLine)
+
+trSum   = ta.sma(ta.tr(true), chopLen) * chopLen
+rangeH  = ta.highest(high, chopLen)
+rangeL  = ta.lowest(low, chopLen)
+chopRaw = (rangeH-rangeL)>0 and chopLen>1 and trSum>0 ? 100.0*math.log10(trSum/(rangeH-rangeL))/math.log10(chopLen) : 100.0
+chopVal = math.max(0.0, math.min(100.0, chopRaw))
+chopOk  = not useChop or chopVal <= chopMax
+
+// Donchian
+f_don(_l) =>
+    _hh = ta.highest(high, _l)
+    _ll = ta.lowest(low, _l)
+    int _t = 0
+    _t := close > _hh[1] ? 1 : close < _ll[1] ? -1 : nz(_t[1],0)
+    _t
+
+d0=f_don(donLen) 
+d1=f_don(math.max(donLen-1,2)) 
+d2=f_don(math.max(donLen-2,2))
+d3=f_don(math.max(donLen-3,2)) 
+d4=f_don(math.max(donLen-4,2)) 
+d5=f_don(math.max(donLen-5,2))
+d6=f_don(math.max(donLen-6,2)) 
+d7=f_don(math.max(donLen-7,2)) 
+d8=f_don(math.max(donLen-8,2))
+d9=f_don(math.max(donLen-9,2))
+
+donBullCnt = (d0==1?1:0)+(d1==1?1:0)+(d2==1?1:0)+(d3==1?1:0)+(d4==1?1:0)+(d5==1?1:0)+(d6==1?1:0)+(d7==1?1:0)+(d8==1?1:0)+(d9==1?1:0)
+donBearCnt = (d0==-1?1:0)+(d1==-1?1:0)+(d2==-1?1:0)+(d3==-1?1:0)+(d4==-1?1:0)+(d5==-1?1:0)+(d6==-1?1:0)+(d7==-1?1:0)+(d8==-1?1:0)+(d9==-1?1:0)
+donBullStr = donBullCnt >= 6
+donBearStr = donBearCnt >= 6
+donMixed   = not donBullStr and not donBearStr
+
+// 
+//  HTF 1H + 4H + 1D (NEW v10.1)
+// 
+f_htf() =>
+    _e = ta.ema(close, emaTrndLen)
+    _m = ta.ema(close, emaMajLen)
+    close > _m and _e > _m ? 1 : close < _m and _e < _m ? -1 : 0
+
+htf1Val = request.security(syminfo.tickerid, htf1, f_htf()[1], barmerge.gaps_off, barmerge.lookahead_off)
+htf2Val = request.security(syminfo.tickerid, htf2, f_htf()[1], barmerge.gaps_off, barmerge.lookahead_off)
+htf3Val = request.security(syminfo.tickerid, htf3, f_htf()[1], barmerge.gaps_off, barmerge.lookahead_off)
+
+htfStrongBull = htf1Val == 1  and htf2Val == 1
+htfStrongBear = htf1Val == -1 and htf2Val == -1
+htfBull       = htf1Val >= 0  and htf2Val >= 0
+htfBear       = htf1Val <= 0  and htf2Val <= 0
+htfMixed      = not htfStrongBull and not htfStrongBear
+
+// Daily filter: 1D must be bear or neutral for shorts
+dailyBearOk = not useDailyFilter or htf3Val <= 0
+dailyBullOk = not useDailyFilter or htf3Val >= 0
+
+// EMA
+emaBull  = emaFast > emaSlow
+emaBear  = emaFast < emaSlow
+emaTBull = close > emaTrnd
+emaTBear = close < emaTrnd
+majBull  = close > emaMaj
+majBear  = close < emaMaj
+slopeVal = emaTrnd - emaTrnd[slopeBack]
+slopeBull= slopeVal > 0
+slopeBear= slopeVal < 0
+slopeStr = math.abs(slopeVal) > atrVal * 0.08
+
+// RSI
+rsiBull  = rsiVal >= longRsiMin  and rsiVal <= longRsiMax
+rsiBear  = rsiVal >= shortRsiMin and rsiVal <= shortRsiMax
+rsiOB    = rsiVal > 70
+rsiOS    = rsiVal < 30
+
+// Volume
+volOk    = relVol >= volHardMin
+volStrong= relVol >= 1.5
+
+// ADX
+adxBull  = adxVal >= adxMin and diPlus  > diMinus
+adxBear  = adxVal >= adxMin and diMinus > diPlus
+adxStr   = adxVal >= 25
+
+// VWAP
+vwapBull = na(vwapVal) or close > vwapVal
+vwapBear = na(vwapVal) or close < vwapVal
+
+// ATR
+atrExp = atrVal > atrAvg * 1.05
+
+// 
+//  v10.1 NEW: LOWER HIGH STRUCTURE
+//  Shorts only when making lower highs (bearish structure)
+// 
+lookback = 3
+recentHigh1 = ta.highest(high, lookback)[1]
+recentHigh2 = ta.highest(high, lookback)[lookback+1]
+lowerHighOk = not useLowerHigh or (high < recentHigh1 and recentHigh1 < recentHigh2)
+
+lowerLowOk  = not useLowerHigh or (low < ta.lowest(low, lookback)[1])
+
+// 
+//  v10.1 NEW: BEAR VOLUME PRESSURE
+//  Down-bar volume > Up-bar volume (recent 5 bars)
+// 
+bearVolSum = 0.0
+bullVolSum = 0.0
+for i = 0 to 4
+    bearVolSum := bearVolSum + (close[i] < open[i] ? volume[i] : 0.0)
+    bullVolSum := bullVolSum + (close[i] > open[i] ? volume[i] : 0.0)
+bearVolPressure = not useBearVolume or bearVolSum >= bullVolSum * 0.8
+
+// 
+//  CANDLE PATTERNS
+// 
+bodySize    = math.abs(close - open)
+candleRange = high - low
+bodyRatio   = candleRange > 0 ? bodySize / candleRange : 0.0
+upperWick   = candleRange > 0 ? (high - math.max(close,open)) / candleRange : 0.0
+lowerWick   = candleRange > 0 ? (math.min(close,open) - low) / candleRange : 0.0
+
+bullCandle  = close > open and bodyRatio >= bodyMin
+bearCandle  = close < open and bodyRatio >= bodyMin
+bullEngulf  = close > open and close > high[1] and open < math.min(close[1],open[1]) and candleRange > candleRange[1] * 0.8
+bearEngulf  = close < open and close < low[1]  and open > math.max(close[1],open[1]) and candleRange > candleRange[1] * 0.8
+hammerPin   = lowerWick >= 0.55 and bodyRatio <= 0.30 and upperWick <= 0.15
+shootingPin = upperWick >= 0.55 and bodyRatio <= 0.30 and lowerWick <= 0.15
+threeBullish= close > open and close[1] > open[1] and close[2] > open[2]
+threeBearish= close < open and close[1] < open[1] and close[2] < open[2]
+bullBurst   = close > open and bodySize > atrVal * 0.7 and bodyRatio >= 0.55
+bearBurst   = close < open and bodySize > atrVal * 0.7 and bodyRatio >= 0.55
+isDoji      = bodyRatio < 0.10
+isInside    = high < high[1] and low > low[1]
+
+// v10.1: Bearish pattern required on signal bar
+bearPatternPresent = bearCandle or bearEngulf or shootingPin or bearBurst or threeBearish
+
+// 
+//  SCORING SYSTEM v10.1
+// 
+float longScore  = 0.0
+float shortScore = 0.0
+
+// HTF 1H+4H (25pts)
+longScore  += htfStrongBull ? 25 : htfBull ? 13 : htfMixed ? 3 : 0
+shortScore += htfStrongBear ? 25 : htfBear ? 13 : htfMixed ? 3 : 0
+
+// Daily HTF bonus (NEW  score only, hard filter separate)
+longScore  += htf3Val == 1 ? 8 : htf3Val == 0 ? 3 : 0
+shortScore += htf3Val == -1 ? 8 : htf3Val == 0 ? 3 : 0
+
+// Donchian
+longScore  += donBullStr ? 14 : donMixed ? 4 : 0
+shortScore += donBearStr ? 14 : donMixed ? 4 : 0
+
+// ADX
+longScore  += adxBull and adxStr ? 15 : adxBull ? 12 : adxVal >= adxMin ? 4 : 0
+shortScore += adxBear and adxStr ? 15 : adxBear ? 12 : adxVal >= adxMin ? 4 : 0
+
+// EMA
+longScore  += emaBull ? 10 : 0
+shortScore += emaBear ? 10 : 0
+
+// EMA trend
+longScore  += emaTBull ? 8 : 0
+shortScore += emaTBear ? 8 : 0
+
+// EMA 200
+longScore  += majBull ? 8 : 0
+shortScore += majBear ? 8 : 0
+
+// Supertrend
+longScore  += stBull ? 8 : 0
+shortScore += stBear ? 8 : 0
+
+// VWAP
+longScore  += vwapBull ? 7 : 0
+shortScore += vwapBear ? 7 : 0
+
+// RSI
+longScore  += rsiBull ? 8 : rsiOS ? 5 : rsiOB ? -4 : 0
+shortScore += rsiBear ? 8 : rsiOB ? 5 : rsiOS ? -4 : 0
+
+// MACD
+longScore  += macdBull ? 6 : macdCrossUp ? 8 : macdNeutBull ? 2 : 0
+shortScore += macdBear ? 6 : macdCrossDn ? 8 : macdNeutBear ? 2 : 0
+
+// EMA slope
+longScore  += slopeBull and slopeStr ? 6 : slopeBull ? 3 : 0
+shortScore += slopeBear and slopeStr ? 6 : slopeBear ? 3 : 0
+
+// Volume
+longScore  += volStrong ? 7 : volOk ? 5 : relVol >= 0.6 ? 2 : 0
+shortScore += volStrong ? 7 : volOk ? 5 : relVol >= 0.6 ? 2 : 0
+
+// Candle patterns
+longScore  += bullEngulf ? 10 : bullBurst ? 8 : hammerPin ? 7 : bullCandle ? 5 : 0
+shortScore += bearEngulf ? 10 : bearBurst ? 8 : shootingPin ? 7 : bearCandle ? 5 : 0
+
+// Consecutive
+longScore  += threeBullish ? 5 : 0
+shortScore += threeBearish ? 5 : 0
+
+// Lower high structure bonus (NEW)
+shortScore += lowerHighOk and useLowerHigh ? 6 : 0
+
+// Bear volume pressure bonus (NEW)
+shortScore += bearVolPressure and useBearVolume ? 5 : 0
+
+// ATR
+longScore  += atrExp ? 4 : 0
+shortScore += atrExp ? 4 : 0
+
+// Penalties
+longScore  += isDoji   ? -5 : 0
+shortScore += isDoji   ? -5 : 0
+longScore  += isInside ? -3 : 0
+shortScore += isInside ? -3 : 0
+
+longWatch  = longScore  >= watchThreshold and longScore  < scoreThreshold and longScore  > shortScore
+shortWatch = shortScore >= watchThreshold and shortScore < scoreThreshold and shortScore > longScore
+
+// 
+//  HARD GATES v10.1
+//  Core: EMA + ADX + ST + Chop + Daily + Vol + RSI
+//  NEW: Daily trend + Lower high + Bear volume
+// 
+allowLong  = tradeSide == "Both" or tradeSide == "Long Only"
+allowShort = tradeSide == "Both" or tradeSide == "Short Only"
+stLongOk   = not useSuptrHard or stBull
+stShortOk  = not useSuptrHard or stBear
+
+hardLong  = allowLong  and symbolOk and emaBull and adxBull and chopOk and stLongOk and dailyBullOk and volOk and rsiBull and inSession
+
+hardShort = allowShort and symbolOk
+         and emaBear
+         and adxBear
+         and chopOk
+         and stShortOk
+         and dailyBearOk
+         and volOk
+         and rsiBear
+         and lowerHighOk
+         and bearVolPressure
+         and inSession
+
+var int lastEntryBar = na
+canEnter = na(lastEntryBar) or bar_index - lastEntryBar >= cooldownBars
+
+longSig  = barstate.isconfirmed and canEnter and hardLong  and longScore  >= scoreThreshold and longScore  > shortScore
+shortSig = barstate.isconfirmed and canEnter and hardShort and shortScore >= scoreThreshold and shortScore > longScore
+
+// Block reason
+var string lBlk = "WAIT"
+var string sBlk = "WAIT"
+
+if barstate.isconfirmed
+    if not symbolOk
+        lBlk := "SYMBOL_NOT_SUPPORTED"
+        sBlk := "SYMBOL_NOT_SUPPORTED"
+    else
+        if not allowShort
+            sBlk := "SIDE_OFF"
+        else if not dailyBearOk
+            sBlk := "DAILY_BULL_MARKET"
+        else if not stShortOk
+            sBlk := "SUPTR_BULL"
+        else if not emaBear
+            sBlk := "EMA_BULL"
+        else if not adxBear
+            sBlk := "ADX:" + str.tostring(adxVal,"#")
+        else if not volOk
+            sBlk := "LOW_VOL:" + str.tostring(relVol,"#.2") + "x"
+        else if not rsiBear
+            sBlk := "RSI:" + str.tostring(rsiVal,"#")
+        else if not lowerHighOk
+            sBlk := "NO_LOWER_HIGH"
+        else if not bearVolPressure
+            sBlk := "BULL_VOL_PRESSURE"
+        else if not chopOk
+            sBlk := "CHOP:" + str.tostring(chopVal,"#")
+        else if not inSession
+            sBlk := "OFF_SESSION"
+        else if not canEnter
+            sBlk := "COOLDOWN"
+        else if shortScore < scoreThreshold
+            sBlk := str.tostring(shortScore,"#") + "<" + str.tostring(scoreThreshold,"#")
+        else
+            sBlk := "READY"
+
+        if not allowLong
+            lBlk := "SIDE_OFF"
+        else if not dailyBullOk
+            lBlk := "DAILY_BEAR_MARKET"
+        else if not stLongOk
+            lBlk := "SUPTR_BEAR"
+        else if not emaBull
+            lBlk := "EMA_BEAR"
+        else if not adxBull
+            lBlk := "ADX:" + str.tostring(adxVal,"#")
+        else if not volOk
+            lBlk := "LOW_VOL:" + str.tostring(relVol,"#.2") + "x"
+        else if not rsiBull
+            lBlk := "RSI:" + str.tostring(rsiVal,"#")
+        else if not chopOk
+            lBlk := "CHOP:" + str.tostring(chopVal,"#")
+        else if not canEnter
+            lBlk := "COOLDOWN"
+        else if longScore < scoreThreshold
+            lBlk := str.tostring(longScore,"#") + "<" + str.tostring(scoreThreshold,"#")
+        else
+            lBlk := "READY"
+
+// 
+//  JSON
+// 
+f_appJson(_sig, _ls, _ss) =>
+    _conf = math.round(math.min(100.0, _sig=="BUY"?_ls:_sig=="SELL"?_ss:math.max(_ls,_ss)))
+    _ot   = str.tostring(time)
+    _at   = str.tostring(timenow)
+    _oid  = tickerNorm + "-15m-" + _at + "-" + _sig
+    string _j = ""
+    _j := '{"token":"' + appToken + '",'
+    _j := _j + '"profile":"' + appProfile + '",'
+    _j := _j + '"source":"pine_webhook",'
+    _j := _j + '"symbol":"' + tickerNorm + '",'
+    _j := _j + '"timeframe":"15m",'
+    _j := _j + '"signal":"' + _sig + '",'
+    _j := _j + '"price":' + str.tostring(close,format.mintick) + ','
+    _j := _j + '"confidence":' + str.tostring(_conf) + ','
+    _j := _j + '"longScore":' + str.tostring(_ls,"#.0") + ','
+    _j := _j + '"shortScore":' + str.tostring(_ss,"#.0") + ','
+    _j := _j + '"bar_confirmed":true,'
+    _j := _j + '"candle_open_time":' + _ot + ','
+    _j := _j + '"alert_time":' + _at + ','
+    _j := _j + '"strategy_order_id":"' + _oid + '",'
+    _j := _j + '"strategy_version":"v10.1"}'
+    _j
+
+f_3commasJson(_action) =>
+    '{"message_type":"bot","bot_id":"' + commasBotId + '","email_token":"' + commasEmail + '","delay_seconds":0,"pair":"' + commasPairPfx + tickerNorm + '","action":"' + _action + '"}'
+
+// 
+//  ENTRIES & EXITS
+// 
+var float eAtr = na
+var float eSl  = na
+
+if strategy.position_size == 0
+    eAtr := na
+    eSl  := na
+
+if longSig and strategy.position_size <= 0
+    eAtr := atrVal
+    eSl  := slMult
+    lastEntryBar := bar_index
+    strategy.entry("LONG", strategy.long, alert_message=f_appJson("BUY", longScore, shortScore))
+    if use3Commas
+        alert(f_3commasJson("start_bot"), alert.freq_once_per_bar_close)
+
+if shortSig and strategy.position_size >= 0
+    eAtr := atrVal
+    eSl  := slMult
+    lastEntryBar := bar_index
+    strategy.entry("SHORT", strategy.short, alert_message=f_appJson("SELL", longScore, shortScore))
+    if use3Commas
+        alert(f_3commasJson("start_bot"), alert.freq_once_per_bar_close)
+
+rA = na(eAtr)?atrVal:eAtr
+rS = na(eSl)?slMult:eSl
+rD = rA * rS
+tT = math.max(1, math.round((atrVal*trailMult)/syminfo.mintick))
+
+if strategy.position_size > 0
+    avg = strategy.position_avg_price
+    strategy.exit("L-TP1",   from_entry="LONG", qty_percent=50, stop=avg-rD, limit=avg+rD*tp1RR, alert_message=f_appJson("CLOSE_LONG",longScore,shortScore))
+    strategy.exit("L-TRAIL", from_entry="LONG", qty_percent=50, stop=avg-rD, trail_points=tT, trail_offset=tT, alert_message=f_appJson("CLOSE_LONG",longScore,shortScore))
+    if exitOnFlip and shortScore >= flipThreshold and shortScore > longScore
+        strategy.close("LONG", comment="Flip", alert_message=f_appJson("CLOSE_LONG",longScore,shortScore))
+        if use3Commas
+            alert(f_3commasJson("stop_bot"), alert.freq_once_per_bar_close)
+
+if strategy.position_size < 0
+    avg = strategy.position_avg_price
+    strategy.exit("S-TP1",   from_entry="SHORT", qty_percent=50, stop=avg+rD, limit=avg-rD*tp1RR, alert_message=f_appJson("CLOSE_SHORT",longScore,shortScore))
+    strategy.exit("S-TRAIL", from_entry="SHORT", qty_percent=50, stop=avg+rD, trail_points=tT, trail_offset=tT, alert_message=f_appJson("CLOSE_SHORT",longScore,shortScore))
+    if exitOnFlip and longScore >= flipThreshold and longScore > shortScore
+        strategy.close("SHORT", comment="Flip", alert_message=f_appJson("CLOSE_SHORT",longScore,shortScore))
+        if use3Commas
+            alert(f_3commasJson("stop_bot"), alert.freq_once_per_bar_close)
+
+// 
+//  TRADE LOG
+// 
+var array<string> lT = array.new_string(15,"")
+var array<string> lS = array.new_string(15,"")
+var array<float>  lP = array.new_float(15,na)
+var array<float>  lC = array.new_float(15,na)
+
+if longSig or shortSig
+    array.unshift(lT, str.format_time(time,"MM-dd HH:mm"))
+    array.unshift(lS, longSig?"BUY":"SELL")
+    array.unshift(lP, close)
+    array.unshift(lC, longSig?longScore:shortScore)
+    if array.size(lT) > 15
+        array.pop(lT) 
+        array.pop(lS) 
+        array.pop(lP) 
+        array.pop(lC)
+
+// 
+//  VISUALS
+// 
+plot(emaFast,"EMA 9",   color=emaBull?color.new(color.lime,0):color.new(color.red,0), linewidth=1)
+plot(emaSlow,"EMA 21",  color=emaBull?color.new(color.green,0):color.new(color.orange,0), linewidth=1)
+plot(emaTrnd,"EMA 50",  color=color.new(color.blue,10), linewidth=2)
+plot(emaMaj, "EMA 200", color=color.new(color.red,10),  linewidth=2)
+plot(vwapVal,"VWAP",    color=color.new(color.purple,0),linewidth=2)
+plot(stLine, "ST",      color=stBull?color.new(color.lime,30):color.new(color.red,30), linewidth=2)
+
+plotshape(showSigs and longSig,  style=shape.labelup,   text="BUY",  location=location.belowbar, color=color.lime, textcolor=color.black, size=size.normal)
+plotshape(showSigs and shortSig, style=shape.labeldown, text="SELL", location=location.abovebar, color=color.red,  textcolor=color.white, size=size.normal)
+plotshape(showWatch and longWatch,  style=shape.circle, text="W", location=location.belowbar, color=color.new(color.lime,45), textcolor=color.white, size=size.tiny)
+plotshape(showWatch and shortWatch, style=shape.circle, text="W", location=location.abovebar, color=color.new(color.red,45),  textcolor=color.white, size=size.tiny)
+plotshape(bearEngulf, style=shape.triangledown, location=location.abovebar, color=color.new(color.red,50),  size=size.tiny)
+barcolor(colorBars?(longScore>shortScore?color.new(color.green,75):shortScore>longScore?color.new(color.red,75):na):na)
+
+plot(longScore,  "dbg_L",    display=display.data_window)
+plot(shortScore, "dbg_S",    display=display.data_window)
+plot(chopVal,    "dbg_chop", display=display.data_window)
+plot(adxVal,     "dbg_adx",  display=display.data_window)
+plot(rsiVal,     "dbg_rsi",  display=display.data_window)
+plot(relVol,     "dbg_vol",  display=display.data_window)
+plot(htf1Val,    "dbg_h1",   display=display.data_window)
+plot(htf2Val,    "dbg_h2",   display=display.data_window)
+plot(htf3Val,    "dbg_h3_daily", display=display.data_window)
+
+// 
+//  DASHBOARD
+// 
+var table dash = table.new(position.top_right,4,18,border_width=1,frame_width=2,frame_color=color.new(color.gray,50))
+
+sigTx = longSig?">>> BUY <<<":shortSig?">>> SELL <<<":longWatch?"WATCH BUY":shortWatch?"WATCH SELL":"-- WAIT --"
+sigBg = longSig?color.new(color.lime,10):shortSig?color.new(color.red,10):longWatch?color.new(color.lime,50):shortWatch?color.new(color.red,50):color.new(color.gray,60)
+biasTx= longScore>shortScore?(htfStrongBull?"STRONG BULL":"BULL"):shortScore>longScore?(htfStrongBear?"STRONG BEAR":"BEAR"):"NEUTRAL"
+biasBg= longScore>shortScore?color.new(color.lime,40):shortScore>longScore?color.new(color.red,40):color.new(color.gray,60)
+h1Tx  = htf1Val==1?"BULL":htf1Val==-1?"BEAR":"MIXED"
+h2Tx  = htf2Val==1?"BULL":htf2Val==-1?"BEAR":"MIXED"
+h3Tx  = htf3Val==1?"BULL (NO SHORT!)":htf3Val==-1?"BEAR (SHORT OK)":"MIXED"
+h1Bg  = htf1Val==1?color.new(color.lime,50):htf1Val==-1?color.new(color.red,50):color.new(color.gray,60)
+h2Bg  = htf2Val==1?color.new(color.lime,50):htf2Val==-1?color.new(color.red,50):color.new(color.gray,60)
+h3Bg  = htf3Val==1?color.new(color.red,40):htf3Val==-1?color.new(color.lime,40):color.new(color.orange,50)
+cTx   = chopOk?"OK "+str.tostring(chopVal,"#.0"):"CHOP "+str.tostring(chopVal,"#.0")
+cBg   = chopOk?color.new(color.lime,60):color.new(color.orange,40)
+pf    = strategy.grossprofit>0 and strategy.grossloss>0?strategy.grossprofit/strategy.grossloss:0.0
+pfBg  = pf>=1.5?color.new(color.lime,20):pf>=1.4?color.new(color.lime,35):pf>=1.2?color.new(color.lime,50):pf>=1.0?color.new(color.orange,40):color.new(color.red,50)
+wl    = strategy.wintrades+strategy.losstrades
+wrBg  = wl>0 and strategy.wintrades/wl>=0.48?color.new(color.lime,50):color.new(color.orange,50)
+netBg = strategy.netprofit>=0?color.new(color.lime,50):color.new(color.red,50)
+symBg = symbolOk?color.new(color.lime,40):color.new(color.red,40)
+lhTx  = lowerHighOk?"LOWER HIGH OK":"NO LOWER HIGH"
+lhBg  = lowerHighOk?color.new(color.lime,50):color.new(color.orange,50)
+bvTx  = bearVolPressure?"BEAR VOL OK":"BULL VOL DOMINANT"
+bvBg  = bearVolPressure?color.new(color.lime,50):color.new(color.orange,50)
+lBlkBg= longSig?color.new(color.lime,40):color.new(color.red,65)
+sBlkBg= shortSig?color.new(color.lime,40):color.new(color.red,65)
+stBg  = stBull?color.new(color.lime,50):color.new(color.red,50)
+mBg   = macdBull?color.new(color.lime,50):macdBear?color.new(color.red,50):color.new(color.gray,60)
+
+hdr=color.new(color.navy,10) 
+lbl=color.new(color.gray,70) 
+val=color.new(color.black,85) 
+sz=size.small
+
+if showDash and barstate.islast
+    table.cell(dash,0,0,"AutoFinX v10.1",bgcolor=hdr,text_color=color.white,text_size=sz)
+    table.cell(dash,1,0,"Smart Short",bgcolor=hdr,text_color=color.yellow,text_size=sz)
+    table.cell(dash,2,0,"Asset: "+assetCat,bgcolor=hdr,text_color=color.lime,text_size=sz)
+    table.cell(dash,3,0,tradeSide+" | SL:"+str.tostring(slMult,"#.0")+"x",bgcolor=hdr,text_color=color.white,text_size=sz)
+    table.cell(dash,0,1,"Signal",bgcolor=lbl,text_color=color.white,text_size=sz)
+    table.cell(dash,1,1,sigTx,bgcolor=sigBg,text_color=color.white,text_size=sz)
+    table.cell(dash,2,1,"Bias",bgcolor=lbl,text_color=color.white,text_size=sz)
+    table.cell(dash,3,1,biasTx,bgcolor=biasBg,text_color=color.white,text_size=sz)
+    table.cell(dash,0,2,"Long Score",bgcolor=lbl,text_color=color.white,text_size=sz)
+    table.cell(dash,1,2,str.tostring(longScore,"#.0")+"/"+str.tostring(scoreThreshold,"#"),bgcolor=val,text_color=color.white,text_size=sz)
+    table.cell(dash,2,2,"Short Score",bgcolor=lbl,text_color=color.white,text_size=sz)
+    table.cell(dash,3,2,str.tostring(shortScore,"#.0")+"/"+str.tostring(scoreThreshold,"#"),bgcolor=val,text_color=color.white,text_size=sz)
+    table.cell(dash,0,3,"HTF1 1H",bgcolor=lbl,text_color=color.white,text_size=sz)
+    table.cell(dash,1,3,h1Tx,bgcolor=h1Bg,text_color=color.white,text_size=sz)
+    table.cell(dash,2,3,"HTF2 4H",bgcolor=lbl,text_color=color.white,text_size=sz)
+    table.cell(dash,3,3,h2Tx,bgcolor=h2Bg,text_color=color.white,text_size=sz)
+    table.cell(dash,0,4,"HTF3 1D (KEY)",bgcolor=lbl,text_color=color.white,text_size=sz)
+    table.cell(dash,1,4,h3Tx,bgcolor=h3Bg,text_color=color.white,text_size=sz)
+    table.cell(dash,2,4,"Supertrend",bgcolor=lbl,text_color=color.white,text_size=sz)
+    table.cell(dash,3,4,stBull?"BULL":"BEAR",bgcolor=stBg,text_color=color.white,text_size=sz)
+    table.cell(dash,0,5,"Lower High",bgcolor=lbl,text_color=color.white,text_size=sz)
+    table.cell(dash,1,5,lhTx,bgcolor=lhBg,text_color=color.white,text_size=sz)
+    table.cell(dash,2,5,"Bear Vol",bgcolor=lbl,text_color=color.white,text_size=sz)
+    table.cell(dash,3,5,bvTx,bgcolor=bvBg,text_color=color.white,text_size=sz)
+    table.cell(dash,0,6,"ADX",bgcolor=lbl,text_color=color.white,text_size=sz)
+    table.cell(dash,1,6,str.tostring(adxVal,"#.1")+" (min "+str.tostring(adxMin,"#")+")",bgcolor=val,text_color=color.white,text_size=sz)
+    table.cell(dash,2,6,"RSI",bgcolor=lbl,text_color=color.white,text_size=sz)
+    table.cell(dash,3,6,str.tostring(rsiVal,"#.1"),bgcolor=rsiBull?color.new(color.lime,60):rsiBear?color.new(color.red,60):color.new(color.orange,50),text_color=color.white,text_size=sz)
+    table.cell(dash,0,7,"Volume",bgcolor=lbl,text_color=color.white,text_size=sz)
+    table.cell(dash,1,7,str.tostring(relVol,"#.2")+"x (min "+str.tostring(volHardMin,"#.2")+"x)",bgcolor=volOk?color.new(color.lime,60):color.new(color.red,60),text_color=color.white,text_size=sz)
+    table.cell(dash,2,7,"Chop (max "+str.tostring(chopMax,"#")+")",bgcolor=lbl,text_color=color.white,text_size=sz)
+    table.cell(dash,3,7,cTx,bgcolor=cBg,text_color=color.white,text_size=sz)
+    table.cell(dash,0,8,"PF (target 1.4+)",bgcolor=lbl,text_color=color.white,text_size=sz)
+    table.cell(dash,1,8,str.tostring(pf,"#.000"),bgcolor=pfBg,text_color=color.white,text_size=sz)
+    table.cell(dash,2,8,"Win Rate",bgcolor=lbl,text_color=color.white,text_size=sz)
+    table.cell(dash,3,8,wl>0?str.tostring(strategy.wintrades/wl*100,"#.1")+"%":"N/A",bgcolor=wrBg,text_color=color.white,text_size=sz)
+    table.cell(dash,0,9,"Closed",bgcolor=lbl,text_color=color.white,text_size=sz)
+    table.cell(dash,1,9,str.tostring(strategy.closedtrades),bgcolor=val,text_color=color.white,text_size=sz)
+    table.cell(dash,2,9,"Net PnL",bgcolor=lbl,text_color=color.white,text_size=sz)
+    table.cell(dash,3,9,str.tostring(strategy.netprofit,"#.2")+" ("+str.tostring(strategy.netprofit/strategy.initial_capital*100,"#.1")+"%)",bgcolor=netBg,text_color=color.white,text_size=sz)
+    table.cell(dash,0,10,"Long Block",bgcolor=lbl,text_color=color.white,text_size=sz)
+    table.cell(dash,1,10,lBlk,bgcolor=lBlkBg,text_color=color.white,text_size=sz)
+    table.cell(dash,2,10,"Short Block",bgcolor=lbl,text_color=color.white,text_size=sz)
+    table.cell(dash,3,10,sBlk,bgcolor=sBlkBg,text_color=color.white,text_size=sz)
+    table.cell(dash,0,11,"Symbol",bgcolor=lbl,text_color=color.white,text_size=sz)
+    table.cell(dash,1,11,tickerNorm+(symbolOk?" OK":" NOT SUPPORTED!"),bgcolor=symBg,text_color=color.white,text_size=sz)
+    table.cell(dash,2,11,"Token",bgcolor=lbl,text_color=color.white,text_size=sz)
+    table.cell(dash,3,11,appToken!="YOUR_PINE_WEBHOOK_TOKEN"?"SET OK":"NOT SET!",bgcolor=appToken!="YOUR_PINE_WEBHOOK_TOKEN"?color.new(color.lime,40):color.new(color.red,40),text_color=color.white,text_size=sz)
+    table.cell(dash,0,12,"App URL",bgcolor=color.new(color.navy,30),text_color=color.white,text_size=size.tiny)
+    table.cell(dash,1,12,appDomain+"/api/v1/future-trade/pine-webhook/"+appWorkspace,bgcolor=color.new(color.black,80),text_color=color.yellow,text_size=size.tiny)
+    table.cell(dash,2,12,"Alert Msg",bgcolor=color.new(color.navy,30),text_color=color.white,text_size=size.tiny)
+    table.cell(dash,3,12,"{{strategy.order.alert_message}}",bgcolor=color.new(color.black,80),text_color=color.lime,text_size=size.tiny)
+
+// 
+//  TRADE LOG
+// 
+var table logT = table.new(position.bottom_right,4,16,border_width=1,frame_width=1,frame_color=color.new(color.gray,50))
+if showLog and barstate.islast
+    table.cell(logT,0,0,"#",bgcolor=color.new(color.navy,20),text_color=color.white,text_size=size.tiny)
+    table.cell(logT,1,0,"Time",bgcolor=color.new(color.navy,20),text_color=color.white,text_size=size.tiny)
+    table.cell(logT,2,0,"Sig",bgcolor=color.new(color.navy,20),text_color=color.white,text_size=size.tiny)
+    table.cell(logT,3,0,"Price/Score",bgcolor=color.new(color.navy,20),text_color=color.white,text_size=size.tiny)
+    maxR=math.min(logRows,array.size(lT))
+    for i=0 to maxR-1
+        sT=array.get(lS,i)
+        sBg=sT=="BUY"?color.new(color.lime,40):color.new(color.red,40)
+        pV=array.get(lP,i)
+        cV=array.get(lC,i)
+        table.cell(logT,0,i+1,str.tostring(i+1),bgcolor=color.new(color.gray,80),text_color=color.white,text_size=size.tiny)
+        table.cell(logT,1,i+1,array.get(lT,i),bgcolor=color.new(color.black,80),text_color=color.white,text_size=size.tiny)
+        table.cell(logT,2,i+1,sT,bgcolor=sBg,text_color=color.white,text_size=size.tiny)
+        table.cell(logT,3,i+1,(na(pV)?"":str.tostring(pV,"#.2"))+"/"+(na(cV)?"":str.tostring(cV,"#.0")),bgcolor=color.new(color.black,80),text_color=color.white,text_size=size.tiny)

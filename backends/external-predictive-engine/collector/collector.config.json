@@ -1,0 +1,23 @@
+{
+  "data_dir": "D:/autofinx-collector/data",
+  "ws_base": "wss://fstream.binance.com",
+  "rest_base": "https://fapi.binance.com",
+  "symbols_all": ["btcusdt", "ethusdt", "bnbusdt", "solusdt", "xrpusdt", "suiusdt"],
+  "symbols_book": ["btcusdt", "ethusdt"],
+  "oi_interval_s": 60,
+  "clock_interval_s": 300,
+  "heartbeat_s": 10,
+  "flush_s": 5,
+  "gzip_level": 5,
+  "min_free_gb": 20,
+  "resume_margin_gb": 2,
+  "liveness_s": {
+    "aggTrade": 180,
+    "markPrice": 15,
+    "bookTicker": 15,
+    "depth": 15,
+    "forceOrder": 1800,
+    "openInterest": 180
+  },
+  "process_priority": "below_normal"
+}

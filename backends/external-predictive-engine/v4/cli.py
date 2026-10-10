@@ -28,12 +28,13 @@ def _months(symbol: str, override: int | None) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="v4.cli")
-    parser.add_argument("command", choices=["download", "verify", "status", "targets", "import-candles", "export-features", "p3", "resolve", "p4a", "p4b", "p5", "lab-v13", "export-g7t", "layers", "p4b-audit", "meta", "p1", "p2"])
+    parser.add_argument("command", choices=["download", "verify", "status", "targets", "import-candles", "export-features", "p3", "resolve", "p4a", "p4b", "p5", "lab-v13", "export-g7t", "layers", "p4b-audit", "meta", "p1", "p2", "p4-build", "p3econ", "v5lite"])
     parser.add_argument("--schema", default="qt-shadow-features-v3", help="export-features: qt-shadow-features-v3 or -v4")
     parser.add_argument("--days", type=int, default=30, help="resolve: random development days to sample")
     parser.add_argument("--horizons", default="15,60,120,240,1440")
     parser.add_argument("--cost-pct", type=float, default=None, help="round-trip cost for Layer A (default 0.12, R-002)")
     parser.add_argument("--arm", default="arm3", choices=["arm3", "arm2"], help="p5: arm3 = selected V4 features (primary), arm2 = V3 features")
+    parser.add_argument("--extra", default=None, help="p1: extra feature layer file name (e.g. ctx)")
     parser.add_argument("--work", required=True, type=Path)
     parser.add_argument("--symbols", default="BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,XRPUSDT,SUIUSDT")
     parser.add_argument("--timeframes", default="1m,5m")
@@ -41,6 +42,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--metrics", action="store_true", help="also download daily metrics for the G7 coverage audit")
     args = parser.parse_args(argv)
 
+    if args.command == "v5lite":
+        from .v5_lite import run as run_v5
+        for setup in ("S1", "S2"):
+            for h in [int(v) for v in args.horizons.replace(";", ",").split(",") if v.strip()]:
+                r = run_v5(args.work, setup, h)
+                u = r["configs"]["E1_per_symbol"]["V5_UTILITY"]
+                print(f"== V5-lite {setup} h{h}: PRIMARY pass={r['primary_pass']} trades {u['trades']} avg net {u['avg_net']} "
+                      f"PF {u['pf']} folds {u['fold_avg_net']} ci {u['boot90']} rule {u['rule_avg_net']} | "
+                      f"fail: {u.get('fail_reasons')} ({r['seconds']}s)", flush=True)
+                for name, cfg in r["configs"].items():
+                    line = " | ".join(f"{arm} {v['trades']}t {v['avg_net']}" for arm, v in cfg.items())
+                    print(f"   {name}: {line}", flush=True)
+        return 0
     if args.command == "p4b-audit":
         from .p4b_audit import run as run_audit
         r = run_audit(args.work)
@@ -90,6 +104,18 @@ def main(argv: list[str] | None = None) -> int:
                     if "frozen" in r:
                         print(f"   frozen: {json.dumps(r['frozen']['exit_policy'])} gate {json.dumps(r['frozen']['gate'])}; P5-C: "
                               f"{r['stages'].get('P5-C', {}).get('trades')} trades, avg {r['stages'].get('P5-C', {}).get('avg_net_pct')}", flush=True)
+            elif args.command == "p3econ":
+                from .p3_economics import run as run_p3e
+                for h in [int(v) for v in args.horizons.replace(";", ",").split(",") if v.strip()]:
+                    r = run_p3e(args.work, symbol, h, args.extra)
+                    print(f"== {symbol} h{h} P3 economics ({r['features']}): pass={r['d039_pass']} ({r['seconds']}s)", flush=True)
+                    for i, f in enumerate(r["folds"]):
+                        a = f["arms"]
+                        print(f"   fold {i}: rho L/S {f['long_spearman']}/{f['short_spearman']} pred>0 {f['share_pred_gt_0']}% | "
+                              + " | ".join(f"{k} {v.get('trades', 0)}t {v.get('avg_net_pct')} {v.get('boot90')}" for k, v in a.items()), flush=True)
+            elif args.command == "p4-build":
+                from .p4_context import build
+                print(f"== {symbol}: context features -> {build(args.work, symbol)}", flush=True)
             elif args.command == "p2":
                 from .p2_setups import run as run_p2
                 for h in [int(v) for v in args.horizons.replace(";", ",").split(",") if v.strip()]:
@@ -105,7 +131,7 @@ def main(argv: list[str] | None = None) -> int:
             elif args.command == "p1":
                 from .p1_signal import run as run_p1
                 for h in [int(v) for v in args.horizons.replace(";", ",").split(",") if v.strip()]:
-                    r = run_p1(args.work, symbol, h)
+                    r = run_p1(args.work, symbol, h, args.extra)
                     print(f"== {symbol} h{h} P1: {r['p1_rule']} ({r['seconds']}s)", flush=True)
                     for i, f in enumerate(r["folds"]):
                         b = f["baselines"]

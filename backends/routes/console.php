@@ -134,6 +134,19 @@ if ($schedulerEnabled && (bool) config('autofinx.scheduler.quick_settler', true)
         ->after(fn () => $markRunEnd('quick-trades:reconcile'));
 }
 
+// Quick Trade Manual SL/TP reconciler (exchange is authoritative; restart/refresh recovery).
+// NOT gated on QUICK_TRADE_MANUAL_ENABLED on purpose: turning the feature off must not stop
+// reconciling a position that is still open on the exchange. The command is a cheap no-op when
+// the table is missing or no manual position is active. See docs/quick-trade-manual/DESIGN.md.
+if ($schedulerEnabled) {
+    Schedule::command('quick-trade-manual:reconcile')
+        ->everyTenSeconds()
+        ->withoutOverlapping(5)
+        ->runInBackground()
+        ->before(fn () => $markRunStart('quick-trade-manual:reconcile'))
+        ->after(fn () => $markRunEnd('quick-trade-manual:reconcile'));
+}
+
 if ($schedulerEnabled && $allowRuntimeAutoRepair) {
     Schedule::command('runtime:repair --attempts=1 --sleep=2')
         ->everyMinute()

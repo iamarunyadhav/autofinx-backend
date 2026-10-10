@@ -242,6 +242,14 @@ class QuickTradeService
             }
         }
 
+        // Manual SL/TP positions (a separate, no-expiry mode with exchange-native stops) own their symbol:
+        // on a one-way account a Time-Based trade would be the SAME exchange position and its expiry close
+        // would shrink the manual one. Inert unless a manual position is actually active on this symbol.
+        if ($mode === 'live' && \App\Domain\QuickTradeManual\ManualPositionGuard::hasActivePosition($workspaceId, $symbol)) {
+            $this->auditEntryGateFailure($traceId, $robotSessionId, $workspaceId, $symbol, $mode, 'manual_sl_tp_position_open', 'manual_sl_tp_position_open: A Manual SL/TP position is active on this symbol.');
+            throw new RuntimeException('manual_sl_tp_position_open: A Manual SL/TP position is active on this symbol. Close it first or trade another symbol.');
+        }
+
         if ($mode === 'live' && (bool) config('autofinx.runtime.require_green_for_live', false)) {
             $runtime = app(TradingRuntimeHealthService::class)->snapshot($workspaceId, $providerKey === 'binance' ? $symbol : null);
             if (($runtime['quick_trade']['settler'] ?? 'red') !== 'green') {

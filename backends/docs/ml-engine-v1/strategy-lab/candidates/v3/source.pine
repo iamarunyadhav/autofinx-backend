@@ -1,0 +1,136 @@
+//@version=6
+// =====================================================================
+//  AutoFinX TF-1 v1  |  Low-turnover Donchian trend (use on 4h or 1d)
+//
+//  WHAT THIS IS
+//   A classic, pre-existing rule set (Turtle-style channel breakout), NOT
+//   a fitted one: enter on a Donchian breakout in the direction of the
+//   EMA trend, exit on the shorter opposite channel or an ATR hard stop.
+//   Few trades, so the ~0.12% round-trip cost is small against a 4h/1d move.
+//
+//  WHAT THIS IS NOT
+//   - Not proven profitable. It is the hypothesis for test round 1.
+//   - Funding is NOT modelled here (Pine has no funding series). Long holds
+//     in perps pay/receive funding; check it in the Python backtest.
+//   - Not wired to the AutoFinX webhook on purpose. Add alerts only after
+//     the strategy passes out-of-sample and paper-forward tests.
+//
+//  CAUSAL / REPAINT-SAFE
+//   Signals use closed-bar values only, channel highs/lows are shifted [1],
+//   no request.security, calc_on_every_tick=false. Orders fill at the NEXT
+//   bar open (process_orders_on_close=false).
+//
+//  COSTS
+//   0.06% per side = taker 0.05% + 0.01% slippage (0.12% round trip).
+//   1x only (margin 100%), no leverage.
+//
+//  HOW TO TEST (do not tune on one window)
+//   BTCUSDT.P, ETHUSDT.P, BNBUSDT.P, XRPUSDT.P, SOLUSDT.P, SUIUSDT.P on 4h and 1d.
+//   Use the Start/End inputs for 4+ different windows. Compare with buy-and-hold.
+//   Judge by net/trade vs cost, profit factor in EVERY window, and trade count.
+// =====================================================================
+strategy("AutoFinX TF-1 v1 | Donchian Trend", shorttitle = "AFX-TF1 v1", overlay = true,
+     initial_capital = 10000,
+     default_qty_type = strategy.fixed, default_qty_value = 1,
+     commission_type = strategy.commission.percent, commission_value = 0.06,
+     slippage = 0, pyramiding = 0,
+     calc_on_every_tick = false, process_orders_on_close = false,
+     margin_long = 100, margin_short = 100,
+     max_labels_count = 500)
+
+// ── INPUTS ───────────────────────────────────────────────────────────
+gE = "Entry"
+donLen     = input.int(55, "Donchian entry length (bars)", minval = 10, maxval = 200, group = gE)
+useTrend   = input.bool(true, "Only trade with the EMA trend", group = gE)
+trendLen   = input.int(200, "Trend EMA length", minval = 20, maxval = 400, group = gE)
+allowLong  = input.bool(true, "Allow longs", group = gE)
+allowShort = input.bool(true, "Allow shorts", group = gE)
+
+gX = "Exit"
+exitLen  = input.int(20, "Donchian exit length (bars)", minval = 5, maxval = 100, group = gX)
+atrLen   = input.int(14, "ATR length", minval = 5, maxval = 50, group = gX)
+stopMult = input.float(2.0, "Hard stop (x ATR)", minval = 0.5, maxval = 6.0, step = 0.5, group = gX)
+
+gR = "Risk"
+riskPct = input.float(1.0, "Risk per trade (% of equity)", minval = 0.1, maxval = 5.0, step = 0.1, group = gR,
+     tooltip = "Position size = risk cash / stop distance, capped at 1x equity (no leverage).")
+
+gT = "Test window"
+startT = input.time(timestamp(2021, 10, 1, 0, 0), "Start", group = gT)
+endT   = input.time(timestamp(2030, 1, 1, 0, 0),  "End",   group = gT,
+     tooltip = "Change these to run the same rules on different windows. Open trades are closed after End.")
+
+// ── INDICATORS (all known at bar close) ──────────────────────────────
+atr      = ta.atr(atrLen)
+emaTrend = ta.ema(close, trendLen)
+upper    = ta.highest(high, donLen)[1]
+lower    = ta.lowest(low,  donLen)[1]
+exitLo   = ta.lowest(low,  exitLen)[1]
+exitHi   = ta.highest(high, exitLen)[1]
+
+inWindow = time >= startT and time <= endT
+longSig  = inWindow and allowLong  and close > upper and (not useTrend or close > emaTrend)
+shortSig = inWindow and allowShort and close < lower and (not useTrend or close < emaTrend)
+
+// Size so that a stop-out loses riskPct of equity, never more than 1x notional.
+f_qty(float stopDist) =>
+    float q = 0.0
+    if not na(stopDist) and stopDist > 0 and close > 0
+        q := math.min(strategy.equity * riskPct / 100.0 / stopDist, strategy.equity / close)
+    q
+
+var float stopLevel = na
+
+// ── ENTRIES (signal on this bar's close, fill at next open) ──────────
+if longSig and strategy.position_size <= 0
+    float sd = stopMult * atr
+    float q  = f_qty(sd)
+    if q > 0
+        stopLevel := close - sd
+        strategy.entry("L", strategy.long, qty = q, comment = "Donchian")
+        strategy.exit("L-stop", from_entry = "L", stop = stopLevel)
+
+if shortSig and strategy.position_size >= 0
+    float sd = stopMult * atr
+    float q  = f_qty(sd)
+    if q > 0
+        stopLevel := close + sd
+        strategy.entry("S", strategy.short, qty = q, comment = "Donchian")
+        strategy.exit("S-stop", from_entry = "S", stop = stopLevel)
+
+// ── EXITS ────────────────────────────────────────────────────────────
+if strategy.position_size > 0
+    strategy.exit("L-stop", from_entry = "L", stop = stopLevel)
+    if close < exitLo
+        strategy.close("L", comment = "ChanExit")
+
+if strategy.position_size < 0
+    strategy.exit("S-stop", from_entry = "S", stop = stopLevel)
+    if close > exitHi
+        strategy.close("S", comment = "ChanExit")
+
+if time > endT
+    strategy.close_all(comment = "WindowEnd")
+
+// ── VISUALS ──────────────────────────────────────────────────────────
+plot(upper,    "Entry high", color = color.new(color.lime, 40))
+plot(lower,    "Entry low",  color = color.new(color.red, 40))
+plot(exitLo,   "Exit low",   color = color.new(color.orange, 70), style = plot.style_stepline)
+plot(exitHi,   "Exit high",  color = color.new(color.orange, 70), style = plot.style_stepline)
+plot(emaTrend, "Trend EMA",  color = color.new(color.blue, 30), linewidth = 2)
+plot(strategy.position_size != 0 ? stopLevel : na, "Stop", color = color.new(color.fuchsia, 20), style = plot.style_circles)
+plotshape(longSig  and strategy.position_size <= 0, "Long",  style = shape.triangleup,   location = location.belowbar, color = color.lime, size = size.small)
+plotshape(shortSig and strategy.position_size >= 0, "Short", style = shape.triangledown, location = location.abovebar, color = color.red,  size = size.small)
+
+var table info = table.new(position.bottom_right, 2, 5, border_width = 1)
+if barstate.islast
+    table.cell(info, 0, 0, "Costs assumed", text_color = color.white, bgcolor = color.new(color.gray, 25), text_size = size.small)
+    table.cell(info, 1, 0, "0.06%/side (fee 0.05 + slip 0.01)", text_color = color.white, bgcolor = color.new(color.gray, 25), text_size = size.small)
+    table.cell(info, 0, 1, "Funding", text_color = color.white, bgcolor = color.new(color.red, 40), text_size = size.small)
+    table.cell(info, 1, 1, "NOT modelled", text_color = color.white, bgcolor = color.new(color.red, 40), text_size = size.small)
+    table.cell(info, 0, 2, "Closed trades", text_color = color.white, bgcolor = color.new(color.gray, 25), text_size = size.small)
+    table.cell(info, 1, 2, str.tostring(strategy.closedtrades), text_color = color.white, bgcolor = color.new(color.gray, 25), text_size = size.small)
+    table.cell(info, 0, 3, "Net profit", text_color = color.white, bgcolor = color.new(color.gray, 25), text_size = size.small)
+    table.cell(info, 1, 3, str.tostring(strategy.netprofit, "#.##"), text_color = color.white, bgcolor = color.new(color.gray, 25), text_size = size.small)
+    table.cell(info, 0, 4, "Max drawdown", text_color = color.white, bgcolor = color.new(color.gray, 25), text_size = size.small)
+    table.cell(info, 1, 4, str.tostring(strategy.max_drawdown, "#.##"), text_color = color.white, bgcolor = color.new(color.gray, 25), text_size = size.small)

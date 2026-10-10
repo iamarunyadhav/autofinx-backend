@@ -1,0 +1,538 @@
+//@version=6
+strategy(
+     title="AutoFinX UT Bot Pro v6 - Strategy + Webhook + Profit Dashboard",
+     shorttitle="AutoFinX UT Bot Pro v6",
+     overlay=true,
+     pyramiding=0,
+     initial_capital=10000,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=10,
+     commission_type=strategy.commission.percent,
+     commission_value=0.04,
+     process_orders_on_close=true,
+     calc_on_every_tick=true,
+     calc_on_order_fills=true
+)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// 1. UT BOT CORE SETTINGS
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+keyValue = input.float(1.0, "Key Value - Sensitivity", minval=0.1, step=0.1, group="UT Bot")
+atrPeriod = input.int(10, "ATR Period", minval=1, group="UT Bot")
+useHeikinAshi = input.bool(false, "Signals From Heikin Ashi Candles", group="UT Bot")
+
+tradeSide = input.string("Both", "Trade Direction", options=["Both", "Long Only", "Short Only"], group="Execution")
+entryMode = input.string("UT Only", "Entry Mode", options=["UT Only", "UT + Filters", "Score Only", "Debug Test"], group="Execution")
+confirmOnClose = input.bool(true, "Confirm On Candle Close", group="Execution")
+cooldownBars = input.int(0, "Cooldown Bars After Entry", minval=0, group="Execution")
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// 2. FILTER SETTINGS
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+useHTFFilter = input.bool(false, "Use HTF Trend Filter", group="Filters")
+htfTimeframe = input.timeframe("60", "HTF Timeframe", group="Filters")
+
+useEMAFilter = input.bool(false, "Use EMA Trend Filter", group="Filters")
+emaFastLen = input.int(9, "EMA Fast", minval=1, group="Filters")
+emaSlowLen = input.int(21, "EMA Slow", minval=1, group="Filters")
+emaTrendLen = input.int(50, "EMA Trend", minval=1, group="Filters")
+
+useADXFilter = input.bool(false, "Use ADX Direction Filter", group="Filters")
+adxLen = input.int(14, "ADX DI Length", minval=1, group="Filters")
+adxSmooth = input.int(14, "ADX Smoothing", minval=1, group="Filters")
+adxMin = input.float(18.0, "Minimum ADX", minval=1, step=0.5, group="Filters")
+
+useRSIFilter = input.bool(false, "Use RSI Filter", group="Filters")
+rsiLen = input.int(14, "RSI Length", minval=1, group="Filters")
+longRsiMin = input.float(45.0, "Long RSI Min", group="Filters")
+longRsiMax = input.float(80.0, "Long RSI Max", group="Filters")
+shortRsiMin = input.float(20.0, "Short RSI Min", group="Filters")
+shortRsiMax = input.float(55.0, "Short RSI Max", group="Filters")
+
+useVWAPFilter = input.bool(false, "Use VWAP Filter", group="Filters")
+
+useVolumeFilter = input.bool(false, "Use Relative Volume Filter", group="Filters")
+volumeLen = input.int(20, "Relative Volume Length", minval=1, group="Filters")
+minRelVolume = input.float(1.0, "Minimum Relative Volume", minval=0.1, step=0.1, group="Filters")
+
+useATRRegimeFilter = input.bool(false, "Use ATR Volatility Filter", group="Filters")
+minAtrPct = input.float(0.03, "Minimum ATR %", minval=0.0, step=0.01, group="Filters")
+maxAtrPct = input.float(3.0, "Maximum ATR %", minval=0.1, step=0.1, group="Filters")
+
+useChopFilter = input.bool(false, "Use Choppiness Filter", group="Filters")
+chopLen = input.int(14, "Choppiness Length", minval=5, group="Filters")
+maxChop = input.float(61.8, "Maximum Choppiness", minval=30, maxval=90, step=0.1, group="Filters")
+
+useScoreFilter = input.bool(false, "Use Minimum Score Filter", group="Score")
+minEntryScore = input.float(55.0, "Minimum Entry Score", minval=1, maxval=100, group="Score")
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// 3. RISK SETTINGS
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+useStrategyExits = input.bool(true, "Use Strategy TP/SL", group="Risk")
+slAtrMult = input.float(1.5, "Stop Loss ATR Multiplier", minval=0.1, step=0.1, group="Risk")
+tpAtrMult = input.float(2.0, "Take Profit ATR Multiplier", minval=0.1, step=0.1, group="Risk")
+
+useTrailingExit = input.bool(false, "Use ATR Trailing Exit", group="Risk")
+trailAtrMult = input.float(1.0, "Trailing ATR Multiplier", minval=0.1, step=0.1, group="Risk")
+
+sendExitWebhook = input.bool(false, "Send CLOSE Webhook For TP/SL", group="Risk")
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// 4. WEBHOOK SETTINGS
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+webhookToken = input.string("", "AutoFinX Webhook Token", group="Webhook")
+webhookProfile = input.string("ut_bot_v6", "AutoFinX Profile", group="Webhook")
+webhookWorkspace = input.string("", "Workspace ID Optional", group="Webhook")
+webhookSymbol = input.string("ETHUSDT", "AutoFinX Symbol", group="Webhook")
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// 5. DISPLAY SETTINGS
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+showSignals = input.bool(true, "Show BUY/SELL Labels", group="Display")
+showBarColors = input.bool(true, "Color Bars", group="Display")
+showDashboard = input.bool(true, "Show Dashboard", group="Display")
+showSignalList = input.bool(true, "Show Recent Signal List", group="Display")
+maxSignalRows = input.int(8, "Recent Signal Rows", minval=3, maxval=10, group="Display")
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// 6. UT BOT CORE LOGIC
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+src = useHeikinAshi ? request.security(ticker.heikinashi(syminfo.tickerid), timeframe.period, close, lookahead=barmerge.lookahead_off) : close
+
+xATR = ta.atr(atrPeriod)
+nLoss = keyValue * xATR
+
+var float xATRTrailingStop = na
+prevStop = nz(xATRTrailingStop[1], src)
+
+xATRTrailingStop :=
+     src > prevStop and src[1] > prevStop ? math.max(prevStop, src - nLoss) :
+     src < prevStop and src[1] < prevStop ? math.min(prevStop, src + nLoss) :
+     src > prevStop ? src - nLoss :
+     src + nLoss
+
+var int utPosition = 0
+utPosition :=
+     src[1] < prevStop and src > prevStop ? 1 :
+     src[1] > prevStop and src < prevStop ? -1 :
+     nz(utPosition[1], 0)
+
+emaOne = ta.ema(src, 1)
+
+above = ta.crossover(emaOne, xATRTrailingStop)
+below = ta.crossover(xATRTrailingStop, emaOne)
+
+utBuy = src > xATRTrailingStop and above
+utSell = src < xATRTrailingStop and below
+
+barBuy = src > xATRTrailingStop
+barSell = src < xATRTrailingStop
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// 7. FILTER INDICATORS
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+emaFast = ta.ema(src, emaFastLen)
+emaSlow = ta.ema(src, emaSlowLen)
+emaTrend = ta.ema(src, emaTrendLen)
+
+emaBull = emaFast > emaSlow and src > emaTrend
+emaBear = emaFast < emaSlow and src < emaTrend
+
+f_htfTrend() =>
+    _fast = ta.ema(close, emaFastLen)
+    _slow = ta.ema(close, emaSlowLen)
+    _trend = ta.ema(close, emaTrendLen)
+    _fast > _slow and close > _trend ? 1 : _fast < _slow and close < _trend ? -1 : 0
+
+htfTrend = request.security(syminfo.tickerid, htfTimeframe, f_htfTrend()[1], barmerge.gaps_off, barmerge.lookahead_off)
+htfBull = htfTrend == 1
+htfBear = htfTrend == -1
+
+[diPlus, diMinus, adxVal] = ta.dmi(adxLen, adxSmooth)
+
+adxBull = adxVal >= adxMin and diPlus > diMinus
+adxBear = adxVal >= adxMin and diMinus > diPlus
+
+rsiVal = ta.rsi(src, rsiLen)
+
+rsiBull = rsiVal >= longRsiMin and rsiVal <= longRsiMax
+rsiBear = rsiVal >= shortRsiMin and rsiVal <= shortRsiMax
+
+vwapVal = ta.vwap(hlc3)
+
+vwapBull = na(vwapVal) ? true : src > vwapVal
+vwapBear = na(vwapVal) ? true : src < vwapVal
+
+volAvg = ta.sma(volume, volumeLen)
+relVol = not na(volAvg) and volAvg > 0 ? volume / volAvg : 1.0
+volumeOk = relVol >= minRelVolume
+
+atrPct = src > 0 ? xATR / src * 100.0 : 0.0
+atrRegimeOk = atrPct >= minAtrPct and atrPct <= maxAtrPct
+
+trSum = ta.sma(ta.tr(true), chopLen) * chopLen
+rangeHigh = ta.highest(high, chopLen)
+rangeLow = ta.lowest(low, chopLen)
+rangeSize = rangeHigh - rangeLow
+
+chopRaw = rangeSize > 0 and chopLen > 1 and trSum > 0 ? 100 * math.log10(trSum / rangeSize) / math.log10(chopLen) : 100
+chopVal = math.max(0.0, math.min(100.0, chopRaw))
+chopOk = chopVal <= maxChop
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// 8. FILTER PASS LOGIC
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+allowLong = tradeSide == "Both" or tradeSide == "Long Only"
+allowShort = tradeSide == "Both" or tradeSide == "Short Only"
+
+passHTFLong = not useHTFFilter or htfBull
+passHTFShort = not useHTFFilter or htfBear
+
+passEMALong = not useEMAFilter or emaBull
+passEMAShort = not useEMAFilter or emaBear
+
+passADXLong = not useADXFilter or adxBull
+passADXShort = not useADXFilter or adxBear
+
+passRSILong = not useRSIFilter or rsiBull
+passRSIShort = not useRSIFilter or rsiBear
+
+passVWAPLong = not useVWAPFilter or vwapBull
+passVWAPShort = not useVWAPFilter or vwapBear
+
+passVolumeLong = not useVolumeFilter or volumeOk
+passVolumeShort = not useVolumeFilter or volumeOk
+
+passATRLong = not useATRRegimeFilter or atrRegimeOk
+passATRShort = not useATRRegimeFilter or atrRegimeOk
+
+passChopLong = not useChopFilter or chopOk
+passChopShort = not useChopFilter or chopOk
+
+filterLongPass = passHTFLong and passEMALong and passADXLong and passRSILong and passVWAPLong and passVolumeLong and passATRLong and passChopLong
+filterShortPass = passHTFShort and passEMAShort and passADXShort and passRSIShort and passVWAPShort and passVolumeShort and passATRShort and passChopShort
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// 9. SCORE LOGIC
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+float longScore = 0.0
+longScore += barBuy ? 25 : 0
+longScore += emaBull ? 15 : 0
+longScore += htfBull ? 15 : 0
+longScore += adxBull ? 12 : 0
+longScore += rsiBull ? 8 : 0
+longScore += vwapBull ? 10 : 0
+longScore += volumeOk ? 5 : 0
+longScore += atrRegimeOk ? 5 : 0
+longScore += chopOk ? 5 : 0
+
+float shortScore = 0.0
+shortScore += barSell ? 25 : 0
+shortScore += emaBear ? 15 : 0
+shortScore += htfBear ? 15 : 0
+shortScore += adxBear ? 12 : 0
+shortScore += rsiBear ? 8 : 0
+shortScore += vwapBear ? 10 : 0
+shortScore += volumeOk ? 5 : 0
+shortScore += atrRegimeOk ? 5 : 0
+shortScore += chopOk ? 5 : 0
+
+longScorePass = longScore >= minEntryScore
+shortScorePass = shortScore >= minEntryScore
+
+scoreFilterLongOk = not useScoreFilter or longScorePass
+scoreFilterShortOk = not useScoreFilter or shortScorePass
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// 10. ENTRY MODE LOGIC
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+utOnlyMode = entryMode == "UT Only"
+utFilterMode = entryMode == "UT + Filters"
+scoreOnlyMode = entryMode == "Score Only"
+debugMode = entryMode == "Debug Test"
+
+signalReady = confirmOnClose ? barstate.isconfirmed : true
+
+var int lastEntryBar = na
+canEnter = na(lastEntryBar) or bar_index - lastEntryBar >= cooldownBars
+
+canOpenLong = strategy.position_size <= 0
+canOpenShort = strategy.position_size >= 0
+
+debugBuy = barBuy and not barBuy[1]
+debugSell = barSell and not barSell[1]
+
+scoreBuy = longScorePass and longScore > shortScore
+scoreSell = shortScorePass and shortScore > longScore
+
+longTrigger =
+     utOnlyMode ? utBuy and scoreFilterLongOk :
+     utFilterMode ? utBuy and filterLongPass and scoreFilterLongOk :
+     scoreOnlyMode ? scoreBuy :
+     debugBuy
+
+shortTrigger =
+     utOnlyMode ? utSell and scoreFilterShortOk :
+     utFilterMode ? utSell and filterShortPass and scoreFilterShortOk :
+     scoreOnlyMode ? scoreSell :
+     debugSell
+
+longEntrySignal = signalReady and canEnter and allowLong and canOpenLong and longTrigger
+shortEntrySignal = signalReady and canEnter and allowShort and canOpenShort and shortTrigger
+
+longBlockReason =
+     not allowLong ? "LONG_DISABLED" :
+     not signalReady ? "BAR_NOT_CONFIRMED" :
+     not canEnter ? "COOLDOWN" :
+     not canOpenLong ? "ALREADY_LONG" :
+     utOnlyMode and not utBuy ? "NO_UT_BUY_CROSS" :
+     utFilterMode and not utBuy ? "NO_UT_BUY_CROSS" :
+     utFilterMode and not filterLongPass ? "FILTER_BLOCK" :
+     useScoreFilter and not longScorePass ? "SCORE_BLOCK" :
+     scoreOnlyMode and not scoreBuy ? "SCORE_BUY_NOT_READY" :
+     debugMode and not debugBuy ? "DEBUG_BUY_NOT_READY" :
+     "READY"
+
+shortBlockReason =
+     not allowShort ? "SHORT_DISABLED" :
+     not signalReady ? "BAR_NOT_CONFIRMED" :
+     not canEnter ? "COOLDOWN" :
+     not canOpenShort ? "ALREADY_SHORT" :
+     utOnlyMode and not utSell ? "NO_UT_SELL_CROSS" :
+     utFilterMode and not utSell ? "NO_UT_SELL_CROSS" :
+     utFilterMode and not filterShortPass ? "FILTER_BLOCK" :
+     useScoreFilter and not shortScorePass ? "SCORE_BLOCK" :
+     scoreOnlyMode and not scoreSell ? "SCORE_SELL_NOT_READY" :
+     debugMode and not debugSell ? "DEBUG_SELL_NOT_READY" :
+     "READY"
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// 11. WEBHOOK PAYLOAD
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+f_webhookPayload(_signal, _reason) =>
+    _score = _signal == "BUY" or _signal == "CLOSE_SHORT" ? longScore : shortScore
+    _payload = '{"token":"' + webhookToken + '","profile":"' + webhookProfile + '","workspace_id":"' + webhookWorkspace + '","source":"tradingview_ut_bot_v6","symbol":"' + webhookSymbol + '","exchange_symbol":"' + syminfo.tickerid + '","timeframe":"' + timeframe.period + '","signal":"' + _signal + '","reason":"' + _reason + '","price":' + str.tostring(close) + ',"score":' + str.tostring(_score) + ',"longScore":' + str.tostring(longScore) + ',"shortScore":' + str.tostring(shortScore) + ',"entryMode":"' + entryMode + '","utPosition":' + str.tostring(utPosition) + ',"atrTrailingStop":' + str.tostring(xATRTrailingStop) + ',"bar_confirmed":' + str.tostring(barstate.isconfirmed) + ',"candle_open_time":"' + str.format_time(time, "yyyy-MM-dd'T'HH:mm:ss'Z'", "UTC") + '","candle_close_time":"' + str.format_time(time_close, "yyyy-MM-dd'T'HH:mm:ss'Z'", "UTC") + '"}'
+    _payload
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// 12. STRATEGY ORDERS
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+if longEntrySignal
+    lastEntryBar := bar_index
+    strategy.entry("LONG", strategy.long, alert_message=f_webhookPayload("BUY", "UT_BUY_ENTRY"))
+
+if shortEntrySignal
+    lastEntryBar := bar_index
+    strategy.entry("SHORT", strategy.short, alert_message=f_webhookPayload("SELL", "UT_SELL_ENTRY"))
+
+if useStrategyExits and strategy.position_size > 0
+    avg = strategy.position_avg_price
+    longStop = avg - xATR * slAtrMult
+    longTarget = avg + xATR * tpAtrMult
+    trailTicks = math.max(1, math.round((xATR * trailAtrMult) / syminfo.mintick))
+
+    if useTrailingExit
+        strategy.exit("LONG-TRAIL", from_entry="LONG", stop=longStop, trail_points=trailTicks, trail_offset=trailTicks, alert_message=sendExitWebhook ? f_webhookPayload("CLOSE_LONG", "LONG_TRAIL_OR_SL") : "")
+    else
+        strategy.exit("LONG-EXIT", from_entry="LONG", stop=longStop, limit=longTarget, alert_message=sendExitWebhook ? f_webhookPayload("CLOSE_LONG", "LONG_TP_OR_SL") : "")
+
+if useStrategyExits and strategy.position_size < 0
+    avg = strategy.position_avg_price
+    shortStop = avg + xATR * slAtrMult
+    shortTarget = avg - xATR * tpAtrMult
+    trailTicks = math.max(1, math.round((xATR * trailAtrMult) / syminfo.mintick))
+
+    if useTrailingExit
+        strategy.exit("SHORT-TRAIL", from_entry="SHORT", stop=shortStop, trail_points=trailTicks, trail_offset=trailTicks, alert_message=sendExitWebhook ? f_webhookPayload("CLOSE_SHORT", "SHORT_TRAIL_OR_SL") : "")
+    else
+        strategy.exit("SHORT-EXIT", from_entry="SHORT", stop=shortStop, limit=shortTarget, alert_message=sendExitWebhook ? f_webhookPayload("CLOSE_SHORT", "SHORT_TP_OR_SL") : "")
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// 13. RECENT SIGNAL LIST STORAGE
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+var array<string> sigTimeArr = array.new_string()
+var array<string> sigTypeArr = array.new_string()
+var array<string> sigPriceArr = array.new_string()
+var array<string> sigScoreArr = array.new_string()
+
+newSignal = longEntrySignal or shortEntrySignal
+
+if newSignal
+    _sig = longEntrySignal ? "BUY" : "SELL"
+    _score = longEntrySignal ? longScore : shortScore
+    array.unshift(sigTimeArr, str.format_time(time_close, "MM-dd HH:mm", "UTC"))
+    array.unshift(sigTypeArr, _sig)
+    array.unshift(sigPriceArr, str.tostring(close, format.mintick))
+    array.unshift(sigScoreArr, str.tostring(_score, "#.0"))
+
+    if array.size(sigTimeArr) > maxSignalRows
+        array.pop(sigTimeArr)
+        array.pop(sigTypeArr)
+        array.pop(sigPriceArr)
+        array.pop(sigScoreArr)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// 14. PROFIT FACTOR + PERFORMANCE METRICS
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+grossProfit = strategy.grossprofit
+grossLossAbs = math.abs(strategy.grossloss)
+profitFactor = grossLossAbs > 0 ? grossProfit / grossLossAbs : na
+
+closedTrades = strategy.closedtrades
+winTrades = strategy.wintrades
+lossTrades = strategy.losstrades
+winRate = closedTrades > 0 ? winTrades / closedTrades * 100.0 : na
+
+netProfit = strategy.netprofit
+netProfitPct = strategy.initial_capital != 0 ? netProfit / strategy.initial_capital * 100.0 : na
+
+f_fmt(_v, _pattern) =>
+    na(_v) ? "-" : str.tostring(_v, _pattern)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// 15. VISUALS
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+trailColor = src >= xATRTrailingStop ? color.green : color.red
+
+plot(xATRTrailingStop, "UT ATR Trailing Stop", color=trailColor, linewidth=2)
+
+plot(useEMAFilter ? emaFast : na, "EMA Fast", color=color.new(color.green, 0))
+plot(useEMAFilter ? emaSlow : na, "EMA Slow", color=color.new(color.orange, 0))
+plot(useEMAFilter ? emaTrend : na, "EMA Trend", color=color.new(color.blue, 0))
+plot(useVWAPFilter ? vwapVal : na, "VWAP", color=color.new(color.purple, 0))
+
+plotshape(showSignals and longEntrySignal, title="BUY", text="BUY", style=shape.labelup, location=location.belowbar, color=color.green, textcolor=color.white, size=size.tiny)
+plotshape(showSignals and shortEntrySignal, title="SELL", text="SELL", style=shape.labeldown, location=location.abovebar, color=color.red, textcolor=color.white, size=size.tiny)
+
+barcolor(showBarColors and barBuy ? color.new(color.green, 0) : showBarColors and barSell ? color.new(color.red, 0) : na)
+
+// Debug plots in data window
+plot(longScore, "debug_longScore", display=display.data_window)
+plot(shortScore, "debug_shortScore", display=display.data_window)
+plot(longEntrySignal ? 1 : 0, "debug_buySignal", display=display.data_window)
+plot(shortEntrySignal ? 1 : 0, "debug_sellSignal", display=display.data_window)
+plot(filterLongPass ? 1 : 0, "debug_filterLongPass", display=display.data_window)
+plot(filterShortPass ? 1 : 0, "debug_filterShortPass", display=display.data_window)
+plot(utBuy ? 1 : 0, "debug_utBuyCross", display=display.data_window)
+plot(utSell ? 1 : 0, "debug_utSellCross", display=display.data_window)
+plot(adxVal, "debug_adx", display=display.data_window)
+plot(rsiVal, "debug_rsi", display=display.data_window)
+plot(relVol, "debug_relVol", display=display.data_window)
+plot(chopVal, "debug_chop", display=display.data_window)
+plot(atrPct, "debug_atrPct", display=display.data_window)
+plot(profitFactor, "debug_profitFactor", display=display.data_window)
+plot(winRate, "debug_winRate", display=display.data_window)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// 16. DASHBOARD + SIGNAL LIST
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+var table dash = table.new(position.top_right, 4, 24, border_width=1)
+
+signalText = longEntrySignal ? "BUY" : shortEntrySignal ? "SELL" : barBuy ? "BULL / WAIT" : barSell ? "BEAR / WAIT" : "WAIT"
+trendText = barBuy ? "BULL" : barSell ? "BEAR" : "NEUTRAL"
+filterText = filterLongPass and filterShortPass ? "BOTH OK" : filterLongPass ? "LONG OK" : filterShortPass ? "SHORT OK" : "BLOCK"
+modeText = entryMode == "Debug Test" ? "DEBUG ONLY" : entryMode
+
+if showDashboard and barstate.islast
+    table.cell(dash, 0, 0, "AutoFinX UT Bot", bgcolor=color.gray, text_color=color.white)
+    table.cell(dash, 1, 0, "v6 Pro", bgcolor=color.gray, text_color=color.white)
+    table.cell(dash, 2, 0, "Mode", bgcolor=color.gray, text_color=color.white)
+    table.cell(dash, 3, 0, modeText, bgcolor=color.gray, text_color=color.white)
+
+    table.cell(dash, 0, 1, "Signal")
+    table.cell(dash, 1, 1, signalText)
+    table.cell(dash, 2, 1, "Direction")
+    table.cell(dash, 3, 1, trendText)
+
+    table.cell(dash, 0, 2, "Long Score")
+    table.cell(dash, 1, 2, str.tostring(longScore, "#.0"))
+    table.cell(dash, 2, 2, "Short Score")
+    table.cell(dash, 3, 2, str.tostring(shortScore, "#.0"))
+
+    table.cell(dash, 0, 3, "UT Stop")
+    table.cell(dash, 1, 3, str.tostring(xATRTrailingStop, format.mintick))
+    table.cell(dash, 2, 3, "Filters")
+    table.cell(dash, 3, 3, filterText)
+
+    table.cell(dash, 0, 4, "ADX")
+    table.cell(dash, 1, 4, str.tostring(adxVal, "#.0"))
+    table.cell(dash, 2, 4, "RSI")
+    table.cell(dash, 3, 4, str.tostring(rsiVal, "#.0"))
+
+    table.cell(dash, 0, 5, "Rel Vol")
+    table.cell(dash, 1, 5, str.tostring(relVol, "#.00"))
+    table.cell(dash, 2, 5, "ATR %")
+    table.cell(dash, 3, 5, str.tostring(atrPct, "#.00") + "%")
+
+    table.cell(dash, 0, 6, "Profit Factor")
+    table.cell(dash, 1, 6, f_fmt(profitFactor, "#.###"))
+    table.cell(dash, 2, 6, "Win Rate")
+    table.cell(dash, 3, 6, f_fmt(winRate, "#.##") + "%")
+
+    table.cell(dash, 0, 7, "Closed")
+    table.cell(dash, 1, 7, str.tostring(closedTrades))
+    table.cell(dash, 2, 7, "W / L")
+    table.cell(dash, 3, 7, str.tostring(winTrades) + " / " + str.tostring(lossTrades))
+
+    table.cell(dash, 0, 8, "Net Profit")
+    table.cell(dash, 1, 8, f_fmt(netProfit, "#.##"))
+    table.cell(dash, 2, 8, "Net %")
+    table.cell(dash, 3, 8, f_fmt(netProfitPct, "#.##") + "%")
+
+    table.cell(dash, 0, 9, "Long Block")
+    table.cell(dash, 1, 9, longBlockReason)
+    table.cell(dash, 2, 9, "Short Block")
+    table.cell(dash, 3, 9, shortBlockReason)
+
+    table.cell(dash, 0, 10, "Alert Msg")
+    table.cell(dash, 1, 10, "{{strategy.order.alert_message}}")
+    table.cell(dash, 2, 10, "Webhook")
+    table.cell(dash, 3, 10, "Ready")
+
+    if showSignalList
+        table.cell(dash, 0, 11, "#", bgcolor=color.new(color.gray, 60))
+        table.cell(dash, 1, 11, "UTC Time", bgcolor=color.new(color.gray, 60))
+        table.cell(dash, 2, 11, "Signal", bgcolor=color.new(color.gray, 60))
+        table.cell(dash, 3, 11, "Price / Score", bgcolor=color.new(color.gray, 60))
+
+        for i = 0 to 9
+            row = i + 12
+            if i < maxSignalRows
+                if i < array.size(sigTimeArr)
+                    _time = array.get(sigTimeArr, i)
+                    _type = array.get(sigTypeArr, i)
+                    _price = array.get(sigPriceArr, i)
+                    _score = array.get(sigScoreArr, i)
+                    table.cell(dash, 0, row, str.tostring(i + 1))
+                    table.cell(dash, 1, row, _time)
+                    table.cell(dash, 2, row, _type)
+                    table.cell(dash, 3, row, _price + " / " + _score)
+                else
+                    table.cell(dash, 0, row, "")
+                    table.cell(dash, 1, row, "")
+                    table.cell(dash, 2, row, "")
+                    table.cell(dash, 3, row, "")
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// 17. ALERT CONDITIONS
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+alertcondition(longEntrySignal, title="AutoFinX UT BUY", message="BUY")
+alertcondition(shortEntrySignal, title="AutoFinX UT SELL", message="SELL")

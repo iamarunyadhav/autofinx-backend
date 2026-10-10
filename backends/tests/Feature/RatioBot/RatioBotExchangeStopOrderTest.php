@@ -123,6 +123,98 @@ class RatioBotExchangeStopOrderTest extends TestCase
     }
 
     /** @test */
+    public function algo_mode_places_replaces_and_cancels_the_stop_through_the_algo_endpoints_only(): void
+    {
+        config(['binance.conditional_order_mode' => 'algo']);
+        $config = $this->createFuturesConfig();
+        $this->createPosition($config, liquidationPrice: 45000.0);
+        $this->setPositionState($config, entryPrice: 50000.0, qty: 1.0, side: 'long');
+
+        $calls = [];
+        Http::fake(function (\Illuminate\Http\Client\Request $request) use (&$calls) {
+            $path = parse_url($request->url(), PHP_URL_PATH);
+            parse_str((string) parse_url($request->url(), PHP_URL_QUERY), $query);
+            parse_str((string) $request->body(), $form);
+            $calls[] = ['key' => $request->method().' '.$path, 'query' => $query, 'form' => $form];
+            if ($request->method() === 'POST' && $path === '/fapi/v1/algoOrder') {
+                return Http::response(['algoId' => 7000 + count($calls), 'clientAlgoId' => $form['clientAlgoId'], 'orderType' => 'STOP_MARKET',
+                    'symbol' => 'BTCUSDT', 'side' => 'SELL', 'algoStatus' => 'NEW', 'triggerPrice' => $form['triggerPrice'], 'closePosition' => true], 200);
+            }
+            if ($request->method() === 'DELETE' && $path === '/fapi/v1/algoOrder') {
+                return Http::response(['clientAlgoId' => $query['clientAlgoId'] ?? '', 'code' => '200', 'msg' => 'success'], 200);
+            }
+
+            return Http::response(['code' => -9999, 'msg' => 'unexpected '.$request->method().' '.$path], 500);
+        });
+
+        $service = app(RatioBotExchangeStopOrderService::class);
+        $workspaceConfig = ['futures_force_testnet' => true];
+
+        $service->syncStopOrder($config, $this->integration, $workspaceConfig);
+        $config->state?->refresh();
+        $firstClientId = $config->state->futures_stop_client_order_id;
+        $this->assertNotNull($config->state->futures_stop_order_id);
+        $this->assertSame('POST /fapi/v1/algoOrder', $calls[0]['key']);
+        $this->assertSame('SELL', $calls[0]['form']['side']);
+        $this->assertSame('true', $calls[0]['form']['closePosition']);
+        $this->assertArrayNotHasKey('quantity', $calls[0]['form']);
+        $this->assertSame($firstClientId, $calls[0]['form']['clientAlgoId']);
+        $this->assertLessThanOrEqual(36, strlen($calls[0]['form']['clientAlgoId']));
+
+        // Same basis: idempotent, no new exchange call at all.
+        $before = count($calls);
+        $service->syncStopOrder($config->fresh('state'), $this->integration, $workspaceConfig);
+        $this->assertCount($before, $calls);
+
+        // Basis changed: cancel by clientAlgoId (query string) then place the new one, never a duplicate.
+        $this->setPositionState($config, entryPrice: 51000.0, qty: 1.5, side: 'long');
+        $service->syncStopOrder($config->fresh('state'), $this->integration, $workspaceConfig);
+        $keys = array_column($calls, 'key');
+        $this->assertSame(['POST /fapi/v1/algoOrder', 'DELETE /fapi/v1/algoOrder', 'POST /fapi/v1/algoOrder'], $keys);
+        $this->assertSame($firstClientId, $calls[1]['query']['clientAlgoId']);
+
+        // Close: cancel through the algo endpoint and clear the tracker.
+        $service->cancelStopOrder($config->fresh('state'), $this->integration, $workspaceConfig, 'test_close');
+        $allKeys = array_column($calls, 'key');
+        $this->assertSame('DELETE /fapi/v1/algoOrder', end($allKeys));
+        $config->state?->refresh();
+        $this->assertNull($config->state->futures_stop_order_id);
+        $this->assertNotContains('POST /fapi/v1/order', array_column($calls, 'key'));
+    }
+
+    /** @test */
+    public function a_failed_algo_stop_placement_is_loud_keeps_state_untouched_and_never_falls_back_to_legacy(): void
+    {
+        config(['binance.conditional_order_mode' => 'algo']);
+        \Illuminate\Support\Facades\Log::spy();
+        $config = $this->createFuturesConfig();
+        $this->createPosition($config, liquidationPrice: 45000.0);
+        $this->setPositionState($config, entryPrice: 50000.0, qty: 1.0, side: 'long');
+
+        $legacyHits = 0;
+        Http::fake(function (\Illuminate\Http\Client\Request $request) use (&$legacyHits) {
+            $path = parse_url($request->url(), PHP_URL_PATH);
+            if ($path === '/fapi/v1/order') {
+                $legacyHits++;
+            }
+            if ($path === '/fapi/v1/algoOrder' && $request->method() === 'POST') {
+                return Http::response(['code' => -2021, 'msg' => 'Order would immediately trigger.'], 400);
+            }
+
+            return Http::response(['code' => -2013, 'msg' => 'Order does not exist.'], 400);
+        });
+
+        app(RatioBotExchangeStopOrderService::class)->syncStopOrder($config, $this->integration, ['futures_force_testnet' => true]);
+
+        $config->state?->refresh();
+        $this->assertNull($config->state->futures_stop_order_id);
+        $this->assertSame(0, $legacyHits);
+        \Illuminate\Support\Facades\Log::shouldHaveReceived('critical')
+            ->withArgs(fn ($message, $context = []) => str_contains($message, '[RatioBotStopOrder]') && ($context['binance_code'] ?? null) === -2021)
+            ->once();
+    }
+
+    /** @test */
     public function no_stop_is_placed_when_there_is_no_open_position(): void
     {
         $config = $this->createFuturesConfig();

@@ -1,0 +1,29 @@
+# USER-level systemd unit: needs NO root for the service itself.
+# Install:  mkdir -p ~/.config/systemd/user && cp autofinx-collector.user.service ~/.config/systemd/user/autofinx-collector.service
+#           (edit the two paths below if your engine dir is not ~/autofinx-collector/app/external-predictive-engine)
+#           systemctl --user daemon-reload && systemctl --user enable --now autofinx-collector
+# To keep it running after logout / start at boot a ONE-TIME root command is needed:  sudo loginctl enable-linger <user>
+# (some VPS images already have lingering; check with:  loginctl show-user $USER | grep Linger)
+[Unit]
+Description=AutoFinX public market-data collector (research only, no keys, no orders)
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/autofinx-collector/app/external-predictive-engine
+Environment=AUTOFINX_COLLECTOR_CONFIG=%h/autofinx-collector/collector.config.json
+Environment=PYTHONUNBUFFERED=1
+ExecStart=%h/autofinx-collector/venv/bin/python -m collector start
+ExecStop=%h/autofinx-collector/venv/bin/python -m collector stop --wait 40
+TimeoutStopSec=60
+Restart=always
+RestartSec=10
+RestartPreventExitStatus=2
+Nice=19
+CPUWeight=5
+IOSchedulingClass=idle
+MemoryMax=512M
+LimitNOFILE=4096
+
+[Install]
+WantedBy=default.target

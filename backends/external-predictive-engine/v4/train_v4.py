@@ -36,7 +36,9 @@ from .lab import reference_levels
 from .targets import MINUTE, VALID, dense_minutes
 from .verify import conflict_buckets
 
-COST, REQUIRED, MIN_EDGE = 0.12, 0.18, 0.06
+from .costs import round_trip_pct
+
+COST, REQUIRED, MIN_EDGE = round_trip_pct("taker"), 0.18, 0.06    # COST = 0.12 by default; real tier via v4/costs.py
 FLOOR, CONFLICT_MARGIN = 0.55, 0.02
 CAL_FRACTION, HALF_LIFE_DAYS = 0.20, 180.0
 QUANTILES = (0.25, 0.5, 0.75)

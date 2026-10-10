@@ -140,11 +140,17 @@ def _fold(c: Context, train_rows: np.ndarray, test: np.ndarray) -> dict:
     return out
 
 
-def run(work: Path, symbol: str, horizon: int) -> dict:
+def run(work: Path, symbol: str, horizon: int, extra: str | None = None) -> dict:
     started = time.monotonic()
     c = Context(work, symbol, horizon, "arm2")
+    if extra:
+        from .optional_layers import _load_layer
+        names, xl = _load_layer(work / "features" / symbol / f"{extra}.parquet", c.anchors)
+        c.x = np.column_stack([c.x, xl])
+        c.names = list(c.names) + names
     tr = np.nonzero(c.is_train)[0]
-    report = {"symbol": symbol, "horizon_minutes": horizon, "features": c.feature_source, "data": "dev_train D-025 folds",
+    report = {"symbol": symbol, "horizon_minutes": horizon, "features": c.feature_source + (f" + {extra}" if extra else ""),
+              "data": "dev_train D-025 folds",
               "folds": [_fold(c, a, b) for a, b in d025_folds(c.anchors, tr, horizon)]}
     ok = [f for f in report["folds"] if f["paired"]["boot90"] and f["paired"]["boot90"][0] > 0]
     report["p1_rule"] = {"folds_with_positive_paired_lift_ci": len(ok),
@@ -154,5 +160,5 @@ def run(work: Path, symbol: str, horizon: int) -> dict:
     report["identity"] = stamp()
     out = work / "reports" / "p1"
     out.mkdir(parents=True, exist_ok=True)
-    (out / f"{symbol}_h{horizon}.json").write_text(json.dumps(report, indent=1, default=str), "utf-8")
+    (out / f"{symbol}_h{horizon}{'_' + extra if extra else ''}.json").write_text(json.dumps(report, indent=1, default=str), "utf-8")
     return report

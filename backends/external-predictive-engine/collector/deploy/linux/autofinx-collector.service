@@ -1,0 +1,47 @@
+# AutoFinX market-data collector - SYSTEM-level systemd unit (runs as a normal user, never root).
+# Do not edit by hand: install_service.sh fills @USER@ @BASE@ @ENGINE@ and copies it to /etc/systemd/system/.
+# Disk guard: the collector itself pauses writing below min_free_gb (config, default 8 on Linux, 20 on the laptop)
+# and resumes at min_free_gb + resume_margin_gb. Edit it in @BASE@/collector.config.json, then restart.
+[Unit]
+Description=AutoFinX public market-data collector (research only, no keys, no orders)
+After=network-online.target time-sync.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@USER@
+WorkingDirectory=@ENGINE@
+Environment=AUTOFINX_COLLECTOR_CONFIG=@BASE@/collector.config.json
+Environment=PYTHONUNBUFFERED=1
+ExecStart=@BASE@/venv/bin/python -m collector start
+# Clean stop: write the STOP file and wait (max 40 s) until the collector has closed its files.
+ExecStop=@BASE@/venv/bin/python -m collector stop --wait 40
+TimeoutStopSec=60
+KillSignal=SIGTERM
+# SIGTERM is also handled cleanly by the collector (closes gzip files, writes the partial daily report).
+Restart=always
+RestartSec=10
+# exit code 2 = "already running" (another instance holds the lock): do not loop
+RestartPreventExitStatus=2
+
+# --- keep this host happy: lowest possible priority and hard limits ---
+Nice=19
+CPUWeight=5
+CPUQuota=60%
+IOSchedulingClass=idle
+IOWeight=10
+MemoryMax=512M
+MemorySwapMax=0
+LimitNOFILE=4096
+TasksMax=64
+
+# --- sandbox (the collector only needs outbound HTTPS and its own data folder) ---
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=@BASE@
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

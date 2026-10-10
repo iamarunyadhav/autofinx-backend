@@ -22,13 +22,15 @@ from pathlib import Path
 
 import numpy as np
 
-ADAPTERS = {"autofinx-v13": "v4.strategy_v13"}
+ADAPTERS = {"autofinx-v13": "v4.strategy_v13", "v1": "v4.strategy_v1", "v2": "v4.strategy_v2", "v3": "v4.strategy_v3", "v4": "v4.strategy_v4"}
 POLICIES = {
     "QUICK_V1": {"symbols": ["BTCUSDT", "ETHUSDT"], "charts": ["15m"], "window": "last 25% of dev_train (by time)",
                  "costs": [0.12], "slices": 4},
     "DEEP_V1": {"symbols": ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "SUIUSDT"], "charts": ["5m", "15m"],
                 "window": "all of dev_train", "costs": [0.12, 0.18], "slices": 4},
 }
+POLICIES["TF1_V1"] = {"symbols": ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "SUIUSDT"],
+                       "charts": ["4h", "1d"], "window": "last 25% of dev_train (by time)", "costs": [0.12], "slices": 4}
 MIN_TRADES, MIN_PF, MIN_POSITIVE_SLICES = 30, 1.05, 3
 CHART_BARS = 1500
 
@@ -104,7 +106,7 @@ def verdict(mode: str, primary: dict, per_symbol: dict[str, dict], stressed: dic
 def run(adapter: str, mode: str, work: Path, out: Path) -> dict:
     started = time.monotonic()
     module = importlib.import_module(ADAPTERS[adapter])
-    policy_name = "QUICK_V1" if mode == "quick" else "DEEP_V1"
+    policy_name = "TF1_V1" if adapter in ("v3", "v4") else ("QUICK_V1" if mode == "quick" else "DEEP_V1")
     pol = POLICIES[policy_name]
     result = {"adapter": adapter, "mode": mode, "sample_policy": policy_name, "policy": pol,
               "rules": {"min_trades": MIN_TRADES, "min_profit_factor": MIN_PF, "min_positive_slices": MIN_POSITIVE_SLICES,

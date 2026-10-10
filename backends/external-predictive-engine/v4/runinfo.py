@@ -31,4 +31,4 @@ def stamp() -> dict:
     return {"run_id": uuid.uuid4().hex, "utc": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "code_sha256": code_sha(), "code_dir": str(Path(__file__).resolve().parent),
             "python": platform.python_version(), "lightgbm": lightgbm.__version__, "numpy": numpy.__version__,
-            "sklearn": sklearn.__version__}
+            "sklearn": sklearn.__version__, "fees": __import__("v4.costs", fromlist=["rates"]).rates()}

@@ -1,0 +1,42 @@
+{
+  "candidate": "AFX-TF1-v2.1",
+  "version": "frozen-v2.1",
+  "run": "PART2-4H-ONCE",
+  "registered_before_download": true,
+  "symbol_rule": "14 largest USDT-M perpetuals by 30-day quote volume as of run date, excluding BTCUSDT ETHUSDT BNBUSDT SOLUSDT XRPUSDT SUIUSDT, stablecoin pairs, and symbols with less than 2 years of 4h history",
+  "spot": {"symbols": ["BTCUSDT", "ETHUSDT"], "start": "2017-08-17", "end": "2021-09-30", "timeframe": "4h"},
+  "costs": {"fee_per_side_pct": 0.05, "slippage_per_side_pct": 0.01, "round_trip_pct": 0.12, "spot_funding_proxy_per_8h_pct": 0.01, "perpetual_funding": "actual downloaded funding"},
+  "pass_rules": {"pooled_trades_min": 100, "t_stat_min": 2, "profit_factor_min": 1.15, "positive_coins": "most", "max_single_coin_profit_share_pct": 40},
+  "survivorship_bias": "The 14 symbols are today's volume survivors; delisted, illiquid, and formerly large contracts are absent, so this universe is not representative of historical tradability.",
+  "ranking_snapshot": {
+    "timestamp_utc": "2026-10-08T05:53:20.459933+00:00",
+    "source": "https://fapi.binance.com/fapi/v1/klines interval=1d limit=31; last 30 closed candles",
+    "eligible_symbols_checked": 525,
+    "valid_sums": 216,
+    "failed_symbols": 0,
+    "frozen_symbols": ["ZECUSDT", "NEARUSDT", "DOGEUSDT", "UNIUSDT", "QNTUSDT", "LSKUSDT", "ENAUSDT", "1000PEPEUSDT", "WLDUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "TAOUSDT", "ONDOUSDT"],
+    "valid_plus_excluded_check": {"valid_sums": 216, "excluded_with_reason": 309, "total": 525, "passes": true},
+    "diagnostics_only": {
+      "pooled_windows": ["full_period", "excluding_last_90_days"],
+      "pooled_exclusion": "excluding_ZECUSDT",
+      "pass_rules_unchanged": true,
+      "last_90_days_definition": "same frozen test window end minus 90 days; diagnostic only and never used to select symbols"
+    },
+    "quote_volume_30d": {
+      "ZECUSDT": 67193468640.073105,
+      "NEARUSDT": 20161635784.118,
+      "DOGEUSDT": 15965569721.546097,
+      "UNIUSDT": 12423429873.568998,
+      "QNTUSDT": 11325609388.929996,
+      "LSKUSDT": 10219146401.602726,
+      "ENAUSDT": 9162133919.71715,
+      "1000PEPEUSDT": 9057603496.697693,
+      "WLDUSDT": 7715936460.280501,
+      "ADAUSDT": 6875143431.2158,
+      "AVAXUSDT": 6293577340.109001,
+      "LINKUSDT": 6197680966.62914,
+      "TAOUSDT": 5927368662.906641,
+      "ONDOUSDT": 5357293165.95631
+    }
+  }
+}

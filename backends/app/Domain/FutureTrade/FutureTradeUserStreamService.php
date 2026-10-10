@@ -229,7 +229,75 @@ class FutureTradeUserStreamService
             return false;
         }
 
-        $isEntryMatch = $clientOrderId !== '' && $clientOrderId === (string) $trade->entry_client_order_id;
+        // Exchange-fired SL/TP (server loop down / websocket dropped when Binance executed our
+        // STOP_MARKET or TAKE_PROFIT_MARKET). Checked BEFORE entry/exit matching because positions
+        // opened before the 2026-10-10 id fix carry the SL id == the ENTRY id (`ftx-entry-<key>`),
+        // which must not be read as an entry fill (a closing-side fill is never the entry).
+        $meta = (array) ($trade->meta ?? []);
+        $protectiveKind = $this->protectiveFillKind($clientOrderId, $meta, (string) $trade->side, $side, $order);
+
+        if ($protectiveKind !== null && $status === 'FILLED' && $avgPrice > 0 && $trade->isOpen()) {
+            $isSLHit      = $protectiveKind === 'SL';
+            $existingFees = (float) ($trade->fees ?? 0);
+            $direction    = $trade->side === 'LONG' ? 1 : -1;
+            $entryPrice   = (float) $trade->entry_price;
+            $qty          = $cumQty ?: (float) $trade->quantity;
+            $gross        = ($avgPrice - $entryPrice) * $qty * $direction;
+            $fees         = $existingFees + abs($commission);
+            $net          = ($realizedPnl !== 0.0) ? $realizedPnl - $fees : $gross - $fees;
+            $reason       = $isSLHit ? 'EXCHANGE_SL_FILLED' : 'EXCHANGE_TP_FILLED';
+
+            $trade->update([
+                'exit_price'              => $avgPrice,
+                'exit_exchange_order_id'  => $orderId,
+                'exit_client_order_id'    => $clientOrderId,
+                'gross_pnl'               => $gross,
+                'fees'                    => $fees,
+                'net_pnl'                 => $net,
+                'status'                  => FutureTradeLogicalTrade::STATUS_CLOSED,
+                'closed_at'               => now(),
+            ]);
+            $this->markRuntimePositionClosed($config, $trade->fresh(), $avgPrice, $net, $reason);
+
+            FutureTradeLogicalTradeEvent::create([
+                'future_trade_logical_trade_id' => $trade->id,
+                'future_trade_bot_config_id'    => $config->id,
+                'symbol'                        => $symbol,
+                'event_type'                    => FutureTradeLogicalTradeEvent::EVENT_EXIT_FILLED,
+                'client_order_id'               => $clientOrderId,
+                'exchange_order_id'             => $orderId,
+                'exchange_status'               => $status,
+                'price'                         => $avgPrice,
+                'quantity'                      => $cumQty,
+                'payload'                       => ['execType' => $execType, 'order' => $order, 'realizedPnl' => $realizedPnl, 'reason' => $reason],
+            ]);
+
+            // Cancel the sibling order (TP if SL fired, SL if TP fired). Whether Binance auto-cancels
+            // the other closePosition order is UNVERIFIED, so always cancel explicitly. The marker says
+            // which API owns it (algo vs legacy); old rows without a marker use the client's mode routing.
+            $siblingClientId = (string) ($meta[$isSLHit ? 'tp_client_order_id' : 'sl_client_order_id'] ?? '');
+            $siblingAlgo = $meta[$isSLHit ? 'tp_algo' : 'sl_algo'] ?? null;
+
+            if ($siblingClientId !== '' && $siblingClientId !== $clientOrderId) {
+                try {
+                    $client = $this->clientFor($config);
+                    if ($client) {
+                        $client->cancelOrder($symbol, null, $siblingClientId, $siblingAlgo === null ? null : (bool) $siblingAlgo);
+                    }
+                } catch (Throwable $e) {
+                    Log::warning('[EXCHANGE_SLTP_SIBLING_CANCEL_FAILED]', [
+                        'symbol'   => $symbol,
+                        'sibling'  => $siblingClientId,
+                        'reason'   => $reason,
+                        'error'    => $e->getMessage(),
+                    ]);
+                }
+            }
+
+            return true;
+        }
+
+        $isEntryMatch = $clientOrderId !== '' && $protectiveKind === null && $clientOrderId === (string) $trade->entry_client_order_id;
         $isExitMatch = $clientOrderId !== '' && $clientOrderId === (string) $trade->exit_client_order_id;
 
         if ($isEntryMatch) {
@@ -320,77 +388,58 @@ class FutureTradeUserStreamService
             }
         }
 
-        // Exchange-fired SL/TP: check if this order matches IDs stored in logical trade meta.
-        // This path fires when Binance executed our STOP_MARKET or TAKE_PROFIT_MARKET order
-        // directly — i.e. the server loop was down or websocket dropped.
-        if ($clientOrderId !== '' && $status === 'FILLED' && $avgPrice > 0 && $trade->isOpen()) {
-            $meta     = (array) ($trade->meta ?? []);
-            $isSLHit  = $clientOrderId === (string) ($meta['sl_client_order_id'] ?? '');
-            $isTPHit  = $clientOrderId === (string) ($meta['tp_client_order_id'] ?? '');
+        // (Exchange-fired SL/TP fills are handled above, before entry/exit matching.)
+        return false;
+    }
 
-            if ($isSLHit || $isTPHit) {
-                $existingFees = (float) ($trade->fees ?? 0);
-                $direction    = $trade->side === 'LONG' ? 1 : -1;
-                $entryPrice   = (float) $trade->entry_price;
-                $qty          = $cumQty ?: (float) $trade->quantity;
-                $gross        = ($avgPrice - $entryPrice) * $qty * $direction;
-                $fees         = $existingFees + abs($commission);
-                $net          = ($realizedPnl !== 0.0) ? $realizedPnl - $fees : $gross - $fees;
-                $reason       = $isSLHit ? 'EXCHANGE_SL_FILLED' : 'EXCHANGE_TP_FILLED';
-
-                $trade->update([
-                    'exit_price'              => $avgPrice,
-                    'exit_exchange_order_id'  => $orderId,
-                    'exit_client_order_id'    => $clientOrderId,
-                    'gross_pnl'               => $gross,
-                    'fees'                    => $fees,
-                    'net_pnl'                 => $net,
-                    'status'                  => FutureTradeLogicalTrade::STATUS_CLOSED,
-                    'closed_at'               => now(),
-                ]);
-                $this->markRuntimePositionClosed($config, $trade->fresh(), $avgPrice, $net, $reason);
-
-                FutureTradeLogicalTradeEvent::create([
-                    'future_trade_logical_trade_id' => $trade->id,
-                    'future_trade_bot_config_id'    => $config->id,
-                    'symbol'                        => $symbol,
-                    'event_type'                    => FutureTradeLogicalTradeEvent::EVENT_EXIT_FILLED,
-                    'client_order_id'               => $clientOrderId,
-                    'exchange_order_id'             => $orderId,
-                    'exchange_status'               => $status,
-                    'price'                         => $avgPrice,
-                    'quantity'                      => $cumQty,
-                    'payload'                       => ['execType' => $execType, 'order' => $order, 'realizedPnl' => $realizedPnl, 'reason' => $reason],
-                ]);
-
-                // Cancel the sibling order (TP if SL fired, SL if TP fired).
-                // Binance usually auto-cancels when closePosition=true closes the position,
-                // but an explicit cancel prevents any edge-case double-fill.
-                $siblingClientId = $isSLHit
-                    ? (string) ($meta['tp_client_order_id'] ?? '')
-                    : (string) ($meta['sl_client_order_id'] ?? '');
-
-                if ($siblingClientId !== '') {
-                    try {
-                        $client = $this->clientFor($config);
-                        if ($client) {
-                            $client->cancelOrder($symbol, null, $siblingClientId);
-                        }
-                    } catch (Throwable $e) {
-                        Log::warning('[EXCHANGE_SLTP_SIBLING_CANCEL_FAILED]', [
-                            'symbol'   => $symbol,
-                            'sibling'  => $siblingClientId,
-                            'reason'   => $reason,
-                            'error'    => $e->getMessage(),
-                        ]);
-                    }
-                }
-
-                return true;
-            }
+    /**
+     * Is this order event a fill of OUR exchange-side protective order? Returns 'SL', 'TP' or null.
+     *
+     * Only a closing-side event can qualify (an entry fill is on the opening side). Matching, in order:
+     *  1. client id equals the trade's meta sl_client_order_id / tp_client_order_id (new AND old ids);
+     *  2. old positions where both slots hold the same shared `ftx-entry-<key>` id: order type
+     *     STOP* => SL, TAKE_PROFIT* => TP (`ot`/`o`), otherwise undecidable => null (generic exit path);
+     *  3. a new-format prefix (`ftx-sl-`, `ftx-tsl-`, `ftx-tp-`) while that meta slot is still empty
+     *     (the fill raced the post-placement meta write).
+     */
+    private function protectiveFillKind(string $clientOrderId, array $meta, string $tradeSide, string $eventSide, array $order): ?string
+    {
+        if ($clientOrderId === '' || ($tradeSide !== 'LONG' && $tradeSide !== 'SHORT')) {
+            return null;
+        }
+        if ($eventSide !== ($tradeSide === 'LONG' ? 'SELL' : 'BUY')) {
+            return null;
         }
 
-        return false;
+        $slId = (string) ($meta['sl_client_order_id'] ?? '');
+        $tpId = (string) ($meta['tp_client_order_id'] ?? '');
+        $isSl = $slId !== '' && $clientOrderId === $slId;
+        $isTp = $tpId !== '' && $clientOrderId === $tpId;
+
+        if ($isSl && $isTp) {
+            $type = strtoupper((string) ($order['ot'] ?? $order['o'] ?? ''));
+            if (str_starts_with($type, 'TAKE_PROFIT')) {
+                return 'TP';
+            }
+
+            return str_starts_with($type, 'STOP') ? 'SL' : null;
+        }
+        if ($isSl) {
+            return 'SL';
+        }
+        if ($isTp) {
+            return 'TP';
+        }
+
+        $byPrefix = FutureTradeSignalStabilityService::protectiveKindFromClientOrderId($clientOrderId);
+        if ($byPrefix === 'SL' && $slId === '') {
+            return 'SL';
+        }
+        if ($byPrefix === 'TP' && $tpId === '') {
+            return 'TP';
+        }
+
+        return null;
     }
 
     /**

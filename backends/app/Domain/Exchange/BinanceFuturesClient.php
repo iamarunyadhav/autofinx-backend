@@ -250,6 +250,12 @@ class BinanceFuturesClient
      * Place a reduce-only STOP_MARKET or TAKE_PROFIT_MARKET order on Binance Futures.
      * Uses closePosition=true so the full position is closed regardless of quantity.
      * workingType=MARK_PRICE avoids wick-triggered liquidations.
+     *
+     * Conditional types moved to Binance's Algo Order service (POST /fapi/v1/algoOrder); the
+     * endpoint actually used is chosen by config('binance.conditional_order_mode') (see
+     * placeConditionalOrder()). Return shape: the exchange answer plus `endpoint` ('legacy'|'algo')
+     * and `algo` (bool). For an algo order `orderId` carries the algoId and `clientOrderId` the
+     * clientAlgoId, so existing callers keep reading the same keys.
      */
     public function placeReduceOnlyStopOrder(
         string $symbol,
@@ -258,8 +264,9 @@ class BinanceFuturesClient
         float $stopPrice,
         string $clientOrderId,
         string $workingType = 'MARK_PRICE',
+        ?string $positionSide = null,
     ): array {
-        $response = $this->signedRequest('POST', '/fapi/v1/order', [
+        $payload = [
             'symbol' => BinanceSymbolNormalizer::normalize($symbol),
             'side' => $side,
             'type' => $type,
@@ -267,9 +274,411 @@ class BinanceFuturesClient
             'closePosition' => 'true',
             'workingType' => $workingType,
             'newClientOrderId' => $clientOrderId,
+        ];
+        if ($positionSide !== null && $positionSide !== '') {
+            $payload['positionSide'] = $positionSide;
+        }
+
+        return $this->placeConditionalOrder($payload);
+    }
+
+    // ── Conditional (algo) orders ─────────────────────────────────────────────
+
+    /** auto | algo | legacy (config binance.conditional_order_mode; anything else = auto). */
+    public function conditionalOrderMode(): string
+    {
+        $mode = strtolower(trim((string) config('binance.conditional_order_mode', 'auto')));
+
+        return in_array($mode, ['auto', 'algo', 'legacy'], true) ? $mode : 'auto';
+    }
+
+    private function conditionalModeKey(): string
+    {
+        return 'autofinx:binance:conditional_mode:'.md5($this->baseUrl);
+    }
+
+    /** 'algo' | 'legacy' | null (nothing learned yet). Only meaningful in auto mode. */
+    private function learnedConditionalMode(): ?string
+    {
+        try {
+            $value = Cache::get($this->conditionalModeKey());
+        } catch (\Throwable) {
+            return null;
+        }
+
+        return in_array($value, ['algo', 'legacy'], true) ? $value : null;
+    }
+
+    private function rememberConditionalMode(string $endpoint): void
+    {
+        try {
+            $ttl = max(30, (int) config('binance.conditional_mode_cache_ttl', 600));
+            Cache::put($this->conditionalModeKey(), $endpoint, $ttl);
+        } catch (\Throwable) {
+            // best-effort
+        }
+    }
+
+    /**
+     * Place a conditional order (payload in the LEGACY /fapi/v1/order shape: stopPrice,
+     * newClientOrderId, closePosition, workingType, optional positionSide).
+     *
+     *  legacy: POST /fapi/v1/order exactly as before.
+     *  algo  : POST /fapi/v1/algoOrder only.
+     *  auto  : algo first. Falls back to legacy ONLY on a definite "unsupported" rejection of the
+     *          algo call (never on timeout/5xx/unknown outcome: those are resolved by querying the
+     *          clientAlgoId, never by placing again). A legacy -4120 switches to algo. The learned
+     *          mode is cached briefly so the wrong endpoint is not hammered.
+     * Never silent: every failure logs [BINANCE_CONDITIONAL_ORDER_FAILED] at critical level with
+     * the exact Binance code/message, then rethrows.
+     */
+    public function placeConditionalOrder(array $payload): array
+    {
+        $type = strtoupper((string) ($payload['type'] ?? ''));
+        if (! BinanceAlgoOrderApi::isConditionalType($type)) {
+            return $this->placeOrder($payload);
+        }
+
+        $mode = $this->conditionalOrderMode();
+        $sequence = match ($mode) {
+            'legacy' => ['legacy'],
+            'algo' => ['algo'],
+            default => $this->learnedConditionalMode() === 'legacy' ? ['legacy', 'algo'] : ['algo', 'legacy'],
+        };
+
+        $last = null;
+        foreach ($sequence as $endpoint) {
+            try {
+                $result = $endpoint === 'algo'
+                    ? $this->placeConditionalViaAlgo($payload)
+                    : $this->placeConditionalViaLegacy($payload);
+                if ($mode === 'auto') {
+                    $this->rememberConditionalMode($endpoint);
+                }
+
+                return $result;
+            } catch (BinanceConditionalOrderException $e) {
+                $last = $e;
+                if ($mode === 'auto' && $endpoint === 'algo' && $e->isAlgoUnsupported()) {
+                    $this->rememberConditionalMode('legacy');
+                    Log::warning('[BINANCE_CONDITIONAL_MODE_SWITCH] algo endpoint definitively unsupported, trying legacy', $e->context());
+
+                    continue;
+                }
+                if ($mode === 'auto' && $endpoint === 'legacy' && $e->isAlgoRequired()) {
+                    $this->rememberConditionalMode('algo');
+                    Log::warning('[BINANCE_CONDITIONAL_MODE_SWITCH] legacy endpoint answered -4120, switching to algo', $e->context());
+
+                    continue;
+                }
+                break;
+            } catch (\Throwable $e) {
+                // Legacy-path transport failure (same as before this change): surface, never swallow.
+                $this->logConditionalFailure($payload, $mode, ['endpoint' => $endpoint, 'outcome' => 'unknown'], $e->getMessage());
+                throw $e;
+            }
+        }
+
+        $this->logConditionalFailure($payload, $mode, $last?->context() ?? [], $last?->getMessage());
+
+        throw $last;
+    }
+
+    private function logConditionalFailure(array $payload, string $mode, array $context, ?string $message = null): void
+    {
+        try {
+            Log::critical('[BINANCE_CONDITIONAL_ORDER_FAILED] exchange-side protective order NOT confirmed', [
+                'symbol' => $payload['symbol'] ?? null,
+                'side' => $payload['side'] ?? null,
+                'type' => $payload['type'] ?? null,
+                'client_order_id' => $payload['newClientOrderId'] ?? null,
+                'mode' => $mode,
+                'message' => $message !== null ? $this->redact($message) : null,
+            ] + $context);
+        } catch (\Throwable) {
+            // logging must never mask the real failure
+        }
+    }
+
+    /** @return array{0: ?int, 1: string} [binance code, binance msg] */
+    private function binanceError(Response $response): array
+    {
+        $code = $response->json('code');
+        $msg = $response->json('msg');
+
+        return [
+            is_numeric($code) ? (int) $code : null,
+            mb_substr(is_scalar($msg) ? (string) $msg : '', 0, 300),
+        ];
+    }
+
+    private function placeConditionalViaLegacy(array $payload): array
+    {
+        $response = $this->signedRequest('POST', '/fapi/v1/order', $payload, false);
+        if ($response->successful()) {
+            return array_merge((array) $response->json(), ['endpoint' => 'legacy', 'algo' => false]);
+        }
+
+        [$code, $msg] = $this->binanceError($response);
+
+        throw new BinanceConditionalOrderException(
+            'Binance futures signed request failed. '.$response->body(),
+            'legacy',
+            $response->status() >= 500 ? 'unknown' : 'rejected',
+            $response->status(),
+            $code,
+            $msg,
+        );
+    }
+
+    private function placeConditionalViaAlgo(array $payload): array
+    {
+        try {
+            $params = BinanceAlgoOrderApi::placeParams($payload);
+        } catch (\InvalidArgumentException $e) {
+            throw new BinanceConditionalOrderException($e->getMessage(), 'algo', 'rejected');
+        }
+
+        try {
+            $response = $this->signedApiCall('POST', BinanceAlgoOrderApi::PLACE_PATH, $params);
+        } catch (\Throwable $e) {
+            $message = $e->getMessage();
+            // Raised BEFORE any request left this process: definitely nothing was placed.
+            if (str_contains($message, 'binance_key_dead') || str_contains($message, 'binance_rest_circuit_open') || str_contains($message, 'credentials are required')) {
+                throw new BinanceConditionalOrderException($this->redact($message), 'algo', 'rejected');
+            }
+
+            return $this->resolveUnknownAlgoPlacement($params, 'transport error: '.$this->redact($message));
+        }
+
+        if ($response->successful()) {
+            $json = (array) $response->json();
+            if (isset($json['algoId']) && (string) $json['algoId'] !== '' && (string) $json['algoId'] !== '0') {
+                return BinanceAlgoOrderApi::normalize($json);
+            }
+
+            return $this->resolveUnknownAlgoPlacement($params, 'HTTP '.$response->status().' without algoId');
+        }
+
+        [$code, $msg] = $this->binanceError($response);
+        if ($response->status() >= 500 || in_array($code, [-1001, -1006, -1007], true)) {
+            return $this->resolveUnknownAlgoPlacement($params, 'HTTP '.$response->status().' code '.($code ?? 'n/a').': '.$msg);
+        }
+
+        // The transport layer retries a POST once on 429/5xx with the SAME clientAlgoId, so a "duplicate
+        // id" style rejection can be the echo of our own first attempt. Before reporting failure, check
+        // whether this exact order already exists (never for an "unsupported" answer).
+        if (! BinanceAlgoOrderApi::isUnsupportedRejection($response->status(), $code)) {
+            [$found] = $this->findPlacedAlgoOrder($params);
+            if ($found !== null) {
+                return $this->recoveredAlgoOrder($found, $params, 'rejected HTTP '.$response->status().' code '.($code ?? 'n/a').': '.$msg);
+            }
+        }
+
+        throw new BinanceConditionalOrderException(
+            sprintf('Binance algo order rejected (HTTP %d, code %s): %s', $response->status(), $code ?? 'n/a', $msg),
+            'algo',
+            'rejected',
+            $response->status(),
+            $code,
+            $msg,
+        );
+    }
+
+    /**
+     * Ask the exchange whether OUR order (same clientAlgoId, symbol, type, side, trigger price)
+     * already exists. Never throws. [found|null, lookupError|null].
+     *
+     * @return array{0: ?array, 1: ?string}
+     */
+    private function findPlacedAlgoOrder(array $params): array
+    {
+        try {
+            $found = $this->lookupAlgoOrderByClientId((string) $params['symbol'], (string) $params['clientAlgoId']);
+        } catch (\Throwable $e) {
+            return [null, $this->redact($e->getMessage())];
+        }
+
+        if ($found === null) {
+            return [null, null];
+        }
+
+        $sameTrigger = ! isset($params['triggerPrice'])
+            || abs((float) ($found['stopPrice'] ?? 0) - (float) $params['triggerPrice']) <= 1e-9 * max(1.0, abs((float) $params['triggerPrice']));
+        $matches = strtoupper((string) ($found['symbol'] ?? '')) === strtoupper((string) $params['symbol'])
+            && strtoupper((string) ($found['type'] ?? '')) === strtoupper((string) $params['type'])
+            && (empty($found['side']) || strtoupper((string) $found['side']) === strtoupper((string) $params['side']))
+            && $sameTrigger;
+
+        return [$matches ? $found : null, null];
+    }
+
+    /**
+     * The algo placement may or may not have reached Binance. NEVER place again here: ask the
+     * exchange for our clientAlgoId. Found (same symbol/type/side/trigger) => that is our order.
+     * Otherwise throw an UNKNOWN-outcome error (the caller's existing failure handling applies; the
+     * order is not re-sent, so no duplicate protective order can come from this call).
+     */
+    private function resolveUnknownAlgoPlacement(array $params, string $reason): array
+    {
+        [$found, $lookupError] = $this->findPlacedAlgoOrder($params);
+        if ($found !== null) {
+            return $this->recoveredAlgoOrder($found, $params, $reason);
+        }
+
+        throw new BinanceConditionalOrderException(
+            'Binance algo order outcome UNKNOWN ('.$reason.'); lookup of clientAlgoId '.$params['clientAlgoId'].' '
+                .($lookupError !== null ? 'failed: '.$lookupError : 'found no matching order')
+                .'; not re-sent to avoid a duplicate protective order.',
+            'algo',
+            'unknown',
+        );
+    }
+
+    private function recoveredAlgoOrder(array $found, array $params, string $reason): array
+    {
+        Log::warning('[BINANCE_ALGO_ORDER_RECOVERED] placement outcome settled by clientAlgoId lookup', [
+            'client_algo_id' => $params['clientAlgoId'],
+            'algo_id' => $found['algoId'] ?? null,
+            'reason' => $reason,
         ]);
 
-        return (array) $response->json();
+        return $found + ['recovered' => true];
+    }
+
+    /**
+     * Find an algo order by clientAlgoId: the open-algo list first (verified route), then
+     * GET /fapi/v1/algoOrder (body not confirmed). Returns null when the exchange answered but
+     * has no such order; throws only when neither lookup produced an answer.
+     */
+    private function lookupAlgoOrderByClientId(string $symbol, string $clientId): ?array
+    {
+        $errors = [];
+        $answered = false;
+
+        try {
+            $rows = $this->fetchOpenAlgoOrders($symbol, true);
+            $answered = true;
+            foreach ($rows as $row) {
+                if ((string) ($row['clientOrderId'] ?? '') === $clientId) {
+                    return $row;
+                }
+            }
+        } catch (\Throwable $e) {
+            $errors[] = $e->getMessage();
+        }
+
+        try {
+            $response = $this->signedApiCall('GET', BinanceAlgoOrderApi::QUERY_PATH, ['clientAlgoId' => $clientId]);
+            if ($response->successful()) {
+                $json = (array) $response->json();
+                if (isset($json['algoId']) && (string) $json['algoId'] !== '') {
+                    return BinanceAlgoOrderApi::normalize($json);
+                }
+            } elseif ($response->status() < 500) {
+                $answered = true;    // a definite "no such order" style answer
+            } else {
+                $errors[] = 'HTTP '.$response->status();
+            }
+        } catch (\Throwable $e) {
+            $errors[] = $e->getMessage();
+        }
+
+        if (! $answered) {
+            throw new RuntimeException(implode(' | ', $errors) ?: 'algo order lookup unavailable');
+        }
+
+        return null;
+    }
+
+    /**
+     * GET /fapi/v1/openAlgoOrders (pending conditional orders), normalised to the legacy
+     * open-order field names (orderId=algoId, clientOrderId, type, stopPrice, reduceOnly) with
+     * `algo=true`. Legacy /fapi/v1/openOrders does NOT list these. Returns [] without any HTTP
+     * call in legacy mode (or auto mode after the algo endpoint was learned as unsupported).
+     * Throws on any other failure/unexpected shape so callers can flag the snapshot unavailable
+     * instead of believing "no stop exists".
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    public function fetchOpenAlgoOrders(?string $symbol = null, bool $force = false): array
+    {
+        $mode = $this->conditionalOrderMode();
+        if (! $force && ($mode === 'legacy' || ($mode === 'auto' && $this->learnedConditionalMode() === 'legacy'))) {
+            return [];
+        }
+
+        $params = [];
+        if ($symbol) {
+            $params['symbol'] = BinanceSymbolNormalizer::normalize($symbol);
+        }
+
+        $response = $this->signedApiCall('GET', BinanceAlgoOrderApi::OPEN_PATH, $params);
+        if (! $response->successful()) {
+            [$code] = $this->binanceError($response);
+            if ($mode === 'auto' && BinanceAlgoOrderApi::isUnsupportedRejection($response->status(), $code)) {
+                $this->rememberConditionalMode('legacy');
+
+                return [];
+            }
+
+            throw new RuntimeException('Binance open algo orders failed. '.$response->body());
+        }
+
+        $json = $response->json();
+        if (! is_array($json) || ($json !== [] && ! array_is_list($json))) {
+            throw new RuntimeException('Binance open algo orders: unexpected response shape.');
+        }
+
+        return array_values(array_map(
+            fn (array $row) => BinanceAlgoOrderApi::normalize($row),
+            array_filter($json, 'is_array')
+        ));
+    }
+
+    /** GET /fapi/v1/algoOrder by algoId or clientAlgoId (response body not confirmed). */
+    public function fetchAlgoOrder(?string $algoId = null, ?string $clientAlgoId = null): array
+    {
+        $params = $algoId ? ['algoId' => $algoId] : ['clientAlgoId' => (string) $clientAlgoId];
+        $response = $this->signedApiCall('GET', BinanceAlgoOrderApi::QUERY_PATH, $params);
+        if (! $response->successful()) {
+            throw new RuntimeException('Binance algo order query failed. '.$response->body());
+        }
+
+        return BinanceAlgoOrderApi::normalize((array) $response->json());
+    }
+
+    /**
+     * Generic SIGNED call that never throws on a non-2xx answer and always returns the
+     * raw Response, so the caller can classify "definitely rejected" (a 4xx with a Binance
+     * code) from "outcome unknown" (transport exception/5xx). Added for Quick Trade Manual
+     * SL/TP (App\Domain\QuickTradeManual) which needs the Algo Order endpoints; it reuses
+     * this client's key-health cache, server-time resync, REST circuit breaker and throttle.
+     * Transport failures still throw (after the client's own retry), exactly like request().
+     *
+     * DELETE parameters are sent in the QUERY STRING (Binance reads form/query parameters;
+     * Laravel's delete($url, $data) would send a JSON body). No existing caller is affected.
+     */
+    public function signedApiCall(string $method, string $path, array $params = []): Response
+    {
+        $this->assertKeyHealthy();
+
+        $send = function () use ($method, $path, $params): Response {
+            $signed = $this->sign($params);
+            if (strtoupper($method) === 'DELETE') {
+                return $this->request('DELETE', $path.'?'.http_build_query($signed, '', '&'), [], true);
+            }
+
+            return $this->request($method, $path, $signed, true);
+        };
+
+        $response = $send();
+        if ($this->isTimestampOutsideRecvWindow($response)) {
+            $this->syncServerTimeOffset();
+            $response = $send();
+        }
+
+        return $response;
     }
 
     public function fetchOrder(string $symbol, ?string $orderId = null, ?string $clientOrderId = null): array
@@ -287,7 +696,50 @@ class BinanceFuturesClient
         return (array) $response->json();
     }
 
-    public function cancelOrder(string $symbol, ?string $orderId = null, ?string $clientOrderId = null): array
+    /**
+     * Cancel one order. `$algo` says which API owns it: true = Algo Order service (DELETE
+     * /fapi/v1/algoOrder, orderId is then the algoId), false = legacy /fapi/v1/order, null =
+     * unknown (callers that only stored a client id): legacy mode -> legacy; algo mode -> algo;
+     * auto -> try the learned endpoint then the other (cancelling is idempotent, so trying both
+     * is safe; a failure is raised only if both fail). Rows from fetchOpenOrders()/
+     * fetchOpenAlgoOrders() carry the marker: pass `(bool) ($row['algo'] ?? false)`.
+     */
+    public function cancelOrder(string $symbol, ?string $orderId = null, ?string $clientOrderId = null, ?bool $algo = null): array
+    {
+        $mode = $this->conditionalOrderMode();
+
+        if ($algo === false || $mode === 'legacy') {
+            return $this->cancelLegacyOrder($symbol, $orderId, $clientOrderId);
+        }
+        if ($algo === true || $mode === 'algo') {
+            return $this->cancelAlgoOrder($orderId, $clientOrderId);
+        }
+        if (! $clientOrderId) {
+            // auto + unmarked + no client id: a bare numeric id is ambiguous between id spaces.
+            return $this->cancelLegacyOrder($symbol, $orderId, $clientOrderId);
+        }
+
+        $sequence = $this->learnedConditionalMode() === 'legacy' ? ['legacy', 'algo'] : ['algo', 'legacy'];
+        $errors = [];
+        foreach ($sequence as $endpoint) {
+            try {
+                return $endpoint === 'algo'
+                    ? $this->cancelAlgoOrder(null, $clientOrderId)
+                    : $this->cancelLegacyOrder($symbol, $orderId, $clientOrderId);
+            } catch (\Throwable $e) {
+                $errors[] = $endpoint.': '.$this->redact($e->getMessage());
+            }
+        }
+
+        throw new RuntimeException('Binance cancel failed on both endpoints. '.implode(' | ', $errors));
+    }
+
+    /**
+     * Legacy DELETE /fapi/v1/order. DELETE parameters go in the QUERY STRING (Binance does not read
+     * a JSON body; Laravel's delete($url, $data) sends JSON, which made this call unable to carry
+     * symbol/timestamp/signature). Narrow fix, only for the cancel calls.
+     */
+    private function cancelLegacyOrder(string $symbol, ?string $orderId, ?string $clientOrderId): array
     {
         $params = ['symbol' => BinanceSymbolNormalizer::normalize($symbol)];
         if ($orderId) {
@@ -297,18 +749,69 @@ class BinanceFuturesClient
             $params['origClientOrderId'] = $clientOrderId;
         }
 
-        $response = $this->signedRequest('DELETE', '/fapi/v1/order', $params);
+        $response = $this->signedApiCall('DELETE', '/fapi/v1/order', $params);
+        $this->assertSuccess($response, 'Binance futures signed request failed.');
 
-        return (array) $response->json();
+        return array_merge((array) $response->json(), ['endpoint' => 'legacy', 'algo' => false]);
     }
 
+    private function cancelAlgoOrder(?string $algoId, ?string $clientAlgoId): array
+    {
+        if ($algoId) {
+            $params = ['algoId' => $algoId];
+        } elseif ($clientAlgoId) {
+            $params = ['clientAlgoId' => $clientAlgoId];
+        } else {
+            throw new RuntimeException('Binance algo cancel needs an algoId or clientAlgoId.');
+        }
+
+        $response = $this->signedApiCall('DELETE', BinanceAlgoOrderApi::CANCEL_PATH, $params);
+        if ($response->successful()) {
+            $json = (array) $response->json();
+            $code = $json['code'] ?? null;
+            if ($code === null || in_array((string) $code, ['200', '0'], true)) {
+                return array_merge($json, ['endpoint' => 'algo', 'algo' => true]);
+            }
+        }
+
+        throw new RuntimeException('Binance algo cancel failed. '.$response->body());
+    }
+
+    /**
+     * Cancel all open orders for a symbol: legacy /fapi/v1/allOpenOrders (does NOT cover algo
+     * orders) plus, unless mode=legacy, DELETE /fapi/v1/algoOpenOrders. Returns the legacy answer
+     * (shape unchanged) with the algo answer under `algo_cancel`.
+     */
     public function cancelOpenOrders(string $symbol): array
     {
-        $response = $this->signedRequest('DELETE', '/fapi/v1/allOpenOrders', [
-            'symbol' => BinanceSymbolNormalizer::normalize($symbol),
-        ]);
+        $normalized = BinanceSymbolNormalizer::normalize($symbol);
+        $mode = $this->conditionalOrderMode();
 
-        return (array) $response->json();
+        $response = $this->signedApiCall('DELETE', '/fapi/v1/allOpenOrders', ['symbol' => $normalized]);
+        if ($mode === 'legacy') {
+            $this->assertSuccess($response, 'Binance futures signed request failed.');
+
+            return (array) $response->json();
+        }
+        $legacy = $response->successful() ? (array) $response->json() : null;
+        $legacyError = $response->successful() ? null : $response->body();
+
+        $algo = null;
+        $algoResponse = $this->signedApiCall('DELETE', BinanceAlgoOrderApi::CANCEL_ALL_PATH, ['symbol' => $normalized]);
+        if ($algoResponse->successful()) {
+            $algo = (array) $algoResponse->json();
+        } else {
+            [$code] = $this->binanceError($algoResponse);
+            $unsupported = BinanceAlgoOrderApi::isUnsupportedRejection($algoResponse->status(), $code);
+            if (! ($mode === 'auto' && $unsupported)) {
+                throw new RuntimeException('Binance algo cancel-all failed. '.$algoResponse->body());
+            }
+        }
+        if ($legacyError !== null) {
+            throw new RuntimeException('Binance futures signed request failed. '.$legacyError);
+        }
+
+        return (array) $legacy + ['algo_cancel' => $algo];
     }
 
     /**

@@ -120,6 +120,74 @@ are. Numbers are copied from real output, never estimated after the fact.
 - G7 metrics: BTC 1,350 days fetched before the run switched to `-NoMetrics` (2021-10-01 → 2026-10-05,
   5-min step, 8 gaps > 15 min). Remaining days/coins later, before P4B.
 
+## R-027 · 2026-10-08 · Edge Search v1 (D-043) — FINAL
+- Decision (B): no tradable directional edge; (C): 4h / 1d INCONCLUSIVE (underpowered). Full write-up
+  `EDGE_SEARCH_V1_RESULT.md`; machine report `D:/autofinx-ml-v4/edge_search_v1/results/REPORT.md` + `SUPPLEMENT_DESCRIPTIVE.md`.
+- 1,844 items: 938 FAIL / 906 INCONCLUSIVE, BH-FDR rejects 5, survivors 0; F8 not run; F7 carry 12 cells (2 FAIL, 10 INCONCLUSIVE).
+- Holdout reads 0 (nothing reached Stage 4). Run 527 s, 0 errors, 149 tests, engine == brute force on real data.
+- Lead only: F7 funding carry paid +0.9..+1.3 %/trade at funding >= 0.02 %/8h but only in 3 euphoric rallies (~11 episodes).
+
+## R-026 · 2026-10-07 · V5-lite (D-041, pre-registered) — S1/S2 × 60/120/240, BTC+ETH, 5 purged walk-forward folds (dev_train)
+| Cell | PRIMARY V5 (per-symbol, E1): trades / avg net | RULE (every event, no model) | CLASSIFIER_EV | PASS |
+|---|---|---|---|---|
+| S1 trend pullback h60 | 1 / +0.53 | 1,975 / −0.112 | 108 / −0.123 | no |
+| S1 h120 | 13 / −0.082 (PF 0.63) | 1,936 / −0.107 | 264 / −0.169 | no |
+| S1 h240 | 10 / −0.268 (PF 0.20) | 1,863 / −0.094 | 271 / −0.010 | no |
+| S2 range rejection h60 | 0 | 220 / −0.154 | 0 | no |
+| S2 h120 | 0 | 213 / −0.130 | 82 / −0.118 | no |
+| S2 h240 | 0 | 204 / −0.127 | 38 / −0.198 | no |
+- Secondary configs (pooled, E2 trailing) also show no candidate. Pooled S1 h60 had 4 trades at +0.49, and
+  S1 h120 13 trades at +0.02: too few and secondary, so not promoted (D-041).
+- **Calibration:** S1 h60 utility deciles predicted −0.29..−0.09 against realised −0.15..−0.09. The top
+  decile was −0.093 predicted vs −0.095 realised. The V5 model is calibrated, correctly sees no positive
+  after-cost events, and therefore WAITs.
+- **Side-selection lift** S1 h60: +0.003 % (CI −0.019..0.026).
+- **Data:** S1 ~2.4k events per coin in dev_train. S2 is rare: ~200 per coin. 2 of 5 folds lacked 300
+  training events, so only 3 folds were evaluated.
+- **D-041 verdict:** all 6 primary tests FAIL. Per the rule this is a stop: "new data hypothesis, not more
+  tuning".
+
+## R-025 · 2026-10-07 · P3 economics (D-039) BTC/ETH × 60/120/240 + P1/P2 at h120 (dev_train, cost 0.12 = real account fees)
+- Direct after-cost net-return model (huber + q20), V3 + ctx, fixed exit stop 1.5 ATR + time.
+- PRED_GT_0 executed avg net per fold vs ALWAYS_LONG:
+  | Cell | PRED_GT_0 (3 folds) | always long |
+  |---|---|---|
+  | BTC h60 | −0.082 / −0.097 / −0.077 | −0.115 / −0.114 / −0.119 |
+  | BTC h120 | −0.101 / −0.099 / −0.050 | −0.115 / −0.110 / −0.120 |
+  | BTC h240 | −0.082 / −0.088 / −0.068 | −0.113 / −0.108 / −0.119 |
+  | ETH h60 | −0.112 / −0.100 / −0.071 | −0.118 / −0.116 / −0.124 |
+  | ETH h120 | −0.109 / −0.116 / −0.085 | −0.119 / −0.114 / −0.127 |
+  | ETH h240 | −0.119 / −0.121 / −0.076 | −0.121 / −0.109 / −0.128 |
+- **D-039: FAIL in all 6 cells.**
+- The model ranks better at longer horizons: Spearman of predicted vs realised net 0.03–0.10 at h60,
+  0.11–0.28 at h240. It improves the executed net by about 0.0–0.07 %/trade, but every fold stays
+  negative.
+- The top bucket is over-confident: predicted +0.1–0.4 %, realised −0.03 to −0.2 %.
+- The q20-filtered arm has 3–124 trades, too few to judge.
+- P1 at h120: no paired lift with CI > 0 on either coin.
+- P2 at h120: every setup's gross is −0.04..+0.015 %, net −0.10..−0.16 %. No setup is promising.
+
+## R-024 · 2026-10-07 · P4 context (D-038) — BTC h60/h240, P1 diagnostics V3 vs V3 + ctx (dev_train D-025 folds)
+- **Coverage:** cross-market and funding ~100 %; metrics 56–74 % (no archive before 2021-10, plus gaps, kept
+  as NaN).
+- **Paired lift (chosen − opposite side, gross %/opportunity, CI90):**
+  | Cell | V3 only | V3 + ctx |
+  |---|---|---|
+  | BTC h60 | +0.002 · **+0.010 (0.002..0.018)** · **+0.008 (0.002..0.015)** | +0.003 · +0.004 · +0.007 (all CIs include 0) |
+  | BTC h240 | −0.009 · +0.016 · +0.008 (CIs include 0) | −0.007 · +0.012 · +0.002 (CIs include 0) |
+- AUC is unchanged (BTC h60 ≈ 0.54–0.60).
+- **Top-margin 10 % executed net:**
+  - h60: −0.119 / −0.113 / −0.111 with ctx, against −0.125 / −0.110 / −0.113 without (mixed, ≤ 0.006).
+  - h240: worse with ctx in 2 of 3 folds.
+- **ETH (added 21:20):**
+  - h60 with ctx: paired lift +0.005 / −0.005 / +0.007, every CI includes 0 (V3 alone: +0.007 / −0.003 / +0.003).
+  - h240 with ctx: +0.008 / −0.008 / −0.001 (V3: −0.018 / +0.016 / −0.019).
+  - Top-10 % executed: worse or mixed. **ETH FAIL.**
+- **D-038 verdict BTC: FAIL.** Context does not raise the direction lift; at h60 it dilutes the small V3
+  signal. ETH runs when its metrics download finishes.
+- Ops note: the P5 baseline runner stalled 20:07–21:15 (its busy check matched its own command line);
+  fixed and resumed (BNB h60 onward).
+
 ## R-023 · 2026-10-07 · P2 event setups (D-037, fixed rules) — BTC/ETH h60/h240, dev_train, cost 0.12
 - Avg gross / net per executed trade (non-overlapping), exit E1 (stop 1.5 ATR + time) unless noted:
   | Setup | BTC h60 | BTC h240 | ETH h60 | ETH h240 |
@@ -439,3 +507,78 @@ eports\p3\SUMMARY.md` (6 coins × 5 horizons, D-023 code).
   vs the anchor close). 100% of feature anchors exist in the targets.
 - Feature-side leakage test K already exists in PHP: `tests/Unit/Ml/ShadowFeatureLabelTest.php`
   `test_future_candles_cannot_enter_the_feature_vector` (all schemas).
+
+
+## 2026-10-08 ? M1 momentum-candle breakout
+
+M1 frozen dev-only run completed: 15m N=2683 gross=0.002268%, net=-0.122367%, PF=0.839966, t=-2.792947, positive coins=1/6; 1h N=792 gross=0.602631%, net=0.457969%, PF=1.358476, t=1.842527, positive=5/6; 4h N=185 gross=1.380913%, net=1.181079%, PF=1.460287, t=1.360618, positive=4/6. All REJECTED under owner gates. Raw signal reversals within three bars: 868/3064, 215/960, 44/220. All trade rows persisted. Full report M1_FROZEN_DEV_RESULT_2026-10-08.md. 118 Python V4 tests passed. No old strategy reruns.
+
+## R-028 · 2026-10-08 · Edge Search v2 PILOT (D-045) — order flow + depth, BTC/ETH, 2025-10-01..2025-12-31 — INCONCLUSIVE
+- Plan `EDGE_SEARCH_V2_PILOT.md` sha256 `3be7cf03502aa730015be1f0a31251b777b1979d491d5ce401f1db63cbea3924` (frozen before any computation; the plan text says "D-044", which is a typo for D-045).
+- Data: aggTrades 169.6 M (BTC) + 225.6 M (ETH) rows, 0 missing ids, 100 % complete 5m buckets; bookDepth 184 days, 99.97 % bucket coverage; checksums verified; volume vs kline exact (median 4e-15).
+- 60 items (10 events x 2 coins x 15m/1h/4h): 48 INCONCLUSIVE, 12 FAIL, 0 LEAD; 0 BH-FDR rejections. Holdout reads 0, nothing after 2025-12-31 read.
+- Powered 15m items: gross -0.029..+0.029 %, net -0.09..-0.15 %. 1h/4h undecidable (MDE 0.11-1.9 %). Best in-sample 4h BTC FLOW_FOLLOW gross +0.235 / net +0.115 (N 135, MDE 0.31) is not a result.
+- Full-run need: 1h ~320-1,830 trades (~1 y median), 4h ~900-4,300 (~4.8 y median); full run ~12-16 h wall clock.
+- Details: `EDGE_SEARCH_V2_PILOT_RESULT.md`; machine results `D:\autofinx-ml-v4\edge_search_v2\results\`.
+
+## R-029 · 2026-10-10 · Regime + Tradeability v1 (D-047) — BTC/ETH (+4 robustness coins), 15m/1h/4h, 2023-01-01..2025-12-31
+- Plan `REGIME_TRADEABILITY_V1.md` sha256 `a48e74061695a0a5a0c70d8d73ef25bf76584088b138bcdabc0bcbe34b91f966` (frozen before any computation). Data: local D: monthly 5m + funding, cut 2026-01-01, holdout reads 0. Fixed textbook rules, no fitted model. Cost C0 0.12 % + actual funding; gross and net reported side by side.
+- Q1 direction FAIL (108 BTC+ETH tests, 0 FDR-significant on both coins; mean forward return within noise, far below 0.12 %). Q1 magnitude LEAD, descriptive only: LOWVOL_COMPRESSION forward |move| 22-34 % smaller (R 0.66-0.78 BTC/ETH, 0.66-0.88 all six, sign stable 2023/24/25). HTF labels: direction FAIL, magnitude LEAD (2 cells).
+- Q2 (10 baselines x 3 tf x 2 exits x 5 filters = 300 tests; DISC = BTC+ETH): 0 HELPS, 0 PROFITABLE. TM filter (T>=0.5 and move gate, keeps ~40 %): mean delta net 15m +0.0004 %, 1h 0.000 %, 4h +0.038 %; delta MDE 0.009 / 0.035 / 0.137 % (15m, 1h powered = FAIL; 4h INCONCLUSIVE); best q_help 0.13. Filtered net 15m/1h -0.07..-0.22 %.
+- Q3 (48 gated tests + 2 composites): 0 HELPS, 0 PROFITABLE; gated sets 31/60 under-powered (INCONCLUSIVE), composites FAIL (D_dir 4h net +0.049 / +0.055 %, gross +0.176 / +0.181 %, N ~1,300, CI95 [-0.12, +0.21], 2025 negative, q 1.0). Unfiltered 4h donchian55 net +0.228 % (N 395, MDE 0.43, q 1.0), squeeze +0.152 % (N 250): not results.
+- Q4 sign-stable only for the volatility effect; Q5 NOT TESTED (no probability fitted). Verdict summary: no after-cost edge from the regime / tradeability rules; volatility information is real (exploratory use: pause / sizing, untested with P&L).
+- Run: whole pipeline 4 min (BTC job 12 s); 187 tests pass (14 new); real-data prefix-invariance check (BTC 15m/4h, cuts at 20k / 50k / n-1000 bars) identical; all trade files inside [2023-01-01, 2026-01-01].
+- Details `REGIME_TRADEABILITY_V1_RESULT.md`; machine results `D:\autofinx-ml-v4\regime_v1\results\` (REPORT.md, csv, json).
+
+## R-030 · 2026-10-10 · Quick Trade Replay v1 (D-048) — BTC/ETH (+4 robustness coins), 3 live presets, 2023-01-01..2025-12-31
+- Plan `QUICK_TRADE_REPLAY_V1.md` sha256 `d6dc8a4ed188d03da28c0986a4b3963b49b26bb48c3df9ffd3480208b13ad00b` frozen before any computation; AMENDMENT 1 (matched random-direction null DiD family F4, +0.03 % materiality bar, risk statistics) written after the code / tests existed, on synthetic data only, before any real-data result; final sha256 `ec434d43cad9ecc5eb4cf2e7f2b3f9e605464fa6e16052b4587406c404885bc7`. Data: local D: monthly 5m + funding, cut 2026-01-01, holdout reads 0 (loader refuses later cuts; unit-tested).
+- Verified Quick Trade facts (file:line in the plan sec 0): live presets 5m/3600 s, 5m/1800 s, 15m/3600 s; live symbols BTC/ETH/BNB/SOL; SL/TP are % of stake, software-polled (1 s), MARKET close; expiry settle every 10 s; leverage > 20x needs an SL; code cost 0.14 % (maker_entry 0.11 %, not 0.08), required move 0.28 %; paper BTC payout 0.86 (not 0.91), tie = refund.
+- Arms: A random (100 seeds), B momentum, C Bollinger fade, E always long / short; D NOT AVAILABLE (no out-of-fold V4 predictions). Exits X1 + 9 SL/TP + 4 BE/trail + 3 MAE/MFE-quantile cells; gates G1a (code), G1b, G2, G3, G2m. Items: F1 633, F2 306 (random cross), F4 126 (DiD vs matched null), F3 6; BH per family.
+- Result: **0 LEAD in every family, 0 FDR rejection in F1 profit / F2**. 324 / 324 profit items FAIL; 0 of 2,337 by-coin rows (n >= 1,000) net-positive at 0.12 % (0 at maker 0.08 %). Random-direction null net -0.110 .. -0.168 % under every exit x gate (gross +0.0001 %). Exit deltas: SL/TP/MAE-MFE -0.001..+0.005 %, BE/trailing -0.005..-0.035 % (declared adverse-ordering convention; conservative). Gate deltas <= +0.0097 % (q >= 0.4). DiD vs matched null: best +0.019 % (C break-even, q < 0.001) but absolute C-BE is worse than C-X1 (-0.139 vs -0.116 %). MDE medians 0.0022-0.0065 %.
+- Gross vs net (BTC+ETH, P1 5m/3600 s, X1): B -0.003 / -0.123 %, C +0.004 / -0.116, always-long +0.007 / -0.114, always-short -0.007 / -0.126, random +0.0001 / -0.120; every year (2023/24/25) negative for every arm and preset.
+- Gates: G1a (code, k = 2) keeps 64 / 40 / 71 % (P1 / P2 / P3, arm B), net per kept trade unchanged (-0.1243 vs -0.1232 %); avoided : wrongly skipped = 14,238 : 4,969 (P1 B). Calibration: Spearman(0.55 R, realised |ret|) 0.32-0.42, realised/predicted 0.85-0.94, P(|ret| >= 0.28 %) 0.50 (gate pass) vs 0.21 (fail) on BTC P1.
+- Risk (BTC P1 B): worst trade -7.35 % (X1) -> -2.62 (SL 0.5 R + TP 2) / -1.45 (X4 q90 MAE + q50 MFE), sd 0.498 -> 0.378 / 0.293, mean net unchanged (-0.124).
+- PAPER binary (report-only): C Bollinger fade hit 55.0-56.6 % (Wilson lower 54.4-56.1 %) vs break-even 53.8 % (payout 0.86) / 52.4 % (0.91); B momentum 47.6-48.7 %; random 50.0 %; C decays 56.8 -> 54.9 -> 53.3 % (2023-2025, P1); sign effect, gross magnitude ~0.
+- Run: whole pipeline ~6 min (6 coin jobs ~30 s each, analysis 37 s); the first full run failed on SOL (X4 table needs history; fixed with a burn-in drop for coins listed inside the window; BTC/ETH arrays verified bit-identical after the fix); 25 new tests, whole engine suite 212 passed.
+- Details `QUICK_TRADE_REPLAY_V1_RESULT.md`; machine results `D:\autofinx-ml-v4\quick_trade_replay_v1\results\` (REPORT.md, items.csv, by_coin.csv, gates.csv, reasons.csv, tails.csv, binary.csv, calibration.csv, summary.json, arrays/).
+
+
+## R-031 · 2026-10-10 · Experiment E v1 — calibrated probability and Quick Trade decision intelligence (D-049) — BTC/ETH/BNB (+SOL 2025), 3 live presets, walk-forward test years 2023-2025
+- Plan `EXPERIMENT_E_V1.md` frozen sha256 `fbd5ddfe14f20e8f7edf74179513df007b6c9c6a22e3601bbfeaca34a8556637`, AMENDMENT 1 (Q-SIDE + WAIT-dominant fallback) before any real-data result, final `0c910d7bec85fb9b348cf494ca7b737b2509b0406e8bc017a668889a8c75fed0` (`D:\autofinx-ml-v4\exp_e_v1\PLAN_SHA256*.txt`). **Label: REUSED HISTORICAL EVALUATION - NOT A FRESH FINAL HOLDOUT.** Data: local D: monthly klines 2021-10..2025-12 + funding, V3 features / h60 targets read with predicate anchor < 2026-01-01; holdout reads 0 (loader refuses any 2026 file / cut; unit-tested).
+- E1: no genuine OOF predictions exist (326 data files + 656 JSON scanned; fitted models only, cutoffs 2024-09-23 BTC/ETH/BNB, 2025-07-15 SOL/XRP/SUI). E2: regenerated walk-forward OOF of the existing V3 / V4 LightGBM recipes (+ the same recipe on Quick Trade targets A, B_L/B_S, C_L/C_S, D): annual test folds 2023 / 2024 / 2025, 6-month calibration window before each, 24 h embargo, labels must be mature; 10 coin-year jobs x 27 models; test AUC max 0.639 (guard 0.70 never fired). Runtime ~25 min training + ~5 min analysis; one out-of-memory restart (PC commit-starved; OpenBLAS 1 GB private fixed by a thread cap).
+- Calibration (P1, BTC+ETH+BNB pooled, n 945,297 / 946,677): raw overconfident (slope 0.37-0.67, ECE 2-4 %, A Brier skill -0.74 % vs base rate); Platt on the later window: ECE 0.4-0.7 %, slope 0.88-0.95, skill +0.41 % (A) / +2.0..+2.5 % (B, C), positive in all 3 years; F1 41 / 49 LEAD; CAL_CALIBRATED 0 / 10 Q items (slope CI below 1). Information mostly volatility (vol-only gets 83 % of the C_L gain, trend-only 78 % of the A gain; VOL-A none). D regressor useless (Spearman 0.010, MSE worse than the mean).
+- Buckets (Q, CONF_A, Platt): 50-60: n 936,500 obs 52.7 % net -0.1177 %; 60-70: n 8,796 pred 61.5 / obs 58.0 % net -0.1005 %; 70-75: 1 event; >= 75: 0. Raw: 75-80 n 2,824 pred 76.8 / obs 59.4 % net -0.081 %; 80-90 n 445 pred 82.1 / obs 61.4 % net -0.048 % (CI [-0.167, +0.071]). 75 % study: calibrated (Platt) never reaches 75 % (max 0.7075); raw / isotonic tails do, observed 59.7 % (raw A, 3,270 events, net -0.076 %), 68.9 % (iso A, 251 events, net +0.027 %); no profitable calibrated >= 75 % population.
+- Economics (P1, cost 0.12 %, % per trade): Q-EVp 8,366 trades (0.88 %), gross +0.060, net -0.0595 [-0.110, -0.009], MDE 0.085, PF(chain) 0.83, 2023 / 24 / 25 = -0.060 / -0.061 / -0.058; Q-EVD -0.058; V3-EVp -0.037 [-0.081, +0.007] (+0.003 at 0.08 %); V4-EVp -0.096; VOL / TREND / SOFT -0.063 / -0.052 / -0.067; Q-SIDE (better side at every event, 946,677) -0.1170 FAIL, +0.003 vs random side [-0.0003, +0.006]; replay baselines B / C / always-long -0.120 / -0.115 / -0.114 (match R-030). P2 Q-EVp -0.0002 (+0.040 at 0.08 %). Primary vs random side +0.0605 [+0.010, +0.111] q 0.061. 0 F2 LEAD; F3 LEAD: Q-EVp vs RULE-B, V3-EVp vs random (net still negative).
+- Verdict: **INCONCLUSIVE** by the frozen rules (primary MDE 0.085 > 0.06 so not FAIL); calibration verdict INFORMATIVE_NOT_CALIBRATED; economics: no profitable policy (primary CI90 entirely below 0). Substantive answer: NO.
+- Tests: `tests/test_exp_e_v1.py` 27 (negative leakage tests: planted look-ahead caught by prefix invariance + too-good guard, calibrator fit on the evaluation window rejected, loader refuses 2026 files / cut / rows, immature labels excluded, overlapping folds rejected); whole engine suite 254 passed. Details `EXPERIMENT_E_V1_RESULT.md`; machine results `D:\autofinx-ml-v4\exp_e_v1\results\` (reports A-G, summary.json, manifest.json).
+
+
+## R-033 · 2026-10-10 · Collector Linux-portability verification (D-052) — engineering check, no research result
+- Collector unit tests 27 passed (12 new portability tests). Full engine suite 285 passed on the clean run (two earlier runs showed 1-7 random numpy failures that passed when re-run: PC memory contention while another job ran; not related to the collector).
+- Real 30 s run on Windows against public Binance (`D:\ac-linux-smoke-tmp`, deleted): aggTrade 19.0 KB, depth 12.1 KB, markPrice 5.3 KB, book1s 2.6 KB, forceOrder 0.5 KB, OI 0.3 KB gz; 0 CR bytes in gaps.jsonl; laptop clock offset again +6.2 s (clock_warning).
+- Real CTRL_BREAK (SIGBREAK) stop: exit 0 after 3.2 s, `collector_stop reason=signal`, lock removed. POSIX SIGTERM, systemd, supervisor, rsync: NOT tested (no WSL distro, no docker, no server).
+- Read-only look at the laptop dataset: 0.104 GB / 90 raw files, gap log = 955 silent_stream, 128 ws_disconnect, 24 missing_agg_ids, 79 oi_fetch_failed (sleep / network loss). Laptop C: drive free 0.09 GB (D: 89 GB).
+
+
+## R-032 · 2026-10-10 · Rule Baseline v1 — trend-breakout + EMA200 + confirmed-swing stop, 2R, Quick Trade presets (D-050 / D-051) — BTC/ETH/BNB/SOL pool (+XRP/SUI report-only), 2023-01-01..2025-12-31
+- **REUSED HISTORICAL EVALUATION - NOT A FRESH FINAL HOLDOUT** (hypothesis chosen after the other experiments' 2023-2025 results were seen); holdout 2026 sealed, reads 0. Plan `RULE_BASELINE_V1.md` sha256 `adf5d5df290cfee050f1a72fc7f6e610a8aa951a3d54e1c3e5b6efa29acefa25` (no amendment).
+- Config: LONG close > EMA200 and close > max(high of previous 20 closed bars), SHORT mirror; entry next open; stop at the last CONFIRMED fractal swing (k = 3, confirmed at j+3), distance floor 0.25 % / cap 1.50 % (signal close and entry price); TP 2 R; timeout at expiry (P1 5m/3600 s, P2 5m/1800 s, P3 15m/3600 s); worst-case 5m intrabar (same bar = SL), gap at the worse open; actual funding; costs 0.12 (primary) / 0.14 / 0.11 / 0.08 %. Matched random-side null (same entries, R, 2R, timeout, 100 seeds); ablations AB_NOEMA / AB_NOSWING (1.5 ATR14 stop) / AB_PLAIN; report-only sensitivity EMA100, BRK50; 18 items per family (F1 profit, F2 vs null), BH-FDR per family; day-block bootstrap 2,000.
+- Results (pool, 0.12 %, % per trade): P1 34,357 trades gross +0.0046 net -0.1155 [-0.1224, -0.1085] win 33.7 % PF 0.585 maxDD 3,968 pp MDE 0.012; P2 40,210 gross +0.0023 net -0.1178 PF 0.483; P3 9,461 gross +0.0069 net -0.1132 PF 0.551. Null net -0.1201 / -0.1201 / -0.1202; rule minus null +0.0046 [-0.0015, +0.0107] / +0.0024 [-0.0022, +0.0069] / +0.0069 [-0.0034, +0.0173], q (F2) 0.32 / 0.40 / 0.32, p_dir 0.040 / 0.168 / 0.079. Per year net P1 -0.119 / -0.119 / -0.110. Every coin x preset net negative; no cost variant (0.14, 0.11, 0.08) net positive (best -0.069 %, P3 BRK50 at 0.08 %). Ablations and sensitivity: gross -0.007..+0.011 %, all net negative.
+- Verdict: **FAIL** (18 / 18 profit items FAIL, 18 / 18 vs-null items FAIL, 0 of 36 with q < 0.05; powered, MDE 0.008-0.018 %). No gross edge: the rule loses about the round-trip cost. Details `RULE_BASELINE_V1_RESULT.md`; machine results `D:\autofinx-ml-v4\rule_baseline_v1\results\`.
+- Tests: `tests/test_rule_baseline_v1.py` 19 (prefix invariance, swing not early, SL / TP ordering, fill timing, floor / cap, non-overlap, null planted-effect power, no holdout read, plan sha, verdict rules); whole engine suite 258 passed.
+
+
+## R-034 - 2026-10-10 - Experiment F POC v1: market structure (4H + 1H trend + 15m close-based BOS), BTCUSDT, 2023-01-01..2025-12-31 (D-053)
+- **REUSED HISTORICAL EVALUATION - NOT A FRESH FINAL HOLDOUT.** Plan `EXPERIMENT_F_POC_V1.md` sha256 `4e4ced03d76877ff6674bed4d04ba9c283405158b6354eb9c56c1dbf0b180a28` (frozen before any real-data result; no amendment). Holdout reads 0 (loader cut 2026-01-01; last signal close 2025-12-31 23:45).
+- Rule: UP = 4H BULLISH and 1H BULLISH (last completed bars) and 15m bullish close-based BOS of a confirmed swing (k 3/3/2); DOWN mirror; else WAIT. Target = next-15m-open to horizon close (15m primary; 1h, 4h secondary). Flat move excluded from accuracy.
+- Coverage (105,216 eligible 15m bars): UP 106, DOWN 68, WAIT 105,042 = 99.83 % WAIT. NOHTF variant: UP 1,149 DOWN 893 (98.06 % WAIT).
+- 15m accuracy (WAIT/flat excluded): RULE 43.10 % (n 174, Wilson95 [36.0, 50.5], UP 46.2 / DOWN 38.2; 2023 / 24 / 25 = 47.7 / 37.0 / 47.4); NOHTF 44.32 % (n 2,042, [42.2, 46.5]). Baselines on the same bars: always-UP 52.3 / 49.6, always-DOWN 47.7 / 50.4, majority(UP) same as always-UP; random 1,000 seeds mean ~50 %, rule p_dir 0.970 (RULE) / 1.000 (NOHTF). Accuracy is BELOW chance in every year and at 1h (43.7 / 43.1 %) and 4h (40.2 / 41.1 %).
+- Profit (entry next open, exit horizon close, no stop / target / leverage, 0.12 % = 0.10 fee + 0.02 slippage): 15m RULE gross +0.0243 %, net -0.0957 % per trade (PF 0.48, maxDD 19 pp, years -0.066 / -0.130 / -0.075); NOHTF gross +0.0064 %, net -0.1136 % (n 2,042, powered FAIL, MDE 0.022). 1h RULE gross -0.046 / net -0.167; 4h RULE gross -0.070 / net -0.191. At 0.14 % every row is 0.02 pp worse. Random-side null net about -0.120.
+- Does HTF alignment help? No evidence: HTF item (RULE excess minus NOHTF excess) -1.2 pp (CI90 [-7.4, +4.9]) at 15m, +0.5 pp at 1h, -0.9 pp at 4h; alignment cuts the signal count 12-fold (2,042 -> 174) and leaves the test under-powered (accuracy MDE 10.6 pp, net MDE 0.082 % vs 0.06 % allowed).
+- 15 declared items, one BH-FDR family: 0 LEAD, q = 1.0 for all; 2 FAIL (NET|NOHTF|15m, NET|NOHTF|1h), 13 INCONCLUSIVE. ETH / SOL (report-only): same picture (15m RULE gross -0.001 / -0.041 %, net -0.120 / -0.161 %; accuracy 42.7 / 38.6 %).
+- **Verdict (frozen rules): INCONCLUSIVE** (primary RULE items under-powered: 174 signals, MDE 10.6 pp / 0.082 %), substantively NO evidence of an edge: every point estimate is negative, no cost variant positive, nothing consistent in a positive direction. Observation, post-hoc and NOT a finding: accuracy is significantly below 50 % for the broader NOHTF variant (-5.7 pp, CI90 [-7.5, -3.9]) while its gross P&L is ~0 (+0.006 %), i.e. no inverted-signal profit either; nothing was tuned or inverted.
+- Tests: `experiment_f/tests/test_experiment_f.py` 24 (swing delay / no early availability, planted look-ahead caught, labels, BOS close vs wick, CHoCH states, S/R causality, HTF sync, missing / duplicate / invalid bars, real-BTC prefix invariance, rule mapping, accuracy / flat / profit accounting, holdout refusal, isolation manifest); whole engine suite 282 passed. Runtime ~30 s for BTC + ETH + SOL.
+- Machine results: `D:\autofinx-ml-v4\experiment_f_v1\poc\` (market_structure_results.txt, market_structure_predictions.csv 105,216 rows, summary.json, PLAN_SHA256.txt); code `external-predictive-engine/experiment_f/poc/market_structure_poc.py`.
+
+## 2026-10-10 � Trend Pullback v1 test
+Attached Pine source tested separately in local research runner. Development window 2022-01-01..2024-12-31: 999 trades, gross +0.0613%, net -0.0666%, PF 0.949, t -0.603, positive 3/6 coins. Forward 2025-01-01..2026-10-10: 794 trades, gross -0.1431%, net -0.2659%, PF 0.798, t -2.447, positive 1/6. Fixed rule set REJECTED; no tuning or holdout access. Full trade rows and spec: D:/autofinx-ml-v4/reports/strategy-lab/trend-pullback-v1.
