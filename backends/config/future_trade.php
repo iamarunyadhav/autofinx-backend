@@ -9,6 +9,8 @@
 $futureTradeScheduleRuntimeCommands = filter_var(env('FUTURE_TRADE_SCHEDULE_RUNTIME_COMMANDS', false), FILTER_VALIDATE_BOOL);
 
 return [
+    // Compatibility bridge while workspaces rotate to hashed tokens.
+    'allow_global_webhook_token_fallback' => filter_var(env('FUTURE_TRADE_ALLOW_GLOBAL_WEBHOOK_TOKEN_FALLBACK', true), FILTER_VALIDATE_BOOL),
     'default_signal_profile' => env('FUTURE_TRADE_DEFAULT_SIGNAL_PROFILE', 'autofinx_prime_v6_1_7_crypto'),
     'paper_trading' => filter_var(env('FUTURE_TRADE_PAPER_TRADING', true), FILTER_VALIDATE_BOOL),
     'enable_testnet_trading' => filter_var(env('FUTURE_TRADE_ENABLE_TESTNET_TRADING', false), FILTER_VALIDATE_BOOL),

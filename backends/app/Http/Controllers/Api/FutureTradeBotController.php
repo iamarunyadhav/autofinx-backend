@@ -3,10 +3,12 @@
 namespace App\Http\Controllers\Api;
 
 use App\Domain\FutureTrade\FutureTradeBacktestEngine;
+use App\Domain\FutureTrade\FutureTradeAuditService;
 use App\Domain\FutureTrade\FutureTradeBotService;
 use App\Domain\FutureTrade\FutureTradeRuntimeConnectivityService;
 use App\Domain\Market\FutureTradeLiveFeedManager;
 use App\Domain\Trading\RuntimeSafetySettingsService;
+use App\Domain\Webhooks\WorkspaceWebhookTokenService;
 use App\Http\Controllers\Controller;
 use App\Jobs\ProcessPineWebhookSignalJob;
 use App\Models\FutureTradeBacktestRun;
@@ -17,6 +19,7 @@ use App\Models\RobotSession;
 use App\Models\RobotTradeAudit;
 use App\Models\SchedulerRun;
 use App\Models\WorkspaceMember;
+use App\Models\Workspace;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -31,6 +34,7 @@ class FutureTradeBotController extends Controller
         private readonly FutureTradeBotService $bot,
         private readonly FutureTradeLiveFeedManager $liveFeedManager,
         private readonly FutureTradeBacktestEngine $backtestEngine,
+        private readonly WorkspaceWebhookTokenService $webhookTokens,
     ) {}
 
     public function status(string $workspace): JsonResponse
@@ -156,7 +160,6 @@ class FutureTradeBotController extends Controller
             $payload['workspace_id']
             ?? $payload['workspace']
             ?? $request->header('X-Workspace-Id')
-            ?? FutureTradeBotConfig::query()->value('workspace_id')
             ?? ''
         );
 
@@ -360,28 +363,12 @@ class FutureTradeBotController extends Controller
     {
         $startedAt = microtime(true);
         $receivedAt = now();
-        // Primary slot 0 always exists — used for token validation, raw audit
-        // logging, and as fallback when no symbol-specific slot is available.
-        $primary = $this->bot->getOrCreateConfig($workspace);
-        $configuredToken = trim((string) config('future_trade.pine_webhook_token', ''));
         $rawBody = (string) $request->getContent();
         $decoded = $rawBody !== '' ? json_decode($rawBody, true) : null;
         $payload = is_array($decoded) ? $decoded : $request->all();
         if ($request->attributes->get('force_future_trade_source')) {
             $payload['source'] = (string) $request->attributes->get('force_future_trade_source');
         }
-        $providedTokens = array_filter(array_map(
-            static fn ($token): string => trim((string) $token),
-            [
-                $request->bearerToken(),
-                $request->header('X-Webhook-Token'),
-                $payload['token'] ?? null,
-                $request->query('token'),
-            ]
-        ));
-
-        $tokenMatched = $configuredToken !== '' && collect($providedTokens)
-            ->contains(static fn (string $token): bool => hash_equals($configuredToken, $token));
 
         $headersSummary = [];
         foreach (['content-type', 'user-agent', 'x-forwarded-for', 'cf-connecting-ip'] as $header) {
@@ -389,30 +376,39 @@ class FutureTradeBotController extends Controller
                 $headersSummary[$header] = $request->headers->get($header);
             }
         }
-        // Raw payload always recorded against slot 0 for a single source of
-        // truth audit trail, regardless of which slot ultimately executes.
+
+        if (! Workspace::query()->whereKey($workspace)->exists()) {
+            return response()->json(['accepted' => false, 'executed' => false, 'reason' => 'workspace_not_found'], 422);
+        }
+
+        $tokenMatched = $this->webhookTokens->matches($request, $workspace, $payload);
+        if (! $tokenMatched) {
+            try {
+                app(FutureTradeAuditService::class)->recordUnauthenticatedWebhookRequest($workspace, $payload, [
+                    'receivedAt' => $receivedAt,
+                    'remoteIp' => $request->ip(),
+                    'headersSummary' => $headersSummary,
+                    'parseStatus' => $rawBody === '' ? 'empty' : (json_last_error() === JSON_ERROR_NONE ? 'json' : 'invalid_json'),
+                ]);
+            } catch (Throwable $exception) {
+                Log::error('PINE_WEBHOOK_RAW_AUDIT_FAILED', ['workspace' => $workspace, 'message' => $exception->getMessage()]);
+            }
+
+            return response()->json(['accepted' => false, 'executed' => false, 'reason' => 'invalid_or_missing_webhook_token'], 401);
+        }
+
+        // Authentication must succeed before a Future Trade config can be created.
+        $primary = $this->bot->getOrCreateConfig($workspace);
         try {
             $this->bot->recordRawPineWebhookRequest($primary, $payload, [
                 'rawBody' => $rawBody,
                 'remoteIp' => $request->ip(),
                 'headersSummary' => $headersSummary,
                 'parseStatus' => $rawBody === '' ? 'empty' : (json_last_error() === JSON_ERROR_NONE ? 'json' : 'invalid_json'),
-                'tokenStatus' => $tokenMatched ? 'valid' : 'invalid_or_missing',
+                'tokenStatus' => 'valid',
             ]);
         } catch (Throwable $exception) {
-            Log::error('PINE_WEBHOOK_RAW_AUDIT_FAILED', [
-                'workspace' => $workspace,
-                'remoteIp' => $request->ip(),
-                'message' => $exception->getMessage(),
-            ]);
-        }
-
-        if (! $tokenMatched) {
-            return response()->json([
-                'accepted' => false,
-                'executed' => false,
-                'reason' => 'invalid_or_missing_webhook_token',
-            ], 401);
+            Log::error('PINE_WEBHOOK_RAW_AUDIT_FAILED', ['workspace' => $workspace, 'message' => $exception->getMessage()]);
         }
 
         if (! $primary->enabled) {

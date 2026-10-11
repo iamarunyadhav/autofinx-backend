@@ -112,6 +112,7 @@ Route::prefix('v1')->group(function () {
     Route::post('future-trade/user-stream/ingest', [FutureTradeUserStreamController::class, 'ingest'])->middleware('throttle:240,1');
     Route::post('future-trade/webhook/tradingview', [FutureTradeBotController::class, 'tradingViewWebhook'])->middleware('throttle:120,1');
     Route::post('future-trade/pine-webhook/{workspace}', [FutureTradeBotController::class, 'pineWebhook'])->middleware('throttle:120,1');
+    Route::post('strategy-lab/webhook/{workspace}', [\App\Http\Controllers\Api\StrategyLabWebhookController::class, 'ingest'])->middleware('throttle:120,1');
     Route::post('podium/webhook', [PodiumWebhookController::class, 'handle'])->middleware('throttle:120,1');
 
     Route::middleware('auth:sanctum')->group(function () {
@@ -156,6 +157,8 @@ Route::prefix('v1')->group(function () {
             Route::post('/versions/{version}/deep-test', [$lab, 'deepTest'])->middleware('throttle:10,1,strategy-lab-write');
             Route::post('/runs/{run}/cancel', [$lab, 'cancel'])->middleware('throttle:20,1,strategy-lab-write');
             Route::post('/runs/{run}/decision', [$lab, 'decide'])->middleware('throttle:20,1,strategy-lab-write');
+            Route::post('/webhook-token/rotate', [\App\Http\Controllers\Api\StrategyLabWebhookController::class, 'rotate'])->middleware('throttle:10,1,strategy-lab-write');
+            Route::get('/shadow-report', [\App\Http\Controllers\Api\StrategyLabWebhookController::class, 'report'])->middleware('throttle:120,1,strategy-lab-read');
         });
         // Market Context (shadow-only, read-only; flag AUTOFINX_MARKET_CONTEXT_ENABLED)
         Route::get('workspaces/{workspace}/market-context/{assetClass}/{instrument}', [\App\Http\Controllers\Api\MarketContextController::class, 'show'])->middleware('throttle:60,1');

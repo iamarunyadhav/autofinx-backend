@@ -12,6 +12,27 @@ use Illuminate\Support\Str;
 
 class FutureTradeAuditService
 {
+    public function recordUnauthenticatedWebhookRequest(string $workspace, array $payload, array $context = []): FutureTradeWebhookAudit
+    {
+        $receivedAt = isset($context['receivedAt']) ? Carbon::parse((string) $context['receivedAt']) : now();
+        $symbol = $this->normalizeSymbol((string) ($payload['symbol'] ?? $payload['ticker'] ?? ''));
+        $signal = strtoupper(str_replace(['-', ' '], '_', trim((string) ($payload['signal'] ?? $payload['action'] ?? $payload['side'] ?? ''))));
+        $barTime = $this->parseBarTime($payload);
+
+        return FutureTradeWebhookAudit::create([
+            'future_trade_bot_config_id' => null, 'workspace_id' => $workspace, 'source' => 'tradingview',
+            'received_at' => $receivedAt, 'request_ip' => $context['remoteIp'] ?? null, 'token_valid' => false,
+            'raw_payload' => $this->safePayload($payload), 'symbol' => $symbol ?: null,
+            'timeframe' => (string) ($payload['timeframe'] ?? $payload['interval'] ?? ''),
+            'signal' => $signal ?: null, 'normalized_signal' => $this->normalizeSignal($signal) ?: null,
+            'price' => $this->positiveFloat($payload['price'] ?? $payload['close'] ?? null), 'bar_time' => $barTime,
+            'bar_confirmed' => $this->barConfirmed($payload), 'profile' => (string) ($payload['profile'] ?? $payload['profile_id'] ?? ''),
+            'latency_from_bar_close_ms' => $barTime ? max(0, $barTime->diffInMilliseconds($receivedAt, false)) : null,
+            'validation_status' => 'rejected', 'reject_reason' => 'invalid_token',
+            'context' => ['parseStatus' => $context['parseStatus'] ?? null, 'headersSummary' => $context['headersSummary'] ?? []],
+        ]);
+    }
+
     public function recordWebhookRequest(FutureTradeBotConfig $config, array $payload, array $context = []): FutureTradeWebhookAudit
     {
         $receivedAt = isset($context['receivedAt']) ? Carbon::parse((string) $context['receivedAt']) : now();
