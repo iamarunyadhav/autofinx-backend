@@ -52,6 +52,9 @@ class QuickTradeManualController extends Controller
                 'max_leverage' => (float) config('quick_trade_manual.max_leverage'),
                 'min_sl_pct' => (float) config('quick_trade_manual.min_sl_pct'),
                 'max_sl_pct' => (float) config('quick_trade_manual.max_sl_pct'),
+                'min_trailing_pct' => (float) config('quick_trade_manual.min_trailing_pct'),
+                'max_trailing_pct' => (float) config('quick_trade_manual.max_trailing_pct'),
+                'max_trailing_activation_pct' => (float) config('quick_trade_manual.max_trailing_activation_pct'),
                 'max_open_positions' => (int) config('quick_trade_manual.max_open_positions'),
                 'price_tolerance_pct' => (float) config('quick_trade_manual.price_tolerance_pct'),
             ],
@@ -170,6 +173,8 @@ class QuickTradeManualController extends Controller
             // Mandatory stop-loss, as a PRICE-MOVEMENT percentage (not margin %).
             'sl_pct' => 'required|numeric|gt:0',
             'tp_pct' => 'nullable|numeric|gt:0',
+            'trailing_pct' => 'nullable|numeric|gt:0',
+            'trailing_activation_pct' => 'nullable|numeric|gte:0',
             'integration_id' => 'nullable|uuid',
             'reference_price' => 'nullable|numeric|gt:0',
             'idempotency_key' => $isOpen ? 'nullable|string|max:120' : 'nullable',

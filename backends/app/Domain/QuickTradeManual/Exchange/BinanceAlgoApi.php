@@ -65,8 +65,16 @@ final class BinanceAlgoApi
             'symbol' => $p['symbol'],
             'side' => $p['side'],
             'type' => $p['type'],
-            self::TRIGGER_PARAM => $p['trigger_price'],
-            'closePosition' => 'true',          // whole position; quantity MUST be omitted
+        ];
+        if ($p['type'] === 'TRAILING_STOP_MARKET') {
+            $params['closePosition'] = 'true';
+            $params['callbackRate'] = $p['callback_rate'];
+            if (! empty($p['activation_price'])) $params['activationPrice'] = $p['activation_price'];
+        } else {
+            $params['triggerPrice'] = $p['trigger_price'];
+            $params['closePosition'] = 'true';
+        }
+        $params += [
             'workingType' => $p['working_type'],
             self::CLIENT_ID_PARAM => $p['client_algo_id'],
         ];
@@ -89,7 +97,9 @@ final class BinanceAlgoApi
             'symbol' => strtoupper((string) ($json['symbol'] ?? '')),
             'side' => strtoupper((string) ($json['side'] ?? '')),
             'type' => strtoupper((string) ($json['orderType'] ?? $json['type'] ?? '')),
-            'trigger_price' => (float) ($json[self::TRIGGER_PARAM] ?? $json['stopPrice'] ?? 0),
+            'trigger_price' => (float) ($json[self::TRIGGER_PARAM] ?? $json['stopPrice'] ?? $json['activationPrice'] ?? 0),
+            'callback_rate' => isset($json['callbackRate']) ? (float) $json['callbackRate'] : null,
+            'activation_price' => isset($json['activationPrice']) ? (float) $json['activationPrice'] : null,
             'close_position' => $closePosition === null ? null : filter_var($closePosition, FILTER_VALIDATE_BOOLEAN),
         ];
     }

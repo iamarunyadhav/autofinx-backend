@@ -77,6 +77,20 @@ class ManualPreviewService
             $tpPct = round((float) $in['tp_pct'], 4);
         }
 
+        $trailingPct = null;
+        $activationPct = null;
+        if (isset($in['trailing_pct']) && $in['trailing_pct'] !== '' && $in['trailing_pct'] !== null) {
+            $trailingPct = round((float) $in['trailing_pct'], 4);
+            $minTrail = (float) config('quick_trade_manual.min_trailing_pct', 0.1);
+            $maxTrail = (float) config('quick_trade_manual.max_trailing_pct', 5.0);
+            if ($trailingPct < $minTrail || $trailingPct > $maxTrail) throw new RuntimeException("invalid_trailing: Trailing distance must be between {$minTrail}% and {$maxTrail}%.");
+            if (isset($in['trailing_activation_pct']) && $in['trailing_activation_pct'] !== '' && $in['trailing_activation_pct'] !== null) {
+                $activationPct = round((float) $in['trailing_activation_pct'], 4);
+                $maxActivation = (float) config('quick_trade_manual.max_trailing_activation_pct', 100);
+                if ($activationPct < 0 || $activationPct > $maxActivation) throw new RuntimeException("invalid_trailing_activation: Activation must be between 0% and {$maxActivation}%.");
+            }
+        }
+
         return [
             'symbol' => $symbol,
             'direction' => $direction,
@@ -84,6 +98,8 @@ class ManualPreviewService
             'leverage' => $leverage,
             'sl_pct' => $slPct,
             'tp_pct' => $tpPct,
+            'trailing_pct' => $trailingPct,
+            'trailing_activation_pct' => $activationPct,
         ];
     }
 

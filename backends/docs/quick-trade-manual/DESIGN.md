@@ -13,6 +13,7 @@ Quick Trade Time-Based (must stay byte-for-byte unchanged in behavior):
 - Expiry exit: `quick-trades:settle` every 10 s (`routes/console.php:118-124`) -> `QuickTradeService::settleExpired()` (`:503`), which selects ONLY `quick_trades`
   rows with `status='open' AND expires_at <= now()`; close = MARKET `reduceOnly` (`closeTimedTrade`, `:320`).
 - Optional SL/TP are SOFTWARE-polled (`CheckQuickTradeStopLossJob`, 1 s loop) and close with a MARKET order. They are not exchange orders.
+- Optional trailing protection is an exchange-native `TRAILING_STOP_MARKET` leg. `trailing_pct` is the callback/give-back distance; `trailing_activation_pct` delays arming until the position has moved favourably. The hard SL remains independent and mandatory.
 - Wallet: `LiveWalletService::reserveStake / settleReservation` (local accounting of the stake).
 - Gates: `TradingEnvironmentGuard::assertWorkspaceMode` (workspace mode + live switch), `RiskGuardService::enforceOrFail`,
   `WorkspaceLiveRiskService::assertQuickTradeExposureAllowed` (counts only `quick_trades` + `positions`), `LeverageValidationService` (real leverage brackets,
@@ -70,7 +71,7 @@ and the position is emergency-closed (see 4). It can cost fees; it can never lea
    is closed at once. Additionally `allow_mainnet` (default false) keeps the mode testnet-only until the owner attests the checklist.
 8. Flags (all default OFF): `config('quick_trade_manual.enabled')` (env `QUICK_TRADE_MANUAL_ENABLED`) AND workspace `Setting(group=quick_trade_manual,key=enabled)`;
    plus the existing live gates (workspace live mode + `live_ready`). Mainnet also needs `QUICK_TRADE_MANUAL_ALLOW_MAINNET`.
-9. SL/TP editing is NOT built (replacement semantics on the algo API are unverified; a cancel-then-place gap would leave a naked position).
+9. SL/TP/trailing editing is NOT built (replacement semantics on the algo API are unverified; a cancel-then-place gap would leave a naked position).
 
 ## 4. Lifecycle and guarded transitions
 

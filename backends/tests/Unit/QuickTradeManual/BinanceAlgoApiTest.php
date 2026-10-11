@@ -24,6 +24,19 @@ test('algo placement params: CONDITIONAL, closePosition=true, no quantity, no re
     ])->and($p)->not->toHaveKey('quantity')->and($p)->not->toHaveKey('reduceOnly')->and($p)->not->toHaveKey('stopPrice');
 });
 
+test('trailing placement uses callbackRate and optional activationPrice instead of triggerPrice', function () {
+    $p = BinanceAlgoApi::placeParams([
+        'symbol' => 'BTCUSDT', 'side' => 'SELL', 'position_side' => null,
+        'type' => 'TRAILING_STOP_MARKET', 'callback_rate' => '0.4000',
+        'activation_price' => '80800.0', 'client_algo_id' => 'qtm-trailing-x-1', 'working_type' => 'MARK_PRICE',
+    ]);
+    expect($p)->toMatchArray([
+        'algoType' => 'CONDITIONAL', 'symbol' => 'BTCUSDT', 'side' => 'SELL', 'type' => 'TRAILING_STOP_MARKET',
+        'closePosition' => 'true', 'callbackRate' => '0.4000', 'activationPrice' => '80800.0',
+        'workingType' => 'MARK_PRICE', 'clientAlgoId' => 'qtm-trailing-x-1',
+    ])->not->toHaveKey('triggerPrice');
+});
+
 test('hedge mode adds positionSide to the algo order', function () {
     $p = BinanceAlgoApi::placeParams(['symbol' => 'BTCUSDT', 'side' => 'SELL', 'position_side' => 'LONG', 'type' => 'STOP_MARKET', 'trigger_price' => '1', 'client_algo_id' => 'a', 'working_type' => 'MARK_PRICE']);
     expect($p['positionSide'])->toBe('LONG');

@@ -74,6 +74,25 @@ class ManualProtectionService
             }
         }
 
+        // Optional exchange-native trailing exit. Binance tracks the favourable
+        // peak/trough and only closes after the callback distance is breached;
+        // this avoids server polling latency and naturally tolerates a small
+        // reversal before the close.
+        if ($p->trailing_pct !== null) {
+            $activation = null;
+            if ($p->trailing_activation_pct !== null && (float) $p->trailing_activation_pct > 0) {
+                $activation = $p->isLong()
+                    ? $entry * (1 + (float) $p->trailing_activation_pct / 100)
+                    : $entry * (1 - (float) $p->trailing_activation_pct / 100);
+                $this->sm->patch($p, ['trailing_activation_price' => ManualTradeMath::formatToStep($activation, $tick)]);
+            }
+            $trail = $this->ensureLeg($p, $gw, 'trailing', $activation ?? 0.0, $tick);
+            if (! $trail['ok']) {
+                $this->sm->patch($p, ['trailing_status' => 'FAILED']);
+                $this->sm->note($p, 'trailing_not_active', 'system', ['reason' => $trail['reason']], 'high');
+            }
+        }
+
         // Cross-check against the exchange's own liquidation price (the pre-trade figure was an estimate).
         try {
             $pos = $gw->position($p->symbol, $p->positionSide());
@@ -102,7 +121,8 @@ class ManualProtectionService
     public function ensureLeg(P $p, ManualExchangeGateway $gw, string $leg, float $trigger, float $tick): array
     {
         $isSl = $leg === 'sl';
-        $type = $isSl ? BinanceAlgoApi::TYPE_STOP : BinanceAlgoApi::TYPE_TAKE_PROFIT;
+        $isTrailing = $leg === 'trailing';
+        $type = $isSl ? BinanceAlgoApi::TYPE_STOP : ($isTrailing ? 'TRAILING_STOP_MARKET' : BinanceAlgoApi::TYPE_TAKE_PROFIT);
         $idCol = $leg.'_algo_id';
         $clientCol = $leg.'_client_algo_id';
 
@@ -139,6 +159,8 @@ class ManualProtectionService
                 'position_side' => $p->positionSide(),
                 'type' => $type,
                 'trigger_price' => ManualTradeMath::formatToStep($trigger, $tick),
+                'callback_rate' => $isTrailing ? number_format((float) $p->trailing_pct, 4, '.', '') : null,
+                'activation_price' => $isTrailing && $trigger > 0 ? ManualTradeMath::formatToStep($trigger, $tick) : null,
                 'client_algo_id' => $clientId,
                 'working_type' => (string) config('quick_trade_manual.working_type', 'MARK_PRICE'),
             ]);
@@ -215,7 +237,7 @@ class ManualProtectionService
     public function cleanup(P $p, ManualExchangeGateway $gw): bool
     {
         $clear = true;
-        foreach (['sl', 'tp'] as $leg) {
+        foreach (['sl', 'tp', 'trailing'] as $leg) {
             $idCol = $leg.'_algo_id';
             $clientCol = $leg.'_client_algo_id';
             $statusCol = $leg.'_status';
@@ -274,6 +296,10 @@ class ManualProtectionService
         }
         if ($q['close_position'] === false) {
             return false;
+        }
+
+        if ($type === 'TRAILING_STOP_MARKET') {
+            return isset($q['callback_rate']) && abs((float) $q['callback_rate'] - (float) $p->trailing_pct) <= 0.0001;
         }
 
         return abs($q['trigger_price'] - $trigger) <= $tick * 0.5 + 1e-12;

@@ -201,6 +201,9 @@ class ManualExitService
         if ($p->tp_pct !== null && in_array($legStatus('tp'), BinanceAlgoApi::TRIGGERED_STATUSES, true)) {
             return ['reason' => 'take_profit', 'basis' => 'exchange_algo_status'];
         }
+        if ($p->trailing_pct !== null && in_array($legStatus('trailing'), BinanceAlgoApi::TRIGGERED_STATUSES, true)) {
+            return ['reason' => 'trailing_stop', 'basis' => 'exchange_algo_status'];
+        }
         $since = $p->opened_at ? $p->opened_at->getTimestamp() * 1000 : 0;
         if ($gw->liquidationSince($p->symbol, $since) === true) {
             return ['reason' => 'liquidation', 'basis' => 'exchange_force_orders'];

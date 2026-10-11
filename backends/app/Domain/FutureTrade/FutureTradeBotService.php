@@ -11409,6 +11409,7 @@ class FutureTradeBotService
         $tpClientId = $this->stabilitySvc()->deterministicClientOrderId($baseKey, 'tp');
 
         $metaUpdate = [];
+        $slPlaced = false;
 
         try {
             $routed = app(FutureTradeOrderRouter::class)->placeReduceOnlyStop($config, $client, $symbol, $closeSide, 'STOP_MARKET', $slPrice, $slClientId, 'MARK_PRICE', [
@@ -11424,10 +11425,28 @@ class FutureTradeBotService
             $this->log($config->fresh('state'), 'EXCHANGE_SL_PLACED', $symbol, null, 0,
                 "Exchange-side SL placed at {$slPrice} (clientOrderId: {$slClientId})",
                 ['orderId' => $slResponse['orderId'] ?? null, 'price' => $slPrice]);
+            $slPlaced = true;
         } catch (Throwable $e) {
             $this->log($config->fresh('state'), 'EXCHANGE_SL_FAILED', $symbol, null, 0,
                 'Exchange-side SL placement failed (server loop is backup): '.$e->getMessage(),
                 $this->exchangeStopFailureContext($e, 'STOP_MARKET', $slClientId));
+        }
+
+        if (! $slPlaced) {
+            $this->log($config->fresh('state'), 'EXCHANGE_SL_FAIL_CLOSED', $symbol, null, 0,
+                'Exchange-side SL was not confirmed; issuing an immediate reduce-only emergency close.',
+                ['protection' => 'NO_EXCHANGE_SIDE_STOP_CONFIRMED', 'reason' => 'stop_loss_placement_failed']);
+            try {
+                $this->closeLivePosition($config->fresh('state'), $entry, 'EXCHANGE_SL_PLACEMENT_FAILED');
+            } catch (Throwable $closeError) {
+                Log::critical('[FT SL FAIL-CLOSED CLOSE FAILED] position may remain open', [
+                    'symbol' => $symbol,
+                    'logical_trade_id' => (string) $logical->id,
+                    'error' => mb_substr($closeError->getMessage(), 0, 500),
+                ]);
+            }
+
+            return;
         }
 
         try {

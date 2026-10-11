@@ -1,0 +1,362 @@
+//@version=6
+// AutoFinX UT Bot — Unified
+// Merges:
+//   • Original "UT Bot" (HPotter, v4) — identical trailing-stop math, Buy/Sell labels, bar colour
+//   • "UT Bot — Trade Plan Labels + TP/SL (Research)" — filters, ATR SL, TP1/TP2, risk sizing
+// Plus: realistic costs, non-repainting HTF filter, AutoFinX webhook JSON, status panel,
+//       volatility range cone + bull/bear scenario levels (range, NOT a prediction).
+//
+// Trade mode:
+//   "Filtered"  → trades only UT signals that pass the enabled filters (recommended)
+//   "Raw UT"    → trades every UT Bot signal (same as the original indicator) — for comparison
+// Alerts: create ONE alert on this strategy, message = {{strategy.order.alert_message}}
+strategy(
+     "AutoFinX UT Bot — Unified",
+     overlay = true,
+     initial_capital = 10000,
+     pyramiding = 0,
+     commission_type = strategy.commission.percent,
+     commission_value = 0.05,
+     slippage = 150,
+     calc_on_every_tick = false,
+     process_orders_on_close = true,
+     max_labels_count = 500,
+     max_lines_count = 500
+)
+
+// ───────────────── Inputs ─────────────────
+grpUT     = "UT Bot"
+grpMode   = "Trade Mode"
+grpFilter = "Signal Filters (Filtered mode only)"
+grpRisk   = "Risk / Targets"
+grpShow   = "Visuals"
+grpHook   = "Webhook"
+
+src        = input.source(close, "Source", group = grpUT)
+keyValue   = input.float(2.5, "Key value (sensitivity) — original default 3", minval = 0.1, step = 0.25, group = grpUT)
+atrPeriod  = input.int(10, "ATR period", minval = 1, group = grpUT)
+
+tradeMode  = input.string("Filtered", "Trade mode", options = ["Filtered", "Raw UT"], group = grpMode)
+cooldown   = input.int(2, "Bars cooldown after entry", minval = 0, group = grpMode)
+
+useEma     = input.bool(true, "Use chart EMA trend filter", group = grpFilter)
+emaLen     = input.int(200, "Chart EMA length", minval = 2, group = grpFilter)
+useHTF     = input.bool(true, "Require HTF alignment", group = grpFilter)
+htf        = input.timeframe("240", "Higher-timeframe trend", group = grpFilter)
+htfEmaLen  = input.int(50, "HTF EMA length", minval = 2, group = grpFilter)
+
+useAdx     = input.bool(true, "Use ADX filter", group = grpFilter)
+adxLen     = input.int(14, "DI length", minval = 2, group = grpFilter)
+adxSmooth  = input.int(14, "ADX smoothing", minval = 2, group = grpFilter)
+adxMin     = input.float(20.0, "Minimum ADX", minval = 1, step = 0.5, group = grpFilter)
+
+useRsi     = input.bool(true, "Use RSI limit", group = grpFilter)
+rsiLen     = input.int(14, "RSI length", minval = 2, group = grpFilter)
+rsiLongMax = input.float(75.0, "Long maximum RSI", minval = 50, maxval = 100, group = grpFilter)
+rsiShortMin= input.float(25.0, "Short minimum RSI", minval = 0, maxval = 50, group = grpFilter)
+
+useAtrPct  = input.bool(true, "Use volatility filter", group = grpFilter)
+atrPctMin  = input.float(0.15, "Minimum ATR %", minval = 0, step = 0.05, group = grpFilter)
+
+slAtrMult  = input.float(1.5, "Stop-loss: ATR multiplier", minval = 0.1, step = 0.1, group = grpRisk)
+tp1R       = input.float(1.0, "TP1: R multiple", minval = 0.1, step = 0.1, group = grpRisk)
+tp2R       = input.float(2.0, "TP2: R multiple", minval = 0.1, step = 0.1, group = grpRisk)
+tp1Qty     = input.float(50.0, "Close % at TP1", minval = 1, maxval = 99, step = 1, group = grpRisk)
+riskPct    = input.float(1.0, "Risk per trade (% of equity)", minval = 0.1, maxval = 5, step = 0.1, group = grpRisk)
+exitOnOpposite = input.bool(true, "Close trade on opposite UT signal", group = grpRisk)
+
+showRaw    = input.bool(true, "Show UT Bot Buy/Sell labels (original style)", group = grpShow)
+showLabels = input.bool(true, "Show trade Entry / SL / TP labels", group = grpShow)
+showLevels = input.bool(true, "Show active Entry / SL / TP levels", group = grpShow)
+showEMA    = input.bool(true, "Show EMA", group = grpShow)
+showUTStop = input.bool(true, "Show UT trailing stop", group = grpShow)
+showBarClr = input.bool(false, "Colour bars by UT side (original style)", group = grpShow)
+showPanel  = input.bool(true, "Show status panel", group = grpShow)
+
+strategyId = input.string("ut_unified_v1", "Strategy ID (sent to AutoFinX)", group = grpHook)
+
+// ───────────────── UT Bot — identical to original HPotter logic ─────────────────
+atr   = ta.atr(atrPeriod)
+nLoss = keyValue * atr
+
+var float utStop = na
+prevStop = nz(utStop[1], 0)
+utStop := src > prevStop and src[1] > prevStop ? math.max(prevStop, src - nLoss) :
+     src < prevStop and src[1] < prevStop ? math.min(prevStop, src + nLoss) :
+     src > prevStop ? src - nLoss : src + nLoss
+
+var int utPos = 0
+utPos := src[1] < prevStop and src > prevStop ? 1 : src[1] > prevStop and src < prevStop ? -1 : utPos
+
+rawBuy  = ta.crossover(src, utStop)
+rawSell = ta.crossunder(src, utStop)
+
+// ───────────────── Filters ─────────────────
+ema = ta.ema(close, emaLen)
+emaLongOk  = not useEma or (close > ema and ema > ema[3])
+emaShortOk = not useEma or (close < ema and ema < ema[3])
+
+// Non-repainting: last CLOSED HTF bar — same value in backtest and realtime.
+htfClose = request.security(syminfo.tickerid, htf, close[1], lookahead = barmerge.lookahead_on)
+htfEma   = request.security(syminfo.tickerid, htf, ta.ema(close, htfEmaLen)[1], lookahead = barmerge.lookahead_on)
+htfLongOk  = not useHTF or htfClose > htfEma
+htfShortOk = not useHTF or htfClose < htfEma
+
+[plusDI, minusDI, adx] = ta.dmi(adxLen, adxSmooth)
+rsi = ta.rsi(close, rsiLen)
+atrPct = close != 0 ? atr / close * 100 : 0.0
+
+adxLongOk   = not useAdx or (adx >= adxMin and plusDI > minusDI)
+adxShortOk  = not useAdx or (adx >= adxMin and minusDI > plusDI)
+rsiLongOk   = not useRsi or rsi <= rsiLongMax
+rsiShortOk  = not useRsi or rsi >= rsiShortMin
+volatilityOk = not useAtrPct or atrPct >= atrPctMin
+
+filtersLongOk  = emaLongOk  and htfLongOk  and adxLongOk  and rsiLongOk  and volatilityOk
+filtersShortOk = emaShortOk and htfShortOk and adxShortOk and rsiShortOk and volatilityOk
+
+rawMode = tradeMode == "Raw UT"
+
+var int lastEntryBar = na
+cooldownOk = na(lastEntryBar) or bar_index - lastEntryBar >= cooldown
+
+longSignal  = rawBuy  and barstate.isconfirmed and cooldownOk and (rawMode or filtersLongOk)
+shortSignal = rawSell and barstate.isconfirmed and cooldownOk and (rawMode or filtersShortOk)
+
+// ───────────────── Webhook JSON ─────────────────
+num(float v) => str.tostring(v, "#.########")
+
+entryJson(string side, float entry, float sl, float tp1, float tp2) =>
+    '{"source":"tradingview","strategy_id":"' + strategyId + '","mode":"' + tradeMode + '","event":"entry","symbol":"' + syminfo.ticker +
+     '","side":"' + side + '","timeframe":"' + timeframe.period + '","bar_time":' + str.tostring(time) +
+     ',"entry":' + num(entry) + ',"sl":' + num(sl) + ',"tp1":' + num(tp1) + ',"tp2":' + num(tp2) +
+     ',"atr_pct":' + num(atrPct) + ',"adx":' + num(adx) + ',"rsi":' + num(rsi) + '}'
+
+exitJson(string side, string reason) =>
+    '{"source":"tradingview","strategy_id":"' + strategyId + '","event":"exit","symbol":"' + syminfo.ticker +
+     '","side":"' + side + '","reason":"' + reason + '","timeframe":"' + timeframe.period +
+     '","bar_time":' + str.tostring(time) + ',"price":' + num(close) + '}'
+
+// ───────────────── Trade plan ─────────────────
+var float entryPrice = na
+var float stopPrice  = na
+var float tp1Price   = na
+var float tp2Price   = na
+var bool tp1Touched = false
+
+riskDistance = atr * slAtrMult
+riskCash = strategy.equity * riskPct / 100
+qty = riskDistance > 0 ? riskCash / riskDistance : 0.0
+
+newLong  = longSignal  and strategy.position_size <= 0
+newShort = shortSignal and strategy.position_size >= 0
+
+if newLong
+    entryPrice := close
+    stopPrice := close - riskDistance
+    tp1Price := close + riskDistance * tp1R
+    tp2Price := close + riskDistance * tp2R
+    tp1Touched := false
+    lastEntryBar := bar_index
+    strategy.entry("Long", strategy.long, qty = qty, alert_message = entryJson("buy", entryPrice, stopPrice, tp1Price, tp2Price))
+    if showLabels
+        label.new(bar_index, low,
+             "BUY\nEntry: " + str.tostring(entryPrice, format.mintick) +
+             "\nSL: " + str.tostring(stopPrice, format.mintick) +
+             "\nTP1: " + str.tostring(tp1Price, format.mintick) +
+             "\nTP2: " + str.tostring(tp2Price, format.mintick),
+             style = label.style_label_up, color = color.green, textcolor = color.white, size = size.small)
+
+if newShort
+    entryPrice := close
+    stopPrice := close + riskDistance
+    tp1Price := close - riskDistance * tp1R
+    tp2Price := close - riskDistance * tp2R
+    tp1Touched := false
+    lastEntryBar := bar_index
+    strategy.entry("Short", strategy.short, qty = qty, alert_message = entryJson("sell", entryPrice, stopPrice, tp1Price, tp2Price))
+    if showLabels
+        label.new(bar_index, high,
+             "SELL\nEntry: " + str.tostring(entryPrice, format.mintick) +
+             "\nSL: " + str.tostring(stopPrice, format.mintick) +
+             "\nTP1: " + str.tostring(tp1Price, format.mintick) +
+             "\nTP2: " + str.tostring(tp2Price, format.mintick),
+             style = label.style_label_down, color = color.red, textcolor = color.white, size = size.small)
+
+// ───────────────── Exits ─────────────────
+if strategy.position_size > 0 and not na(stopPrice)
+    strategy.exit("Long TP1", from_entry = "Long", stop = stopPrice, limit = tp1Price, qty_percent = tp1Qty,
+         alert_profit = exitJson("buy", "tp1"), alert_loss = exitJson("buy", "sl"))
+    strategy.exit("Long TP2", from_entry = "Long", stop = stopPrice, limit = tp2Price, qty_percent = 100 - tp1Qty,
+         alert_profit = exitJson("buy", "tp2"), alert_loss = exitJson("buy", "sl"))
+
+if strategy.position_size < 0 and not na(stopPrice)
+    strategy.exit("Short TP1", from_entry = "Short", stop = stopPrice, limit = tp1Price, qty_percent = tp1Qty,
+         alert_profit = exitJson("sell", "tp1"), alert_loss = exitJson("sell", "sl"))
+    strategy.exit("Short TP2", from_entry = "Short", stop = stopPrice, limit = tp2Price, qty_percent = 100 - tp1Qty,
+         alert_profit = exitJson("sell", "tp2"), alert_loss = exitJson("sell", "sl"))
+
+exitLongSignal  = exitOnOpposite and strategy.position_size > 0 and rawSell and barstate.isconfirmed
+exitShortSignal = exitOnOpposite and strategy.position_size < 0 and rawBuy  and barstate.isconfirmed
+
+if exitLongSignal
+    strategy.close("Long", comment = "Exit Long: opposite UT signal", alert_message = exitJson("buy", "opposite_signal"))
+    if showLabels
+        label.new(bar_index, high, "EXIT LONG", style = label.style_label_down, color = color.orange, textcolor = color.white, size = size.tiny)
+
+if exitShortSignal
+    strategy.close("Short", comment = "Exit Short: opposite UT signal", alert_message = exitJson("sell", "opposite_signal"))
+    if showLabels
+        label.new(bar_index, low, "EXIT SHORT", style = label.style_label_up, color = color.orange, textcolor = color.white, size = size.tiny)
+
+longTp1Hit  = strategy.position_size > 0 and not tp1Touched and high >= tp1Price
+shortTp1Hit = strategy.position_size < 0 and not tp1Touched and low  <= tp1Price
+if longTp1Hit or shortTp1Hit
+    tp1Touched := true
+    if showLabels
+        label.new(bar_index, close, "TP1 HIT", style = label.style_label_left, color = color.aqua, textcolor = color.black, size = size.tiny)
+
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    entryPrice := na
+    stopPrice := na
+    tp1Price := na
+    tp2Price := na
+    tp1Touched := false
+
+// ───────────────── Plots ─────────────────
+utColor = utPos == 1 ? color.green : utPos == -1 ? color.red : color.blue
+plot(showUTStop ? utStop : na, "UT trailing stop", color = utColor, linewidth = 2)
+plot(showEMA and useEma ? ema : na, "EMA", color = color.orange, linewidth = 2)
+
+// Original-style UT labels — only where no trade was opened, so they never overlap the trade label.
+plotshape(showRaw and rawBuy  and not newLong,  "UT Buy",  shape.labelup,   location.belowbar, color.new(color.green, 40), text = "Buy",  textcolor = color.white, size = size.tiny)
+plotshape(showRaw and rawSell and not newShort, "UT Sell", shape.labeldown, location.abovebar, color.new(color.red, 40),   text = "Sell", textcolor = color.white, size = size.tiny)
+
+barcolor(showBarClr ? (src > utStop ? color.green : color.red) : na)
+
+plot(showLevels and strategy.position_size != 0 ? entryPrice : na, "Active Entry", color = color.blue,  linewidth = 2, style = plot.style_linebr)
+plot(showLevels and strategy.position_size != 0 ? stopPrice  : na, "Active SL",    color = color.red,   linewidth = 2, style = plot.style_linebr)
+plot(showLevels and strategy.position_size != 0 ? tp1Price   : na, "Active TP1",   color = color.aqua,  linewidth = 2, style = plot.style_linebr)
+plot(showLevels and strategy.position_size != 0 ? tp2Price   : na, "Active TP2",   color = color.lime,  linewidth = 2, style = plot.style_linebr)
+
+plot(adx,    "ADX diagnostic",   display = display.data_window)
+plot(rsi,    "RSI diagnostic",   display = display.data_window)
+plot(atrPct, "ATR % diagnostic", display = display.data_window)
+
+// ───────────────── Status panel ─────────────────
+okTxt(bool b) => b ? "✅" : "❌"
+var table panel = table.new(position.top_right, 3, 11, bgcolor = color.new(color.black, 15), border_width = 1, border_color = color.gray)
+
+if showPanel and (barstate.islast or barstate.islastconfirmedhistory)
+    utBull = src >= utStop
+    table.cell(panel, 0, 0, "Mode: " + tradeMode, text_color = color.white, text_size = size.small)
+    table.cell(panel, 1, 0, "BUY",  text_color = color.lime, text_size = size.small)
+    table.cell(panel, 2, 0, "SELL", text_color = color.red,  text_size = size.small)
+
+    table.cell(panel, 0, 1, "UT side", text_color = color.white, text_size = size.small)
+    table.cell(panel, 1, 1, utBull ? "bull" : "needs cross up",   text_color = color.white, text_size = size.small)
+    table.cell(panel, 2, 1, utBull ? "needs cross down" : "bear", text_color = color.white, text_size = size.small)
+
+    table.cell(panel, 0, 2, useEma ? "EMA " + str.tostring(emaLen) : "EMA (off)", text_color = color.white, text_size = size.small)
+    table.cell(panel, 1, 2, okTxt(emaLongOk),  text_size = size.small)
+    table.cell(panel, 2, 2, okTxt(emaShortOk), text_size = size.small)
+
+    table.cell(panel, 0, 3, useHTF ? "HTF " + htf : "HTF (off)", text_color = color.white, text_size = size.small)
+    table.cell(panel, 1, 3, okTxt(htfLongOk),  text_size = size.small)
+    table.cell(panel, 2, 3, okTxt(htfShortOk), text_size = size.small)
+
+    table.cell(panel, 0, 4, "ADX " + str.tostring(adx, "#.0"), text_color = color.white, text_size = size.small)
+    table.cell(panel, 1, 4, okTxt(adxLongOk),  text_size = size.small)
+    table.cell(panel, 2, 4, okTxt(adxShortOk), text_size = size.small)
+
+    table.cell(panel, 0, 5, "RSI " + str.tostring(rsi, "#.0"), text_color = color.white, text_size = size.small)
+    table.cell(panel, 1, 5, okTxt(rsiLongOk),  text_size = size.small)
+    table.cell(panel, 2, 5, okTxt(rsiShortOk), text_size = size.small)
+
+    table.cell(panel, 0, 6, "ATR% " + str.tostring(atrPct, "#.00"), text_color = color.white, text_size = size.small)
+    table.cell(panel, 1, 6, okTxt(volatilityOk), text_size = size.small)
+    table.cell(panel, 2, 6, okTxt(volatilityOk), text_size = size.small)
+
+    table.cell(panel, 0, 7, "Cooldown", text_color = color.white, text_size = size.small)
+    table.cell(panel, 1, 7, okTxt(cooldownOk), text_size = size.small)
+    table.cell(panel, 2, 7, okTxt(cooldownOk), text_size = size.small)
+
+    table.cell(panel, 0, 8, "All filters", text_color = color.white, text_size = size.small)
+    table.cell(panel, 1, 8, rawMode ? "n/a (raw)" : okTxt(filtersLongOk),  text_size = size.small)
+    table.cell(panel, 2, 8, rawMode ? "n/a (raw)" : okTxt(filtersShortOk), text_size = size.small)
+
+    trigger = utBull ? "SELL trigger: close < " + str.tostring(utStop, format.mintick) : "BUY trigger: close > " + str.tostring(utStop, format.mintick)
+    table.cell(panel, 0, 9, "Next", text_color = color.white, text_size = size.small)
+    table.cell(panel, 1, 9, trigger, text_color = color.yellow, text_size = size.small)
+    table.merge_cells(panel, 1, 9, 2, 9)
+
+    posTxt = strategy.position_size > 0 ? "LONG open" : strategy.position_size < 0 ? "SHORT open" : "Flat — waiting"
+    table.cell(panel, 0, 10, "Position", text_color = color.white, text_size = size.small)
+    table.cell(panel, 1, 10, posTxt, text_color = color.aqua, text_size = size.small)
+    table.merge_cells(panel, 1, 10, 2, 10)
+
+var line trigLine = na
+if showPanel and (barstate.islast or barstate.islastconfirmedhistory)
+    line.delete(trigLine)
+    trigLine := line.new(bar_index - 20, utStop, bar_index + 10, utStop, color = color.yellow, style = line.style_dashed, width = 1)
+
+// ───────────────── Range cone + scenario levels (append at END of autofinx-ut-bot-unified) ─────────────────
+// NOT a price prediction. The cone shows the typical range price can cover in the
+// next N bars at current volatility (ATR × √bars). Scenario labels show which
+// 1h close would turn the setup bullish or bearish.
+//
+grpProj  = "Range projection (not a prediction)"
+showCone = input.bool(true, "Show volatility range cone", group = grpProj)
+coneBars = input.int(12, "Bars ahead", minval = 2, maxval = 100, group = grpProj)
+swingLen = input.int(50, "Swing lookback for scenario targets", minval = 10, group = grpProj)
+
+drawNow = barstate.islast or barstate.islastconfirmedhistory
+swingHi = ta.highest(high, swingLen)
+swingLo = ta.lowest(low, swingLen)
+
+coneLine(float mult, int sign) =>
+    pts = array.new<chart.point>()
+    for k = 0 to coneBars
+        pts.push(chart.point.from_index(bar_index + k, close + sign * mult * atr * math.sqrt(k)))
+    pts
+
+var polyline coneUp1 = na
+var polyline coneDn1 = na
+var polyline coneUp2 = na
+var polyline coneDn2 = na
+var label lblBull = na
+var label lblBear = na
+var label lblCone = na
+
+if showCone and drawNow
+    polyline.delete(coneUp1)
+    polyline.delete(coneDn1)
+    polyline.delete(coneUp2)
+    polyline.delete(coneDn2)
+    label.delete(lblBull)
+    label.delete(lblBear)
+    label.delete(lblCone)
+
+    coneUp1 := polyline.new(coneLine(1.0,  1), line_color = color.new(color.teal, 0),  line_style = line.style_dotted, line_width = 1)
+    coneDn1 := polyline.new(coneLine(1.0, -1), line_color = color.new(color.teal, 0),  line_style = line.style_dotted, line_width = 1)
+    coneUp2 := polyline.new(coneLine(2.0,  1), line_color = color.new(color.gray, 30), line_style = line.style_dotted, line_width = 1)
+    coneDn2 := polyline.new(coneLine(2.0, -1), line_color = color.new(color.gray, 30), line_style = line.style_dotted, line_width = 1)
+
+    xEnd = bar_index + coneBars
+    lblCone := label.new(xEnd, close + 2.0 * atr * math.sqrt(coneBars),
+         "Typical range next " + str.tostring(coneBars) + " bars\n(inner = normal, outer = wide)\nNOT a prediction",
+         style = label.style_label_left, color = color.new(color.gray, 70), textcolor = color.white, size = size.tiny)
+
+    utBullNow = src >= utStop
+    bullTrig  = math.max(useEma ? ema : 0.0, utBullNow ? 0.0 : utStop)
+    bearTrig  = utBullNow ? (useEma ? math.min(utStop, ema) : utStop) : na
+
+    bullTxt = bullTrig > 0 ? "BULL if 1h close > " + str.tostring(bullTrig, format.mintick) : "BULL: price side OK — waiting for UT cross"
+    lblBull := label.new(xEnd + 2, math.max(bullTrig, close),
+         bullTxt + "\nnext resistance: " + str.tostring(swingHi, format.mintick),
+         style = label.style_label_left, color = color.new(color.green, 20), textcolor = color.white, size = size.small)
+
+    bearTxt = na(bearTrig) ? "BEAR: already below UT — waiting for re-cross" : "BEAR if 1h close < " + str.tostring(bearTrig, format.mintick)
+    lblBear := label.new(xEnd + 2, na(bearTrig) ? close : math.min(bearTrig, close),
+         bearTxt + "\nnext support: " + str.tostring(swingLo, format.mintick),
+         style = label.style_label_left, color = color.new(color.red, 20), textcolor = color.white, size = size.small)

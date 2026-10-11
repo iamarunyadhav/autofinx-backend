@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Ratio Bot REPLAY audit (dev tool, NOT part of the default suite).
+     Isolated sqlite file DB on D:, array cache, no Redis, no network (Http is faked in the harness).
+     Run: php vendor/bin/phpunit -c phpunit.replay.xml  (see docs/ratio-bot-replay/PLAN.md) -->
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="vendor/phpunit/phpunit/phpunit.xsd"
+         bootstrap="vendor/autoload.php"
+         colors="true">
+    <testsuites>
+        <testsuite name="Replay">
+            <directory>tests/Replay</directory>
+        </testsuite>
+    </testsuites>
+    <php>
+        <env name="APP_ENV" value="testing" force="true"/>
+        <env name="DB_CONNECTION" value="sqlite" force="true"/>
+        <env name="DB_DATABASE" value="D:/autofinx-ml-v4/ratio_bot_replay/tmp/replay.sqlite"/>
+        <env name="CACHE_STORE" value="array" force="true"/>
+        <env name="QUEUE_CONNECTION" value="sync" force="true"/>
+        <env name="SESSION_DRIVER" value="array" force="true"/>
+        <env name="BROADCAST_CONNECTION" value="null" force="true"/>
+        <env name="MAIL_MAILER" value="array" force="true"/>
+        <env name="LOG_CHANNEL" value="null" force="true"/>
+        <env name="REDIS_HOST" value="127.0.0.1" force="true"/>
+        <env name="REDIS_PORT" value="1" force="true"/>
+        <env name="REDIS_DB" value="15" force="true"/>
+        <env name="PULSE_ENABLED" value="false" force="true"/>
+        <env name="TELESCOPE_ENABLED" value="false" force="true"/>
+        <env name="NIGHTWATCH_ENABLED" value="false" force="true"/>
+        <env name="BINANCE_CONDITIONAL_ORDER_MODE" value="legacy" force="true"/>
+        <env name="TRADING_MODE" value="live" force="true"/>
+        <env name="LIVE_TRADING_SYMBOL_ALLOWLIST" value="BTCUSDT,ETHUSDT" force="true"/>
+        <env name="BCRYPT_ROUNDS" value="4" force="true"/>
+    </php>
+</phpunit>

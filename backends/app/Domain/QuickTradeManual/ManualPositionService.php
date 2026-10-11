@@ -159,6 +159,8 @@ class ManualPositionService
                     'sl_trigger_price' => $est['sl_trigger_price'],
                     'tp_pct' => $in['tp_pct'],
                     'tp_trigger_price' => $est['take_profit']['trigger_price'] ?? null,
+                    'trailing_pct' => isset($in['trailing_pct']) ? (float) $in['trailing_pct'] : null,
+                    'trailing_activation_pct' => isset($in['trailing_activation_pct']) ? (float) $in['trailing_activation_pct'] : null,
                     'entry_client_order_id' => 'qtm-e-'.$idCompact,
                 ]);
             } catch (UniqueConstraintViolationException $e) {
@@ -170,7 +172,7 @@ class ManualPositionService
                 }
                 throw new RuntimeException('duplicate_manual_position: A Manual SL/TP position is already active on this symbol.');
             }
-            $this->sm->note($p, 'entry_intent_recorded', 'api', ['quantity' => $est['quantity'], 'reference_price' => $est['reference_price'], 'sl_pct' => $in['sl_pct'], 'tp_pct' => $in['tp_pct'], 'sl_basis' => 'price_movement']);
+            $this->sm->note($p, 'entry_intent_recorded', 'api', ['quantity' => $est['quantity'], 'reference_price' => $est['reference_price'], 'sl_pct' => $in['sl_pct'], 'tp_pct' => $in['tp_pct'], 'trailing_pct' => $in['trailing_pct'] ?? null, 'trailing_activation_pct' => $in['trailing_activation_pct'] ?? null, 'sl_basis' => 'price_movement']);
         } finally {
             $lock->release();
         }

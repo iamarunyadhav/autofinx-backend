@@ -30,6 +30,9 @@ return [
     // Stop-loss is a PRICE-MOVEMENT percentage (not margin %). Bounds on that number.
     'min_sl_pct' => 0.1,
     'max_sl_pct' => 15.0,
+    'min_trailing_pct' => 0.1,
+    'max_trailing_pct' => 5.0,
+    'max_trailing_activation_pct' => 100.0,
     // The stop must sit inside this share of the estimated distance to liquidation.
     'sl_liq_ratio' => 0.5,
     // MARK_PRICE avoids wick triggers; CONTRACT_PRICE is the alternative.
