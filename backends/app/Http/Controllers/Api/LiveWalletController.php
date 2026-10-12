@@ -135,6 +135,22 @@ class LiveWalletController extends Controller
         $asset = strtoupper(trim((string) $request->query('asset', 'USDT'))) ?: 'USDT';
         $state = $settings->tradingState($workspaceId);
 
+        // Manual SL/TP can explicitly select an integration even when the
+        // legacy Time-Based workspace mode is paper.
+        $requestedIntegrationId = trim((string) $request->query('integration_id', ''));
+        if ($requestedIntegrationId !== '') {
+            $state['preferred_integration_id'] = $requestedIntegrationId;
+            $selectedIntegration = \App\Models\Integration::query()
+                ->where('workspace_id', $workspaceId)
+                ->whereKey($requestedIntegrationId)
+                ->where('status', 'active')
+                ->first();
+            if ($selectedIntegration) {
+                $state['preferred_provider'] = strtolower((string) $selectedIntegration->provider_key);
+            }
+            $state['mode'] = 'live';
+        }
+
         if (($state['mode'] ?? 'paper') !== 'live') {
             return response()->json([
                 'source' => 'internal',
