@@ -85,6 +85,8 @@ test('manual BUY/LONG opens, entry order is a market order, SL is placed AND ver
         ->and($p->sl_verified_at)->not->toBeNull()
         ->and($p->tp_status)->toBe('NONE')
         ->and($r->json('has_expiry'))->toBeFalse()
+        ->and($r->json('integration_id'))->toBe($s->integration->id)
+        ->and($r->json('account_label'))->toBe($s->integration->display_name)
         ->and($r->json('outcome'))->toBe('open_protected');
 
     // exchange side

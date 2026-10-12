@@ -23,6 +23,8 @@ class ManualPositionPresenter
             'mode' => $p->mode,
             'status' => $p->status,
             'environment' => $p->environment,
+            'integration_id' => $p->integration_id,
+            'account_label' => $p->integration?->display_name,
             'symbol' => $p->symbol,
             'direction' => $p->direction,
             'position_mode' => $p->position_mode,

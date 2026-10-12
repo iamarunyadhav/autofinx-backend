@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
 /**
@@ -82,6 +83,11 @@ class QuickTradeManualPosition extends BaseModel
     public function events(): HasMany
     {
         return $this->hasMany(QuickTradeManualEvent::class, 'position_id')->orderBy('seq');
+    }
+
+    public function integration(): BelongsTo
+    {
+        return $this->belongsTo(Integration::class, 'integration_id');
     }
 
     public function isTerminal(): bool

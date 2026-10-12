@@ -111,14 +111,14 @@ class QuickTradeManualController extends Controller
         $q = $scope === 'history' ? $q->whereIn('status', P::TERMINAL)->orderByDesc('closed_at') : $q->whereNotIn('status', P::TERMINAL)->orderByDesc('created_at');
 
         return response()->json([
-            'positions' => $q->limit(min(200, max(1, (int) $request->query('limit', 50))))->get()->map(fn (P $p) => $this->presenter->toArray($p))->all(),
+            'positions' => $q->with('integration:id,display_name')->limit(min(200, max(1, (int) $request->query('limit', 50))))->get()->map(fn (P $p) => $this->presenter->toArray($p))->all(),
         ]);
     }
 
     public function show(Request $request, string $workspace, string $position): JsonResponse
     {
         $this->assertWorkspaceMembership($request, $workspace);
-        $p = $this->find($workspace, $position);
+        $p = $this->find($workspace, $position)->loadMissing('integration:id,display_name');
 
         return response()->json($this->presenter->toArray($p, $this->presenter->live($p), true));
     }
