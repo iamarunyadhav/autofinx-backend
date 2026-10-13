@@ -33,8 +33,10 @@ class ManualPreviewService
     public function normalizeInput(array $in): array
     {
         $symbol = strtoupper(trim((string) ($in['symbol'] ?? '')));
-        if (! in_array($symbol, (array) config('quick_trade_manual.symbols', []), true)) {
-            throw new RuntimeException('invalid_symbol: Manual SL/TP supports '.implode(', ', (array) config('quick_trade_manual.symbols', [])).'.');
+        // Binance exchangeInfo is the source of truth; symbolRules() below
+        // still fail-closes if the selected symbol is not actually listed.
+        if (! preg_match('/^[A-Z0-9]{3,24}USDT$/', $symbol)) {
+            throw new RuntimeException('invalid_symbol: Choose a Binance USDT-margined futures symbol.');
         }
 
         $direction = strtolower(trim((string) ($in['direction'] ?? '')));
