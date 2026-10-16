@@ -72,8 +72,11 @@ class Kernel extends ConsoleKernel
 
     protected function schedule(Schedule $schedule): void
     {
-        // All production schedule definitions live in routes/console.php.
-        // Keep Kernel available for command registration only.
+        // Research refresh is deliberately disabled by default. Enable only with an
+        // explicit deployment configuration after reviewing the research-only checklist.
+        if ((bool) config('market_opportunity_brain.v5_refresh_schedule_enabled', false)) {
+            $schedule->command('v5:research-refresh --live --limit=3')->everyFifteenMinutes()->withoutOverlapping(10)->runInBackground();
+        }
     }
 
     protected $commands = [

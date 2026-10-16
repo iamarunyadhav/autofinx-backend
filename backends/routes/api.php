@@ -702,4 +702,9 @@ Route::middleware('auth:sanctum')->prefix('v5/research')->group(function () {
     Route::get('/candidates', [\App\Http\Controllers\V5ResearchController::class, 'candidates']);
     Route::get('/status', [\App\Http\Controllers\V5ResearchController::class, 'status']);
     Route::get('/predictions', [\App\Http\Controllers\V5ResearchController::class, 'history']);
+    Route::get('/selections', [\App\Http\Controllers\V5ResearchController::class, 'selections']);
+    Route::post('/selections', [\App\Http\Controllers\V5ResearchController::class, 'select']);
+    Route::delete('/selections/{id}', [\App\Http\Controllers\V5ResearchController::class, 'remove']);
+    Route::get('/ranking-history', [\App\Http\Controllers\V5ResearchController::class, 'rankingHistory']);
+    Route::get('/selection-metrics', [\App\Http\Controllers\V5ResearchController::class, 'selectionMetrics']);
 });

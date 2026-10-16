@@ -30,9 +30,27 @@ final class ResearchScanner
             $candidates[] = $item;
         }
         usort($candidates, static fn (array $a, array $b) => $b['ranking_score'] <=> $a['ranking_score']);
+        // Hysteresis: retain an incumbent candidate when a newcomer is only marginally
+        // better. Material score changes still replace it; this only prevents UI churn.
+        try {
+            $previous = \App\Models\V5ResearchScannerRun::with('candidates')->latest('as_of')->first();
+            $margin = (float) config('market_opportunity_brain.v5_anti_churn_score_margin', 0.05);
+            if ($previous && $margin > 0 && count($candidates) > 3) {
+                $incumbents = $previous->candidates->sortBy('rank')->take(3)->pluck('symbol')->all();
+                foreach ($incumbents as $slot => $symbol) {
+                    $old = collect($candidates)->firstWhere('symbol', $symbol);
+                    if (!$old) continue;
+                    $challenger = $candidates[2] ?? null;
+                    if ($challenger && $old['ranking_score'] + $margin >= $challenger['ranking_score']) {
+                        $candidates = array_values(array_filter($candidates, fn($x) => $x['symbol'] !== $symbol));
+                        array_splice($candidates, min($slot, count($candidates)), 0, [$old]);
+                    }
+                }
+            }
+        } catch (\Throwable) { /* scanner remains usable before research tables exist */ }
         foreach ($candidates as $index => &$candidate) $candidate['rank'] = $index + 1;
         unset($candidate);
-        return ['as_of' => $asOf->format(DATE_ATOM), 'execution_authorized' => false,
+        return ['as_of' => $asOf->format(DATE_ATOM), 'execution_authorized' => false, 'ranked_candidates' => $candidates,
             'source_status' => ['universe' => 'available', 'funding' => 'unavailable', 'open_interest' => 'unavailable'],
             'candidates' => array_slice($candidates, 0, max(0, min(3, $limit)))];
     }
@@ -47,7 +65,7 @@ final class ResearchScanner
                 'requested_limit' => $limit, 'eligible_count' => count($result['candidates']),
                 'source_status' => $result['source_status'],
             ]);
-            foreach ($result['candidates'] as $candidate) {
+            foreach (($result['ranked_candidates'] ?? $result['candidates']) as $candidate) {
                 V5ResearchScannerCandidate::updateOrCreate(
                     ['scanner_run_id' => $run->id, 'symbol' => $candidate['symbol']],
                     ['rank' => $candidate['rank'], 'ranking_score' => $candidate['ranking_score'],

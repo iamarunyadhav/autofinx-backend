@@ -72,4 +72,6 @@ return [
         'TMP' => env('AUTOFINX_MOB_PYTHON_TMP_DIR'),
     ]),
     'forecast_timeout_seconds' => (int) env('AUTOFINX_MOB_FORECAST_TIMEOUT_SECONDS', 120),
+    'v5_refresh_schedule_enabled' => (bool) env('AUTOFINX_V5_REFRESH_SCHEDULE_ENABLED', false),
+    'v5_anti_churn_score_margin' => (float) env('AUTOFINX_V5_ANTI_CHURN_SCORE_MARGIN', 0.05),
 ];
