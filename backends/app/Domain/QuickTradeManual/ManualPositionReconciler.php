@@ -151,7 +151,8 @@ class ManualPositionReconciler
             }
         }
 
-        // 3) Protection must still exist and be working.
+        // 3) Protection must still exist and be working. A deliberate no-stop trade (state NO_STOP) has none
+        //    to lose: it is never flagged, re-placed or closed because a stop is absent.
         if ($health['state'] === 'LOST') {
             $this->sm->note($p, 'protection_lost', $source, ['sl' => $health['sl']], 'critical');
             $this->sm->patch($p, ['protection_status' => P::PS_LOST, 'sl_status' => 'LOST']);
@@ -223,6 +224,12 @@ class ManualPositionReconciler
 
             return $p;
         }
+        if ($health['state'] === 'NO_STOP') {
+            // No stop by the owner's explicit choice: a failed close must NOT escalate to an automatic emergency close.
+            $this->sm->transition($p, P::OPEN_PROTECTED, $source, ['protection_status' => P::PS_NO_STOP, 'last_reconciled_at' => now()], ['note' => 'close failed; position is open without a stop-loss by opt-in, close it manually again'], 'close_failed_position_still_open_no_stop', 'high');
+
+            return $p;
+        }
 
         return $this->exits->emergencyExit($p, $gw, $source, 'close_failed_and_protection_not_verified');
     }
@@ -245,6 +252,11 @@ class ManualPositionReconciler
 
             return $moved ? $this->exits->finalize($p, $gw, $source) : $p;
         }
+        if ($health['state'] === 'NO_STOP') {
+            $this->sm->transition($p, P::OPEN_PROTECTED, $source, ['protection_status' => P::PS_NO_STOP, 'reconcile_failures' => 0, 'last_reconciled_at' => now()], ['no_stop_loss' => true], 'unknown_resolved_open_no_stop');
+
+            return $p;
+        }
         if ($health['state'] === 'OK' && $p->sl_verified_at !== null) {
             $this->sm->transition($p, P::OPEN_PROTECTED, $source, ['protection_status' => P::PS_PROTECTED, 'reconcile_failures' => 0, 'last_reconciled_at' => now()], [], 'unknown_resolved_protected');
 
@@ -259,7 +271,7 @@ class ManualPositionReconciler
         $failures = (int) $p->reconcile_failures + 1;
         $this->sm->patch($p, ['reconcile_failures' => $failures, 'last_error' => mb_substr($e->getMessage(), 0, 500)]);
         if ($failures >= (int) config('quick_trade_manual.reconcile_unknown_after_failures', 3) && $p->status !== P::EXCHANGE_STATE_UNKNOWN) {
-            $this->sm->transition($p, P::EXCHANGE_STATE_UNKNOWN, 'reconciler', ['protection_status' => P::PS_UNKNOWN], ['unknown_from' => $p->status, 'error' => $e->getMessage(), 'note' => 'Exchange protection is NOT assumed lost; its state cannot be read from here.'], 'exchange_state_unknown', 'high');
+            $this->sm->transition($p, P::EXCHANGE_STATE_UNKNOWN, 'reconciler', ['protection_status' => $p->noStopLoss() ? P::PS_NO_STOP : P::PS_UNKNOWN], ['unknown_from' => $p->status, 'error' => $e->getMessage(), 'note' => 'Exchange protection is NOT assumed lost; its state cannot be read from here.'], 'exchange_state_unknown', 'high');
         }
 
         return $p;

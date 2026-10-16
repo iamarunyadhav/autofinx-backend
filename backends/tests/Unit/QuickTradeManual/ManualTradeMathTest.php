@@ -105,3 +105,25 @@ test('decimals follow the tick size', function () {
     expect(ManualTradeMath::decimalsOf(0.1))->toBe(1)->and(ManualTradeMath::decimalsOf(0.01))->toBe(2)->and(ManualTradeMath::decimalsOf(1.0))->toBe(0)
         ->and(ManualTradeMath::formatToStep(79200.0, 0.1))->toBe('79200.0');
 });
+
+test('no-stop estimate: no stop numbers, no stop errors, liquidation still computed, loud warning, max-loss is the margin', function () {
+    $e = qtmEstimate(['sl_pct' => null, 'no_stop_loss' => true, 'leverage' => 5.0]);
+    expect($e['ok'])->toBeTrue()->and($e['no_stop_loss'])->toBeTrue()
+        ->and($e['sl_pct'])->toBeNull()->and($e['sl_trigger_price'])->toBeNull()->and($e['estimated_loss_at_sl'])->toBeNull()
+        ->and($e['margin_loss_pct_at_sl'])->toBeNull()->and($e['sl_distance_pct'])->toBeNull()
+        ->and($e['estimated_liquidation_price'])->not->toBeNull()->and($e['estimated_liquidation_price'])->toBeLessThan(80000.0)
+        ->and($e['max_loss_without_stop_estimate'])->toBe(100.0)
+        ->and(implode(' ', $e['warnings']))->toContain('NO STOP-LOSS')
+        ->and(implode(' ', $e['warnings']))->not->toContain('Stop-loss does not guarantee');
+});
+
+test('no-stop estimate still fails closed when the liquidation distance cannot be verified', function () {
+    $e = qtmEstimate(['sl_pct' => null, 'no_stop_loss' => true, 'maint_margin_rate' => null]);
+    expect($e['ok'])->toBeFalse()->and($e['errors'][0]['code'])->toBe('unable_to_verify_liquidation_distance');
+});
+
+test('a normal estimate is unchanged by the no-stop support (stop numbers present, no no-stop warning)', function () {
+    $e = qtmEstimate();
+    expect($e['no_stop_loss'])->toBeFalse()->and($e['sl_trigger_price'])->toBe(79200.0)->and($e['max_loss_without_stop_estimate'])->toBeNull()
+        ->and(implode(' ', $e['warnings']))->not->toContain('NO STOP-LOSS');
+});

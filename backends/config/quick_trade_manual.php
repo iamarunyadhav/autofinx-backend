@@ -19,6 +19,14 @@ return [
     // Testnet integrations (config_json.environment = testnet) do not need this.
     'allow_mainnet' => filter_var(env('QUICK_TRADE_MANUAL_ALLOW_MAINNET', false), FILTER_VALIDATE_BOOL),
 
+    // OPT-IN (default OFF): allow a trade WITHOUT an exchange stop-loss. Even when on, every trade must
+    // still carry an explicit per-trade opt-in + acknowledgement; a missing stop-loss is never inferred.
+    // Without a stop the ONLY automatic exit is liquidation, so the caps below are stricter.
+    'allow_no_stop_loss' => filter_var(env('QUICK_TRADE_MANUAL_ALLOW_NO_STOP_LOSS', false), FILTER_VALIDATE_BOOL),
+    'no_stop_loss_max_leverage' => (float) env('QUICK_TRADE_MANUAL_NO_SL_MAX_LEVERAGE', 5),
+    // Cross margin lets liquidation consume the whole futures wallet: refuse no-SL unless ISOLATED.
+    'no_stop_loss_require_isolated' => filter_var(env('QUICK_TRADE_MANUAL_NO_SL_REQUIRE_ISOLATED', true), FILTER_VALIDATE_BOOL),
+
     // Symbols are limited to what the Binance Quick Trade provider already supports.
     'symbols' => ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT'],
 

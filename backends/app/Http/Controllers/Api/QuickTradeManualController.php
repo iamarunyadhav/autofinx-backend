@@ -45,7 +45,9 @@ class QuickTradeManualController extends Controller
             'can_manage' => in_array((string) $role, ['owner', 'admin'], true),
             'exchange_verification' => 'UNVERIFIED_ON_EXCHANGE',
             'sl_basis' => 'price_movement',
+            'allow_no_stop_loss' => (bool) config('quick_trade_manual.allow_no_stop_loss', false),
             'limits' => [
+                'no_stop_loss_max_leverage' => (float) config('quick_trade_manual.no_stop_loss_max_leverage'),
                 'symbols' => (array) config('quick_trade_manual.symbols'),
                 'min_stake' => (float) config('quick_trade_manual.min_stake'),
                 'max_stake' => (float) config('quick_trade_manual.max_stake'),
@@ -170,8 +172,11 @@ class QuickTradeManualController extends Controller
             'direction' => 'required|string|in:long,short,buy,sell',
             'stake_amount' => 'required|numeric|gt:0',
             'leverage' => 'required|numeric|min:1',
-            // Mandatory stop-loss, as a PRICE-MOVEMENT percentage (not margin %).
-            'sl_pct' => 'required|numeric|gt:0',
+            // Stop-loss (PRICE-MOVEMENT %, not margin %) is required unless the explicit per-trade
+            // no_stop_loss opt-in is sent; the service enforces that rule, never "missing = no stop".
+            'sl_pct' => 'nullable|numeric|gt:0',
+            'no_stop_loss' => 'nullable|boolean',
+            'no_stop_loss_ack' => 'nullable|boolean',
             'tp_pct' => 'nullable|numeric|gt:0',
             'trailing_pct' => 'nullable|numeric|gt:0',
             'trailing_activation_pct' => 'nullable|numeric|gte:0',
@@ -197,7 +202,7 @@ class QuickTradeManualController extends Controller
         $message = $e->getMessage();
         $code = strtok($message, ':') ?: 'error';
         $status = match (true) {
-            in_array($code, ['feature_disabled', 'mainnet_blocked'], true) => 403,
+            in_array($code, ['feature_disabled', 'mainnet_blocked', 'no_stop_loss_disabled'], true) => 403,
             in_array($code, ['duplicate_manual_position', 'open_in_progress', 'price_moved', 'time_based_position_open', 'max_open_positions', 'not_closable'], true) => 409,
             in_array($code, ['exchange_unavailable', 'integration_missing'], true) => 503,
             default => 422,

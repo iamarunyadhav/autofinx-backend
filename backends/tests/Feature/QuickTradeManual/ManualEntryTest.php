@@ -176,17 +176,24 @@ test('hedge-mode account: entry, stop and (later) close all carry positionSide; 
         ->and($s->fake->liveAlgos()[0]['position_side'])->toBe('LONG');
 });
 
-test('validation: stop-loss is mandatory, bounded, and take-profit must be positive', function () {
+test('validation: stop-loss is required (unless explicitly opted out), bounded, and take-profit must be positive', function () {
     $s = ManualTradeScenario::make();
     $this->actingAs($s->user);
     $base = $s->payload();
     unset($base['sl_pct']);
-    $this->postJson($s->url('/positions'), $base)->assertStatus(422);
+    $this->postJson($s->url('/positions'), $base)->assertStatus(422)->assertJsonPath('code', 'stop_loss_required');
+    // the no-stop opt-in is OFF by default: sending it is refused, it never silently drops the stop
+    $this->postJson($s->url('/positions'), array_merge($base, ['no_stop_loss' => true, 'no_stop_loss_ack' => true]))->assertStatus(403)->assertJsonPath('code', 'no_stop_loss_disabled');
     $this->postJson($s->url('/positions'), $s->payload(['sl_pct' => 0]))->assertStatus(422);
     $this->postJson($s->url('/positions'), $s->payload(['sl_pct' => 40]))->assertStatus(422)->assertJsonPath('code', 'invalid_stop_loss');
     $this->postJson($s->url('/positions'), $s->payload(['tp_pct' => -1]))->assertStatus(422);
     $this->postJson($s->url('/positions'), $s->payload(['confirm' => false]))->assertStatus(422);   // separate final confirmation required
-    $this->postJson($s->url('/positions'), $s->payload(['symbol' => 'DOGEUSDT']))->assertStatus(422)->assertJsonPath('code', 'invalid_symbol');
+    // The symbol allowlist was intentionally replaced by a USDT-margined pattern + exchangeInfo (a symbol the
+    // exchange does not list fails closed in BinanceManualGateway::symbolRules), so a well-formed DOGEUSDT is
+    // no longer a validation error here. Malformed / non-USDT-margined symbols are still refused.
+    $this->postJson($s->url('/positions'), $s->payload(['symbol' => 'DOGEUSD']))->assertStatus(422)->assertJsonPath('code', 'invalid_symbol');
+    $this->postJson($s->url('/positions'), $s->payload(['symbol' => 'BTC/USDT']))->assertStatus(422)->assertJsonPath('code', 'invalid_symbol');
+    $this->postJson($s->url('/positions'), $s->payload(['symbol' => '']))->assertStatus(422);
     $this->postJson($s->url('/positions'), $s->payload(['leverage' => 3.5]))->assertStatus(422)->assertJsonPath('code', 'invalid_leverage');
     expect(P::count())->toBe(0)->and($s->fake->count('placeEntry'))->toBe(0);
 });

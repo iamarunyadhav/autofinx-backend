@@ -1,0 +1,20 @@
+{
+  "schema": "mob.experiment.v1",
+  "experiment_id": "MOB-EXP-001",
+  "status": "PREREGISTRATION_DRAFT",
+  "workspace_id": "local-research-workspace",
+  "hypothesis": "Dynamic discovery and AI forecasts improve calibrated forecasts and net outcomes relative to fixed-universe baseline after costs.",
+  "registration_sha256": null,
+  "dataset_sha256": null,
+  "universe_policy": "point-in-time USDM_PERPETUAL",
+  "timeframe": "15m",
+  "horizon_bars": 4,
+  "arms": ["A_FIXED_BASELINE", "B_DYNAMIC_RULE", "C_DYNAMIC_AI_SHADOW", "D_DYNAMIC_AI_PLUS_RULE"],
+  "holdout_policy": "SEALED_NO_ACCESS",
+  "model_revision": null,
+  "cost_profile_version": null,
+  "sample_count": 0,
+  "metrics": null,
+  "verdict": "NOT_RUN",
+  "execution_authorized": false
+}

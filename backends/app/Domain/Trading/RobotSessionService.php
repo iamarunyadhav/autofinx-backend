@@ -7,6 +7,7 @@ use App\Domain\MarketIntelligence\UnifiedForecastLiveGate;
 use App\Domain\Ops\FeatureFlagService;
 use App\Domain\Ops\TradingRuntimeHealthService;
 use App\Domain\FutureTrade\FutureTradeAuditService;
+use App\Domain\StrategyLab\StrategyActivationGate;
 use App\Models\QuickTrade;
 use App\Models\RobotSession;
 use App\Models\MarketFeedStatus;
@@ -30,6 +31,7 @@ class RobotSessionService
         private readonly CandleDirectionBotService $candleBot,
         private readonly MarketPriceCacheService $prices,
         private readonly TradeForecastService $forecastSvc,
+        private readonly StrategyActivationGate $strategyActivationGate,
     ) {
     }
 
@@ -179,6 +181,8 @@ class RobotSessionService
             'confidence_threshold',
             'provider_key',
             'integration_id',
+            'execution_mode',
+            'strategy_lab_version_id',
             'bot_mode',
             'stop_loss_pct',
             'take_profit_pct',
@@ -269,6 +273,22 @@ class RobotSessionService
             }
         }
 
+        if (array_key_exists('execution_mode', $payload) && strtoupper((string) $payload['execution_mode']) === 'AUTO') {
+            $candidate = clone $session;
+            foreach ($updates as $key => $value) {
+                $candidate->{$key} = $value;
+            }
+            $check = $this->strategyActivationGate->check($candidate);
+            if (! $check['allowed']) {
+                throw new RuntimeException('strategy_auto_activation_blocked: '.implode(',', $check['reasons']));
+            }
+            $updates['auto_enabled_at'] = now();
+            $updates['auto_disabled_reason'] = null;
+        } elseif (array_key_exists('execution_mode', $payload)) {
+            $updates['execution_mode'] = 'MANUAL';
+            $updates['auto_disabled_reason'] = 'operator_manual_mode';
+        }
+
         $session->update($updates);
 
         return $this->syncExecutionContext($this->refreshPerformance($session));
@@ -276,6 +296,10 @@ class RobotSessionService
 
     public function start(RobotSession $session): RobotSession
     {
+        $activation = $this->strategyActivationGate->check($session);
+        if (strtoupper((string) ($session->execution_mode ?? 'MANUAL')) === 'AUTO' && ! $activation['allowed']) {
+            throw new RuntimeException('strategy_auto_activation_blocked: '.implode(',', $activation['reasons']));
+        }
         if (! $this->settings->automationEnabled($session->workspace_id)) {
             throw new RuntimeException('Auto trading is disabled for this workspace. Enable it in Settings before starting robot sessions.');
         }

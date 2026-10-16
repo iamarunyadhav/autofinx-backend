@@ -80,6 +80,10 @@ class RobotSessionController extends Controller
             'quick_trade_take_profit_pct' => 'nullable|numeric|gt:0|lte:1000',
             'quick_trade_leverage_enabled' => 'nullable|boolean',
             'quick_trade_leverage' => 'nullable|numeric|min:1|max:125',
+            // Strategy execution is MANUAL by default; AUTO is accepted only
+            // when the Strategy Lab activation gate proves the version.
+            'execution_mode' => 'sometimes|in:MANUAL,AUTO,manual,auto',
+            'strategy_lab_version_id' => 'nullable|uuid',
         ]);
 
         return response()->json(
@@ -121,6 +125,8 @@ class RobotSessionController extends Controller
             'quick_trade_take_profit_pct' => 'nullable|numeric|gt:0|lte:1000',
             'quick_trade_leverage_enabled' => 'nullable|boolean',
             'quick_trade_leverage' => 'nullable|numeric|min:1|max:125',
+            'execution_mode' => 'sometimes|in:MANUAL,AUTO,manual,auto',
+            'strategy_lab_version_id' => 'nullable|uuid',
         ]);
 
         return response()->json($sessions->update($robotSession, $payload));

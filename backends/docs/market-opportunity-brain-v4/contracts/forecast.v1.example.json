@@ -1,0 +1,23 @@
+{
+  "schema": "mob.forecast.v1",
+  "forecast_id": "sample-forecast-001",
+  "workspace_id": "local-research-workspace",
+  "exchange": "BINANCE",
+  "market": "USDM_PERPETUAL",
+  "symbol": "STRKUSDT",
+  "timeframe": "15m",
+  "horizon_bars": 4,
+  "as_of_utc": "2026-10-14T12:00:00Z",
+  "known_by_utc": "2026-10-14T12:00:00Z",
+  "label_available_at_utc": "2026-10-14T13:00:00Z",
+  "model_name": "naive_last",
+  "model_revision": "demo-only",
+  "feature_schema_version": "mob-features-v1",
+  "dataset_hash_sha256": null,
+  "prediction_quantiles": {"p10": null, "p50": null, "p90": null},
+  "probabilities": {"up": null, "neutral": null, "down": null},
+  "probability_calibrated": false,
+  "status": "UNAVAILABLE",
+  "reason": "EXAMPLE_ONLY_NO_MODEL_WAS_RUN",
+  "execution_authorized": false
+}

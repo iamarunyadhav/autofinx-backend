@@ -45,7 +45,7 @@ class ManualPositionService
     public function previewFor(string $workspaceId, array $input): array
     {
         $this->gate->assertEnabled($workspaceId);
-        $in = $this->preview->normalizeInput($input);
+        $in = $this->preview->normalizeInput($input, false);
         $integration = $this->preview->resolveIntegration($workspaceId, $input['integration_id'] ?? null);
         $gw = $this->gateways->make($integration);
 
@@ -155,7 +155,7 @@ class ManualPositionService
                     'requested_quantity' => $est['quantity'],
                     'entry_reference_price' => $est['reference_price'],
                     'estimated_liquidation_price' => $est['estimated_liquidation_price'],
-                    'sl_pct' => $in['sl_pct'],
+                    'sl_pct' => $in['no_stop_loss'] ? 0 : $in['sl_pct'],   // 0 = explicit no-stop opt-in (column is NOT NULL); see P::noStopLoss()
                     'sl_trigger_price' => $est['sl_trigger_price'],
                     'tp_pct' => $in['tp_pct'],
                     'tp_trigger_price' => $est['take_profit']['trigger_price'] ?? null,
@@ -172,7 +172,7 @@ class ManualPositionService
                 }
                 throw new RuntimeException('duplicate_manual_position: A Manual SL/TP position is already active on this symbol.');
             }
-            $this->sm->note($p, 'entry_intent_recorded', 'api', ['quantity' => $est['quantity'], 'reference_price' => $est['reference_price'], 'sl_pct' => $in['sl_pct'], 'tp_pct' => $in['tp_pct'], 'trailing_pct' => $in['trailing_pct'] ?? null, 'trailing_activation_pct' => $in['trailing_activation_pct'] ?? null, 'sl_basis' => 'price_movement']);
+            $this->sm->note($p, 'entry_intent_recorded', 'api', ['quantity' => $est['quantity'], 'reference_price' => $est['reference_price'], 'sl_pct' => $in['sl_pct'], 'no_stop_loss' => $in['no_stop_loss'], 'no_stop_loss_acknowledged' => $in['no_stop_loss'] ? true : null, 'acknowledged_by' => $in['no_stop_loss'] ? $userId : null, 'tp_pct' => $in['tp_pct'], 'trailing_pct' => $in['trailing_pct'] ?? null, 'trailing_activation_pct' => $in['trailing_activation_pct'] ?? null, 'sl_basis' => 'price_movement']);
         } finally {
             $lock->release();
         }
@@ -261,6 +261,17 @@ class ManualPositionService
         }
 
         $res = $this->protection->protect($p, $gw);
+        if ($res['ok'] && $p->noStopLoss()) {
+            // Deliberate no-stop trade: open and managed, but NOT exchange-protected. Say so in every field.
+            $this->sm->transition($p, P::OPEN_PROTECTED, $source, [
+                'protection_status' => P::PS_NO_STOP,
+                'protected_at' => null,
+                'last_reconciled_at' => now(),
+                'last_error' => null,
+            ], ['no_stop_loss' => true, 'tp_algo_id' => $p->tp_algo_id, 'note' => 'Opened by explicit opt-in without a stop-loss. Close manually.'], 'open_without_stop_loss', 'high');
+
+            return $p;
+        }
         if ($res['ok']) {
             $this->sm->transition($p, P::OPEN_PROTECTED, $source, [
                 'protection_status' => P::PS_PROTECTED,

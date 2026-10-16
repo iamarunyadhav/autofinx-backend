@@ -38,6 +38,8 @@ class QuickTradeManualPosition extends BaseModel
     public const PS_FAILED = 'FAILED';
     public const PS_LOST = 'LOST';
     public const PS_UNKNOWN = 'UNKNOWN';
+    /** Opened on purpose WITHOUT a stop-loss (explicit per-trade opt-in). Not a failure state. */
+    public const PS_NO_STOP = 'NO_STOP';
 
     protected $table = 'quick_trade_manual_positions';
 
@@ -93,6 +95,16 @@ class QuickTradeManualPosition extends BaseModel
     public function isTerminal(): bool
     {
         return in_array($this->status, self::TERMINAL, true);
+    }
+
+    /**
+     * True when the trade was opened with the explicit "no stop-loss" opt-in. `sl_pct` is NOT NULL in
+     * the (pending) schema and is immutable after creation, so 0 is the stored marker (a real stop is
+     * always >= min_sl_pct). Every "stop is missing" alarm must be conditioned on this.
+     */
+    public function noStopLoss(): bool
+    {
+        return (float) $this->sl_pct <= 0.0;
     }
 
     public function isLong(): bool

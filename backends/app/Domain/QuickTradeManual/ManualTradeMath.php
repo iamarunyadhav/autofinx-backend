@@ -80,7 +80,7 @@ final class ManualTradeMath
     /**
      * Full pre-trade numbers + blocking errors + warnings for the confirmation screen and for entry validation.
      *
-     * @param  array{direction: string, stake: float, leverage: float, price: float, sl_pct: float, tp_pct: ?float,
+     * @param  array{direction: string, stake: float, leverage: float, price: float, sl_pct: ?float, tp_pct: ?float, no_stop_loss?: bool,
      *         tick_size: float, step_size: float, min_qty: float, min_notional: float, maint_margin_rate: ?float,
      *         taker_fee_rate: float, slippage_buffer_pct: float, sl_liq_ratio: float, position_mode?: ?string, margin_type?: ?string}  $in
      * @return array<string, mixed>
@@ -90,7 +90,8 @@ final class ManualTradeMath
         $dir = $in['direction'];
         $price = (float) $in['price'];
         $lev = (float) $in['leverage'];
-        $slPct = (float) $in['sl_pct'];
+        $noStop = (bool) ($in['no_stop_loss'] ?? false) || $in['sl_pct'] === null;
+        $slPct = $noStop ? null : (float) $in['sl_pct'];
         $tpPct = $in['tp_pct'] !== null ? (float) $in['tp_pct'] : null;
         $tick = (float) $in['tick_size'];
 
@@ -98,17 +99,17 @@ final class ManualTradeMath
         $notional = round($qty * $price, 8);
         $margin = $lev > 0 ? round($notional / $lev, 8) : 0.0;
 
-        $slTrigger = self::slTrigger($dir, $price, $slPct, $tick);
+        $slTrigger = $noStop ? null : self::slTrigger($dir, $price, $slPct, $tick);
         $tpTrigger = $tpPct !== null ? self::tpTrigger($dir, $price, $tpPct, $tick) : null;
 
-        $slMove = $dir === 'long' ? $price - $slTrigger : $slTrigger - $price;       // adverse move in price units
-        $slDistancePct = $price > 0 ? $slMove / $price * 100 : 0.0;
+        $slMove = $slTrigger === null ? null : ($dir === 'long' ? $price - $slTrigger : $slTrigger - $price);   // adverse move in price units
+        $slDistancePct = $slMove === null ? null : ($price > 0 ? $slMove / $price * 100 : 0.0);
         $rate = (float) $in['taker_fee_rate'];
         $entryFee = round($notional * $rate, 8);
-        $exitFeeAtSl = round($qty * $slTrigger * $rate, 8);
-        $grossLossAtSl = round($qty * $slMove, 8);
+        $exitFeeAtSl = $slTrigger === null ? null : round($qty * $slTrigger * $rate, 8);
+        $grossLossAtSl = $slMove === null ? null : round($qty * $slMove, 8);
         $slippageRisk = round($notional * ((float) $in['slippage_buffer_pct']) / 100, 8);
-        $netLossAtSl = round($grossLossAtSl + $entryFee + $exitFeeAtSl, 8);
+        $netLossAtSl = $grossLossAtSl === null ? null : round($grossLossAtSl + $entryFee + $exitFeeAtSl, 8);
 
         $tp = null;
         if ($tpTrigger !== null) {
@@ -133,9 +134,11 @@ final class ManualTradeMath
         if ((float) $in['min_notional'] > 0 && $notional < (float) $in['min_notional']) {
             $errors[] = ['code' => 'notional_below_minimum', 'message' => sprintf('Notional %.2f USDT is below the exchange minimum %.2f USDT.', $notional, (float) $in['min_notional'])];
         }
-        $slOnLossSide = $dir === 'long' ? $slTrigger < $price : $slTrigger > $price;
-        if (! $slOnLossSide || $slMove <= 0) {
-            $errors[] = ['code' => 'stop_loss_too_tight', 'message' => 'Stop-loss rounds to the entry price at this tick size. Use a wider stop-loss.'];
+        if ($slTrigger !== null) {
+            $slOnLossSide = $dir === 'long' ? $slTrigger < $price : $slTrigger > $price;
+            if (! $slOnLossSide || $slMove <= 0) {
+                $errors[] = ['code' => 'stop_loss_too_tight', 'message' => 'Stop-loss rounds to the entry price at this tick size. Use a wider stop-loss.'];
+            }
         }
         if ($tpTrigger !== null) {
             $tpOnProfitSide = $dir === 'long' ? $tpTrigger > $price : $tpTrigger < $price;
@@ -156,7 +159,12 @@ final class ManualTradeMath
                 (float) $in['maint_margin_rate'],
             );
             $ratio = (float) $in['sl_liq_ratio'];
-            if ($liq['estimated_distance_pct'] <= 0 || $slDistancePct > $liq['estimated_distance_pct'] * $ratio) {
+            if ($noStop) {
+                // No stop to compare: the leverage cap (normalizeInput) and the isolated-margin rule bound the risk.
+                if ($liq['estimated_distance_pct'] <= 0) {
+                    $errors[] = ['code' => 'unable_to_verify_liquidation_distance', 'message' => 'Liquidation distance could not be estimated. Refused.'];
+                }
+            } elseif ($liq['estimated_distance_pct'] <= 0 || $slDistancePct > $liq['estimated_distance_pct'] * $ratio) {
                 $errors[] = ['code' => 'stop_loss_not_inside_liquidation', 'message' => sprintf(
                     'Stop-loss distance %.3f%% is not safely inside the estimated liquidation distance %.3f%% (must be at most %d%% of it). Lower the leverage or tighten the stop.',
                     $slDistancePct,
@@ -166,7 +174,12 @@ final class ManualTradeMath
             }
         }
 
-        $warnings[] = 'Stop-loss does not guarantee a maximum loss: it triggers a MARKET order, so gaps and fast markets can fill worse than the trigger.';
+        if ($noStop) {
+            $warnings[] = 'NO STOP-LOSS: nothing closes this position automatically except liquidation. You must watch it and close it manually.';
+            $warnings[] = sprintf('If price reaches the liquidation price you can lose your entire margin (%.2f USDT) and the position is force-closed by the exchange.', (float) $in['stake']);
+        } else {
+            $warnings[] = 'Stop-loss does not guarantee a maximum loss: it triggers a MARKET order, so gaps and fast markets can fill worse than the trigger.';
+        }
         $warnings[] = 'Funding is charged/credited every 8 hours while the position is open and is not capped by the stop-loss.';
         $warnings[] = 'Liquidation price shown is an ESTIMATE; the exchange figure is authoritative.';
         $warnings[] = 'Exchange maintenance or connectivity problems can delay closing or reconciliation; protection lives on the exchange and does not depend on this page.';
@@ -182,17 +195,20 @@ final class ManualTradeMath
             'quantity' => $qty,
             'notional' => $notional,
             'margin_required' => $margin,
+            'no_stop_loss' => $noStop,
             'sl_pct' => $slPct,
             'sl_basis' => 'price_movement',
             'sl_trigger_price' => $slTrigger,
-            'sl_distance_pct' => round($slDistancePct, 4),
-            'margin_loss_pct_at_sl' => (float) $in['stake'] > 0 ? round($netLossAtSl / (float) $in['stake'] * 100, 4) : 0.0,
+            'sl_distance_pct' => $slDistancePct === null ? null : round($slDistancePct, 4),
+            'margin_loss_pct_at_sl' => $netLossAtSl === null ? null : ((float) $in['stake'] > 0 ? round($netLossAtSl / (float) $in['stake'] * 100, 4) : 0.0),
             'estimated_loss_at_sl' => $netLossAtSl,
             'gross_loss_at_sl' => $grossLossAtSl,
             'entry_fee_estimate' => $entryFee,
             'exit_fee_estimate_at_sl' => $exitFeeAtSl,
             'slippage_risk_estimate' => $slippageRisk,
             'take_profit' => $tp,
+            // Approximate worst case without a stop: the isolated margin is lost (plus fees). Labelled an estimate in the UI.
+            'max_loss_without_stop_estimate' => $noStop ? (float) $in['stake'] : null,
             'estimated_liquidation_price' => $liq['estimated_liquidation_price'] ?? null,
             'estimated_liquidation_distance_pct' => $liq['estimated_distance_pct'] ?? null,
             'position_mode' => $in['position_mode'] ?? null,

@@ -32,6 +32,10 @@ class ManualProtectionService
      */
     public function protect(P $p, ManualExchangeGateway $gw): array
     {
+        if ($p->noStopLoss()) {
+            return $this->protectWithoutStop($p, $gw);
+        }
+
         try {
             $rules = $gw->symbolRules($p->symbol);
         } catch (ManualExchangeException $e) {
@@ -107,6 +111,48 @@ class ManualProtectionService
             }
         } catch (ManualExchangeException) {
             // A failed cross-check read does not remove the verified stop; the reconciler re-reads.
+        }
+
+        return ['ok' => true, 'reason' => null];
+    }
+
+    /**
+     * Explicit no-stop-loss trade: NEVER places a stop order. Only the optional take-profit leg is handled
+     * (same rules as the normal path: a failed TP is reported, it does not fail or close the position).
+     * Nothing here depends on an exchange read succeeding, so a transient read error cannot turn into an
+     * emergency close of a trade that has nothing to protect.
+     *
+     * @return array{ok: bool, reason: ?string}
+     */
+    private function protectWithoutStop(P $p, ManualExchangeGateway $gw): array
+    {
+        $entry = (float) $p->entry_price;
+        if ($entry <= 0) {
+            return ['ok' => false, 'reason' => 'entry_price_unknown'];
+        }
+        if ($p->tp_pct !== null) {
+            try {
+                $tick = $gw->symbolRules($p->symbol)['tick_size'];
+                $tp = $p->tp_trigger_price !== null && (float) $p->tp_trigger_price > 0
+                    ? (float) $p->tp_trigger_price
+                    : ManualTradeMath::tpTrigger($p->direction, $entry, (float) $p->tp_pct, $tick);
+                $this->sm->patch($p, ['tp_trigger_price' => $tp]);
+                $tpResult = $this->ensureLeg($p, $gw, 'tp', $tp, $tick);
+            } catch (ManualExchangeException $e) {
+                $tpResult = ['ok' => false, 'reason' => 'rules_unavailable: '.$e->getMessage()];
+            }
+            if (! $tpResult['ok']) {
+                $this->sm->patch($p, ['tp_status' => 'FAILED']);
+                $this->sm->note($p, 'take_profit_not_active', 'system', ['reason' => $tpResult['reason']], 'high');
+            }
+        }
+        try {
+            $pos = $gw->position($p->symbol, $p->positionSide());
+            if ($pos['liquidation_price'] !== null) {
+                $this->sm->patch($p, ['exchange_liquidation_price' => $pos['liquidation_price']]);
+            }
+        } catch (ManualExchangeException) {
+            // informational only; the reconciler re-reads it
         }
 
         return ['ok' => true, 'reason' => null];
@@ -218,10 +264,14 @@ class ManualProtectionService
     public function inspect(P $p, ManualExchangeGateway $gw): array
     {
         try {
-            $sl = $gw->queryProtective($p->symbol, $p->sl_algo_id ?: null, $p->sl_client_algo_id ?: null);
+            // A deliberate no-stop trade has no stop to look for: never report it LOST.
+            $sl = $p->noStopLoss() ? null : $gw->queryProtective($p->symbol, $p->sl_algo_id ?: null, $p->sl_client_algo_id ?: null);
             $tp = $p->tp_pct !== null ? $gw->queryProtective($p->symbol, $p->tp_algo_id ?: null, $p->tp_client_algo_id ?: null) : null;
         } catch (ManualExchangeException) {
             return ['state' => 'UNKNOWN', 'sl' => null, 'tp' => null];
+        }
+        if ($p->noStopLoss()) {
+            return ['state' => 'NO_STOP', 'sl' => null, 'tp' => $tp];
         }
         $slWorking = $sl !== null && in_array($sl['status'], BinanceAlgoApi::WORKING_STATUSES, true);
 

@@ -173,7 +173,7 @@ class ManualExitService
         $this->sm->transition($p, P::CLOSE_FAILED, 'api', ['last_error' => mb_substr((string) $res['reason'], 0, 500)], [
             'close' => $res['state'],
             'detail' => $res['reason'],
-            'note' => 'exchange stop-loss remains in place until the reconciler verifies it',
+            'note' => $p->noStopLoss() ? 'no stop-loss on this position (explicit opt-in): close it manually again' : 'exchange stop-loss remains in place until the reconciler verifies it',
         ], 'manual_close_failed', 'high');
 
         return $p;
@@ -186,6 +186,9 @@ class ManualExitService
     public function attributeExit(P $p, ManualExchangeGateway $gw): array
     {
         $legStatus = function (string $leg) use ($p, $gw): ?string {
+            if ($leg === 'sl' && $p->noStopLoss()) {
+                return null;   // no stop was ever placed: nothing to look up (and never attribute an exit to one)
+            }
             try {
                 $q = $gw->queryProtective($p->symbol, $p->{$leg.'_algo_id'} ?: null, $p->{$leg.'_client_algo_id'} ?: null);
             } catch (ManualExchangeException) {

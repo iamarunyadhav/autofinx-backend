@@ -1,0 +1,20 @@
+{
+  "schema": "mob.discovery.v1",
+  "snapshot_id": "sample-snapshot-001",
+  "exchange": "BINANCE",
+  "market": "USDM_PERPETUAL",
+  "symbol": "STRKUSDT",
+  "workspace_id": "local-research-workspace",
+  "as_of_utc": "2026-10-14T12:00:00Z",
+  "last_closed_candle_utc": "2026-10-14T11:59:59Z",
+  "listed_as_of": true,
+  "eligible_for_analysis": false,
+  "rank": null,
+  "opportunity_score": null,
+  "direction": null,
+  "source_freshness_seconds": null,
+  "reason_codes": ["EXAMPLE_ONLY", "MISSING_LIQUIDITY_EVIDENCE"],
+  "feature_schema_version": "mob-discovery-v1",
+  "feature_window_hash_sha256": null,
+  "execution_authorized": false
+}

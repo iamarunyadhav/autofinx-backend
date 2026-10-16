@@ -62,6 +62,14 @@ Use BTCUSDT, stake 30 USDT, leverage 5, SL 1 %, no TP (notional 150 USDT clears 
 - [ ] Margin type: with the symbol on CROSS the preview must warn; liquidation price shown after the fill should equal Binance's.
 - [ ] Leverage shown equals the leverage Binance reports for the symbol after the open.
 
+## 6b. No-stop-loss trades (only if you enable `QUICK_TRADE_MANUAL_ALLOW_NO_STOP_LOSS`)
+- [ ] With the flag OFF the UI hides the opt-in and a hand-crafted request gets `403 no_stop_loss_disabled`.
+- [ ] With the flag ON: open a 3x no-stop trade on testnet (ISOLATED symbol). Binance shows the position and NO conditional/algo order (check Open Orders and the algo order list). The card shows "NO STOP-LOSS - close manually".
+- [ ] Add a take-profit: exactly one TAKE_PROFIT algo order exists; let it fire (or cancel it by hand) and confirm the reconciler books CLOSED / reports `take_profit_lost` and never closes the position.
+- [ ] Wait several reconciler ticks: no `protection_lost`, no `emergency_exit_started`, no critical alert.
+- [ ] Manual Close: flat on Binance, CLOSED, P&L equals Binance. Repeat once with a forced close failure (e.g. testnet maintenance) if you can: the card returns to open and stays open.
+- [ ] On a CROSS symbol the no-stop preview is refused (`no_stop_loss_requires_isolated_margin`); leverage above the cap is refused.
+
 ## 7. Sign-off
 | Item | Result | Date | Notes |
 |---|---|---|---|
@@ -72,6 +80,7 @@ Use BTCUSDT, stake 30 USDT, leverage 5, SL 1 %, no TP (notional 150 USDT clears 
 | Emergency close drill | | | |
 | Funding and P&L reconciliation | | | |
 | Hedge mode (optional) | | | |
+| No-stop-loss trade (only if enabled) | | | |
 
 Only after every required row is PASS: consider `QUICK_TRADE_MANUAL_ALLOW_MAINNET=true`, with the smallest stake, on a dedicated sub-account, watching the first positions manually.
 If algo orders are not supported on testnet, the result is **BLOCKED (cannot verify)**, not pass: keep the feature off.

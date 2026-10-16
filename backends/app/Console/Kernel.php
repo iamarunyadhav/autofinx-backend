@@ -58,6 +58,8 @@ use App\Console\Commands\PredictionFreshModelPublishShadowCommand;
 use App\Console\Commands\PredictionFreshModelDispatchReadyCommand;
 use App\Console\Commands\PredictionFreshModelActivateShadowCommand;
 use App\Console\Commands\PredictionLegacyModelsArchiveCommand;
+use App\Console\Commands\V5ResearchScanCommand;
+use App\Console\Commands\V5ResearchRefreshCommand;
 use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Foundation\Console\Kernel as ConsoleKernel;
 
@@ -75,6 +77,8 @@ class Kernel extends ConsoleKernel
     }
 
     protected $commands = [
+        V5ResearchScanCommand::class,
+        V5ResearchRefreshCommand::class,
         ScheduleSimulateCommand::class,
         BotsEvaluateCommand::class,
         MarketWsConsumerCommand::class,

@@ -132,3 +132,43 @@ the Time-Based JSX is untouched; its hooks still run while Manual is shown).
 3. Leave `QUICK_TRADE_MANUAL_ENABLED=false` in production until `TESTNET_CHECKLIST.md` is signed off on a TESTNET workspace first.
 4. Enable order: server flag (testnet environment) -> workspace flag -> verify checklist -> only then `QUICK_TRADE_MANUAL_ALLOW_MAINNET=true`, smallest stake, dedicated sub-account.
 5. Decide how Future Trade / Ratio Bot symbols are separated from manual-mode symbols (see limitations).
+
+## 8. Optional no-stop-loss trades (owner request, 2026-10-15)
+
+Status: BUILT BEHIND A THIRD FLAG (default OFF). Fake-tested only; NEVER run against the exchange. The stop-loss remains the default and the recommended way to trade.
+
+### The safety trade-off (read this before enabling)
+Everything in sections 3 to 6 was built around one promise: an exchange-side stop that is placed and verified, so a closed browser, a dead worker or a crashed server cannot leave a
+losing position unprotected. A no-stop trade deliberately gives that up. With no stop, the only automatic exits are the optional take-profit and LIQUIDATION. The loss is bounded
+only by the isolated margin (the whole stake) and by nothing sooner; there is no alert that fires before liquidation and nobody is watching unless the owner is. Funding keeps accruing.
+This is an owner decision, taken per trade, and the code does not try to second-guess it, but it is not a free option.
+
+### Rules (all enforced server-side in `ManualPreviewService::normalizeInput`, never in the UI only)
+- Server flag `config('quick_trade_manual.allow_no_stop_loss')` (env `QUICK_TRADE_MANUAL_ALLOW_NO_STOP_LOSS`, default false). Off => `403 no_stop_loss_disabled` for preview and open.
+- Per-trade opt-in: `no_stop_loss: true` AND `no_stop_loss_ack: true` (the UI sends the ack from a separate checkbox in the final confirm dialog). A missing, blank or null `sl_pct` WITHOUT the
+  opt-in is still `422 stop_loss_required`; the ack alone, or `no_stop_loss: false`, is not an opt-in. `no_stop_loss` together with an `sl_pct` is `422 stop_loss_conflict`. The preview does not need the ack.
+- Stricter caps while no stop exists (added by this change, all configurable): leverage <= `no_stop_loss_max_leverage` (default 5, `QUICK_TRADE_MANUAL_NO_SL_MAX_LEVERAGE`); the symbol must be ISOLATED margin
+  (`no_stop_loss_require_isolated`, default true, `QUICK_TRADE_MANUAL_NO_SL_REQUIRE_ISOLATED`) because cross margin can lose the whole futures wallet; the liquidation distance must still be verifiable from real leverage
+  brackets (fail closed). Stake min/max, max open positions, exchange max leverage, margin check, flat-symbol check, and the live/mainnet gates are unchanged. Trailing is refused with no stop (`trailing_requires_stop_loss`).
+- Take-profit works exactly as before (placed and verified exchange-side; a failed TP is reported, never fatal).
+
+### How it is stored and modelled (no new migration)
+- `sl_pct` is NOT NULL in the (still pending) schema, so a no-stop trade stores `sl_pct = 0` (a real stop is always >= `min_sl_pct`). `P::noStopLoss()` (`sl_pct <= 0`) is the single predicate; `sl_pct` is immutable after creation.
+  The API exposes `no_stop_loss: true` and `sl_pct: null`. No migration is needed, so deploying this code before/without any migration cannot break existing stop-loss trades.
+- Lifecycle is unchanged: the trade ends in `OPEN_PROTECTED` (the "open and managed" state) but with `protection_status = NO_STOP`, `outcome = open_no_stop_loss`, `protected_at = null`, `sl_status = NONE`.
+  The status NAME says "protected" for historical reasons; the UI shows "Open - NO stop-loss" and never a green shield for it.
+- Audit: the `entry_intent_recorded` event (written BEFORE the entry order) carries `no_stop_loss`, `no_stop_loss_acknowledged`, `acknowledged_by` (user id); the entry ends with an `open_without_stop_loss` event (severity high, not critical).
+
+### Behaviour with no stop
+- Entry: market order, then NO `placeProtective` call for a stop. Only the optional TP leg is placed. A rules/exchange read failure while placing the TP is non-fatal for a no-stop trade (it cannot become an emergency close).
+- Reconciler: never reports `protection_lost`, never re-places a stop, never emergency-closes because a stop is absent (`inspect()` returns `NO_STOP`). A failed manual close returns to `OPEN_PROTECTED/NO_STOP` for a user
+  retry instead of `emergencyExit`. `EXCHANGE_STATE_UNKNOWN` resolves back to open-without-stop. Flat-on-exchange detection, external/liquidation attribution (never attributed to a stop), real-fill P&L finalisation and wallet
+  settlement are unchanged. A missing TP is reported as `take_profit_lost` only.
+- Manual close: unchanged (reduce-only market, flat confirmed by the exchange, once-only wallet settlement, duplicate click is a no-op).
+- UI: opt-in checkbox only when `status.allow_no_stop_loss`; extra mandatory acknowledgement in the review dialog; persistent "No stop-loss: you must close this position manually" banner with the approximate liquidation price and
+  its distance from mark; liquidation shown as an approximation (exchange figure replaces it once known); chart shows no SL line.
+
+### Known limits
+- No proximity alert: nothing warns before liquidation except what the owner sees on the page. (Possible follow-up; not built, out of scope.)
+- The no-stop path has never touched Binance: only the take-profit and market entry/close calls are shared with the verified-by-fake stop path.
+- `OPEN_PROTECTED` for an unprotected trade is a naming wart kept to avoid touching the state machine; consumers must read `no_stop_loss` / `protection_status`.

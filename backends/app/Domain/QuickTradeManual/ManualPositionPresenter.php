@@ -36,7 +36,8 @@ class ManualPositionPresenter
             'entry_reference_price' => $f($p->entry_reference_price),
             'entry_price' => $f($p->entry_price),
             'entry_slippage_pct' => $f($p->entry_slippage_pct),
-            'sl_pct' => $f($p->sl_pct),
+            'no_stop_loss' => $p->noStopLoss(),
+            'sl_pct' => $p->noStopLoss() ? null : $f($p->sl_pct),
             'sl_basis' => 'price_movement',
             'sl_trigger_price' => $f($p->sl_trigger_price),
             'tp_pct' => $f($p->tp_pct),
@@ -143,6 +144,7 @@ class ManualPositionPresenter
     private function outcome(P $p): string
     {
         return match (true) {
+            $p->status === P::OPEN_PROTECTED && $p->noStopLoss() => 'open_no_stop_loss',
             $p->status === P::OPEN_PROTECTED => 'open_protected',
             $p->status === P::ENTRY_FAILED => 'entry_failed',
             $p->status === P::EXCHANGE_STATE_UNKNOWN => 'state_unknown_reconciling',

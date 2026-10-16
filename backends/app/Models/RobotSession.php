@@ -38,6 +38,7 @@ class RobotSession extends BaseModel
         'daily_loss_limit' => 'decimal:8',
         'signal_streak' => 'integer',
         'last_signal_direction_at' => 'datetime',
+        'auto_enabled_at' => 'datetime',
     ];
 
     public function quickTrades(): HasMany

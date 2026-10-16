@@ -28,9 +28,9 @@ class ManualPreviewService
     /**
      * Validates and normalises user input. Throws RuntimeException('code: message').
      *
-     * @return array{symbol: string, direction: string, stake: float, leverage: float, sl_pct: float, tp_pct: ?float}
+     * @return array{symbol: string, direction: string, stake: float, leverage: float, sl_pct: ?float, no_stop_loss: bool, tp_pct: ?float}
      */
-    public function normalizeInput(array $in): array
+    public function normalizeInput(array $in, bool $requireNoStopAck = true): array
     {
         $symbol = strtoupper(trim((string) ($in['symbol'] ?? '')));
         // Binance exchangeInfo is the source of truth; symbolRules() below
@@ -61,14 +61,34 @@ class ManualPreviewService
             throw new RuntimeException("invalid_leverage: Leverage must be a whole number from 1 to {$maxLeverage}.");
         }
 
-        if (! isset($in['sl_pct']) || $in['sl_pct'] === '' || ! is_numeric($in['sl_pct'])) {
-            throw new RuntimeException('stop_loss_required: A stop-loss is mandatory in Manual SL/TP mode.');
-        }
-        $slPct = round((float) $in['sl_pct'], 4);
-        $minSl = (float) config('quick_trade_manual.min_sl_pct', 0.1);
-        $maxSl = (float) config('quick_trade_manual.max_sl_pct', 15);
-        if ($slPct < $minSl || $slPct > $maxSl) {
-            throw new RuntimeException("invalid_stop_loss: Stop-loss must be between {$minSl}% and {$maxSl}% of price movement.");
+        $noStop = self::truthy($in['no_stop_loss'] ?? false);
+        $slProvided = isset($in['sl_pct']) && $in['sl_pct'] !== '' && $in['sl_pct'] !== null;
+        $slPct = null;
+        if ($noStop) {
+            // Explicit per-trade opt-in only. Never inferred from a missing stop-loss.
+            if (! (bool) config('quick_trade_manual.allow_no_stop_loss', false)) {
+                throw new RuntimeException('no_stop_loss_disabled: Trading without a stop-loss is disabled on this server (QUICK_TRADE_MANUAL_ALLOW_NO_STOP_LOSS).');
+            }
+            if ($slProvided) {
+                throw new RuntimeException('stop_loss_conflict: Send either a stop-loss or the no-stop-loss opt-in, not both.');
+            }
+            if ($requireNoStopAck && ! self::truthy($in['no_stop_loss_ack'] ?? false)) {
+                throw new RuntimeException('no_stop_loss_ack_required: Trading without a stop-loss requires explicit acknowledgement (no_stop_loss_ack).');
+            }
+            $maxNoSl = (float) config('quick_trade_manual.no_stop_loss_max_leverage', 5);
+            if ($leverage > $maxNoSl) {
+                throw new RuntimeException("no_stop_loss_leverage_too_high: Without a stop-loss the maximum leverage is {$maxNoSl}x.");
+            }
+        } else {
+            if (! $slProvided || ! is_numeric($in['sl_pct'])) {
+                throw new RuntimeException('stop_loss_required: A stop-loss is required unless you explicitly opt in to trading without one.');
+            }
+            $slPct = round((float) $in['sl_pct'], 4);
+            $minSl = (float) config('quick_trade_manual.min_sl_pct', 0.1);
+            $maxSl = (float) config('quick_trade_manual.max_sl_pct', 15);
+            if ($slPct < $minSl || $slPct > $maxSl) {
+                throw new RuntimeException("invalid_stop_loss: Stop-loss must be between {$minSl}% and {$maxSl}% of price movement.");
+            }
         }
 
         $tpPct = null;
@@ -82,6 +102,9 @@ class ManualPreviewService
         $trailingPct = null;
         $activationPct = null;
         if (isset($in['trailing_pct']) && $in['trailing_pct'] !== '' && $in['trailing_pct'] !== null) {
+            if ($noStop) {
+                throw new RuntimeException('trailing_requires_stop_loss: Trailing protection is only available together with a stop-loss.');
+            }
             $trailingPct = round((float) $in['trailing_pct'], 4);
             $minTrail = (float) config('quick_trade_manual.min_trailing_pct', 0.1);
             $maxTrail = (float) config('quick_trade_manual.max_trailing_pct', 5.0);
@@ -99,10 +122,16 @@ class ManualPreviewService
             'stake' => $stake,
             'leverage' => $leverage,
             'sl_pct' => $slPct,
+            'no_stop_loss' => $noStop,
             'tp_pct' => $tpPct,
             'trailing_pct' => $trailingPct,
             'trailing_activation_pct' => $activationPct,
         ];
+    }
+
+    private static function truthy(mixed $v): bool
+    {
+        return $v === true || $v === 1 || $v === '1' || (is_string($v) && strtolower(trim($v)) === 'true');
     }
 
     public function resolveIntegration(string $workspaceId, ?string $integrationId): Integration
@@ -150,6 +179,7 @@ class ManualPreviewService
             'price' => $mark['mark_price'],
             'sl_pct' => $in['sl_pct'],
             'tp_pct' => $in['tp_pct'],
+            'no_stop_loss' => (bool) ($in['no_stop_loss'] ?? false),
             'tick_size' => $rules['tick_size'],
             'step_size' => $rules['step_size'],
             'min_qty' => $rules['min_qty'],
@@ -171,6 +201,9 @@ class ManualPreviewService
         $requiredMargin = round($est['margin_required'] * (1 + self::MARGIN_BUFFER_PCT / 100), 8);
         if ($requiredMargin > $balance) {
             $est['errors'][] = ['code' => 'insufficient_margin', 'message' => sprintf('Required margin %.2f USDT (incl. %d%% buffer) exceeds available futures balance %.2f USDT.', $requiredMargin, (int) self::MARGIN_BUFFER_PCT, $balance)];
+        }
+        if (($in['no_stop_loss'] ?? false) && (bool) config('quick_trade_manual.no_stop_loss_require_isolated', true) && $position['margin_type'] !== 'isolated') {
+            $est['errors'][] = ['code' => 'no_stop_loss_requires_isolated_margin', 'message' => 'Without a stop-loss the symbol must use ISOLATED margin (cross margin can lose the whole futures wallet). Switch the margin type on Binance, or use a stop-loss.'];
         }
         if (abs($position['amount']) > 0) {
             $est['errors'][] = ['code' => 'exchange_position_exists', 'message' => 'An open exchange position already exists on this symbol/side. Manual mode only opens when the symbol is flat.'];

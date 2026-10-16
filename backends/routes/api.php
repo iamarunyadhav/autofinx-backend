@@ -696,3 +696,10 @@ Route::post('ratio-bots/{ratioBot}/diagnostics/fix', [RatioBotController::class,
         Route::match(['get', 'post', 'put', 'patch', 'delete'], 'table/{table}', [TableController::class, 'handle']);
     });
 });
+Route::middleware('auth:sanctum')->prefix('v5/research')->group(function () {
+    Route::get('/overview', [\App\Http\Controllers\V5ResearchController::class, 'overview']);
+    Route::get('/latest', [\App\Http\Controllers\V5ResearchController::class, 'latest']);
+    Route::get('/candidates', [\App\Http\Controllers\V5ResearchController::class, 'candidates']);
+    Route::get('/status', [\App\Http\Controllers\V5ResearchController::class, 'status']);
+    Route::get('/predictions', [\App\Http\Controllers\V5ResearchController::class, 'history']);
+});
