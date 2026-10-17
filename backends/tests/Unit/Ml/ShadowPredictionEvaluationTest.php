@@ -68,6 +68,7 @@ final class ShadowPredictionEvaluationTest extends TestCase
         $decision = (new ShadowDecision)->decide(100.0, 0.005, 0.001, 0.009, $costs); // +0.5%
 
         $this->assertSame('BUY', $decision['decision']);
+        $this->assertSame('VALID_TRADEABLE', $decision['decision_status']);
         $this->assertEqualsWithDelta(0.5 - $costs['cost_pct'], $decision['buy_net_pct'], 1e-9);
         $this->assertEqualsWithDelta(-0.5 - $costs['cost_pct'], $decision['sell_net_pct'], 1e-9);
         $this->assertEqualsWithDelta(100.5, $decision['predicted_price'], 1e-9);
@@ -76,7 +77,9 @@ final class ShadowPredictionEvaluationTest extends TestCase
 
         // Clears cost once but not the required (safety-multiplied) move => WAIT.
         $small = ($costs['cost_pct'] + ($costs['required_move_pct'] - $costs['cost_pct']) / 2) / 100;
-        $this->assertSame('WAIT', (new ShadowDecision)->decide(100.0, -$small, null, null, $costs)['decision']);
+        $blocked = (new ShadowDecision)->decide(100.0, -$small, null, null, $costs);
+        $this->assertSame('WAIT', $blocked['decision']);
+        $this->assertSame('COST_BLOCKED', $blocked['decision_status']);
     }
 
     public function test_prediction_is_stored_once_per_anchor_with_model_version(): void

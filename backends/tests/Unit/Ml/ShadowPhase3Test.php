@@ -3,6 +3,7 @@
 namespace Tests\Unit\Ml;
 
 use App\Domain\Ml\Shadow\ClassifierDecision;
+use App\Domain\Ml\Shadow\ShadowDecisionDiagnostics;
 use App\Domain\Ml\Shadow\ClassifierPromotionPolicy;
 use App\Domain\Ml\Shadow\FeatureLabelService;
 use App\Domain\Ml\Shadow\FundingRateService;
@@ -204,12 +205,27 @@ final class ShadowPhase3Test extends TestCase
         $d = new ClassifierDecision;
         $costs = ['cost_pct' => 0.12];
         $this->assertSame('BUY', $d->decide(0.70, 0.10, $this->params(0.8, -0.3), $costs, 0.0)['decision']);
+        $this->assertSame('VALID_TRADEABLE', $d->decide(0.70, 0.10, $this->params(0.8, -0.3), $costs, 0.0)['decision_status']);
         $this->assertSame('SELL', $d->decide(0.10, 0.70, $this->params(0.8, -0.3), $costs, 0.0)['decision']);
-        $this->assertSame('no_side_probability_above_floor', $d->decide(0.50, 0.50, $this->params(0.8, -0.3), $costs, 0.0)['decision_reason']);
+        $neutral = $d->decide(0.50, 0.50, $this->params(0.8, -0.3), $costs, 0.0);
+        $this->assertSame('no_side_probability_above_floor', $neutral['decision_reason']);
+        $this->assertSame('WAIT_SIGNAL', $neutral['decision_status']);
         // Above the floor but costs eat the edge -> WAIT.
-        $this->assertSame('expected_net_not_positive_after_costs', $d->decide(0.60, 0.10, $this->params(0.3, -0.3), $costs, 0.0)['decision_reason']);
+        $blocked = $d->decide(0.60, 0.10, $this->params(0.3, -0.3), $costs, 0.0);
+        $this->assertSame('expected_net_not_positive_after_costs', $blocked['decision_reason']);
+        $this->assertSame('COST_BLOCKED', $blocked['decision_status']);
         // Both qualify -> the higher expected net wins.
         $this->assertSame('SELL', $d->decide(0.60, 0.80, $this->params(0.8, -0.3), $costs, 0.0)['decision']);
+    }
+
+    public function test_decision_diagnostics_separates_cost_blocked_from_wait_signal(): void
+    {
+        $diagnostics = new ShadowDecisionDiagnostics;
+
+        $this->assertSame('COST_BLOCKED', $diagnostics->classify('WAIT', 'expected_net_not_positive_after_costs'));
+        $this->assertSame('WAIT_SIGNAL', $diagnostics->classify('WAIT', 'no_side_probability_above_floor'));
+        $this->assertSame('VALID_TRADEABLE', $diagnostics->classify('BUY', 'p_buy_above_floor_and_expected_net_positive'));
+        $this->assertSame('DATA_INVALID', $diagnostics->classify('WAIT', 'DATA_STALE', 'FAILED'));
     }
 
     private function classifierChampion(int $horizon = 60): MlModel

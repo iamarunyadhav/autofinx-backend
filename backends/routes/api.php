@@ -228,7 +228,13 @@ Route::prefix('v1')->group(function () {
         Route::get('quick-trade/prediction-fresh-datasets', [\App\Http\Controllers\Api\FreshPredictionDatasetDashboardController::class, 'index'])->middleware('throttle:30,1');
         // Phase 1 Python ML shadow loop — read-only stored shadow rows; never an order input.
         Route::get('quick-trade/ml-shadow', [\App\Http\Controllers\Api\MlShadowController::class, 'prediction'])->middleware('throttle:60,1');
+        Route::get('quick-trade/ml-shadow/history', [\App\Http\Controllers\Api\MlShadowController::class, 'history'])->middleware('throttle:60,1');
+        Route::post('quick-trade/ml-shadow/research-case', [\App\Http\Controllers\Api\MlShadowController::class, 'createResearchCase'])->middleware('throttle:10,1');
+        Route::post('quick-trade/ml-shadow/research-hypothesis', [\App\Http\Controllers\Api\MlShadowController::class, 'createHypothesis'])->middleware('throttle:10,1');
+        Route::post('quick-trade/ml-shadow/research-hypothesis/review', [\App\Http\Controllers\Api\MlShadowController::class, 'reviewHypothesis'])->middleware('throttle:5,1');
+        Route::post('quick-trade/ml-shadow/research-experiment-review', [\App\Http\Controllers\Api\MlShadowController::class, 'queueExperimentReview'])->middleware('throttle:5,1');
         Route::get('quick-trade/ml-shadow/learning', [\App\Http\Controllers\Api\MlShadowController::class, 'learning'])->middleware('throttle:30,1');
+        Route::get('quick-trade/ml-shadow/holdout-review', [\App\Http\Controllers\Api\MlShadowController::class, 'holdoutReview'])->middleware('throttle:30,1');
         Route::get('quick-trade/ml-autopilot', [\App\Http\Controllers\Api\MlShadowController::class, 'autopilot'])->middleware('throttle:30,1');
         Route::post('forecast/comparison', [QuickTradeController::class, 'forecastComparison']);
         // VNext Dynamic Decision Engine, Phase A -- read-only, informational
@@ -702,9 +708,16 @@ Route::middleware('auth:sanctum')->prefix('v5/research')->group(function () {
     Route::get('/candidates', [\App\Http\Controllers\V5ResearchController::class, 'candidates']);
     Route::get('/status', [\App\Http\Controllers\V5ResearchController::class, 'status']);
     Route::get('/predictions', [\App\Http\Controllers\V5ResearchController::class, 'history']);
+    Route::get('/selections', [\App\Http\Controllers\V5ResearchController::class, 'legacySelections']);
+    Route::post('/selections', [\App\Http\Controllers\V5ResearchController::class, 'legacySelect']);
+    Route::delete('/selections/{id}', [\App\Http\Controllers\V5ResearchController::class, 'legacyRemove']);
+    Route::get('/ranking-history', [\App\Http\Controllers\V5ResearchController::class, 'rankingHistory']);
+    Route::get('/selection-metrics', [\App\Http\Controllers\V5ResearchController::class, 'legacySelectionMetrics']);
+});
+
+Route::middleware('auth:sanctum')->prefix('workspaces/{workspace}/v5/research')->group(function () {
     Route::get('/selections', [\App\Http\Controllers\V5ResearchController::class, 'selections']);
     Route::post('/selections', [\App\Http\Controllers\V5ResearchController::class, 'select']);
     Route::delete('/selections/{id}', [\App\Http\Controllers\V5ResearchController::class, 'remove']);
-    Route::get('/ranking-history', [\App\Http\Controllers\V5ResearchController::class, 'rankingHistory']);
     Route::get('/selection-metrics', [\App\Http\Controllers\V5ResearchController::class, 'selectionMetrics']);
 });
