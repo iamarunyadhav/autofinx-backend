@@ -15,28 +15,30 @@ return [
 
     'crypto' => [
         'default_provider' => 'binance',
-        'symbols' => [
-            'BTCUSDT' => [
-                'asset_class' => 'CRYPTO',
-                'asset_code' => 'BTCUSDT',
-                'base' => 'BTC',
-                'quote' => 'USDT',
-                'min_qty' => 0.0001,
-                'qty_precision' => 6,
-                'price_precision' => 2,
-                'fee_pct' => 0.1,
-            ],
-            'ETHUSDT' => [
-                'asset_class' => 'CRYPTO',
-                'asset_code' => 'ETHUSDT',
-                'base' => 'ETH',
-                'quote' => 'USDT',
-                'min_qty' => 0.001,
-                'qty_precision' => 6,
-                'price_precision' => 2,
-                'fee_pct' => 0.1,
-            ],
-        ],
+        'symbols' => array_reduce(
+            explode(',', (string) env(
+                'QUICK_TRADE_MANUAL_SYMBOLS',
+                'BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,XRPUSDT,ADAUSDT,DOGEUSDT,AVAXUSDT,LINKUSDT,TRXUSDT,DOTUSDT,MATICUSDT,NEARUSDT,LTCUSDT,UNIUSDT,ATOMUSDT,ETCUSDT,FILUSDT,APTUSDT,ARBUSDT'
+            )),
+            static function (array $symbols, string $raw): array {
+                $symbol = strtoupper(trim($raw));
+                if ($symbol === '') return $symbols;
+                $base = str_ends_with($symbol, 'USDT') ? substr($symbol, 0, -4) : $symbol;
+                $symbols[$symbol] = [
+                    'asset_class' => 'CRYPTO',
+                    'asset_code' => $symbol,
+                    'base' => $base,
+                    'quote' => 'USDT',
+                    // ExchangeInfo remains authoritative for live quantity/price filters.
+                    'min_qty' => 0.001,
+                    'qty_precision' => 6,
+                    'price_precision' => 2,
+                    'fee_pct' => 0.1,
+                ];
+                return $symbols;
+            },
+            []
+        ),
     ],
 
     'metals' => [
