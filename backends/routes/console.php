@@ -11,6 +11,23 @@ use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Schedule;
 use Illuminate\Support\Str;
 
+// Laravel 12 loads scheduled definitions from this command route file. Keep the
+// V5 research cadence here so the deployment flags are effective; these jobs are
+// research/shadow-only and never authorize execution or model promotion.
+if ((bool) config('market_opportunity_brain.v5_refresh_schedule_enabled', false)) {
+    Schedule::command('v5:research-refresh --live --limit=3')
+        ->everyFifteenMinutes()
+        ->withoutOverlapping(10)
+        ->runInBackground();
+}
+
+if ((bool) config('market_opportunity_brain.v5_outcome_schedule_enabled', false)) {
+    Schedule::command('v5:research-evaluate-outcomes')
+        ->hourly()
+        ->withoutOverlapping(10)
+        ->runInBackground();
+}
+
 $markRunStart = function (string $command): void {
     SchedulerRun::create([
         'id' => (string) Str::uuid(),
