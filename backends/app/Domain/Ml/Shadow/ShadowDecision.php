@@ -15,7 +15,7 @@ final class ShadowDecision
 {
     /**
      * @param  array{cost_pct:float, required_move_pct:float}  $costs  From QuickTradeCostModel::costs()
-     * @return array{predicted_price:float, predicted_low:?float, predicted_high:?float, expected_move_pct:float, buy_net_pct:float, sell_net_pct:float, decision:string, decision_reason:string}
+     * @return array{predicted_price:float, predicted_low:?float, predicted_high:?float, expected_move_pct:float, buy_net_pct:float, sell_net_pct:float, decision:string, decision_status:string, decision_reason:string}
      */
     public function decide(float $currentPrice, float $predictedReturn, ?float $q10, ?float $q90, array $costs, float $fundingBuyPct = 0.0): array
     {
@@ -26,11 +26,13 @@ final class ShadowDecision
         $sellNet = -$movePct - $costPct + $fundingBuyPct;
 
         if ($movePct - $fundingBuyPct >= $requiredPct) {
-            [$decision, $reason] = ['BUY', 'expected_move_clears_required_move'];
+            [$decision, $status, $reason] = ['BUY', 'VALID_TRADEABLE', 'expected_move_clears_required_move'];
         } elseif (-$movePct + $fundingBuyPct >= $requiredPct) {
-            [$decision, $reason] = ['SELL', 'expected_move_clears_required_move'];
+            [$decision, $status, $reason] = ['SELL', 'VALID_TRADEABLE', 'expected_move_clears_required_move'];
+        } elseif (abs($movePct) > 0.0) {
+            [$decision, $status, $reason] = ['WAIT', 'COST_BLOCKED', 'expected_move_below_required_move'];
         } else {
-            [$decision, $reason] = ['WAIT', 'expected_move_below_required_move'];
+            [$decision, $status, $reason] = ['WAIT', 'WAIT_SIGNAL', 'expected_move_below_required_move'];
         }
 
         return [
@@ -41,6 +43,7 @@ final class ShadowDecision
             'buy_net_pct' => round($buyNet, 8),
             'sell_net_pct' => round($sellNet, 8),
             'decision' => $decision,
+            'decision_status' => $status,
             'decision_reason' => $reason,
         ];
     }

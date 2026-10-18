@@ -26,6 +26,7 @@ class ShadowPredictionService
         private readonly ClassifierDecision $classifierDecision,
         private readonly QuickTradeCostModel $costModel,
         private readonly FundingRateService $funding,
+        private readonly ShadowDecisionDiagnostics $diagnostics,
     ) {}
 
     /** @return array{status:string, prediction:?MlShadowPrediction} */
@@ -161,6 +162,7 @@ class ShadowPredictionService
         $live = $evaluation->metrics($symbol, $horizon);
         $base['model'] = $champion ? $this->modelSummary($champion) : null;
         $base['live_evaluation'] = $live;
+        $base['decision_diagnostics'] = $this->diagnostics->forScope($symbol, $horizon);
 
         $prediction = MlShadowPrediction::query()->where('symbol', $symbol)->where('horizon_minutes', $horizon)
             ->orderByDesc('anchor_time_ms')->first();
@@ -195,6 +197,7 @@ class ShadowPredictionService
                 'required_move_pct' => data_get($prediction->cost_snapshot, 'required_move_pct'),
                 // Stale data never yields a BUY/SELL, whatever was stored.
                 'decision' => $stale ? 'WAIT' : $prediction->decision,
+                'decision_status' => $stale ? 'DATA_INVALID' : $this->decisionStatus($prediction->decision, $prediction->decision_reason, $prediction->buy_net_pct, $prediction->sell_net_pct),
                 'decision_reason' => $stale ? 'DATA_STALE' : $prediction->decision_reason,
                 'model_version' => $prediction->model_version,
                 'training_samples' => $model?->train_samples,
@@ -281,5 +284,20 @@ class ShadowPredictionService
     private function isStale(int $anchorTimeMs): bool
     {
         return now('UTC')->getTimestampMs() - $anchorTimeMs > (int) config('ml.data.max_anchor_age_seconds', 720) * 1000;
+    }
+
+    private function decisionStatus(string $decision, ?string $reason, mixed $buyNet, mixed $sellNet): string
+    {
+        if ($decision === 'BUY' || $decision === 'SELL') {
+            return 'VALID_TRADEABLE';
+        }
+        if ($reason === 'expected_net_not_positive_after_costs' || $reason === 'expected_move_below_required_move') {
+            return 'COST_BLOCKED';
+        }
+        if ($reason === 'no_side_probability_above_floor') {
+            return 'WAIT_SIGNAL';
+        }
+
+        return 'WAIT_SIGNAL';
     }
 }

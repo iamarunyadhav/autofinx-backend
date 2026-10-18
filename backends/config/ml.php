@@ -14,6 +14,9 @@
 */
 
 return [
+    'shadow_research' => [
+        'llm_enabled' => (bool) env('AUTOFINX_ML_SHADOW_LLM_ENABLED', false),
+    ],
     'enabled' => (bool) env('AUTOFINX_ML_SHADOW_ENABLED', false),
 
     // Hard-coded invariants surfaced in every payload. Not configurable on
@@ -230,6 +233,13 @@ return [
         // data", never a percentage. Evaluation starts at the first Phase 1
         // prediction; no historical trade ever seeds it.
         'min_samples' => (int) env('AUTOFINX_ML_EVAL_MIN_SAMPLES', 50),
+    ],
+
+    // Read-only decision-distribution diagnostics. These never alter a
+    // prediction, cost gate, champion, or execution path.
+    'diagnostics' => [
+        'min_samples' => (int) env('AUTOFINX_ML_DIAGNOSTICS_MIN_SAMPLES', 30),
+        'wait_like_alert_ratio' => (float) env('AUTOFINX_ML_DIAGNOSTICS_WAIT_ALERT_RATIO', 0.90),
     ],
 
     // Execution-feedback eligibility (Step 3.5). Trades before this instant

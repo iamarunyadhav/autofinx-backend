@@ -18,7 +18,7 @@ final class ClassifierDecision
     /**
      * @param  array{probability_floor?:?float, buy:array{avg_win_pct:float, avg_other_pct:float}, sell:array{avg_win_pct:float, avg_other_pct:float}}  $params
      * @param  array{cost_pct:float}  $costs
-     * @return array{decision:string, decision_reason:string, expected_net_buy_pct:float, expected_net_sell_pct:float}
+     * @return array{decision:string, decision_status:string, decision_reason:string, expected_net_buy_pct:float, expected_net_sell_pct:float}
      */
     public function decide(float $pBuy, float $pSell, array $params, array $costs, float $fundingBuyPct, ?float $floor = null): array
     {
@@ -29,15 +29,16 @@ final class ClassifierDecision
         $buy = $pBuy >= $floor && $netBuy > 0;
         $sell = $pSell >= $floor && $netSell > 0;
 
-        [$decision, $reason] = match (true) {
-            $buy && (! $sell || $netBuy >= $netSell) => ['BUY', 'p_buy_above_floor_and_expected_net_positive'],
-            $sell => ['SELL', 'p_sell_above_floor_and_expected_net_positive'],
-            $pBuy < $floor && $pSell < $floor => ['WAIT', 'no_side_probability_above_floor'],
-            default => ['WAIT', 'expected_net_not_positive_after_costs'],
+        [$decision, $status, $reason] = match (true) {
+            $buy && (! $sell || $netBuy >= $netSell) => ['BUY', 'VALID_TRADEABLE', 'p_buy_above_floor_and_expected_net_positive'],
+            $sell => ['SELL', 'VALID_TRADEABLE', 'p_sell_above_floor_and_expected_net_positive'],
+            $pBuy < $floor && $pSell < $floor => ['WAIT', 'WAIT_SIGNAL', 'no_side_probability_above_floor'],
+            default => ['WAIT', 'COST_BLOCKED', 'expected_net_not_positive_after_costs'],
         };
 
         return [
             'decision' => $decision,
+            'decision_status' => $status,
             'decision_reason' => $reason,
             'expected_net_buy_pct' => round($netBuy, 8),
             'expected_net_sell_pct' => round($netSell, 8),
