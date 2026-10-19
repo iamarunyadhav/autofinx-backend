@@ -6,6 +6,8 @@ use App\Http\Controllers\Concerns\AssertsWorkspaceMembership;
 use App\Models\V5ResearchScannerRun;
 use App\Models\V5ResearchSelection;
 use App\Models\V5ShadowPrediction;
+use App\Models\NexusEntry;
+use App\Models\NexusReview;
 use App\Models\WorkspaceMember;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -83,6 +85,62 @@ final class V5ResearchController extends Controller
         $this->assertWorkspaceMembership($request, $workspace);
 
         return $this->metrics($request, $workspace);
+    }
+
+    /** Knowledge proposals are research-only. Approval never promotes a model or enables execution. */
+    public function knowledge(Request $request, string $workspace): JsonResponse
+    {
+        $this->assertWorkspaceMembership($request, $workspace);
+        return response()->json([
+            'execution_authorized' => false,
+            'items' => NexusEntry::query()->where('workspace_id', $workspace)->where('kind', 'candidate')
+                ->where('payload->source', 'v5_knowledge_review')->latest()->limit(100)->get(),
+        ]);
+    }
+
+    public function createKnowledge(Request $request, string $workspace): JsonResponse
+    {
+        $this->assertWorkspaceMembership($request, $workspace);
+        $data = $request->validate([
+            'title' => ['required', 'string', 'max:180'],
+            'content' => ['required', 'string', 'max:12000'],
+            'category' => ['required', 'in:CANDLE,TREND,SUPPORT_RESISTANCE,RISK,OTHER'],
+            'source_url' => ['nullable', 'url', 'max:1000'],
+        ]);
+        $entry = NexusEntry::create([
+            'workspace_id' => $workspace,
+            'kind' => 'candidate',
+            'title' => $data['title'],
+            'status' => 'PROPOSED',
+            'evidence_level' => 'C',
+            'fingerprint' => hash('sha256', json_encode(['v5_knowledge_review', $workspace, $data['title'], $data['content']], JSON_THROW_ON_ERROR)),
+            'payload' => [
+                'source' => 'v5_knowledge_review', 'category' => $data['category'], 'content' => $data['content'],
+                'source_url' => $data['source_url'] ?? null, 'paper_metrics' => null,
+                'verification' => ['backtest' => 'PENDING', 'paper_trade' => 'PENDING', 'holdout' => 'PENDING'],
+                'training_eligible' => false, 'execution_authorized' => false,
+            ],
+        ]);
+        return response()->json(['execution_authorized' => false, 'item' => $entry], 201);
+    }
+
+    public function reviewKnowledge(Request $request, string $workspace, string $entry): JsonResponse
+    {
+        $this->assertWorkspaceMembership($request, $workspace);
+        abort_unless(in_array(strtolower((string) $request->user()?->pivot?->role), ['owner', 'admin'], true) ||
+            WorkspaceMember::query()->where('workspace_id', $workspace)->where('user_id', $request->user()->id)->whereIn('role', ['owner', 'admin'])->exists(), 403, 'Workspace owner or admin required.');
+        $data = $request->validate(['action' => ['required', 'in:APPROVED,REJECTED'], 'reason' => ['required', 'string', 'min:3', 'max:2000']]);
+        $item = DB::transaction(function () use ($request, $workspace, $entry, $data) {
+            $item = NexusEntry::query()->where('workspace_id', $workspace)->where('kind', 'candidate')->lockForUpdate()->findOrFail($entry);
+            abort_unless(data_get($item->payload, 'source') === 'v5_knowledge_review', 422, 'Not a V5 knowledge item.');
+            NexusReview::create(['workspace_id' => $workspace, 'entry_id' => $item->id, 'user_id' => $request->user()->id, 'action' => $data['action'], 'reason' => $data['reason']]);
+            $payload = (array) $item->payload;
+            $payload['verification']['human_review'] = $data['action'];
+            $payload['training_eligible'] = false; // paper/holdout gates must be added by a future experiment result.
+            $item->update(['status' => $data['action'], 'payload' => $payload]);
+            return $item->fresh();
+        });
+        return response()->json(['execution_authorized' => false, 'item' => $item]);
     }
 
     /** Compatibility routes; new callers should use workspace-scoped endpoints. */
