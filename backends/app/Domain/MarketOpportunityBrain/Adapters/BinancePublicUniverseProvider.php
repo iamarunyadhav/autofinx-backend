@@ -22,7 +22,8 @@ final class BinancePublicUniverseProvider implements MarketUniverseProvider
 
     private const MARKET = 'USDM_PERPETUAL';
 
-    public function __construct(private readonly BinancePublicRestClient $client = new BinancePublicRestClient())
+    /** @param list<string>|null $allowedSymbols Optional V5 cohort; null preserves generic MOB discovery. */
+    public function __construct(private readonly BinancePublicRestClient $client = new BinancePublicRestClient(), private readonly ?array $allowedSymbols = null)
     {
     }
 
@@ -60,6 +61,9 @@ final class BinancePublicUniverseProvider implements MarketUniverseProvider
         foreach ($symbolsInfo as $info) {
             $symbol = (string) ($info['symbol'] ?? '');
             if ($symbol === '') {
+                continue;
+            }
+            if ($this->allowedSymbols !== null && ! in_array($symbol, $this->allowedSymbols, true)) {
                 continue;
             }
             $status = (string) ($info['status'] ?? '');

@@ -537,4 +537,16 @@ if ($schedulerEnabled && (bool) config('ml.enabled', false)) {
         ->runInBackground()
         ->before(fn () => $markRunStart('ml:retrain:check'))
         ->after(fn () => $markRunEnd('ml:retrain:check'));
+
+    // The initial history load is intentionally bounded and opt-in. It works
+    // through the shadow-only candle store; no live/manual bot reads it.
+    if ((bool) config('ml.cohort_bootstrap.enabled', false)) {
+        Schedule::command('ml:cohort:bootstrap')
+            ->everyFifteenMinutes()
+            ->onOneServer()
+            ->withoutOverlapping(14)
+            ->runInBackground()
+            ->before(fn () => $markRunStart('ml:cohort:bootstrap'))
+            ->after(fn () => $markRunEnd('ml:cohort:bootstrap'));
+    }
 }

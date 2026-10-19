@@ -24,7 +24,11 @@ return [
     'mode' => 'shadow_only',
 
     'provider' => 'binance_futures',
-    'symbols' => array_values(array_filter(array_map('trim', explode(',', (string) env('AUTOFINX_ML_SYMBOLS', 'BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,XRPUSDT,SUIUSDT'))))),
+    // Research cohort, not a claim that every symbol is profitable. These are
+    // established, liquid USDⓈ-M pairs with enough historical depth to test
+    // independently. V5 selects a smaller quality-filtered subset for paper
+    // simulation; every symbol still trains/evaluates independently.
+    'symbols' => array_values(array_filter(array_map('trim', explode(',', (string) env('AUTOFINX_ML_SYMBOLS', 'BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,XRPUSDT,SUIUSDT,ADAUSDT,DOGEUSDT,LINKUSDT,AVAXUSDT,LTCUSDT,NEARUSDT'))))),
 
     // How far back candles + funding are collected per symbol. The deep
     // majors get 5 years (more market regimes: bull, bear, sideways, crash);
@@ -78,6 +82,15 @@ return [
         // Maximum pages per invocation; the checkpoint makes the next run
         // resume exactly where this one stopped.
         'max_pages_per_run' => (int) env('AUTOFINX_ML_BACKFILL_MAX_PAGES', 400),
+    ],
+
+    // Controlled onboarding of a new research cohort. One symbol is advanced
+    // per scheduled pass and the persistent checkpoint resumes safely after a
+    // restart. This is deliberately opt-in: it consumes public Binance REST
+    // capacity but never talks to an account or an order endpoint.
+    'cohort_bootstrap' => [
+        'enabled' => (bool) env('AUTOFINX_ML_COHORT_BOOTSTRAP_ENABLED', false),
+        'pages_per_run' => max(1, min(25, (int) env('AUTOFINX_ML_COHORT_BOOTSTRAP_PAGES_PER_RUN', 5))),
     ],
 
     'data' => [
@@ -202,6 +215,10 @@ return [
         // Horizons the autopilot may trade. Every horizon is still trained and
         // shown; 15m stays display-only until its results justify it.
         'trade_horizons_minutes' => array_values(array_map('intval', array_filter(array_map('trim', explode(',', (string) env('AUTOFINX_ML_PAPER_AUTOPILOT_TRADE_HORIZONS', '60,120,240,1440')))))),
+        // When enabled, only the fresh V5 quality shortlist can open a V5
+        // virtual trade. A stale/missing shortlist fails closed (zero entries).
+        'dynamic_universe_enabled' => (bool) env('AUTOFINX_ML_PAPER_AUTOPILOT_DYNAMIC_UNIVERSE_ENABLED', false),
+        'dynamic_universe_max_age_seconds' => (int) env('AUTOFINX_ML_PAPER_AUTOPILOT_UNIVERSE_MAX_AGE_SECONDS', 1800),
     ],
 
     'classifier' => [
