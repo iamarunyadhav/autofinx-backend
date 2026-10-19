@@ -124,6 +124,27 @@ final class V5ResearchController extends Controller
         return response()->json(['execution_authorized' => false, 'item' => $entry], 201);
     }
 
+    public function uploadKnowledge(Request $request, string $workspace): JsonResponse
+    {
+        $this->assertWorkspaceMembership($request, $workspace);
+        $data = $request->validate([
+            'title' => ['required', 'string', 'max:180'],
+            'category' => ['required', 'in:CANDLE,TREND,SUPPORT_RESISTANCE,RISK,OTHER'],
+            'content' => ['nullable', 'string', 'max:12000'],
+            'document' => ['required', 'file', 'mimes:pdf,txt,md', 'max:20480'],
+        ]);
+        $path = $request->file('document')->store('v5-knowledge/'.$workspace, 'local');
+        $entry = NexusEntry::create([
+            'workspace_id' => $workspace, 'kind' => 'candidate', 'title' => $data['title'], 'status' => 'PROPOSED',
+            'evidence_level' => 'C', 'fingerprint' => hash('sha256', $workspace.'|'.$path.'|'.$data['title']),
+            'payload' => ['source' => 'v5_knowledge_review', 'category' => $data['category'], 'content' => $data['content'] ?? null,
+                'document_path' => $path, 'document_mime' => $request->file('document')->getMimeType(),
+                'verification' => ['document_review' => 'PENDING', 'backtest' => 'PENDING', 'paper_trade' => 'PENDING', 'holdout' => 'PENDING'],
+                'training_eligible' => false, 'execution_authorized' => false],
+        ]);
+        return response()->json(['execution_authorized' => false, 'item' => $entry], 201);
+    }
+
     public function reviewKnowledge(Request $request, string $workspace, string $entry): JsonResponse
     {
         $this->assertWorkspaceMembership($request, $workspace);
