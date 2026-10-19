@@ -34,6 +34,7 @@ class MlPaperAutopilotService
         private readonly FeatureLabelService $features,
         private readonly BinanceFuturesKlineClient $binance,
         private readonly SignalStabilityService $stability,
+        private readonly DynamicV5ResearchUniverse $universe,
     ) {}
 
     /** @return list<int> */
@@ -55,7 +56,7 @@ class MlPaperAutopilotService
         $opened = 0;
         $nowMs = $this->nowMs();
         $maxAgeMs = (int) config('ml.autopilot.max_signal_age_seconds', 600) * 1000;
-        foreach ((array) config('ml.symbols', []) as $symbol) {
+        foreach ($this->universe->current()['symbols'] as $symbol) {
             foreach (array_intersect($this->features->horizons(), self::tradeHorizons()) as $horizon) {
                 if (! $this->registry->champion($symbol, $horizon)) {
                     continue;
@@ -236,6 +237,7 @@ class MlPaperAutopilotService
                 'live_quote_exits' => $closed->whereIn('exit_price_source', ['live_quote', 'rest_ticker'])->count(),
             ],
             'equity_curve' => $equity,
+            'universe' => $this->universe->current(),
             'signals' => $this->signals(),
             'open_trades' => $open->map(fn ($t) => $this->row($t))->values()->all(),
             'recent_trades' => $closed->sortByDesc('exit_time_ms')->take(50)->map(fn ($t) => $this->row($t))->values()->all(),
@@ -275,7 +277,7 @@ class MlPaperAutopilotService
         $nowMs = $this->nowMs();
         $maxAgeMs = (int) config('ml.autopilot.max_signal_age_seconds', 600) * 1000;
         $tradeHorizons = self::tradeHorizons();
-        foreach ((array) config('ml.symbols', []) as $symbol) {
+        foreach ($this->universe->current()['symbols'] as $symbol) {
             foreach ($this->features->horizons() as $horizon) {
                 $champion = $this->registry->champion($symbol, $horizon);
                 $stable = $this->stability->state($symbol, $horizon);

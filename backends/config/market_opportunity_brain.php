@@ -75,4 +75,16 @@ return [
     'v5_refresh_schedule_enabled' => (bool) env('AUTOFINX_V5_REFRESH_SCHEDULE_ENABLED', false),
     'v5_outcome_schedule_enabled' => (bool) env('AUTOFINX_V5_OUTCOME_SCHEDULE_ENABLED', false),
     'v5_anti_churn_score_margin' => (float) env('AUTOFINX_V5_ANTI_CHURN_SCORE_MARGIN', 0.05),
+    // Quality selection is research-only. It cannot produce an order or a
+    // model promotion. Its bounded cohort protects the small server from a
+    // whole-exchange historical download.
+    'v5_research_universe' => [
+        'symbols' => array_values(array_filter(array_map('trim', explode(',', (string) env('AUTOFINX_V5_RESEARCH_UNIVERSE_SYMBOLS', 'BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,XRPUSDT,SUIUSDT,ADAUSDT,DOGEUSDT,LINKUSDT,AVAXUSDT,LTCUSDT,NEARUSDT'))))),
+        'shortlist_size' => max(1, min(5, (int) env('AUTOFINX_V5_RESEARCH_SHORTLIST_SIZE', 3))),
+        // Closed-candle quality gates. Values are fractions, e.g. 0.003 = 0.3%.
+        'min_quality_score' => (float) env('AUTOFINX_V5_MIN_QUALITY_SCORE', 0.45),
+        'min_directional_timeframes' => max(1, min(3, (int) env('AUTOFINX_V5_MIN_DIRECTIONAL_TIMEFRAMES', 2))),
+        'min_15m_volatility' => (float) env('AUTOFINX_V5_MIN_15M_VOLATILITY', 0.0008),
+        'max_15m_volatility' => (float) env('AUTOFINX_V5_MAX_15M_VOLATILITY', 0.04),
+    ],
 ];

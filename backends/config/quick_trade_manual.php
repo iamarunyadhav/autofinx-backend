@@ -27,8 +27,16 @@ return [
     // Cross margin lets liquidation consume the whole futures wallet: refuse no-SL unless ISOLATED.
     'no_stop_loss_require_isolated' => filter_var(env('QUICK_TRADE_MANUAL_NO_SL_REQUIRE_ISOLATED', true), FILTER_VALIDATE_BOOL),
 
-    // Symbols are limited to what the Binance Quick Trade provider already supports.
-    'symbols' => ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT'],
+    // Binance USDT-margined futures symbols exposed by the manual chart/order selector.
+    // This is an application allow-list, not an exchange credential or live-trading switch.
+    // Override with QUICK_TRADE_MANUAL_SYMBOLS when an operator wants a smaller list.
+    'symbols' => array_values(array_filter(array_map(
+        static fn (string $symbol): string => strtoupper(trim($symbol)),
+        explode(',', (string) env(
+            'QUICK_TRADE_MANUAL_SYMBOLS',
+            'BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,XRPUSDT,ADAUSDT,DOGEUSDT,AVAXUSDT,LINKUSDT,TRXUSDT,DOTUSDT,MATICUSDT,NEARUSDT,LTCUSDT,UNIUSDT,ATOMUSDT,ETCUSDT,FILUSDT,APTUSDT,ARBUSDT'
+        ))
+    ))),
 
     'min_stake' => 20.0,
     'max_stake' => 500.0,

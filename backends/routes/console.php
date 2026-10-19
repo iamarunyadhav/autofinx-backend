@@ -11,6 +11,23 @@ use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Schedule;
 use Illuminate\Support\Str;
 
+// Laravel 12 loads scheduled definitions from this command route file. Keep the
+// V5 research cadence here so the deployment flags are effective; these jobs are
+// research/shadow-only and never authorize execution or model promotion.
+if ((bool) config('market_opportunity_brain.v5_refresh_schedule_enabled', false)) {
+    Schedule::command('v5:research-refresh --live --limit=3')
+        ->everyFifteenMinutes()
+        ->withoutOverlapping(10)
+        ->runInBackground();
+}
+
+if ((bool) config('market_opportunity_brain.v5_outcome_schedule_enabled', false)) {
+    Schedule::command('v5:research-evaluate-outcomes')
+        ->hourly()
+        ->withoutOverlapping(10)
+        ->runInBackground();
+}
+
 $markRunStart = function (string $command): void {
     SchedulerRun::create([
         'id' => (string) Str::uuid(),
@@ -520,4 +537,16 @@ if ($schedulerEnabled && (bool) config('ml.enabled', false)) {
         ->runInBackground()
         ->before(fn () => $markRunStart('ml:retrain:check'))
         ->after(fn () => $markRunEnd('ml:retrain:check'));
+
+    // The initial history load is intentionally bounded and opt-in. It works
+    // through the shadow-only candle store; no live/manual bot reads it.
+    if ((bool) config('ml.cohort_bootstrap.enabled', false)) {
+        Schedule::command('ml:cohort:bootstrap')
+            ->everyFifteenMinutes()
+            ->onOneServer()
+            ->withoutOverlapping(14)
+            ->runInBackground()
+            ->before(fn () => $markRunStart('ml:cohort:bootstrap'))
+            ->after(fn () => $markRunEnd('ml:cohort:bootstrap'));
+    }
 }

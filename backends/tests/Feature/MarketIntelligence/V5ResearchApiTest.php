@@ -73,6 +73,50 @@ final class V5ResearchApiTest extends TestCase
         $this->assertDatabaseCount('v5_research_selections', 3);
     }
 
+    public function test_knowledge_items_are_individually_reviewed_and_only_approved_items_export(): void
+    {
+        [$user, $workspace] = $this->member();
+        $base = "/api/workspaces/{$workspace->id}/v5/research/knowledge";
+
+        $created = $this->actingAs($user)->postJson($base, [
+            'title' => 'Closed-candle trend confirmation',
+            'category' => 'TREND',
+            'source_type' => 'VIDEO_TRANSCRIPT',
+            'content' => 'Assess a trend only after the candle has closed.',
+        ])->assertCreated()->assertJsonPath('item.status', 'PROPOSED')
+            ->assertJsonPath('item.payload.training_eligible', false);
+
+        $this->actingAs($user)->getJson($base.'/download?format=txt')->assertUnprocessable();
+
+        $id = $created->json('item.id');
+        $this->actingAs($user)->postJson($base."/{$id}/review", [
+            'action' => 'APPROVED',
+            'reason' => 'Reviewed against the supplied educational transcript.',
+        ])->assertOk()->assertJsonPath('item.status', 'APPROVED')
+            ->assertJsonPath('item.payload.training_eligible', false);
+
+        $this->actingAs($user)->get($base.'/download?format=txt')
+            ->assertOk()
+            ->assertHeader('content-type', 'text/plain; charset=UTF-8')
+            ->assertSeeText('Closed-candle trend confirmation')
+            ->assertSeeText('Training eligible: NO');
+    }
+
+    public function test_non_owner_cannot_review_knowledge(): void
+    {
+        [$owner, $workspace] = $this->member();
+        $member = User::factory()->create();
+        WorkspaceMember::create(['workspace_id' => $workspace->id, 'user_id' => $member->id, 'role' => 'member']);
+        $base = "/api/workspaces/{$workspace->id}/v5/research/knowledge";
+        $item = $this->actingAs($owner)->postJson($base, [
+            'title' => 'Risk rule', 'category' => 'RISK', 'content' => 'Use an explicit invalidation level.',
+        ])->assertCreated()->json('item.id');
+
+        $this->actingAs($member)->postJson($base."/{$item}/review", [
+            'action' => 'APPROVED', 'reason' => 'Attempted review by a non-owner.',
+        ])->assertForbidden();
+    }
+
     /** @return array{User, Workspace} */
     private function member(): array
     {
