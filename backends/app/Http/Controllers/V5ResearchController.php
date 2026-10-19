@@ -9,6 +9,9 @@ use App\Models\V5ShadowPrediction;
 use App\Models\NexusEntry;
 use App\Models\NexusReview;
 use App\Models\WorkspaceMember;
+use App\Domain\Ml\Shadow\V5KnowledgeExportService;
+use App\Domain\Ml\Shadow\V5KnowledgeCategorizer;
+use Barryvdh\DomPDF\Facade\Pdf;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -105,6 +108,7 @@ final class V5ResearchController extends Controller
             'title' => ['required', 'string', 'max:180'],
             'content' => ['required', 'string', 'max:12000'],
             'category' => ['required', 'in:CANDLE,TREND,SUPPORT_RESISTANCE,RISK,OTHER'],
+            'source_type' => ['nullable', 'in:MANUAL_NOTE,VIDEO_TRANSCRIPT,AUDIO_TRANSCRIPT,DOCUMENT_TRANSCRIPT'],
             'source_url' => ['nullable', 'url', 'max:1000'],
         ]);
         $entry = NexusEntry::create([
@@ -116,6 +120,7 @@ final class V5ResearchController extends Controller
             'fingerprint' => hash('sha256', json_encode(['v5_knowledge_review', $workspace, $data['title'], $data['content']], JSON_THROW_ON_ERROR)),
             'payload' => [
                 'source' => 'v5_knowledge_review', 'category' => $data['category'], 'content' => $data['content'],
+                'source_type' => $data['source_type'] ?? 'MANUAL_NOTE',
                 'source_url' => $data['source_url'] ?? null, 'paper_metrics' => null,
                 'verification' => ['backtest' => 'PENDING', 'paper_trade' => 'PENDING', 'holdout' => 'PENDING'],
                 'training_eligible' => false, 'execution_authorized' => false,
@@ -124,32 +129,42 @@ final class V5ResearchController extends Controller
         return response()->json(['execution_authorized' => false, 'item' => $entry], 201);
     }
 
-    public function uploadKnowledge(Request $request, string $workspace): JsonResponse
+    public function uploadKnowledge(Request $request, string $workspace, V5KnowledgeCategorizer $categorizer): JsonResponse
     {
         $this->assertWorkspaceMembership($request, $workspace);
         $data = $request->validate([
             'title' => ['required', 'string', 'max:180'],
             'category' => ['required', 'in:CANDLE,TREND,SUPPORT_RESISTANCE,RISK,OTHER'],
+            'source_type' => ['nullable', 'in:VIDEO_TRANSCRIPT,AUDIO_TRANSCRIPT,DOCUMENT_TRANSCRIPT'],
             'content' => ['nullable', 'string', 'max:12000'],
             'document' => ['required', 'file', 'mimes:pdf,txt,md', 'max:20480'],
         ]);
         $path = $request->file('document')->store('v5-knowledge/'.$workspace, 'local');
-        $entry = NexusEntry::create([
-            'workspace_id' => $workspace, 'kind' => 'candidate', 'title' => $data['title'], 'status' => 'PROPOSED',
-            'evidence_level' => 'C', 'fingerprint' => hash('sha256', $workspace.'|'.$path.'|'.$data['title']),
-            'payload' => ['source' => 'v5_knowledge_review', 'category' => $data['category'], 'content' => $data['content'] ?? null,
+        $content = (string) ($data['content'] ?? '');
+        $parts = $categorizer->split($data['title'], $content, $data['category']);
+        // Without extracted text there is still one document-level review item;
+        // the system never pretends that a PDF/video was transcribed.
+        if ($parts === []) {
+            $parts = [['category' => $data['category'], 'title' => $data['title'], 'content' => $content]];
+        }
+        $entries = collect($parts)->map(function (array $part, int $index) use ($workspace, $path, $data, $request): NexusEntry {
+            return NexusEntry::create([
+            'workspace_id' => $workspace, 'kind' => 'candidate', 'title' => $part['title'], 'status' => 'PROPOSED',
+            'evidence_level' => 'C', 'fingerprint' => hash('sha256', $workspace.'|'.$path.'|'.$index.'|'.$part['category'].'|'.$part['content']),
+            'payload' => ['source' => 'v5_knowledge_review', 'category' => $part['category'], 'content' => $part['content'],
+                'item_status' => 'PENDING_REVIEW', 'parent_document_title' => $data['title'],
+                'source_type' => $data['source_type'] ?? 'DOCUMENT_TRANSCRIPT',
                 'document_path' => $path, 'document_mime' => $request->file('document')->getMimeType(),
                 'verification' => ['document_review' => 'PENDING', 'backtest' => 'PENDING', 'paper_trade' => 'PENDING', 'holdout' => 'PENDING'],
                 'training_eligible' => false, 'execution_authorized' => false],
-        ]);
-        return response()->json(['execution_authorized' => false, 'item' => $entry], 201);
+            ]);
+        });
+        return response()->json(['execution_authorized' => false, 'items' => $entries->values(), 'item_count' => $entries->count()], 201);
     }
 
     public function reviewKnowledge(Request $request, string $workspace, string $entry): JsonResponse
     {
-        $this->assertWorkspaceMembership($request, $workspace);
-        abort_unless(in_array(strtolower((string) $request->user()?->pivot?->role), ['owner', 'admin'], true) ||
-            WorkspaceMember::query()->where('workspace_id', $workspace)->where('user_id', $request->user()->id)->whereIn('role', ['owner', 'admin'])->exists(), 403, 'Workspace owner or admin required.');
+        $this->assertWorkspaceRole($request, $workspace);
         $data = $request->validate(['action' => ['required', 'in:APPROVED,REJECTED'], 'reason' => ['required', 'string', 'min:3', 'max:2000']]);
         $item = DB::transaction(function () use ($request, $workspace, $entry, $data) {
             $item = NexusEntry::query()->where('workspace_id', $workspace)->where('kind', 'candidate')->lockForUpdate()->findOrFail($entry);
@@ -162,6 +177,34 @@ final class V5ResearchController extends Controller
             return $item->fresh();
         });
         return response()->json(['execution_authorized' => false, 'item' => $item]);
+    }
+
+    /** Download only human-approved items. Exporting never changes their training or execution state. */
+    public function downloadKnowledge(Request $request, string $workspace, V5KnowledgeExportService $exports)
+    {
+        $this->assertWorkspaceMembership($request, $workspace);
+        $items = $exports->approved($workspace);
+        abort_if($items === [], 422, 'No human-approved V5 knowledge items are available for export.');
+
+        $format = $request->string('format', 'txt')->lower()->value();
+        abort_unless(in_array($format, ['txt', 'pdf'], true), 422, 'Format must be txt or pdf.');
+        $file = 'v5-knowledge-review-'.now('UTC')->format('Ymd-His');
+        $text = $exports->text($items);
+
+        if ($format === 'pdf') {
+            $html = '<!doctype html><html><head><meta charset="utf-8"><style>body{font-family:DejaVu Sans,sans-serif;font-size:10px;line-height:1.45}h1{font-size:17px}h2{font-size:13px;margin-top:18px}.meta{color:#555}.content{white-space:pre-wrap;border-top:1px solid #ddd;padding-top:7px}</style></head><body>';
+            $html .= '<h1>AUTOFINX V5 Research Knowledge Review</h1><p class="meta">Human-approved research notes only. This file does not train, promote, or execute a trading model.</p>';
+            foreach ($items as $number => $item) {
+                $payload = (array) $item->payload;
+                $verification = (array) data_get($payload, 'verification', []);
+                $html .= '<h2>'.($number + 1).'. '.e($item->title).'</h2>';
+                $html .= '<p class="meta">Category: '.e((string) data_get($payload, 'category', 'OTHER')).' · Item: '.e($item->status).' · Source: '.e((string) data_get($payload, 'source_type', 'MANUAL_NOTE')).'<br>Document: '.e((string) data_get($verification, 'document_review', 'PENDING')).' · Human: '.e((string) data_get($verification, 'human_review', 'PENDING')).' · Backtest/Paper/Holdout: '.e((string) data_get($verification, 'backtest', 'PENDING')).' / '.e((string) data_get($verification, 'paper_trade', 'PENDING')).' / '.e((string) data_get($verification, 'holdout', 'PENDING')).'<br>Training eligible: NO</p>';
+                $html .= '<div class="content">'.nl2br(e((string) data_get($payload, 'content', 'No extracted transcript was supplied.'))).'</div>';
+            }
+            return Pdf::loadHTML($html)->download($file.'.pdf');
+        }
+
+        return response($text, 200, ['Content-Type' => 'text/plain; charset=UTF-8', 'Content-Disposition' => 'attachment; filename="'.$file.'.txt"']);
     }
 
     /** Compatibility routes; new callers should use workspace-scoped endpoints. */
