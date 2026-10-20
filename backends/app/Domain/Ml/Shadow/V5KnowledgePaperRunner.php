@@ -31,6 +31,11 @@ final class V5KnowledgePaperRunner
             } else {
                 $trades = (array) ($ledger['paper_trades'] ?? []);
                 $last = end($trades);
+                if (is_array($last) && ($last['status'] ?? null) === 'OPEN' && ($last['candle_close_ms'] ?? null) !== $observation->candle_close_ms) {
+                    $move = ((float) $observation->close - (float) $last['entry_price']) / max((float) $last['entry_price'], 0.00000001);
+                    $pnl = ($last['direction'] ?? 'LONG') === 'SHORT' ? -$move : $move;
+                    $trades[array_key_last($trades)] = array_merge($last, ['status' => 'SETTLED', 'exit_price' => (float) $observation->close, 'pnl_pct' => round($pnl * 100, 6), 'settled_at' => now()->toIso8601String(), 'outcome' => $pnl > 0 ? 'WIN' : ($pnl < 0 ? 'LOSS' : 'FLAT')]);
+                }
                 if (! is_array($last) || ($last['candle_close_ms'] ?? null) !== $observation->candle_close_ms) {
                     $trades[] = ['id' => hash('sha256', $knowledge->id.'|'.$observation->candle_close_ms), 'symbol' => $symbol, 'direction' => $direction, 'entry_price' => (float) $observation->close, 'candle_close_ms' => $observation->candle_close_ms, 'status' => 'OPEN', 'opened_at' => now()->toIso8601String(), 'source' => 'approved_nexus_knowledge'];
                 }
