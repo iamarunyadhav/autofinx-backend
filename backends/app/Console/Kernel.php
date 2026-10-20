@@ -61,6 +61,7 @@ use App\Console\Commands\PredictionLegacyModelsArchiveCommand;
 use App\Console\Commands\V5ResearchScanCommand;
 use App\Console\Commands\V5ResearchRefreshCommand;
 use App\Console\Commands\V5ResearchEvaluateOutcomesCommand;
+use App\Console\Commands\V5KnowledgePaperAutopilotCommand;
 use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Foundation\Console\Kernel as ConsoleKernel;
 
@@ -81,12 +82,14 @@ class Kernel extends ConsoleKernel
         if ((bool) config('market_opportunity_brain.v5_outcome_schedule_enabled', false)) {
             $schedule->command('v5:research-evaluate-outcomes')->hourly()->withoutOverlapping(10)->runInBackground();
         }
+        $schedule->command('v5:knowledge-paper:run')->everyFifteenMinutes()->onOneServer()->withoutOverlapping(10)->runInBackground();
     }
 
     protected $commands = [
         V5ResearchScanCommand::class,
         V5ResearchRefreshCommand::class,
         V5ResearchEvaluateOutcomesCommand::class,
+        V5KnowledgePaperAutopilotCommand::class,
         ScheduleSimulateCommand::class,
         BotsEvaluateCommand::class,
         MarketWsConsumerCommand::class,

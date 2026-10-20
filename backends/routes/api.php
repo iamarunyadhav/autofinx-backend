@@ -717,9 +717,11 @@ Route::middleware('auth:sanctum')->prefix('v5/research')->group(function () {
 
 Route::middleware('auth:sanctum')->prefix('workspaces/{workspace}/v5/research')->group(function () {
     Route::get('/knowledge', [\App\Http\Controllers\V5ResearchController::class, 'knowledge']);
+    Route::get('/knowledge/paper-experiments', [\App\Http\Controllers\V5ResearchController::class, 'knowledgePaperExperiments']);
     Route::post('/knowledge', [\App\Http\Controllers\V5ResearchController::class, 'createKnowledge']);
     Route::post('/knowledge/upload', [\App\Http\Controllers\V5ResearchController::class, 'uploadKnowledge']);
     Route::post('/knowledge/{entry}/review', [\App\Http\Controllers\V5ResearchController::class, 'reviewKnowledge']);
+    Route::post('/knowledge/{entry}/paper-run', [\App\Http\Controllers\V5ResearchController::class, 'runKnowledgePaper']);
     Route::get('/knowledge/download', [\App\Http\Controllers\V5ResearchController::class, 'downloadKnowledge']);
     Route::get('/selections', [\App\Http\Controllers\V5ResearchController::class, 'selections']);
     Route::post('/selections', [\App\Http\Controllers\V5ResearchController::class, 'select']);
