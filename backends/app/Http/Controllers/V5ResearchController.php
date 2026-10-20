@@ -11,6 +11,7 @@ use App\Models\NexusReview;
 use App\Models\WorkspaceMember;
 use App\Domain\Ml\Shadow\V5KnowledgeExportService;
 use App\Domain\Ml\Shadow\V5KnowledgeCategorizer;
+use App\Domain\Ml\Shadow\V5KnowledgePaperRunner;
 use Barryvdh\DomPDF\Facade\Pdf;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -122,6 +123,16 @@ final class V5ResearchController extends Controller
                 ];
             })->values();
         return response()->json(['execution_authorized' => false, 'baseline_track' => 'V5 ML Paper Autopilot', 'knowledge_track' => 'V5 Knowledge Experiments', 'items' => $items]);
+    }
+
+    public function runKnowledgePaper(Request $request, string $workspace, string $entry, V5KnowledgePaperRunner $runner): JsonResponse
+    {
+        $this->assertWorkspaceRole($request, $workspace);
+        abort_unless(\Illuminate\Schema\Schema::hasTable('nexus_entries'), 503, 'Nexus database migration is pending.');
+        $item = NexusEntry::query()->where('workspace_id', $workspace)->where('kind', 'candidate')->findOrFail($entry);
+        abort_unless(data_get($item->payload, 'source') === 'v5_knowledge_review', 422, 'Not a V5 knowledge item.');
+        $ledger = $runner->run($workspace, $item);
+        return response()->json(['execution_authorized' => false, 'baseline_autopilot_untouched' => true, 'ledger' => $ledger], $ledger->wasRecentlyCreated ? 201 : 200);
     }
 
     public function createKnowledge(Request $request, string $workspace): JsonResponse
