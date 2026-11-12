@@ -9,6 +9,7 @@ use App\Models\Integration;
 use App\Models\QuickTradeManualPosition as P;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Schema;
 use Throwable;
 
 /**
@@ -23,6 +24,7 @@ class ManualPositionReconciler
     public function __construct(
         private readonly ManualPositionStateMachine $sm,
         private readonly ManualProtectionService $protection,
+        private readonly ManualProtectionPairService $pairProtection,
         private readonly ManualExitService $exits,
         private readonly ManualPositionService $positions,
         private readonly ManualExchangeGatewayFactory $gateways,
@@ -112,6 +114,14 @@ class ManualPositionReconciler
         }
         if ($health['state'] === 'UNKNOWN') {
             return $this->readFailed($p, new ManualExchangeException('protective order state unreadable'));
+        }
+
+        if ($health['state'] === 'OK' && Schema::hasTable('quick_trade_manual_protection_pairs') && $p->protectionPairs()->exists()) {
+            try {
+                $this->pairProtection->reconcile($p, $gw, (float) $pos['mark_price']);
+            } catch (ManualExchangeException $e) {
+                $this->sm->note($p, 'protection_pair_reconcile_failed', $source, ['error' => $e->getMessage()], 'high');
+            }
         }
 
         $this->sm->patch($p, [

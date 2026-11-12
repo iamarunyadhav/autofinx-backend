@@ -6,6 +6,7 @@ use App\Domain\QuickTradeManual\Exchange\BinanceAlgoApi;
 use App\Domain\QuickTradeManual\Exchange\ManualExchangeException;
 use App\Domain\QuickTradeManual\Exchange\ManualExchangeGateway;
 use App\Models\QuickTradeManualPosition as P;
+use Illuminate\Support\Facades\Schema;
 
 /**
  * Exchange-native protection for a manual position: place the conditional close-position
@@ -55,7 +56,10 @@ class ManualProtectionService
             return ['ok' => false, 'reason' => 'stop_loss_not_on_loss_side_of_entry'];
         }
         $tp = null;
-        if ($p->tp_pct !== null) {
+        // Pair mode treats TP levels as observation/activation points. Never
+        // place the legacy close-position TP alongside that mode.
+        $hasPairTable = Schema::hasTable('quick_trade_manual_protection_pairs');
+        if ($p->tp_pct !== null && (! $hasPairTable || $p->protectionPairs()->count() === 0)) {
             $tp = $p->tp_trigger_price !== null && (float) $p->tp_trigger_price > 0
                 ? (float) $p->tp_trigger_price
                 : ManualTradeMath::tpTrigger($p->direction, $entry, (float) $p->tp_pct, $tick);
@@ -383,6 +387,20 @@ class ManualProtectionService
                 $clear = false;
                 $this->sm->note($p, 'protective_cleanup_failed', 'system', ['leg' => $leg, 'error' => $e->getMessage()], 'high');
             }
+        }
+
+        if (Schema::hasTable('quick_trade_manual_protection_pairs')) foreach ($p->protectionPairs()->whereNotNull('sl_algo_id')->get() as $pair) {
+            try {
+                $q = $gw->queryProtective($p->symbol, $pair->sl_algo_id ?: null, $pair->sl_client_algo_id ?: null);
+                if ($q === null || in_array($q['status'], BinanceAlgoApi::INACTIVE_STATUSES, true) || in_array($q['status'], BinanceAlgoApi::TRIGGERED_STATUSES, true)) {
+                    $pair->update(['sl_status' => $q === null ? 'GONE' : (in_array($q['status'], BinanceAlgoApi::TRIGGERED_STATUSES, true) ? 'TRIGGERED' : 'CANCELLED')]);
+                    continue;
+                }
+                $gw->cancelProtective($p->symbol, $pair->sl_algo_id ?: null, $pair->sl_client_algo_id ?: null);
+                $after = $gw->queryProtective($p->symbol, $pair->sl_algo_id ?: null, $pair->sl_client_algo_id ?: null);
+                if ($after === null || in_array($after['status'], BinanceAlgoApi::INACTIVE_STATUSES, true)) $pair->update(['sl_status' => 'CANCELLED']);
+                else { $clear = false; $this->sm->note($p, 'leftover_pair_protective_order', 'system', ['level' => $pair->level], 'critical'); }
+            } catch (ManualExchangeException $e) { $clear = false; $this->sm->note($p, 'pair_protective_cleanup_failed', 'system', ['level' => $pair->level, 'error' => $e->getMessage()], 'high'); }
         }
 
         return $clear;

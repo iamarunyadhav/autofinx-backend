@@ -28,7 +28,7 @@ class ManualPreviewService
     /**
      * Validates and normalises user input. Throws RuntimeException('code: message').
      *
-     * @return array{symbol: string, direction: string, stake: float, leverage: float, sl_pct: ?float, no_stop_loss: bool, tp_pct: ?float}
+     * @return array{symbol: string, direction: string, stake: float, leverage: float, sl_pct: ?float, no_stop_loss: bool, tp_pct: ?float, protection_pairs: list<array<string, mixed>>}
      */
     public function normalizeInput(array $in, bool $requireNoStopAck = true): array
     {
@@ -116,6 +116,40 @@ class ManualPreviewService
             }
         }
 
+        $pairs = [];
+        $rawPairs = $in['protection_pairs'] ?? [];
+        if ($rawPairs !== [] && ! is_array($rawPairs)) {
+            throw new RuntimeException('invalid_protection_pairs: Protection pairs must be an array.');
+        }
+        if (count($rawPairs) > 20) {
+            throw new RuntimeException('too_many_protection_pairs: A maximum of 20 TP/SL pairs is supported.');
+        }
+        if ($rawPairs !== [] && $noStop) {
+            throw new RuntimeException('protection_pairs_require_stop_loss: TP/SL reversal pairs require a normal stop-loss.');
+        }
+        if ($rawPairs !== [] && $tpPct !== null) {
+            throw new RuntimeException('protection_pairs_conflict: Use TP/SL pairs or the legacy single take-profit, not both.');
+        }
+        foreach (array_values($rawPairs) as $i => $pair) {
+            if (! is_array($pair)) throw new RuntimeException('invalid_protection_pair: Each protection pair must be an object.');
+            $level = $i + 1;
+            $tpMode = strtolower((string) ($pair['tp_mode'] ?? 'percent'));
+            $slMode = strtolower((string) ($pair['sl_mode'] ?? 'fixed'));
+            $slInput = strtolower((string) ($pair['sl_input_mode'] ?? 'percent'));
+            if (! in_array($tpMode, ['percent', 'price'], true)) throw new RuntimeException("invalid_tp_mode: TP{$level} mode must be percent or price.");
+            if (! in_array($slMode, ['fixed', 'trailing'], true)) throw new RuntimeException("invalid_sl_mode: SL{$level} mode must be fixed or trailing.");
+            if (! in_array($slInput, ['percent', 'price', 'distance'], true)) throw new RuntimeException("invalid_sl_input_mode: SL{$level} input mode is invalid.");
+            if ($slMode === 'trailing' && $slInput === 'price') throw new RuntimeException("invalid_trailing_input_mode: SL{$level} trailing protection must use a percentage or absolute distance, not a fixed price.");
+            $tpValue = $pair['tp_value'] ?? $pair['tp_pct'] ?? $pair['tp_price'] ?? null;
+            $slValue = $pair['sl_value'] ?? $pair['sl_pct'] ?? $pair['sl_price'] ?? $pair['trailing_distance'] ?? null;
+            if (! is_numeric($tpValue) || (float) $tpValue <= 0) throw new RuntimeException("invalid_tp_value: TP{$level} must be positive.");
+            if (! is_numeric($slValue) || (float) $slValue <= 0) throw new RuntimeException("invalid_sl_value: SL{$level} must be positive.");
+            $pairs[] = [
+                'level' => $level, 'tp_mode' => $tpMode, 'tp_value' => (float) $tpValue,
+                'sl_mode' => $slMode, 'sl_input_mode' => $slInput, 'sl_value' => (float) $slValue,
+            ];
+        }
+
         return [
             'symbol' => $symbol,
             'direction' => $direction,
@@ -126,6 +160,7 @@ class ManualPreviewService
             'tp_pct' => $tpPct,
             'trailing_pct' => $trailingPct,
             'trailing_activation_pct' => $activationPct,
+            'protection_pairs' => $pairs,
         ];
     }
 

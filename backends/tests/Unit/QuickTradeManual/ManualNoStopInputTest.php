@@ -60,3 +60,13 @@ test('take-profit is validated exactly as before with no stop', function () {
     expect(qtmNormalize(array_merge($optIn, ['tp_pct' => 2]))['tp_pct'])->toBe(2.0)
         ->and(qtmNormalizeCode(array_merge($optIn, ['tp_pct' => -1])))->toBe('invalid_take_profit');
 });
+
+test('protection pairs normalize independently and no-stop trades cannot request them', function () {
+    $pairs = qtmNormalize(['protection_pairs' => [
+        ['tp_mode' => 'percent', 'tp_value' => 2, 'sl_mode' => 'fixed', 'sl_input_mode' => 'percent', 'sl_value' => 0.5],
+        ['tp_mode' => 'price', 'tp_value' => 90000, 'sl_mode' => 'trailing', 'sl_input_mode' => 'distance', 'sl_value' => 250],
+    ]])['protection_pairs'];
+    config()->set('quick_trade_manual.allow_no_stop_loss', true);
+    expect($pairs)->toHaveCount(2)->and($pairs[1]['tp_mode'])->toBe('price')->and($pairs[1]['sl_mode'])->toBe('trailing')
+        ->and(qtmNormalizeCode(['protection_pairs' => [['tp_value' => 2, 'sl_value' => 1]], 'no_stop_loss' => true, 'no_stop_loss_ack' => true, 'sl_pct' => null]))->toBe('protection_pairs_require_stop_loss');
+});

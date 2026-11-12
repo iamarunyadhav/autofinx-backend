@@ -6,11 +6,13 @@ use App\Domain\QuickTradeManual\ManualFeatureGate;
 use App\Domain\QuickTradeManual\ManualPositionPresenter;
 use App\Domain\QuickTradeManual\ManualPositionReconciler;
 use App\Domain\QuickTradeManual\ManualProtectionService;
+use App\Domain\QuickTradeManual\ManualProtectionPairService;
 use App\Domain\QuickTradeManual\ManualPositionService;
 use App\Domain\QuickTradeManual\Exchange\ManualExchangeGatewayFactory;
 use App\Http\Controllers\Concerns\AssertsWorkspaceMembership;
 use App\Http\Controllers\Controller;
 use App\Models\QuickTradeManualPosition as P;
+use App\Models\QuickTradeManualProtectionPair as Pair;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -33,6 +35,7 @@ class QuickTradeManualController extends Controller
         private readonly ManualPositionReconciler $reconciler,
         private readonly ManualPositionPresenter $presenter,
         private readonly ManualProtectionService $protection,
+        private readonly ManualProtectionPairService $pairProtection,
         private readonly ManualExchangeGatewayFactory $gateways,
     ) {
     }
@@ -225,6 +228,40 @@ class QuickTradeManualController extends Controller
         }
     }
 
+    public function updateProtectionPair(Request $request, string $workspace, string $position, string $pair): JsonResponse
+    {
+        $this->assertWorkspaceMembership($request, $workspace);
+        $p = $this->find($workspace, $position)->loadMissing('integration');
+        $row = Pair::query()->where('position_id', $p->id)->whereKey($pair)->firstOrFail();
+        $data = $request->validate([
+            'tp_mode' => 'nullable|string|in:percent,price', 'tp_value' => 'nullable|numeric|gt:0',
+            'sl_mode' => 'nullable|string|in:fixed,trailing', 'sl_input_mode' => 'nullable|string|in:percent,price,distance', 'sl_value' => 'nullable|numeric|gt:0',
+        ]);
+        $lock = Cache::lock('qtm:pos:'.$p->id, 150);
+        if (! $lock->get()) return response()->json(['message' => 'position_update_in_progress: Try again shortly.', 'code' => 'position_update_in_progress'], 409);
+        try {
+            $result = $this->pairProtection->update($p->refresh(), $row->refresh(), $this->gateways->make($p->integration), $data);
+            if (! $result['ok']) return response()->json(['message' => $result['reason'], 'code' => strtok((string) $result['reason'], ':')], 422);
+            return response()->json($this->presenter->toArray($p->refresh(), null, true));
+        } catch (RuntimeException $e) { return $this->fail($e); }
+        finally { $lock->release(); }
+    }
+
+    public function cancelProtectionPair(Request $request, string $workspace, string $position, string $pair): JsonResponse
+    {
+        $this->assertWorkspaceMembership($request, $workspace);
+        $p = $this->find($workspace, $position)->loadMissing('integration');
+        $row = Pair::query()->where('position_id', $p->id)->whereKey($pair)->firstOrFail();
+        $lock = Cache::lock('qtm:pos:'.$p->id, 150);
+        if (! $lock->get()) return response()->json(['message' => 'position_update_in_progress: Try again shortly.', 'code' => 'position_update_in_progress'], 409);
+        try {
+            $result = $this->pairProtection->cancel($p->refresh(), $row->refresh(), $this->gateways->make($p->integration));
+            if (! $result['ok']) return response()->json(['message' => $result['reason'], 'code' => strtok((string) $result['reason'], ':')], 409);
+            return response()->json($this->presenter->toArray($p->refresh(), null, true));
+        } catch (RuntimeException $e) { return $this->fail($e); }
+        finally { $lock->release(); }
+    }
+
     // ---------------------------------------------------------------- helpers
 
     private function validateOrder(Request $request, bool $isOpen): array
@@ -242,6 +279,13 @@ class QuickTradeManualController extends Controller
             'tp_pct' => 'nullable|numeric|gt:0',
             'trailing_pct' => 'nullable|numeric|gt:0',
             'trailing_activation_pct' => 'nullable|numeric|gte:0',
+            'protection_pairs' => 'sometimes|array|max:20',
+            'protection_pairs.*' => 'array',
+            'protection_pairs.*.tp_mode' => 'nullable|string|in:percent,price',
+            'protection_pairs.*.tp_value' => 'nullable|numeric|gt:0',
+            'protection_pairs.*.sl_mode' => 'nullable|string|in:fixed,trailing',
+            'protection_pairs.*.sl_input_mode' => 'nullable|string|in:percent,price,distance',
+            'protection_pairs.*.sl_value' => 'nullable|numeric|gt:0',
             'integration_id' => 'nullable|uuid',
             'reference_price' => 'nullable|numeric|gt:0',
             'idempotency_key' => $isOpen ? 'nullable|string|max:120' : 'nullable',

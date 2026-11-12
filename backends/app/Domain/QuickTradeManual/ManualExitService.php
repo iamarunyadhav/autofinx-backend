@@ -9,6 +9,7 @@ use App\Domain\Trading\ExchangeExecutionCostReconciliationService;
 use App\Domain\Trading\LiveWalletService;
 use App\Models\QuickTradeManualPosition as P;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 
 /**
  * Every way a manual position ends: manual close, emergency close, exchange-side exit
@@ -207,6 +208,13 @@ class ManualExitService
         if ($p->trailing_pct !== null && in_array($legStatus('trailing'), BinanceAlgoApi::TRIGGERED_STATUSES, true)) {
             return ['reason' => 'trailing_stop', 'basis' => 'exchange_algo_status'];
         }
+        if (Schema::hasTable('quick_trade_manual_protection_pairs')) foreach ($p->protectionPairs()->whereNotNull('sl_algo_id')->get() as $pair) {
+            try { $q = $gw->queryProtective($p->symbol, $pair->sl_algo_id ?: null, $pair->sl_client_algo_id ?: null); }
+            catch (ManualExchangeException) { $q = null; }
+            if ($q !== null && in_array($q['status'], BinanceAlgoApi::TRIGGERED_STATUSES, true)) {
+                return ['reason' => 'reversal_stop', 'basis' => 'exchange_pair_algo_status', 'pair_level' => (int) $pair->level];
+            }
+        }
         $since = $p->opened_at ? $p->opened_at->getTimestamp() * 1000 : 0;
         if ($gw->liquidationSince($p->symbol, $since) === true) {
             return ['reason' => 'liquidation', 'basis' => 'exchange_force_orders'];
@@ -264,8 +272,10 @@ class ManualExitService
                 return $p;   // stay RECONCILIATION; next tick retries with the exchange as the authority
             }
             $estimated = true;
+            $pairStop = Schema::hasTable('quick_trade_manual_protection_pairs') ? $p->protectionPairs()->where('status', 'ACTIVE')->whereNotNull('active_stop_price')->orderByDesc('level')->value('active_stop_price') : null;
             $exitPrice = $p->exit_reason === 'stop_loss' ? (float) $p->sl_trigger_price
-                : ($p->exit_reason === 'take_profit' ? (float) $p->tp_trigger_price : $entryPrice);
+                : ($p->exit_reason === 'take_profit' ? (float) $p->tp_trigger_price
+                    : ($p->exit_reason === 'reversal_stop' ? (float) ($pairStop ?: $entryPrice) : $entryPrice));
             if ($exitPrice <= 0) {
                 $exitPrice = $entryPrice;
             }

@@ -6,6 +6,7 @@ use App\Domain\QuickTradeManual\Exchange\ManualExchangeException;
 use App\Domain\QuickTradeManual\Exchange\ManualExchangeGatewayFactory;
 use App\Models\Integration;
 use App\Models\QuickTradeManualPosition as P;
+use Illuminate\Support\Facades\Schema;
 
 /** API shape for a manual position. Whitelisted fields only; numbers are real stored/exchange values, never invented. */
 class ManualPositionPresenter
@@ -17,6 +18,7 @@ class ManualPositionPresenter
     /** @return array<string, mixed> */
     public function toArray(P $p, ?array $live = null, bool $withEvents = false): array
     {
+        if (Schema::hasTable('quick_trade_manual_protection_pairs')) $p->loadMissing('protectionPairs');
         $f = fn ($v) => $v === null ? null : (float) $v;
         $out = [
             'id' => $p->id,
@@ -48,6 +50,27 @@ class ManualPositionPresenter
             'trailing_status' => $p->trailing_status,
             'trailing_algo_id' => $p->trailing_algo_id,
             'trailing_verified_at' => $p->trailing_verified_at?->toIso8601String(),
+            'protection_pairs' => $p->relationLoaded('protectionPairs')
+                ? $p->protectionPairs->map(fn ($pair) => [
+                    'id' => $pair->id,
+                    'level' => (int) $pair->level,
+                    'tp_mode' => $pair->tp_mode,
+                    'tp_value' => $f($pair->tp_value),
+                    'tp_price' => $f($pair->tp_price),
+                    'sl_mode' => $pair->sl_mode,
+                    'sl_input_mode' => $pair->sl_input_mode,
+                    'sl_value' => $f($pair->sl_value),
+                    'sl_price' => $f($pair->sl_price),
+                    'trailing_distance' => $f($pair->trailing_distance),
+                    'peak_price' => $f($pair->peak_price),
+                    'trough_price' => $f($pair->trough_price),
+                    'active_stop_price' => $f($pair->active_stop_price),
+                    'status' => $pair->status,
+                    'tp_status' => $pair->tp_status,
+                    'sl_status' => $pair->sl_status,
+                    'activated_at' => $pair->activated_at?->toIso8601String(),
+                ])->values()->all()
+                : [],
             'estimated_liquidation_price' => $f($p->estimated_liquidation_price),
             'exchange_liquidation_price' => $f($p->exchange_liquidation_price),
             'protection_status' => $p->protection_status,

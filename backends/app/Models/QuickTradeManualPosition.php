@@ -87,6 +87,11 @@ class QuickTradeManualPosition extends BaseModel
         return $this->hasMany(QuickTradeManualEvent::class, 'position_id')->orderBy('seq');
     }
 
+    public function protectionPairs(): HasMany
+    {
+        return $this->hasMany(QuickTradeManualProtectionPair::class, 'position_id')->orderBy('level');
+    }
+
     public function integration(): BelongsTo
     {
         return $this->belongsTo(Integration::class, 'integration_id');

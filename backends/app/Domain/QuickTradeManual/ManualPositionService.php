@@ -12,10 +12,12 @@ use App\Domain\Trading\TradingModuleSettingsService;
 use App\Models\Integration;
 use App\Models\QuickTrade;
 use App\Models\QuickTradeManualPosition as P;
+use App\Models\QuickTradeManualProtectionPair;
 use App\Support\RiskGuardService;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 use RuntimeException;
 
@@ -163,6 +165,22 @@ class ManualPositionService
                     'trailing_activation_pct' => isset($in['trailing_activation_pct']) ? (float) $in['trailing_activation_pct'] : null,
                     'entry_client_order_id' => 'qtm-e-'.$idCompact,
                 ]);
+                if ($in['protection_pairs'] !== [] && ! Schema::hasTable('quick_trade_manual_protection_pairs')) {
+                    throw new RuntimeException('protection_pairs_migration_pending: Apply the Manual TP/SL pair migration before using staged protection.');
+                }
+                foreach ($in['protection_pairs'] as $pair) {
+                    QuickTradeManualProtectionPair::create([
+                        'id' => (string) Str::uuid(),
+                        'position_id' => $p->id,
+                        'workspace_id' => $workspaceId,
+                        'level' => $pair['level'],
+                        'tp_mode' => $pair['tp_mode'],
+                        'tp_value' => $pair['tp_value'],
+                        'sl_mode' => $pair['sl_mode'],
+                        'sl_input_mode' => $pair['sl_input_mode'],
+                        'sl_value' => $pair['sl_value'],
+                    ]);
+                }
             } catch (UniqueConstraintViolationException $e) {
                 // Lost a race for the (workspace, symbol) slot or the idempotency key: nothing was sent to the exchange.
                 $this->wallets->cancelReservation($workspaceId, $account->id, $in['stake'], ['trace_id' => $idem, 'symbol' => $in['symbol']]);
@@ -248,7 +266,42 @@ class ManualPositionService
             return $p;
         }
 
+        if (Schema::hasTable('quick_trade_manual_protection_pairs')) $this->resolveProtectionPairs($p->refresh(), $avg);
+
         return $this->runProtection($p, $gw, $source);
+    }
+
+    /** Resolve all pair prices from the actual fill; preview prices are never used for protection. */
+    private function resolveProtectionPairs(P $p, float $entry): void
+    {
+        if ($entry <= 0) return;
+        foreach ($p->protectionPairs as $pair) {
+            $tp = $pair->tp_mode === 'price'
+                ? (float) $pair->tp_value
+                : ($p->isLong() ? $entry * (1 + (float) $pair->tp_value / 100) : $entry * (1 - (float) $pair->tp_value / 100));
+            $sl = null;
+            if ($pair->sl_mode === 'fixed') {
+                $sl = $pair->sl_input_mode === 'price'
+                    ? (float) $pair->sl_value
+                    : ($p->isLong() ? $tp * (1 - (float) $pair->sl_value / 100) : $tp * (1 + (float) $pair->sl_value / 100));
+            } elseif ($pair->sl_input_mode === 'distance') {
+                $sl = $p->isLong() ? $tp - (float) $pair->sl_value : $tp + (float) $pair->sl_value;
+            } else {
+                $sl = $p->isLong() ? $tp * (1 - (float) $pair->sl_value / 100) : $tp * (1 + (float) $pair->sl_value / 100);
+            }
+            if (($p->isLong() && ($tp <= $entry || $sl >= $tp)) || ($p->isLong() === false && ($tp >= $entry || $sl <= $tp))) {
+                $pair->update(['status' => QuickTradeManualProtectionPair::CANCELLED]);
+                $this->sm->note($p, 'protection_pair_rejected_after_fill', 'system', ['level' => $pair->level, 'entry_price' => $entry, 'tp_price' => $tp, 'sl_price' => $sl], 'high');
+                continue;
+            }
+            $pair->update([
+                'tp_price' => round($tp, 10),
+                'sl_price' => round($sl, 10),
+                'active_stop_price' => round($sl, 10),
+                'peak_price' => $p->isLong() ? $tp : null,
+                'trough_price' => $p->isLong() ? null : $tp,
+            ]);
+        }
     }
 
     /** ENTRY_FILLED/PARTIALLY_FILLED/UNKNOWN/PROTECTION_PENDING -> OPEN_PROTECTED, or PROTECTION_FAILED -> EMERGENCY_EXIT. */
