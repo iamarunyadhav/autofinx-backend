@@ -117,6 +117,69 @@ class ManualProtectionService
     }
 
     /**
+     * Replace an already verified normal stop without creating an unprotected
+     * window: place and verify the replacement first, then cancel the old leg.
+     * The caller must hold the per-position lock.
+     *
+     * @return array{ok: bool, reason: ?string}
+     */
+    public function replaceStopLoss(P $p, ManualExchangeGateway $gw, float $trigger): array
+    {
+        if ($p->noStopLoss() || ! in_array($p->status, [P::OPEN_PROTECTED, P::CLOSE_FAILED], true)) {
+            return ['ok' => false, 'reason' => 'position_not_editable'];
+        }
+
+        try {
+            $tick = (float) $gw->symbolRules($p->symbol)['tick_size'];
+        } catch (ManualExchangeException $e) {
+            return ['ok' => false, 'reason' => 'rules_unavailable: '.$e->getMessage()];
+        }
+
+        $trigger = ManualTradeMath::formatToStep($trigger, $tick);
+        $entry = (float) $p->entry_price;
+        if ($entry <= 0 || ($p->isLong() ? $trigger >= $entry : $trigger <= $entry)) {
+            return ['ok' => false, 'reason' => 'stop_loss_not_on_loss_side_of_entry'];
+        }
+
+        $oldId = (string) ($p->sl_algo_id ?? '');
+        $oldClient = (string) ($p->sl_client_algo_id ?? '');
+        $oldState = [
+            'sl_algo_id' => $oldId,
+            'sl_client_algo_id' => $oldClient,
+            'sl_status' => (string) ($p->sl_status ?? 'WORKING'),
+            'sl_trigger_price' => $p->sl_trigger_price,
+        ];
+
+        $new = $this->ensureLeg($p, $gw, 'sl', $trigger, $tick, true);
+        if (! $new['ok']) {
+            $this->sm->patch($p, $oldState);
+
+            return $new;
+        }
+
+        if (($oldId !== '' || $oldClient !== '') && ($oldId !== (string) $p->sl_algo_id || $oldClient !== (string) $p->sl_client_algo_id)) {
+            try {
+                $gw->cancelProtective($p->symbol, $oldId !== '' ? $oldId : null, $oldClient !== '' ? $oldClient : null);
+                $after = $gw->queryProtective($p->symbol, $oldId !== '' ? $oldId : null, $oldClient !== '' ? $oldClient : null);
+                if ($after !== null && in_array($after['status'], BinanceAlgoApi::WORKING_STATUSES, true)) {
+                    $this->sm->note($p, 'old_stop_cancel_unconfirmed', 'api', ['old_algo_id' => $oldId, 'new_algo_id' => $p->sl_algo_id], 'critical');
+
+                    return ['ok' => false, 'reason' => 'old_stop_cancel_unconfirmed'];
+                }
+            } catch (ManualExchangeException $e) {
+                $this->sm->note($p, 'old_stop_cancel_failed', 'api', ['error' => $e->getMessage(), 'old_algo_id' => $oldId], 'critical');
+
+                return ['ok' => false, 'reason' => 'old_stop_cancel_failed: '.$e->getMessage()];
+            }
+        }
+
+        $this->sm->patch($p, ['sl_trigger_price' => $trigger]);
+        $this->sm->note($p, 'stop_loss_updated', 'api', ['old_trigger_price' => $oldState['sl_trigger_price'], 'new_trigger_price' => $trigger]);
+
+        return ['ok' => true, 'reason' => null];
+    }
+
+    /**
      * Explicit no-stop-loss trade: NEVER places a stop order. Only the optional take-profit leg is handled
      * (same rules as the normal path: a failed TP is reported, it does not fail or close the position).
      * Nothing here depends on an exchange read succeeding, so a transient read error cannot turn into an
@@ -164,7 +227,7 @@ class ManualProtectionService
      *
      * @return array{ok: bool, reason: ?string}
      */
-    public function ensureLeg(P $p, ManualExchangeGateway $gw, string $leg, float $trigger, float $tick): array
+    public function ensureLeg(P $p, ManualExchangeGateway $gw, string $leg, float $trigger, float $tick, bool $forceNew = false): array
     {
         $isSl = $leg === 'sl';
         $isTrailing = $leg === 'trailing';
@@ -179,7 +242,7 @@ class ManualProtectionService
         $lastGen = (int) ($state[$leg.'_gen'] ?? 0);
         $probeId = ($p->{$idCol} ?? '') !== '' ? (string) $p->{$idCol} : null;
         $probeClient = ($p->{$clientCol} ?? '') !== '' ? (string) $p->{$clientCol} : ($lastGen > 0 ? $this->clientId($p, $leg, $lastGen) : null);
-        if ($probeId !== null || $probeClient !== null) {
+        if (! $forceNew && ($probeId !== null || $probeClient !== null)) {
             try {
                 $found = $gw->queryProtective($p->symbol, $probeId, $probeClient);
             } catch (ManualExchangeException) {

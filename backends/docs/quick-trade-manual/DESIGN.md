@@ -71,7 +71,7 @@ and the position is emergency-closed (see 4). It can cost fees; it can never lea
    is closed at once. Additionally `allow_mainnet` (default false) keeps the mode testnet-only until the owner attests the checklist.
 8. Flags (all default OFF): `config('quick_trade_manual.enabled')` (env `QUICK_TRADE_MANUAL_ENABLED`) AND workspace `Setting(group=quick_trade_manual,key=enabled)`;
    plus the existing live gates (workspace live mode + `live_ready`). Mainnet also needs `QUICK_TRADE_MANUAL_ALLOW_MAINNET`.
-9. SL/TP/trailing editing is NOT built (replacement semantics on the algo API are unverified; a cancel-then-place gap would leave a naked position).
+9. Post-entry normal Stop Loss editing is now implemented for the manual position UI/API using place-and-verify replacement: the new algo stop must be exchange-verified before the old stop is cancelled. TP-pair/trailing editing remains out of scope until separately designed and testnet-verified.
 
 ## 4. Lifecycle and guarded transitions
 

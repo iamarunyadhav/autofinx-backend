@@ -5,7 +5,9 @@ namespace App\Http\Controllers\Api;
 use App\Domain\QuickTradeManual\ManualFeatureGate;
 use App\Domain\QuickTradeManual\ManualPositionPresenter;
 use App\Domain\QuickTradeManual\ManualPositionReconciler;
+use App\Domain\QuickTradeManual\ManualProtectionService;
 use App\Domain\QuickTradeManual\ManualPositionService;
+use App\Domain\QuickTradeManual\Exchange\ManualExchangeGatewayFactory;
 use App\Http\Controllers\Concerns\AssertsWorkspaceMembership;
 use App\Http\Controllers\Controller;
 use App\Models\QuickTradeManualPosition as P;
@@ -13,6 +15,7 @@ use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use RuntimeException;
+use Illuminate\Support\Facades\Cache;
 
 /**
  * Quick Trade "Manual SL/TP" API. Same workspace-membership pattern as RatioBotController
@@ -29,6 +32,8 @@ class QuickTradeManualController extends Controller
         private readonly ManualPositionService $positions,
         private readonly ManualPositionReconciler $reconciler,
         private readonly ManualPositionPresenter $presenter,
+        private readonly ManualProtectionService $protection,
+        private readonly ManualExchangeGatewayFactory $gateways,
     ) {
     }
 
@@ -55,7 +60,7 @@ class QuickTradeManualController extends Controller
                 'hedge_mode_positions' => ['supported' => true, 'note' => 'Uses the account mode already set on Binance.'],
                 'full_close' => ['supported' => true],
                 'limit_entry' => ['supported' => false, 'reason' => 'Manual mode currently guarantees market-entry reconciliation only.'],
-                'post_entry_protection_edit' => ['supported' => false, 'reason' => 'USD-M algo stop amendment is not verified; cancel/replace can create a protection gap or ghost close order.'],
+                'post_entry_protection_edit' => ['supported' => true, 'verified' => false, 'note' => 'Safe place/verify replacement, then cancel old stop; still requires testnet checklist.'],
                 'position_averaging' => ['supported' => false, 'reason' => 'Requires an approved entry-ledger schema and exchange-tested protection resizing.'],
                 'margin_mode_change_with_open_position' => ['supported' => false, 'reason' => 'Binance rejects margin-mode changes while quantity or open orders exist.'],
                 'exact_cross_liquidation_preview' => ['supported' => false, 'reason' => 'Cross liquidation depends on the complete account portfolio; exchange positionRisk is authoritative after execution.'],
@@ -176,6 +181,48 @@ class QuickTradeManualController extends Controller
         }
 
         return response()->json($this->presenter->toArray($p->refresh(), null, true));
+    }
+
+    /** Edit the normal exchange-side stop on an open manual position. */
+    public function updateStopLoss(Request $request, string $workspace, string $position): JsonResponse
+    {
+        $this->assertWorkspaceMembership($request, $workspace);
+        $p = $this->find($workspace, $position)->loadMissing('integration');
+        $data = $request->validate([
+            'stop_loss_price' => 'nullable|numeric|gt:0',
+            'sl_pct' => 'nullable|numeric|gt:0',
+        ]);
+        if (array_key_exists('stop_loss_price', $data) === array_key_exists('sl_pct', $data)) {
+            return response()->json(['message' => 'Provide exactly one of stop_loss_price or sl_pct.', 'code' => 'invalid_stop_loss_edit'], 422);
+        }
+
+        $entry = (float) $p->entry_price;
+        $trigger = array_key_exists('stop_loss_price', $data)
+            ? (float) $data['stop_loss_price']
+            : ($p->isLong() ? $entry * (1 - (float) $data['sl_pct'] / 100) : $entry * (1 + (float) $data['sl_pct'] / 100));
+        $pct = $entry > 0 ? abs($entry - $trigger) / $entry * 100 : 0;
+        if ($pct < (float) config('quick_trade_manual.min_sl_pct') || $pct > (float) config('quick_trade_manual.max_sl_pct')) {
+            return response()->json(['message' => 'Stop-loss percentage is outside the configured limits.', 'code' => 'invalid_stop_loss_edit'], 422);
+        }
+
+        $lock = Cache::lock('qtm:pos:'.$p->id, 150);
+        if (! $lock->get()) {
+            return response()->json(['message' => 'position_update_in_progress: Try again shortly.', 'code' => 'position_update_in_progress'], 409);
+        }
+        try {
+            $result = $this->protection->replaceStopLoss($p->refresh(), $this->gateways->make($p->integration), $trigger);
+            if (! $result['ok']) {
+                $code = strtok((string) $result['reason'], ':') ?: 'stop_loss_edit_failed';
+                return response()->json(['message' => $result['reason'], 'code' => $code], in_array($code, ['position_not_editable', 'old_stop_cancel_unconfirmed'], true) ? 409 : 422);
+            }
+            $p->update(['sl_pct' => round($pct, 4)]);
+
+            return response()->json($this->presenter->toArray($p->refresh(), null, true));
+        } catch (RuntimeException $e) {
+            return $this->fail($e);
+        } finally {
+            $lock->release();
+        }
     }
 
     // ---------------------------------------------------------------- helpers

@@ -253,6 +253,7 @@ Route::prefix('v1')->group(function () {
         Route::get('workspaces/{workspace}/quick-trade-manual/positions', [\App\Http\Controllers\Api\QuickTradeManualController::class, 'index']);
         Route::get('workspaces/{workspace}/quick-trade-manual/positions/{position}', [\App\Http\Controllers\Api\QuickTradeManualController::class, 'show']);
         Route::post('workspaces/{workspace}/quick-trade-manual/positions/{position}/refresh', [\App\Http\Controllers\Api\QuickTradeManualController::class, 'refresh'])->middleware('throttle:30,1');
+        Route::patch('workspaces/{workspace}/quick-trade-manual/positions/{position}/stop-loss', [\App\Http\Controllers\Api\QuickTradeManualController::class, 'updateStopLoss'])->middleware('throttle:20,1');
         Route::post('workspaces/{workspace}/quick-trade-manual/positions/{position}/close-preview', [\App\Http\Controllers\Api\QuickTradeManualController::class, 'closePreview'])->middleware('throttle:30,1');
         Route::post('workspaces/{workspace}/quick-trade-manual/positions/{position}/close', [\App\Http\Controllers\Api\QuickTradeManualController::class, 'close'])->middleware('throttle:20,1');
         Route::get('workspaces/{workspace}/quick-trades/active', [QuickTradeController::class, 'active']);
