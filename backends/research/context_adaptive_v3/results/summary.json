@@ -1,0 +1,3047 @@
+[
+  {
+    "meta": {
+      "rows": 525888,
+      "start": "2021-10-01 00:00:00+00:00",
+      "end": "2026-09-30 23:55:00+00:00",
+      "timeframe": "5m",
+      "market_years": [
+        {
+          "year": 2021,
+          "start": "2021-10-01 00:00:00+00:00",
+          "end": "2021-12-31 23:55:00+00:00",
+          "return_pct": 5.5,
+          "regime": "range/mixed"
+        },
+        {
+          "year": 2022,
+          "start": "2022-01-01 00:00:00+00:00",
+          "end": "2022-12-31 23:55:00+00:00",
+          "return_pct": -64.21,
+          "regime": "bear"
+        },
+        {
+          "year": 2023,
+          "start": "2023-01-01 00:00:00+00:00",
+          "end": "2023-12-31 23:55:00+00:00",
+          "return_pct": 155.87,
+          "regime": "bull"
+        },
+        {
+          "year": 2024,
+          "start": "2024-01-01 00:00:00+00:00",
+          "end": "2024-12-31 23:55:00+00:00",
+          "return_pct": 121.08,
+          "regime": "bull"
+        },
+        {
+          "year": 2025,
+          "start": "2025-01-01 00:00:00+00:00",
+          "end": "2025-12-31 23:55:00+00:00",
+          "return_pct": -6.35,
+          "regime": "range/mixed"
+        },
+        {
+          "year": 2026,
+          "start": "2026-01-01 00:00:00+00:00",
+          "end": "2026-09-30 23:55:00+00:00",
+          "return_pct": -4.6,
+          "regime": "range/mixed"
+        }
+      ]
+    },
+    "module_outcomes": [
+      {
+        "module": "EMA pullback",
+        "events": 11664,
+        "wins": 5665,
+        "losses": 5698,
+        "ambiguous": 301,
+        "success_pct": 48.57
+      },
+      {
+        "module": "Structure BOS",
+        "events": 9509,
+        "wins": 4500,
+        "losses": 4750,
+        "ambiguous": 259,
+        "success_pct": 47.32
+      },
+      {
+        "module": "Liquidity sweep",
+        "events": 6373,
+        "wins": 3019,
+        "losses": 3187,
+        "ambiguous": 167,
+        "success_pct": 47.37
+      },
+      {
+        "module": "FVG retest",
+        "events": 48685,
+        "wins": 23550,
+        "losses": 23679,
+        "ambiguous": 1456,
+        "success_pct": 48.37
+      },
+      {
+        "module": "Volume breakout",
+        "events": 12120,
+        "wins": 5687,
+        "losses": 6031,
+        "ambiguous": 402,
+        "success_pct": 46.92
+      },
+      {
+        "module": "Candle at S/R",
+        "events": 17131,
+        "wins": 8269,
+        "losses": 8407,
+        "ambiguous": 455,
+        "success_pct": 48.27
+      },
+      {
+        "module": "Trendline break",
+        "events": 31888,
+        "wins": 15740,
+        "losses": 15137,
+        "ambiguous": 1011,
+        "success_pct": 49.36
+      },
+      {
+        "module": "Range/AMD proxy",
+        "events": 15034,
+        "wins": 7304,
+        "losses": 7371,
+        "ambiguous": 359,
+        "success_pct": 48.58
+      },
+      {
+        "module": "Session range",
+        "events": 0,
+        "wins": 0,
+        "losses": 0,
+        "ambiguous": 0,
+        "success_pct": null
+      }
+    ],
+    "annual_module_outcomes": [
+      {
+        "year": 2021,
+        "module": "EMA pullback",
+        "events": 597,
+        "success_pct": 51.26
+      },
+      {
+        "year": 2021,
+        "module": "Structure BOS",
+        "events": 478,
+        "success_pct": 42.47
+      },
+      {
+        "year": 2021,
+        "module": "Liquidity sweep",
+        "events": 366,
+        "success_pct": 45.9
+      },
+      {
+        "year": 2021,
+        "module": "FVG retest",
+        "events": 2197,
+        "success_pct": 46.7
+      },
+      {
+        "year": 2021,
+        "module": "Volume breakout",
+        "events": 629,
+        "success_pct": 47.06
+      },
+      {
+        "year": 2021,
+        "module": "Candle at S/R",
+        "events": 834,
+        "success_pct": 48.68
+      },
+      {
+        "year": 2021,
+        "module": "Trendline break",
+        "events": 1652,
+        "success_pct": 48.06
+      },
+      {
+        "year": 2021,
+        "module": "Range/AMD proxy",
+        "events": 833,
+        "success_pct": 50.66
+      },
+      {
+        "year": 2021,
+        "module": "Session range",
+        "events": 0,
+        "success_pct": null
+      },
+      {
+        "year": 2022,
+        "module": "EMA pullback",
+        "events": 2359,
+        "success_pct": 48.37
+      },
+      {
+        "year": 2022,
+        "module": "Structure BOS",
+        "events": 1752,
+        "success_pct": 45.55
+      },
+      {
+        "year": 2022,
+        "module": "Liquidity sweep",
+        "events": 1391,
+        "success_pct": 47.59
+      },
+      {
+        "year": 2022,
+        "module": "FVG retest",
+        "events": 9646,
+        "success_pct": 48.19
+      },
+      {
+        "year": 2022,
+        "module": "Volume breakout",
+        "events": 2297,
+        "success_pct": 44.28
+      },
+      {
+        "year": 2022,
+        "module": "Candle at S/R",
+        "events": 3486,
+        "success_pct": 47.07
+      },
+      {
+        "year": 2022,
+        "module": "Trendline break",
+        "events": 6388,
+        "success_pct": 49.28
+      },
+      {
+        "year": 2022,
+        "module": "Range/AMD proxy",
+        "events": 2989,
+        "success_pct": 48.21
+      },
+      {
+        "year": 2022,
+        "module": "Session range",
+        "events": 0,
+        "success_pct": null
+      },
+      {
+        "year": 2023,
+        "module": "EMA pullback",
+        "events": 2296,
+        "success_pct": 46.39
+      },
+      {
+        "year": 2023,
+        "module": "Structure BOS",
+        "events": 1716,
+        "success_pct": 46.91
+      },
+      {
+        "year": 2023,
+        "module": "Liquidity sweep",
+        "events": 1315,
+        "success_pct": 45.78
+      },
+      {
+        "year": 2023,
+        "module": "FVG retest",
+        "events": 9452,
+        "success_pct": 47.2
+      },
+      {
+        "year": 2023,
+        "module": "Volume breakout",
+        "events": 2235,
+        "success_pct": 44.83
+      },
+      {
+        "year": 2023,
+        "module": "Candle at S/R",
+        "events": 3377,
+        "success_pct": 46.43
+      },
+      {
+        "year": 2023,
+        "module": "Trendline break",
+        "events": 6789,
+        "success_pct": 47.64
+      },
+      {
+        "year": 2023,
+        "module": "Range/AMD proxy",
+        "events": 2831,
+        "success_pct": 47.69
+      },
+      {
+        "year": 2023,
+        "module": "Session range",
+        "events": 0,
+        "success_pct": null
+      },
+      {
+        "year": 2024,
+        "module": "EMA pullback",
+        "events": 2399,
+        "success_pct": 49.35
+      },
+      {
+        "year": 2024,
+        "module": "Structure BOS",
+        "events": 1994,
+        "success_pct": 48.65
+      },
+      {
+        "year": 2024,
+        "module": "Liquidity sweep",
+        "events": 1165,
+        "success_pct": 46.87
+      },
+      {
+        "year": 2024,
+        "module": "FVG retest",
+        "events": 9685,
+        "success_pct": 49.66
+      },
+      {
+        "year": 2024,
+        "module": "Volume breakout",
+        "events": 2567,
+        "success_pct": 48.89
+      },
+      {
+        "year": 2024,
+        "module": "Candle at S/R",
+        "events": 3453,
+        "success_pct": 49.32
+      },
+      {
+        "year": 2024,
+        "module": "Trendline break",
+        "events": 6352,
+        "success_pct": 49.56
+      },
+      {
+        "year": 2024,
+        "module": "Range/AMD proxy",
+        "events": 3121,
+        "success_pct": 48.73
+      },
+      {
+        "year": 2024,
+        "module": "Session range",
+        "events": 0,
+        "success_pct": null
+      },
+      {
+        "year": 2025,
+        "module": "EMA pullback",
+        "events": 2154,
+        "success_pct": 50.05
+      },
+      {
+        "year": 2025,
+        "module": "Structure BOS",
+        "events": 2165,
+        "success_pct": 47.67
+      },
+      {
+        "year": 2025,
+        "module": "Liquidity sweep",
+        "events": 1158,
+        "success_pct": 48.53
+      },
+      {
+        "year": 2025,
+        "module": "FVG retest",
+        "events": 9793,
+        "success_pct": 48.74
+      },
+      {
+        "year": 2025,
+        "module": "Volume breakout",
+        "events": 2530,
+        "success_pct": 47.87
+      },
+      {
+        "year": 2025,
+        "module": "Candle at S/R",
+        "events": 3354,
+        "success_pct": 50.3
+      },
+      {
+        "year": 2025,
+        "module": "Trendline break",
+        "events": 6067,
+        "success_pct": 50.45
+      },
+      {
+        "year": 2025,
+        "module": "Range/AMD proxy",
+        "events": 3047,
+        "success_pct": 48.74
+      },
+      {
+        "year": 2025,
+        "module": "Session range",
+        "events": 0,
+        "success_pct": null
+      },
+      {
+        "year": 2026,
+        "module": "EMA pullback",
+        "events": 1859,
+        "success_pct": 47.93
+      },
+      {
+        "year": 2026,
+        "module": "Structure BOS",
+        "events": 1404,
+        "success_pct": 49.29
+      },
+      {
+        "year": 2026,
+        "module": "Liquidity sweep",
+        "events": 978,
+        "success_pct": 48.98
+      },
+      {
+        "year": 2026,
+        "module": "FVG retest",
+        "events": 7912,
+        "success_pct": 48.43
+      },
+      {
+        "year": 2026,
+        "module": "Volume breakout",
+        "events": 1862,
+        "success_pct": 48.66
+      },
+      {
+        "year": 2026,
+        "module": "Candle at S/R",
+        "events": 2627,
+        "success_pct": 48.12
+      },
+      {
+        "year": 2026,
+        "module": "Trendline break",
+        "events": 4640,
+        "success_pct": 50.75
+      },
+      {
+        "year": 2026,
+        "module": "Range/AMD proxy",
+        "events": 2213,
+        "success_pct": 49.03
+      },
+      {
+        "year": 2026,
+        "module": "Session range",
+        "events": 0,
+        "success_pct": null
+      }
+    ],
+    "strategy_overall": [
+      {
+        "mode": "Context Confirmed",
+        "trades": 381,
+        "win_rate_pct": 33.07,
+        "profit_factor": 0.452,
+        "net": -4586.68,
+        "fees": 2632.86,
+        "expectancy": -12.04,
+        "max_drawdown_pct": -45.6,
+        "ending_equity": 5413.32
+      },
+      {
+        "mode": "Context Independent",
+        "trades": 5841,
+        "win_rate_pct": 34.36,
+        "profit_factor": 0.476,
+        "net": -9999.14,
+        "fees": 5456.02,
+        "expectancy": -1.71,
+        "max_drawdown_pct": -99.99,
+        "ending_equity": 0.86
+      },
+      {
+        "mode": "Raw UT",
+        "trades": 19730,
+        "win_rate_pct": 30.5,
+        "profit_factor": 0.439,
+        "net": -10000.0,
+        "fees": 5642.9,
+        "expectancy": -0.51,
+        "max_drawdown_pct": -100.0,
+        "ending_equity": 0.0
+      },
+      {
+        "mode": "V2 Filtered",
+        "trades": 1150,
+        "win_rate_pct": 33.48,
+        "profit_factor": 0.446,
+        "net": -8417.02,
+        "fees": 4576.71,
+        "expectancy": -7.32,
+        "max_drawdown_pct": -84.09,
+        "ending_equity": 1582.98
+      }
+    ],
+    "strategy_annual": [
+      {
+        "mode": "Context Confirmed",
+        "year": 2021,
+        "trades": 28,
+        "win_rate_pct": 39.29,
+        "profit_factor": 0.443,
+        "net": -441.44,
+        "fees": 272.15,
+        "expectancy": -15.77,
+        "max_drawdown_pct": -4.14
+      },
+      {
+        "mode": "Context Confirmed",
+        "year": 2022,
+        "trades": 92,
+        "win_rate_pct": 28.26,
+        "profit_factor": 0.374,
+        "net": -1970.46,
+        "fees": 784.61,
+        "expectancy": -21.42,
+        "max_drawdown_pct": -19.91
+      },
+      {
+        "mode": "Context Confirmed",
+        "year": 2023,
+        "trades": 51,
+        "win_rate_pct": 25.49,
+        "profit_factor": 0.261,
+        "net": -919.95,
+        "fees": 357.82,
+        "expectancy": -18.04,
+        "max_drawdown_pct": -9.71
+      },
+      {
+        "mode": "Context Confirmed",
+        "year": 2024,
+        "trades": 92,
+        "win_rate_pct": 35.87,
+        "profit_factor": 0.465,
+        "net": -886.29,
+        "fees": 563.96,
+        "expectancy": -9.63,
+        "max_drawdown_pct": -9.2
+      },
+      {
+        "mode": "Context Confirmed",
+        "year": 2025,
+        "trades": 67,
+        "win_rate_pct": 37.31,
+        "profit_factor": 0.639,
+        "net": -305.91,
+        "fees": 374.42,
+        "expectancy": -4.57,
+        "max_drawdown_pct": -4.24
+      },
+      {
+        "mode": "Context Confirmed",
+        "year": 2026,
+        "trades": 51,
+        "win_rate_pct": 35.29,
+        "profit_factor": 0.909,
+        "net": -62.63,
+        "fees": 279.91,
+        "expectancy": -1.23,
+        "max_drawdown_pct": -2.77
+      },
+      {
+        "mode": "Context Independent",
+        "year": 2021,
+        "trades": 377,
+        "win_rate_pct": 32.63,
+        "profit_factor": 0.464,
+        "net": -4714.65,
+        "fees": 2703.06,
+        "expectancy": -12.51,
+        "max_drawdown_pct": -46.88
+      },
+      {
+        "mode": "Context Independent",
+        "year": 2022,
+        "trades": 1466,
+        "win_rate_pct": 31.79,
+        "profit_factor": 0.487,
+        "net": -5078.53,
+        "fees": 2632.89,
+        "expectancy": -3.46,
+        "max_drawdown_pct": -50.67
+      },
+      {
+        "mode": "Context Independent",
+        "year": 2023,
+        "trades": 949,
+        "win_rate_pct": 33.19,
+        "profit_factor": 0.418,
+        "net": -172.47,
+        "fees": 91.48,
+        "expectancy": -0.18,
+        "max_drawdown_pct": -1.75
+      },
+      {
+        "mode": "Context Independent",
+        "year": 2024,
+        "trades": 1310,
+        "win_rate_pct": 37.71,
+        "profit_factor": 0.602,
+        "net": -26.09,
+        "fees": 23.07,
+        "expectancy": -0.02,
+        "max_drawdown_pct": -0.26
+      },
+      {
+        "mode": "Context Independent",
+        "year": 2025,
+        "trades": 980,
+        "win_rate_pct": 35.1,
+        "profit_factor": 0.523,
+        "net": -5.98,
+        "fees": 4.4,
+        "expectancy": -0.01,
+        "max_drawdown_pct": -0.06
+      },
+      {
+        "mode": "Context Independent",
+        "year": 2026,
+        "trades": 759,
+        "win_rate_pct": 34.91,
+        "profit_factor": 0.535,
+        "net": -1.42,
+        "fees": 1.1,
+        "expectancy": -0.0,
+        "max_drawdown_pct": -0.01
+      },
+      {
+        "mode": "Raw UT",
+        "year": 2021,
+        "trades": 926,
+        "win_rate_pct": 32.4,
+        "profit_factor": 0.437,
+        "net": -8001.83,
+        "fees": 4502.32,
+        "expectancy": -8.64,
+        "max_drawdown_pct": -80.35
+      },
+      {
+        "mode": "Raw UT",
+        "year": 2022,
+        "trades": 3540,
+        "win_rate_pct": 29.58,
+        "profit_factor": 0.45,
+        "net": -1996.98,
+        "fees": 1140.03,
+        "expectancy": -0.56,
+        "max_drawdown_pct": -19.9
+      },
+      {
+        "mode": "Raw UT",
+        "year": 2023,
+        "trades": 3841,
+        "win_rate_pct": 26.06,
+        "profit_factor": 0.209,
+        "net": -1.18,
+        "fees": 0.55,
+        "expectancy": -0.0,
+        "max_drawdown_pct": -0.01
+      },
+      {
+        "mode": "Raw UT",
+        "year": 2024,
+        "trades": 4025,
+        "win_rate_pct": 33.86,
+        "profit_factor": 0.469,
+        "net": -0.0,
+        "fees": 0.0,
+        "expectancy": -0.0,
+        "max_drawdown_pct": -0.0
+      },
+      {
+        "mode": "Raw UT",
+        "year": 2025,
+        "trades": 4383,
+        "win_rate_pct": 30.87,
+        "profit_factor": 0.435,
+        "net": -0.0,
+        "fees": 0.0,
+        "expectancy": -0.0,
+        "max_drawdown_pct": -0.0
+      },
+      {
+        "mode": "Raw UT",
+        "year": 2026,
+        "trades": 3015,
+        "win_rate_pct": 31.64,
+        "profit_factor": 0.147,
+        "net": -0.0,
+        "fees": 0.0,
+        "expectancy": -0.0,
+        "max_drawdown_pct": -0.0
+      },
+      {
+        "mode": "V2 Filtered",
+        "year": 2021,
+        "trades": 81,
+        "win_rate_pct": 30.86,
+        "profit_factor": 0.37,
+        "net": -1555.7,
+        "fees": 727.3,
+        "expectancy": -19.21,
+        "max_drawdown_pct": -15.24
+      },
+      {
+        "mode": "V2 Filtered",
+        "year": 2022,
+        "trades": 260,
+        "win_rate_pct": 28.85,
+        "profit_factor": 0.394,
+        "net": -3919.7,
+        "fees": 1645.86,
+        "expectancy": -15.08,
+        "max_drawdown_pct": -39.12
+      },
+      {
+        "mode": "V2 Filtered",
+        "year": 2023,
+        "trades": 159,
+        "win_rate_pct": 36.48,
+        "profit_factor": 0.442,
+        "net": -1074.21,
+        "fees": 619.04,
+        "expectancy": -6.76,
+        "max_drawdown_pct": -10.52
+      },
+      {
+        "mode": "V2 Filtered",
+        "year": 2024,
+        "trades": 262,
+        "win_rate_pct": 38.17,
+        "profit_factor": 0.6,
+        "net": -867.26,
+        "fees": 780.62,
+        "expectancy": -3.31,
+        "max_drawdown_pct": -9.17
+      },
+      {
+        "mode": "V2 Filtered",
+        "year": 2025,
+        "trades": 226,
+        "win_rate_pct": 36.73,
+        "profit_factor": 0.568,
+        "net": -568.67,
+        "fees": 510.61,
+        "expectancy": -2.52,
+        "max_drawdown_pct": -6.05
+      },
+      {
+        "mode": "V2 Filtered",
+        "year": 2026,
+        "trades": 162,
+        "win_rate_pct": 27.16,
+        "profit_factor": 0.484,
+        "net": -431.48,
+        "fees": 293.29,
+        "expectancy": -2.66,
+        "max_drawdown_pct": -4.57
+      }
+    ]
+  },
+  {
+    "meta": {
+      "rows": 175296,
+      "start": "2021-10-01 00:00:00+00:00",
+      "end": "2026-09-30 23:45:00+00:00",
+      "timeframe": "15m",
+      "market_years": [
+        {
+          "year": 2021,
+          "start": "2021-10-01 00:00:00+00:00",
+          "end": "2021-12-31 23:45:00+00:00",
+          "return_pct": 5.5,
+          "regime": "range/mixed"
+        },
+        {
+          "year": 2022,
+          "start": "2022-01-01 00:00:00+00:00",
+          "end": "2022-12-31 23:45:00+00:00",
+          "return_pct": -64.21,
+          "regime": "bear"
+        },
+        {
+          "year": 2023,
+          "start": "2023-01-01 00:00:00+00:00",
+          "end": "2023-12-31 23:45:00+00:00",
+          "return_pct": 155.87,
+          "regime": "bull"
+        },
+        {
+          "year": 2024,
+          "start": "2024-01-01 00:00:00+00:00",
+          "end": "2024-12-31 23:45:00+00:00",
+          "return_pct": 121.08,
+          "regime": "bull"
+        },
+        {
+          "year": 2025,
+          "start": "2025-01-01 00:00:00+00:00",
+          "end": "2025-12-31 23:45:00+00:00",
+          "return_pct": -6.35,
+          "regime": "range/mixed"
+        },
+        {
+          "year": 2026,
+          "start": "2026-01-01 00:00:00+00:00",
+          "end": "2026-09-30 23:45:00+00:00",
+          "return_pct": -4.6,
+          "regime": "range/mixed"
+        }
+      ]
+    },
+    "module_outcomes": [
+      {
+        "module": "EMA pullback",
+        "events": 4463,
+        "wins": 2091,
+        "losses": 2165,
+        "ambiguous": 207,
+        "success_pct": 46.85
+      },
+      {
+        "module": "Structure BOS",
+        "events": 2947,
+        "wins": 1415,
+        "losses": 1444,
+        "ambiguous": 88,
+        "success_pct": 48.01
+      },
+      {
+        "module": "Liquidity sweep",
+        "events": 2526,
+        "wins": 1167,
+        "losses": 1238,
+        "ambiguous": 121,
+        "success_pct": 46.2
+      },
+      {
+        "module": "FVG retest",
+        "events": 15456,
+        "wins": 7242,
+        "losses": 7461,
+        "ambiguous": 753,
+        "success_pct": 46.86
+      },
+      {
+        "module": "Volume breakout",
+        "events": 3975,
+        "wins": 1894,
+        "losses": 1930,
+        "ambiguous": 151,
+        "success_pct": 47.65
+      },
+      {
+        "module": "Candle at S/R",
+        "events": 6063,
+        "wins": 2814,
+        "losses": 2937,
+        "ambiguous": 312,
+        "success_pct": 46.41
+      },
+      {
+        "module": "Trendline break",
+        "events": 10877,
+        "wins": 5354,
+        "losses": 5002,
+        "ambiguous": 521,
+        "success_pct": 49.22
+      },
+      {
+        "module": "Range/AMD proxy",
+        "events": 5162,
+        "wins": 2393,
+        "losses": 2572,
+        "ambiguous": 197,
+        "success_pct": 46.36
+      },
+      {
+        "module": "Session range",
+        "events": 0,
+        "wins": 0,
+        "losses": 0,
+        "ambiguous": 0,
+        "success_pct": null
+      }
+    ],
+    "annual_module_outcomes": [
+      {
+        "year": 2021,
+        "module": "EMA pullback",
+        "events": 216,
+        "success_pct": 41.67
+      },
+      {
+        "year": 2021,
+        "module": "Structure BOS",
+        "events": 159,
+        "success_pct": 53.46
+      },
+      {
+        "year": 2021,
+        "module": "Liquidity sweep",
+        "events": 126,
+        "success_pct": 51.59
+      },
+      {
+        "year": 2021,
+        "module": "FVG retest",
+        "events": 746,
+        "success_pct": 46.25
+      },
+      {
+        "year": 2021,
+        "module": "Volume breakout",
+        "events": 203,
+        "success_pct": 46.31
+      },
+      {
+        "year": 2021,
+        "module": "Candle at S/R",
+        "events": 293,
+        "success_pct": 45.39
+      },
+      {
+        "year": 2021,
+        "module": "Trendline break",
+        "events": 564,
+        "success_pct": 46.99
+      },
+      {
+        "year": 2021,
+        "module": "Range/AMD proxy",
+        "events": 271,
+        "success_pct": 49.82
+      },
+      {
+        "year": 2021,
+        "module": "Session range",
+        "events": 0,
+        "success_pct": null
+      },
+      {
+        "year": 2022,
+        "module": "EMA pullback",
+        "events": 1010,
+        "success_pct": 48.32
+      },
+      {
+        "year": 2022,
+        "module": "Structure BOS",
+        "events": 531,
+        "success_pct": 44.26
+      },
+      {
+        "year": 2022,
+        "module": "Liquidity sweep",
+        "events": 536,
+        "success_pct": 50.0
+      },
+      {
+        "year": 2022,
+        "module": "FVG retest",
+        "events": 3087,
+        "success_pct": 45.77
+      },
+      {
+        "year": 2022,
+        "module": "Volume breakout",
+        "events": 722,
+        "success_pct": 47.09
+      },
+      {
+        "year": 2022,
+        "module": "Candle at S/R",
+        "events": 1213,
+        "success_pct": 46.99
+      },
+      {
+        "year": 2022,
+        "module": "Trendline break",
+        "events": 2178,
+        "success_pct": 50.83
+      },
+      {
+        "year": 2022,
+        "module": "Range/AMD proxy",
+        "events": 968,
+        "success_pct": 47.93
+      },
+      {
+        "year": 2022,
+        "module": "Session range",
+        "events": 0,
+        "success_pct": null
+      },
+      {
+        "year": 2023,
+        "module": "EMA pullback",
+        "events": 923,
+        "success_pct": 47.02
+      },
+      {
+        "year": 2023,
+        "module": "Structure BOS",
+        "events": 488,
+        "success_pct": 47.95
+      },
+      {
+        "year": 2023,
+        "module": "Liquidity sweep",
+        "events": 618,
+        "success_pct": 41.42
+      },
+      {
+        "year": 2023,
+        "module": "FVG retest",
+        "events": 3154,
+        "success_pct": 46.86
+      },
+      {
+        "year": 2023,
+        "module": "Volume breakout",
+        "events": 710,
+        "success_pct": 46.34
+      },
+      {
+        "year": 2023,
+        "module": "Candle at S/R",
+        "events": 1221,
+        "success_pct": 44.23
+      },
+      {
+        "year": 2023,
+        "module": "Trendline break",
+        "events": 2361,
+        "success_pct": 50.06
+      },
+      {
+        "year": 2023,
+        "module": "Range/AMD proxy",
+        "events": 1045,
+        "success_pct": 43.25
+      },
+      {
+        "year": 2023,
+        "module": "Session range",
+        "events": 0,
+        "success_pct": null
+      },
+      {
+        "year": 2024,
+        "module": "EMA pullback",
+        "events": 846,
+        "success_pct": 45.51
+      },
+      {
+        "year": 2024,
+        "module": "Structure BOS",
+        "events": 595,
+        "success_pct": 51.93
+      },
+      {
+        "year": 2024,
+        "module": "Liquidity sweep",
+        "events": 465,
+        "success_pct": 44.73
+      },
+      {
+        "year": 2024,
+        "module": "FVG retest",
+        "events": 2971,
+        "success_pct": 47.66
+      },
+      {
+        "year": 2024,
+        "module": "Volume breakout",
+        "events": 854,
+        "success_pct": 49.65
+      },
+      {
+        "year": 2024,
+        "module": "Candle at S/R",
+        "events": 1234,
+        "success_pct": 46.35
+      },
+      {
+        "year": 2024,
+        "module": "Trendline break",
+        "events": 2134,
+        "success_pct": 49.39
+      },
+      {
+        "year": 2024,
+        "module": "Range/AMD proxy",
+        "events": 1059,
+        "success_pct": 45.61
+      },
+      {
+        "year": 2024,
+        "module": "Session range",
+        "events": 0,
+        "success_pct": null
+      },
+      {
+        "year": 2025,
+        "module": "EMA pullback",
+        "events": 820,
+        "success_pct": 49.15
+      },
+      {
+        "year": 2025,
+        "module": "Structure BOS",
+        "events": 711,
+        "success_pct": 46.98
+      },
+      {
+        "year": 2025,
+        "module": "Liquidity sweep",
+        "events": 458,
+        "success_pct": 46.07
+      },
+      {
+        "year": 2025,
+        "module": "FVG retest",
+        "events": 3090,
+        "success_pct": 48.38
+      },
+      {
+        "year": 2025,
+        "module": "Volume breakout",
+        "events": 855,
+        "success_pct": 45.5
+      },
+      {
+        "year": 2025,
+        "module": "Candle at S/R",
+        "events": 1223,
+        "success_pct": 47.91
+      },
+      {
+        "year": 2025,
+        "module": "Trendline break",
+        "events": 2101,
+        "success_pct": 47.41
+      },
+      {
+        "year": 2025,
+        "module": "Range/AMD proxy",
+        "events": 1117,
+        "success_pct": 46.46
+      },
+      {
+        "year": 2025,
+        "module": "Session range",
+        "events": 0,
+        "success_pct": null
+      },
+      {
+        "year": 2026,
+        "module": "EMA pullback",
+        "events": 648,
+        "success_pct": 44.91
+      },
+      {
+        "year": 2026,
+        "module": "Structure BOS",
+        "events": 463,
+        "success_pct": 47.08
+      },
+      {
+        "year": 2026,
+        "module": "Liquidity sweep",
+        "events": 323,
+        "success_pct": 49.23
+      },
+      {
+        "year": 2026,
+        "module": "FVG retest",
+        "events": 2408,
+        "success_pct": 45.47
+      },
+      {
+        "year": 2026,
+        "module": "Volume breakout",
+        "events": 631,
+        "success_pct": 50.4
+      },
+      {
+        "year": 2026,
+        "module": "Candle at S/R",
+        "events": 879,
+        "success_pct": 46.99
+      },
+      {
+        "year": 2026,
+        "module": "Trendline break",
+        "events": 1539,
+        "success_pct": 48.73
+      },
+      {
+        "year": 2026,
+        "module": "Range/AMD proxy",
+        "events": 702,
+        "success_pct": 48.43
+      },
+      {
+        "year": 2026,
+        "module": "Session range",
+        "events": 0,
+        "success_pct": null
+      }
+    ],
+    "strategy_overall": [
+      {
+        "mode": "Context Confirmed",
+        "trades": 258,
+        "win_rate_pct": 33.72,
+        "profit_factor": 0.508,
+        "net": -3829.88,
+        "fees": 1930.32,
+        "expectancy": -14.84,
+        "max_drawdown_pct": -39.42,
+        "ending_equity": 6170.12
+      },
+      {
+        "mode": "Context Independent",
+        "trades": 3407,
+        "win_rate_pct": 36.81,
+        "profit_factor": 0.619,
+        "net": -9936.22,
+        "fees": 5563.56,
+        "expectancy": -2.92,
+        "max_drawdown_pct": -99.36,
+        "ending_equity": 63.78
+      },
+      {
+        "mode": "Raw UT",
+        "trades": 5528,
+        "win_rate_pct": 35.38,
+        "profit_factor": 0.568,
+        "net": -9997.97,
+        "fees": 4793.88,
+        "expectancy": -1.81,
+        "max_drawdown_pct": -99.98,
+        "ending_equity": 2.03
+      },
+      {
+        "mode": "V2 Filtered",
+        "trades": 691,
+        "win_rate_pct": 35.75,
+        "profit_factor": 0.547,
+        "net": -6866.52,
+        "fees": 3510.71,
+        "expectancy": -9.94,
+        "max_drawdown_pct": -68.78,
+        "ending_equity": 3133.48
+      }
+    ],
+    "strategy_annual": [
+      {
+        "mode": "Context Confirmed",
+        "year": 2021,
+        "trades": 10,
+        "win_rate_pct": 30.0,
+        "profit_factor": 0.618,
+        "net": -176.32,
+        "fees": 95.07,
+        "expectancy": -17.63,
+        "max_drawdown_pct": -3.54
+      },
+      {
+        "mode": "Context Confirmed",
+        "year": 2022,
+        "trades": 62,
+        "win_rate_pct": 24.19,
+        "profit_factor": 0.375,
+        "net": -1733.59,
+        "fees": 515.09,
+        "expectancy": -27.96,
+        "max_drawdown_pct": -19.33
+      },
+      {
+        "mode": "Context Confirmed",
+        "year": 2023,
+        "trades": 48,
+        "win_rate_pct": 37.5,
+        "profit_factor": 0.557,
+        "net": -613.08,
+        "fees": 370.62,
+        "expectancy": -12.77,
+        "max_drawdown_pct": -6.2
+      },
+      {
+        "mode": "Context Confirmed",
+        "year": 2024,
+        "trades": 51,
+        "win_rate_pct": 35.29,
+        "profit_factor": 0.629,
+        "net": -497.91,
+        "fees": 363.74,
+        "expectancy": -9.76,
+        "max_drawdown_pct": -5.86
+      },
+      {
+        "mode": "Context Confirmed",
+        "year": 2025,
+        "trades": 48,
+        "win_rate_pct": 43.75,
+        "profit_factor": 0.761,
+        "net": -204.92,
+        "fees": 331.99,
+        "expectancy": -4.27,
+        "max_drawdown_pct": -3.34
+      },
+      {
+        "mode": "Context Confirmed",
+        "year": 2026,
+        "trades": 39,
+        "win_rate_pct": 30.77,
+        "profit_factor": 0.372,
+        "net": -604.06,
+        "fees": 253.81,
+        "expectancy": -15.49,
+        "max_drawdown_pct": -6.61
+      },
+      {
+        "mode": "Context Independent",
+        "year": 2021,
+        "trades": 147,
+        "win_rate_pct": 31.97,
+        "profit_factor": 0.576,
+        "net": -2762.02,
+        "fees": 1232.94,
+        "expectancy": -18.79,
+        "max_drawdown_pct": -27.9
+      },
+      {
+        "mode": "Context Independent",
+        "year": 2022,
+        "trades": 685,
+        "win_rate_pct": 37.23,
+        "profit_factor": 0.655,
+        "net": -4939.28,
+        "fees": 2987.86,
+        "expectancy": -7.21,
+        "max_drawdown_pct": -49.93
+      },
+      {
+        "mode": "Context Independent",
+        "year": 2023,
+        "trades": 668,
+        "win_rate_pct": 33.53,
+        "profit_factor": 0.503,
+        "net": -1699.97,
+        "fees": 833.33,
+        "expectancy": -2.54,
+        "max_drawdown_pct": -17.41
+      },
+      {
+        "mode": "Context Independent",
+        "year": 2024,
+        "trades": 711,
+        "win_rate_pct": 40.93,
+        "profit_factor": 0.741,
+        "net": -309.58,
+        "fees": 318.31,
+        "expectancy": -0.44,
+        "max_drawdown_pct": -3.24
+      },
+      {
+        "mode": "Context Independent",
+        "year": 2025,
+        "trades": 671,
+        "win_rate_pct": 37.26,
+        "profit_factor": 0.675,
+        "net": -156.81,
+        "fees": 140.91,
+        "expectancy": -0.23,
+        "max_drawdown_pct": -1.59
+      },
+      {
+        "mode": "Context Independent",
+        "year": 2026,
+        "trades": 525,
+        "win_rate_pct": 35.62,
+        "profit_factor": 0.618,
+        "net": -68.57,
+        "fees": 50.21,
+        "expectancy": -0.13,
+        "max_drawdown_pct": -0.69
+      },
+      {
+        "mode": "Raw UT",
+        "year": 2021,
+        "trades": 271,
+        "win_rate_pct": 32.1,
+        "profit_factor": 0.528,
+        "net": -4809.54,
+        "fees": 2048.55,
+        "expectancy": -17.75,
+        "max_drawdown_pct": -49.85
+      },
+      {
+        "mode": "Raw UT",
+        "year": 2022,
+        "trades": 999,
+        "win_rate_pct": 35.44,
+        "profit_factor": 0.62,
+        "net": -4323.95,
+        "fees": 2313.64,
+        "expectancy": -4.33,
+        "max_drawdown_pct": -43.24
+      },
+      {
+        "mode": "Raw UT",
+        "year": 2023,
+        "trades": 1038,
+        "win_rate_pct": 30.92,
+        "profit_factor": 0.411,
+        "net": -770.87,
+        "fees": 347.88,
+        "expectancy": -0.74,
+        "max_drawdown_pct": -7.73
+      },
+      {
+        "mode": "Raw UT",
+        "year": 2024,
+        "trades": 1119,
+        "win_rate_pct": 39.68,
+        "profit_factor": 0.696,
+        "net": -62.92,
+        "fees": 57.71,
+        "expectancy": -0.06,
+        "max_drawdown_pct": -0.64
+      },
+      {
+        "mode": "Raw UT",
+        "year": 2025,
+        "trades": 1234,
+        "win_rate_pct": 36.71,
+        "profit_factor": 0.634,
+        "net": -25.02,
+        "fees": 22.61,
+        "expectancy": -0.02,
+        "max_drawdown_pct": -0.25
+      },
+      {
+        "mode": "Raw UT",
+        "year": 2026,
+        "trades": 867,
+        "win_rate_pct": 34.26,
+        "profit_factor": 0.515,
+        "net": -5.67,
+        "fees": 3.49,
+        "expectancy": -0.01,
+        "max_drawdown_pct": -0.06
+      },
+      {
+        "mode": "V2 Filtered",
+        "year": 2021,
+        "trades": 25,
+        "win_rate_pct": 20.0,
+        "profit_factor": 0.354,
+        "net": -902.54,
+        "fees": 233.96,
+        "expectancy": -36.1,
+        "max_drawdown_pct": -9.35
+      },
+      {
+        "mode": "V2 Filtered",
+        "year": 2022,
+        "trades": 149,
+        "win_rate_pct": 32.21,
+        "profit_factor": 0.556,
+        "net": -2426.21,
+        "fees": 1081.4,
+        "expectancy": -16.28,
+        "max_drawdown_pct": -25.55
+      },
+      {
+        "mode": "V2 Filtered",
+        "year": 2023,
+        "trades": 128,
+        "win_rate_pct": 31.25,
+        "profit_factor": 0.387,
+        "net": -1931.91,
+        "fees": 721.76,
+        "expectancy": -15.09,
+        "max_drawdown_pct": -19.77
+      },
+      {
+        "mode": "V2 Filtered",
+        "year": 2024,
+        "trades": 145,
+        "win_rate_pct": 37.93,
+        "profit_factor": 0.643,
+        "net": -862.94,
+        "fees": 583.2,
+        "expectancy": -5.95,
+        "max_drawdown_pct": -8.29
+      },
+      {
+        "mode": "V2 Filtered",
+        "year": 2025,
+        "trades": 149,
+        "win_rate_pct": 44.97,
+        "profit_factor": 0.823,
+        "net": -299.78,
+        "fees": 568.25,
+        "expectancy": -2.01,
+        "max_drawdown_pct": -5.06
+      },
+      {
+        "mode": "V2 Filtered",
+        "year": 2026,
+        "trades": 95,
+        "win_rate_pct": 33.68,
+        "profit_factor": 0.564,
+        "net": -443.15,
+        "fees": 322.14,
+        "expectancy": -4.66,
+        "max_drawdown_pct": -4.81
+      }
+    ]
+  },
+  {
+    "meta": {
+      "rows": 43824,
+      "start": "2021-10-01 00:00:00+00:00",
+      "end": "2026-09-30 23:00:00+00:00",
+      "timeframe": "1h",
+      "market_years": [
+        {
+          "year": 2021,
+          "start": "2021-10-01 00:00:00+00:00",
+          "end": "2021-12-31 23:00:00+00:00",
+          "return_pct": 5.5,
+          "regime": "range/mixed"
+        },
+        {
+          "year": 2022,
+          "start": "2022-01-01 00:00:00+00:00",
+          "end": "2022-12-31 23:00:00+00:00",
+          "return_pct": -64.21,
+          "regime": "bear"
+        },
+        {
+          "year": 2023,
+          "start": "2023-01-01 00:00:00+00:00",
+          "end": "2023-12-31 23:00:00+00:00",
+          "return_pct": 155.87,
+          "regime": "bull"
+        },
+        {
+          "year": 2024,
+          "start": "2024-01-01 00:00:00+00:00",
+          "end": "2024-12-31 23:00:00+00:00",
+          "return_pct": 121.08,
+          "regime": "bull"
+        },
+        {
+          "year": 2025,
+          "start": "2025-01-01 00:00:00+00:00",
+          "end": "2025-12-31 23:00:00+00:00",
+          "return_pct": -6.35,
+          "regime": "range/mixed"
+        },
+        {
+          "year": 2026,
+          "start": "2026-01-01 00:00:00+00:00",
+          "end": "2026-09-30 23:00:00+00:00",
+          "return_pct": -4.6,
+          "regime": "range/mixed"
+        }
+      ]
+    },
+    "module_outcomes": [
+      {
+        "module": "EMA pullback",
+        "events": 1157,
+        "wins": 507,
+        "losses": 548,
+        "ambiguous": 102,
+        "success_pct": 43.82
+      },
+      {
+        "module": "Structure BOS",
+        "events": 737,
+        "wins": 359,
+        "losses": 334,
+        "ambiguous": 44,
+        "success_pct": 48.71
+      },
+      {
+        "module": "Liquidity sweep",
+        "events": 664,
+        "wins": 300,
+        "losses": 314,
+        "ambiguous": 50,
+        "success_pct": 45.18
+      },
+      {
+        "module": "FVG retest",
+        "events": 3728,
+        "wins": 1715,
+        "losses": 1719,
+        "ambiguous": 294,
+        "success_pct": 46.0
+      },
+      {
+        "module": "Volume breakout",
+        "events": 1100,
+        "wins": 534,
+        "losses": 516,
+        "ambiguous": 50,
+        "success_pct": 48.55
+      },
+      {
+        "module": "Candle at S/R",
+        "events": 1557,
+        "wins": 700,
+        "losses": 741,
+        "ambiguous": 116,
+        "success_pct": 44.96
+      },
+      {
+        "module": "Trendline break",
+        "events": 2671,
+        "wins": 1261,
+        "losses": 1211,
+        "ambiguous": 199,
+        "success_pct": 47.21
+      },
+      {
+        "module": "Range/AMD proxy",
+        "events": 1169,
+        "wins": 555,
+        "losses": 538,
+        "ambiguous": 76,
+        "success_pct": 47.48
+      },
+      {
+        "module": "Session range",
+        "events": 0,
+        "wins": 0,
+        "losses": 0,
+        "ambiguous": 0,
+        "success_pct": null
+      }
+    ],
+    "annual_module_outcomes": [
+      {
+        "year": 2021,
+        "module": "EMA pullback",
+        "events": 56,
+        "success_pct": 30.36
+      },
+      {
+        "year": 2021,
+        "module": "Structure BOS",
+        "events": 34,
+        "success_pct": 50.0
+      },
+      {
+        "year": 2021,
+        "module": "Liquidity sweep",
+        "events": 32,
+        "success_pct": 46.88
+      },
+      {
+        "year": 2021,
+        "module": "FVG retest",
+        "events": 171,
+        "success_pct": 47.37
+      },
+      {
+        "year": 2021,
+        "module": "Volume breakout",
+        "events": 53,
+        "success_pct": 56.6
+      },
+      {
+        "year": 2021,
+        "module": "Candle at S/R",
+        "events": 75,
+        "success_pct": 52.0
+      },
+      {
+        "year": 2021,
+        "module": "Trendline break",
+        "events": 136,
+        "success_pct": 47.79
+      },
+      {
+        "year": 2021,
+        "module": "Range/AMD proxy",
+        "events": 63,
+        "success_pct": 57.14
+      },
+      {
+        "year": 2021,
+        "module": "Session range",
+        "events": 0,
+        "success_pct": null
+      },
+      {
+        "year": 2022,
+        "module": "EMA pullback",
+        "events": 226,
+        "success_pct": 45.13
+      },
+      {
+        "year": 2022,
+        "module": "Structure BOS",
+        "events": 160,
+        "success_pct": 40.62
+      },
+      {
+        "year": 2022,
+        "module": "Liquidity sweep",
+        "events": 136,
+        "success_pct": 48.53
+      },
+      {
+        "year": 2022,
+        "module": "FVG retest",
+        "events": 748,
+        "success_pct": 45.05
+      },
+      {
+        "year": 2022,
+        "module": "Volume breakout",
+        "events": 227,
+        "success_pct": 47.58
+      },
+      {
+        "year": 2022,
+        "module": "Candle at S/R",
+        "events": 304,
+        "success_pct": 42.43
+      },
+      {
+        "year": 2022,
+        "module": "Trendline break",
+        "events": 547,
+        "success_pct": 46.98
+      },
+      {
+        "year": 2022,
+        "module": "Range/AMD proxy",
+        "events": 223,
+        "success_pct": 47.53
+      },
+      {
+        "year": 2022,
+        "module": "Session range",
+        "events": 0,
+        "success_pct": null
+      },
+      {
+        "year": 2023,
+        "module": "EMA pullback",
+        "events": 237,
+        "success_pct": 46.41
+      },
+      {
+        "year": 2023,
+        "module": "Structure BOS",
+        "events": 98,
+        "success_pct": 52.04
+      },
+      {
+        "year": 2023,
+        "module": "Liquidity sweep",
+        "events": 129,
+        "success_pct": 42.64
+      },
+      {
+        "year": 2023,
+        "module": "FVG retest",
+        "events": 769,
+        "success_pct": 45.38
+      },
+      {
+        "year": 2023,
+        "module": "Volume breakout",
+        "events": 189,
+        "success_pct": 52.38
+      },
+      {
+        "year": 2023,
+        "module": "Candle at S/R",
+        "events": 295,
+        "success_pct": 46.1
+      },
+      {
+        "year": 2023,
+        "module": "Trendline break",
+        "events": 576,
+        "success_pct": 47.92
+      },
+      {
+        "year": 2023,
+        "module": "Range/AMD proxy",
+        "events": 223,
+        "success_pct": 46.19
+      },
+      {
+        "year": 2023,
+        "module": "Session range",
+        "events": 0,
+        "success_pct": null
+      },
+      {
+        "year": 2024,
+        "module": "EMA pullback",
+        "events": 257,
+        "success_pct": 42.8
+      },
+      {
+        "year": 2024,
+        "module": "Structure BOS",
+        "events": 144,
+        "success_pct": 50.69
+      },
+      {
+        "year": 2024,
+        "module": "Liquidity sweep",
+        "events": 144,
+        "success_pct": 40.28
+      },
+      {
+        "year": 2024,
+        "module": "FVG retest",
+        "events": 745,
+        "success_pct": 49.13
+      },
+      {
+        "year": 2024,
+        "module": "Volume breakout",
+        "events": 232,
+        "success_pct": 50.43
+      },
+      {
+        "year": 2024,
+        "module": "Candle at S/R",
+        "events": 328,
+        "success_pct": 44.82
+      },
+      {
+        "year": 2024,
+        "module": "Trendline break",
+        "events": 528,
+        "success_pct": 45.45
+      },
+      {
+        "year": 2024,
+        "module": "Range/AMD proxy",
+        "events": 253,
+        "success_pct": 47.04
+      },
+      {
+        "year": 2024,
+        "module": "Session range",
+        "events": 0,
+        "success_pct": null
+      },
+      {
+        "year": 2025,
+        "module": "EMA pullback",
+        "events": 221,
+        "success_pct": 43.89
+      },
+      {
+        "year": 2025,
+        "module": "Structure BOS",
+        "events": 169,
+        "success_pct": 49.7
+      },
+      {
+        "year": 2025,
+        "module": "Liquidity sweep",
+        "events": 122,
+        "success_pct": 47.54
+      },
+      {
+        "year": 2025,
+        "module": "FVG retest",
+        "events": 661,
+        "success_pct": 44.78
+      },
+      {
+        "year": 2025,
+        "module": "Volume breakout",
+        "events": 220,
+        "success_pct": 42.27
+      },
+      {
+        "year": 2025,
+        "module": "Candle at S/R",
+        "events": 327,
+        "success_pct": 46.79
+      },
+      {
+        "year": 2025,
+        "module": "Trendline break",
+        "events": 486,
+        "success_pct": 44.65
+      },
+      {
+        "year": 2025,
+        "module": "Range/AMD proxy",
+        "events": 249,
+        "success_pct": 47.79
+      },
+      {
+        "year": 2025,
+        "module": "Session range",
+        "events": 0,
+        "success_pct": null
+      },
+      {
+        "year": 2026,
+        "module": "EMA pullback",
+        "events": 160,
+        "success_pct": 44.38
+      },
+      {
+        "year": 2026,
+        "module": "Structure BOS",
+        "events": 132,
+        "success_pct": 52.27
+      },
+      {
+        "year": 2026,
+        "module": "Liquidity sweep",
+        "events": 101,
+        "success_pct": 47.52
+      },
+      {
+        "year": 2026,
+        "module": "FVG retest",
+        "events": 634,
+        "success_pct": 45.11
+      },
+      {
+        "year": 2026,
+        "module": "Volume breakout",
+        "events": 179,
+        "success_pct": 48.6
+      },
+      {
+        "year": 2026,
+        "module": "Candle at S/R",
+        "events": 228,
+        "success_pct": 42.11
+      },
+      {
+        "year": 2026,
+        "module": "Trendline break",
+        "events": 398,
+        "success_pct": 51.76
+      },
+      {
+        "year": 2026,
+        "module": "Range/AMD proxy",
+        "events": 158,
+        "success_pct": 45.57
+      },
+      {
+        "year": 2026,
+        "module": "Session range",
+        "events": 0,
+        "success_pct": null
+      }
+    ],
+    "strategy_overall": [
+      {
+        "mode": "Context Confirmed",
+        "trades": 87,
+        "win_rate_pct": 40.23,
+        "profit_factor": 0.957,
+        "net": -181.22,
+        "fees": 677.59,
+        "expectancy": -2.08,
+        "max_drawdown_pct": -11.46,
+        "ending_equity": 9818.78
+      },
+      {
+        "mode": "Context Independent",
+        "trades": 1169,
+        "win_rate_pct": 39.44,
+        "profit_factor": 0.774,
+        "net": -7288.5,
+        "fees": 4945.07,
+        "expectancy": -6.23,
+        "max_drawdown_pct": -73.88,
+        "ending_equity": 2711.5
+      },
+      {
+        "mode": "Raw UT",
+        "trades": 1299,
+        "win_rate_pct": 38.18,
+        "profit_factor": 0.716,
+        "net": -8330.31,
+        "fees": 4462.99,
+        "expectancy": -6.41,
+        "max_drawdown_pct": -83.18,
+        "ending_equity": 1669.69
+      },
+      {
+        "mode": "V2 Filtered",
+        "trades": 208,
+        "win_rate_pct": 35.58,
+        "profit_factor": 0.682,
+        "net": -2938.49,
+        "fees": 1351.37,
+        "expectancy": -14.13,
+        "max_drawdown_pct": -34.06,
+        "ending_equity": 7061.51
+      }
+    ],
+    "strategy_annual": [
+      {
+        "mode": "Context Confirmed",
+        "year": 2021,
+        "trades": 3,
+        "win_rate_pct": 66.67,
+        "profit_factor": 41.574,
+        "net": 277.07,
+        "fees": 19.05,
+        "expectancy": 92.36,
+        "max_drawdown_pct": -0.07
+      },
+      {
+        "mode": "Context Confirmed",
+        "year": 2022,
+        "trades": 17,
+        "win_rate_pct": 23.53,
+        "profit_factor": 0.419,
+        "net": -753.42,
+        "fees": 103.94,
+        "expectancy": -44.32,
+        "max_drawdown_pct": -6.93
+      },
+      {
+        "mode": "Context Confirmed",
+        "year": 2023,
+        "trades": 13,
+        "win_rate_pct": 38.46,
+        "profit_factor": 0.869,
+        "net": -83.86,
+        "fees": 109.6,
+        "expectancy": -6.45,
+        "max_drawdown_pct": -4.87
+      },
+      {
+        "mode": "Context Confirmed",
+        "year": 2024,
+        "trades": 23,
+        "win_rate_pct": 43.48,
+        "profit_factor": 1.654,
+        "net": 513.51,
+        "fees": 185.46,
+        "expectancy": 22.33,
+        "max_drawdown_pct": -4.29
+      },
+      {
+        "mode": "Context Confirmed",
+        "year": 2025,
+        "trades": 18,
+        "win_rate_pct": 38.89,
+        "profit_factor": 0.67,
+        "net": -296.44,
+        "fees": 148.1,
+        "expectancy": -16.47,
+        "max_drawdown_pct": -3.66
+      },
+      {
+        "mode": "Context Confirmed",
+        "year": 2026,
+        "trades": 13,
+        "win_rate_pct": 53.85,
+        "profit_factor": 1.265,
+        "net": 161.93,
+        "fees": 111.44,
+        "expectancy": 12.46,
+        "max_drawdown_pct": -2.95
+      },
+      {
+        "mode": "Context Independent",
+        "year": 2021,
+        "trades": 52,
+        "win_rate_pct": 32.69,
+        "profit_factor": 0.669,
+        "net": -966.73,
+        "fees": 348.5,
+        "expectancy": -18.59,
+        "max_drawdown_pct": -13.79
+      },
+      {
+        "mode": "Context Independent",
+        "year": 2022,
+        "trades": 229,
+        "win_rate_pct": 35.81,
+        "profit_factor": 0.711,
+        "net": -2947.19,
+        "fees": 1274.93,
+        "expectancy": -12.87,
+        "max_drawdown_pct": -32.69
+      },
+      {
+        "mode": "Context Independent",
+        "year": 2023,
+        "trades": 210,
+        "win_rate_pct": 39.52,
+        "profit_factor": 0.78,
+        "net": -1201.87,
+        "fees": 986.82,
+        "expectancy": -5.72,
+        "max_drawdown_pct": -13.84
+      },
+      {
+        "mode": "Context Independent",
+        "year": 2024,
+        "trades": 240,
+        "win_rate_pct": 43.75,
+        "profit_factor": 1.0,
+        "net": 0.93,
+        "fees": 882.93,
+        "expectancy": 0.0,
+        "max_drawdown_pct": -8.63
+      },
+      {
+        "mode": "Context Independent",
+        "year": 2025,
+        "trades": 244,
+        "win_rate_pct": 39.75,
+        "profit_factor": 0.711,
+        "net": -1499.07,
+        "fees": 883.85,
+        "expectancy": -6.14,
+        "max_drawdown_pct": -16.18
+      },
+      {
+        "mode": "Context Independent",
+        "year": 2026,
+        "trades": 194,
+        "win_rate_pct": 39.69,
+        "profit_factor": 0.781,
+        "net": -674.56,
+        "fees": 568.04,
+        "expectancy": -3.48,
+        "max_drawdown_pct": -8.44
+      },
+      {
+        "mode": "Raw UT",
+        "year": 2021,
+        "trades": 65,
+        "win_rate_pct": 32.31,
+        "profit_factor": 0.733,
+        "net": -892.62,
+        "fees": 401.82,
+        "expectancy": -13.73,
+        "max_drawdown_pct": -14.65
+      },
+      {
+        "mode": "Raw UT",
+        "year": 2022,
+        "trades": 242,
+        "win_rate_pct": 39.67,
+        "profit_factor": 0.668,
+        "net": -3429.34,
+        "fees": 1234.18,
+        "expectancy": -14.17,
+        "max_drawdown_pct": -35.93
+      },
+      {
+        "mode": "Raw UT",
+        "year": 2023,
+        "trades": 232,
+        "win_rate_pct": 37.93,
+        "profit_factor": 0.732,
+        "net": -1485.08,
+        "fees": 1059.25,
+        "expectancy": -6.4,
+        "max_drawdown_pct": -14.69
+      },
+      {
+        "mode": "Raw UT",
+        "year": 2024,
+        "trades": 244,
+        "win_rate_pct": 38.93,
+        "profit_factor": 0.82,
+        "net": -789.05,
+        "fees": 734.56,
+        "expectancy": -3.23,
+        "max_drawdown_pct": -9.79
+      },
+      {
+        "mode": "Raw UT",
+        "year": 2025,
+        "trades": 300,
+        "win_rate_pct": 34.67,
+        "profit_factor": 0.642,
+        "net": -1383.46,
+        "fees": 680.49,
+        "expectancy": -4.61,
+        "max_drawdown_pct": -14.17
+      },
+      {
+        "mode": "Raw UT",
+        "year": 2026,
+        "trades": 216,
+        "win_rate_pct": 42.59,
+        "profit_factor": 0.808,
+        "net": -350.75,
+        "fees": 352.69,
+        "expectancy": -1.62,
+        "max_drawdown_pct": -3.69
+      },
+      {
+        "mode": "V2 Filtered",
+        "year": 2021,
+        "trades": 6,
+        "win_rate_pct": 50.0,
+        "profit_factor": 17.006,
+        "net": 404.52,
+        "fees": 37.99,
+        "expectancy": 67.42,
+        "max_drawdown_pct": -0.15
+      },
+      {
+        "mode": "V2 Filtered",
+        "year": 2022,
+        "trades": 36,
+        "win_rate_pct": 27.78,
+        "profit_factor": 0.402,
+        "net": -1464.91,
+        "fees": 222.8,
+        "expectancy": -40.69,
+        "max_drawdown_pct": -14.15
+      },
+      {
+        "mode": "V2 Filtered",
+        "year": 2023,
+        "trades": 38,
+        "win_rate_pct": 31.58,
+        "profit_factor": 0.488,
+        "net": -977.37,
+        "fees": 279.63,
+        "expectancy": -25.72,
+        "max_drawdown_pct": -10.45
+      },
+      {
+        "mode": "V2 Filtered",
+        "year": 2024,
+        "trades": 44,
+        "win_rate_pct": 43.18,
+        "profit_factor": 1.156,
+        "net": 256.15,
+        "fees": 284.87,
+        "expectancy": 5.82,
+        "max_drawdown_pct": -6.61
+      },
+      {
+        "mode": "V2 Filtered",
+        "year": 2025,
+        "trades": 51,
+        "win_rate_pct": 33.33,
+        "profit_factor": 0.519,
+        "net": -952.53,
+        "fees": 322.48,
+        "expectancy": -18.68,
+        "max_drawdown_pct": -12.77
+      },
+      {
+        "mode": "V2 Filtered",
+        "year": 2026,
+        "trades": 33,
+        "win_rate_pct": 39.39,
+        "profit_factor": 0.832,
+        "net": -204.35,
+        "fees": 203.6,
+        "expectancy": -6.19,
+        "max_drawdown_pct": -3.36
+      }
+    ]
+  },
+  {
+    "meta": {
+      "rows": 10956,
+      "start": "2021-10-01 00:00:00+00:00",
+      "end": "2026-09-30 20:00:00+00:00",
+      "timeframe": "4h",
+      "market_years": [
+        {
+          "year": 2021,
+          "start": "2021-10-01 00:00:00+00:00",
+          "end": "2021-12-31 20:00:00+00:00",
+          "return_pct": 5.5,
+          "regime": "range/mixed"
+        },
+        {
+          "year": 2022,
+          "start": "2022-01-01 00:00:00+00:00",
+          "end": "2022-12-31 20:00:00+00:00",
+          "return_pct": -64.21,
+          "regime": "bear"
+        },
+        {
+          "year": 2023,
+          "start": "2023-01-01 00:00:00+00:00",
+          "end": "2023-12-31 20:00:00+00:00",
+          "return_pct": 155.87,
+          "regime": "bull"
+        },
+        {
+          "year": 2024,
+          "start": "2024-01-01 00:00:00+00:00",
+          "end": "2024-12-31 20:00:00+00:00",
+          "return_pct": 121.08,
+          "regime": "bull"
+        },
+        {
+          "year": 2025,
+          "start": "2025-01-01 00:00:00+00:00",
+          "end": "2025-12-31 20:00:00+00:00",
+          "return_pct": -6.35,
+          "regime": "range/mixed"
+        },
+        {
+          "year": 2026,
+          "start": "2026-01-01 00:00:00+00:00",
+          "end": "2026-09-30 20:00:00+00:00",
+          "return_pct": -4.6,
+          "regime": "range/mixed"
+        }
+      ]
+    },
+    "module_outcomes": [
+      {
+        "module": "EMA pullback",
+        "events": 312,
+        "wins": 149,
+        "losses": 141,
+        "ambiguous": 22,
+        "success_pct": 47.76
+      },
+      {
+        "module": "Structure BOS",
+        "events": 176,
+        "wins": 92,
+        "losses": 76,
+        "ambiguous": 8,
+        "success_pct": 52.27
+      },
+      {
+        "module": "Liquidity sweep",
+        "events": 144,
+        "wins": 69,
+        "losses": 64,
+        "ambiguous": 11,
+        "success_pct": 47.92
+      },
+      {
+        "module": "FVG retest",
+        "events": 988,
+        "wins": 470,
+        "losses": 451,
+        "ambiguous": 67,
+        "success_pct": 47.57
+      },
+      {
+        "module": "Volume breakout",
+        "events": 292,
+        "wins": 153,
+        "losses": 120,
+        "ambiguous": 19,
+        "success_pct": 52.4
+      },
+      {
+        "module": "Candle at S/R",
+        "events": 394,
+        "wins": 195,
+        "losses": 183,
+        "ambiguous": 16,
+        "success_pct": 49.49
+      },
+      {
+        "module": "Trendline break",
+        "events": 679,
+        "wins": 325,
+        "losses": 299,
+        "ambiguous": 55,
+        "success_pct": 47.86
+      },
+      {
+        "module": "Range/AMD proxy",
+        "events": 311,
+        "wins": 136,
+        "losses": 155,
+        "ambiguous": 20,
+        "success_pct": 43.73
+      },
+      {
+        "module": "Session range",
+        "events": 0,
+        "wins": 0,
+        "losses": 0,
+        "ambiguous": 0,
+        "success_pct": null
+      }
+    ],
+    "annual_module_outcomes": [
+      {
+        "year": 2021,
+        "module": "EMA pullback",
+        "events": 12,
+        "success_pct": 33.33
+      },
+      {
+        "year": 2021,
+        "module": "Structure BOS",
+        "events": 4,
+        "success_pct": 75.0
+      },
+      {
+        "year": 2021,
+        "module": "Liquidity sweep",
+        "events": 9,
+        "success_pct": 66.67
+      },
+      {
+        "year": 2021,
+        "module": "FVG retest",
+        "events": 57,
+        "success_pct": 43.86
+      },
+      {
+        "year": 2021,
+        "module": "Volume breakout",
+        "events": 18,
+        "success_pct": 50.0
+      },
+      {
+        "year": 2021,
+        "module": "Candle at S/R",
+        "events": 17,
+        "success_pct": 52.94
+      },
+      {
+        "year": 2021,
+        "module": "Trendline break",
+        "events": 33,
+        "success_pct": 54.55
+      },
+      {
+        "year": 2021,
+        "module": "Range/AMD proxy",
+        "events": 13,
+        "success_pct": 38.46
+      },
+      {
+        "year": 2021,
+        "module": "Session range",
+        "events": 0,
+        "success_pct": null
+      },
+      {
+        "year": 2022,
+        "module": "EMA pullback",
+        "events": 61,
+        "success_pct": 55.74
+      },
+      {
+        "year": 2022,
+        "module": "Structure BOS",
+        "events": 27,
+        "success_pct": 51.85
+      },
+      {
+        "year": 2022,
+        "module": "Liquidity sweep",
+        "events": 27,
+        "success_pct": 55.56
+      },
+      {
+        "year": 2022,
+        "module": "FVG retest",
+        "events": 190,
+        "success_pct": 44.21
+      },
+      {
+        "year": 2022,
+        "module": "Volume breakout",
+        "events": 51,
+        "success_pct": 60.78
+      },
+      {
+        "year": 2022,
+        "module": "Candle at S/R",
+        "events": 71,
+        "success_pct": 46.48
+      },
+      {
+        "year": 2022,
+        "module": "Trendline break",
+        "events": 128,
+        "success_pct": 50.0
+      },
+      {
+        "year": 2022,
+        "module": "Range/AMD proxy",
+        "events": 62,
+        "success_pct": 41.94
+      },
+      {
+        "year": 2022,
+        "module": "Session range",
+        "events": 0,
+        "success_pct": null
+      },
+      {
+        "year": 2023,
+        "module": "EMA pullback",
+        "events": 68,
+        "success_pct": 48.53
+      },
+      {
+        "year": 2023,
+        "module": "Structure BOS",
+        "events": 33,
+        "success_pct": 60.61
+      },
+      {
+        "year": 2023,
+        "module": "Liquidity sweep",
+        "events": 28,
+        "success_pct": 46.43
+      },
+      {
+        "year": 2023,
+        "module": "FVG retest",
+        "events": 181,
+        "success_pct": 47.51
+      },
+      {
+        "year": 2023,
+        "module": "Volume breakout",
+        "events": 64,
+        "success_pct": 48.44
+      },
+      {
+        "year": 2023,
+        "module": "Candle at S/R",
+        "events": 77,
+        "success_pct": 49.35
+      },
+      {
+        "year": 2023,
+        "module": "Trendline break",
+        "events": 157,
+        "success_pct": 43.95
+      },
+      {
+        "year": 2023,
+        "module": "Range/AMD proxy",
+        "events": 59,
+        "success_pct": 61.02
+      },
+      {
+        "year": 2023,
+        "module": "Session range",
+        "events": 0,
+        "success_pct": null
+      },
+      {
+        "year": 2024,
+        "module": "EMA pullback",
+        "events": 71,
+        "success_pct": 45.07
+      },
+      {
+        "year": 2024,
+        "module": "Structure BOS",
+        "events": 50,
+        "success_pct": 52.0
+      },
+      {
+        "year": 2024,
+        "module": "Liquidity sweep",
+        "events": 26,
+        "success_pct": 42.31
+      },
+      {
+        "year": 2024,
+        "module": "FVG retest",
+        "events": 186,
+        "success_pct": 48.92
+      },
+      {
+        "year": 2024,
+        "module": "Volume breakout",
+        "events": 58,
+        "success_pct": 55.17
+      },
+      {
+        "year": 2024,
+        "module": "Candle at S/R",
+        "events": 69,
+        "success_pct": 43.48
+      },
+      {
+        "year": 2024,
+        "module": "Trendline break",
+        "events": 128,
+        "success_pct": 47.66
+      },
+      {
+        "year": 2024,
+        "module": "Range/AMD proxy",
+        "events": 64,
+        "success_pct": 42.19
+      },
+      {
+        "year": 2024,
+        "module": "Session range",
+        "events": 0,
+        "success_pct": null
+      },
+      {
+        "year": 2025,
+        "module": "EMA pullback",
+        "events": 61,
+        "success_pct": 44.26
+      },
+      {
+        "year": 2025,
+        "module": "Structure BOS",
+        "events": 31,
+        "success_pct": 35.48
+      },
+      {
+        "year": 2025,
+        "module": "Liquidity sweep",
+        "events": 24,
+        "success_pct": 50.0
+      },
+      {
+        "year": 2025,
+        "module": "FVG retest",
+        "events": 205,
+        "success_pct": 49.27
+      },
+      {
+        "year": 2025,
+        "module": "Volume breakout",
+        "events": 63,
+        "success_pct": 46.03
+      },
+      {
+        "year": 2025,
+        "module": "Candle at S/R",
+        "events": 100,
+        "success_pct": 54.0
+      },
+      {
+        "year": 2025,
+        "module": "Trendline break",
+        "events": 134,
+        "success_pct": 46.27
+      },
+      {
+        "year": 2025,
+        "module": "Range/AMD proxy",
+        "events": 63,
+        "success_pct": 38.1
+      },
+      {
+        "year": 2025,
+        "module": "Session range",
+        "events": 0,
+        "success_pct": null
+      },
+      {
+        "year": 2026,
+        "module": "EMA pullback",
+        "events": 39,
+        "success_pct": 48.72
+      },
+      {
+        "year": 2026,
+        "module": "Structure BOS",
+        "events": 31,
+        "success_pct": 58.06
+      },
+      {
+        "year": 2026,
+        "module": "Liquidity sweep",
+        "events": 30,
+        "success_pct": 40.0
+      },
+      {
+        "year": 2026,
+        "module": "FVG retest",
+        "events": 169,
+        "success_pct": 49.11
+      },
+      {
+        "year": 2026,
+        "module": "Volume breakout",
+        "events": 38,
+        "success_pct": 55.26
+      },
+      {
+        "year": 2026,
+        "module": "Candle at S/R",
+        "events": 60,
+        "success_pct": 51.67
+      },
+      {
+        "year": 2026,
+        "module": "Trendline break",
+        "events": 99,
+        "success_pct": 51.52
+      },
+      {
+        "year": 2026,
+        "module": "Range/AMD proxy",
+        "events": 50,
+        "success_pct": 36.0
+      },
+      {
+        "year": 2026,
+        "module": "Session range",
+        "events": 0,
+        "success_pct": null
+      }
+    ],
+    "strategy_overall": [
+      {
+        "mode": "Context Confirmed",
+        "trades": 15,
+        "win_rate_pct": 33.33,
+        "profit_factor": 0.491,
+        "net": -485.14,
+        "fees": 71.39,
+        "expectancy": -32.34,
+        "max_drawdown_pct": -5.01,
+        "ending_equity": 9514.86
+      },
+      {
+        "mode": "Context Independent",
+        "trades": 288,
+        "win_rate_pct": 40.97,
+        "profit_factor": 0.973,
+        "net": -369.4,
+        "fees": 1263.38,
+        "expectancy": -1.28,
+        "max_drawdown_pct": -15.77,
+        "ending_equity": 9630.6
+      },
+      {
+        "mode": "Raw UT",
+        "trades": 332,
+        "win_rate_pct": 40.96,
+        "profit_factor": 0.946,
+        "net": -897.22,
+        "fees": 1556.08,
+        "expectancy": -2.7,
+        "max_drawdown_pct": -21.13,
+        "ending_equity": 9102.78
+      },
+      {
+        "mode": "V2 Filtered",
+        "trades": 39,
+        "win_rate_pct": 33.33,
+        "profit_factor": 0.642,
+        "net": -817.43,
+        "fees": 174.8,
+        "expectancy": -20.96,
+        "max_drawdown_pct": -10.89,
+        "ending_equity": 9182.57
+      }
+    ],
+    "strategy_annual": [
+      {
+        "mode": "Context Confirmed",
+        "year": 2022,
+        "trades": 1,
+        "win_rate_pct": 100.0,
+        "profit_factor": null,
+        "net": 17.19,
+        "fees": 4.76,
+        "expectancy": 17.19,
+        "max_drawdown_pct": 0.0
+      },
+      {
+        "mode": "Context Confirmed",
+        "year": 2023,
+        "trades": 3,
+        "win_rate_pct": 0.0,
+        "profit_factor": 0.0,
+        "net": -325.22,
+        "fees": 13.88,
+        "expectancy": -108.41,
+        "max_drawdown_pct": -2.17
+      },
+      {
+        "mode": "Context Confirmed",
+        "year": 2024,
+        "trades": 4,
+        "win_rate_pct": 50.0,
+        "profit_factor": 0.842,
+        "net": -32.98,
+        "fees": 17.52,
+        "expectancy": -8.25,
+        "max_drawdown_pct": -2.05
+      },
+      {
+        "mode": "Context Confirmed",
+        "year": 2025,
+        "trades": 4,
+        "win_rate_pct": 25.0,
+        "profit_factor": 0.643,
+        "net": -75.71,
+        "fees": 21.13,
+        "expectancy": -18.93,
+        "max_drawdown_pct": -1.12
+      },
+      {
+        "mode": "Context Confirmed",
+        "year": 2026,
+        "trades": 3,
+        "win_rate_pct": 33.33,
+        "profit_factor": 0.67,
+        "net": -68.42,
+        "fees": 14.1,
+        "expectancy": -22.81,
+        "max_drawdown_pct": -2.05
+      },
+      {
+        "mode": "Context Independent",
+        "year": 2021,
+        "trades": 5,
+        "win_rate_pct": 60.0,
+        "profit_factor": 2.066,
+        "net": 227.35,
+        "fees": 14.9,
+        "expectancy": 45.47,
+        "max_drawdown_pct": -1.05
+      },
+      {
+        "mode": "Context Independent",
+        "year": 2022,
+        "trades": 59,
+        "win_rate_pct": 35.59,
+        "profit_factor": 0.807,
+        "net": -592.92,
+        "fees": 197.99,
+        "expectancy": -10.05,
+        "max_drawdown_pct": -8.47
+      },
+      {
+        "mode": "Context Independent",
+        "year": 2023,
+        "trades": 46,
+        "win_rate_pct": 34.78,
+        "profit_factor": 0.758,
+        "net": -560.44,
+        "fees": 222.0,
+        "expectancy": -12.18,
+        "max_drawdown_pct": -12.53
+      },
+      {
+        "mode": "Context Independent",
+        "year": 2024,
+        "trades": 65,
+        "win_rate_pct": 44.62,
+        "profit_factor": 1.107,
+        "net": 336.34,
+        "fees": 252.4,
+        "expectancy": 5.17,
+        "max_drawdown_pct": -6.06
+      },
+      {
+        "mode": "Context Independent",
+        "year": 2025,
+        "trades": 64,
+        "win_rate_pct": 39.06,
+        "profit_factor": 1.027,
+        "net": 78.32,
+        "fees": 316.63,
+        "expectancy": 1.22,
+        "max_drawdown_pct": -4.57
+      },
+      {
+        "mode": "Context Independent",
+        "year": 2026,
+        "trades": 49,
+        "win_rate_pct": 48.98,
+        "profit_factor": 1.066,
+        "net": 141.94,
+        "fees": 259.45,
+        "expectancy": 2.9,
+        "max_drawdown_pct": -4.37
+      },
+      {
+        "mode": "Raw UT",
+        "year": 2021,
+        "trades": 11,
+        "win_rate_pct": 63.64,
+        "profit_factor": 3.593,
+        "net": 571.13,
+        "fees": 36.7,
+        "expectancy": 51.92,
+        "max_drawdown_pct": -1.95
+      },
+      {
+        "mode": "Raw UT",
+        "year": 2022,
+        "trades": 68,
+        "win_rate_pct": 42.65,
+        "profit_factor": 0.938,
+        "net": -232.48,
+        "fees": 294.14,
+        "expectancy": -3.42,
+        "max_drawdown_pct": -7.42
+      },
+      {
+        "mode": "Raw UT",
+        "year": 2023,
+        "trades": 58,
+        "win_rate_pct": 36.21,
+        "profit_factor": 0.67,
+        "net": -1135.84,
+        "fees": 313.06,
+        "expectancy": -19.58,
+        "max_drawdown_pct": -10.69
+      },
+      {
+        "mode": "Raw UT",
+        "year": 2024,
+        "trades": 63,
+        "win_rate_pct": 41.27,
+        "profit_factor": 0.99,
+        "net": -32.09,
+        "fees": 252.08,
+        "expectancy": -0.51,
+        "max_drawdown_pct": -5.1
+      },
+      {
+        "mode": "Raw UT",
+        "year": 2025,
+        "trades": 75,
+        "win_rate_pct": 37.33,
+        "profit_factor": 0.835,
+        "net": -625.82,
+        "fees": 370.82,
+        "expectancy": -8.34,
+        "max_drawdown_pct": -9.72
+      },
+      {
+        "mode": "Raw UT",
+        "year": 2026,
+        "trades": 57,
+        "win_rate_pct": 43.86,
+        "profit_factor": 1.251,
+        "net": 557.88,
+        "fees": 289.28,
+        "expectancy": 9.79,
+        "max_drawdown_pct": -5.48
+      },
+      {
+        "mode": "V2 Filtered",
+        "year": 2021,
+        "trades": 1,
+        "win_rate_pct": 100.0,
+        "profit_factor": null,
+        "net": 143.88,
+        "fees": 4.96,
+        "expectancy": 143.88,
+        "max_drawdown_pct": 0.0
+      },
+      {
+        "mode": "V2 Filtered",
+        "year": 2022,
+        "trades": 5,
+        "win_rate_pct": 20.0,
+        "profit_factor": 0.049,
+        "net": -324.91,
+        "fees": 24.16,
+        "expectancy": -64.98,
+        "max_drawdown_pct": -2.35
+      },
+      {
+        "mode": "V2 Filtered",
+        "year": 2023,
+        "trades": 7,
+        "win_rate_pct": 14.29,
+        "profit_factor": 0.201,
+        "net": -494.67,
+        "fees": 31.23,
+        "expectancy": -70.67,
+        "max_drawdown_pct": -3.91
+      },
+      {
+        "mode": "V2 Filtered",
+        "year": 2024,
+        "trades": 13,
+        "win_rate_pct": 38.46,
+        "profit_factor": 0.731,
+        "net": -190.75,
+        "fees": 50.2,
+        "expectancy": -14.67,
+        "max_drawdown_pct": -5.51
+      },
+      {
+        "mode": "V2 Filtered",
+        "year": 2025,
+        "trades": 7,
+        "win_rate_pct": 42.86,
+        "profit_factor": 1.304,
+        "net": 91.64,
+        "fees": 34.87,
+        "expectancy": 13.09,
+        "max_drawdown_pct": -1.06
+      },
+      {
+        "mode": "V2 Filtered",
+        "year": 2026,
+        "trades": 6,
+        "win_rate_pct": 33.33,
+        "profit_factor": 0.862,
+        "net": -42.61,
+        "fees": 29.38,
+        "expectancy": -7.1,
+        "max_drawdown_pct": -2.04
+      }
+    ]
+  }
+]

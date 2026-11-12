@@ -40,6 +40,7 @@ class BinanceFuturesStreamRouterTest extends TestCase
         $this->assertSame([
             BinanceFuturesStreamRouter::LANE_PUBLIC => ['depth5@500ms'],
             BinanceFuturesStreamRouter::LANE_MARKET => ['kline_1m', 'kline_5m'],
+            BinanceFuturesStreamRouter::LANE_TRADE => [],
         ], $result);
     }
 
@@ -62,16 +63,12 @@ class BinanceFuturesStreamRouterTest extends TestCase
         $router->classify(['depth5@500ms', 'bookTicker']);
     }
 
-    public function test_trade_stream_family_is_also_rejected(): void
+    public function test_aggregate_trade_has_an_isolated_root_lane(): void
     {
-        // 'trade' was never verified on either lane endpoint by the
-        // 2026-09-22 production diagnostic -- it must fail closed, not be
-        // silently assigned to a lane.
         $router = new BinanceFuturesStreamRouter;
-
-        $this->expectException(InvalidArgumentException::class);
-
-        $router->classify(['trade']);
+        $this->assertSame(BinanceFuturesStreamRouter::LANE_TRADE, $router->laneFor('aggTrade'));
+        $this->assertSame(['aggTrade'], $router->streamsForLane(['depth5@500ms', 'aggTrade'], BinanceFuturesStreamRouter::LANE_TRADE));
+        $this->assertNull($router->laneFor('trade'));
     }
 
     public function test_classify_deduplicates_within_a_lane(): void
@@ -82,6 +79,7 @@ class BinanceFuturesStreamRouterTest extends TestCase
 
         $this->assertSame(['kline_1m'], $result[BinanceFuturesStreamRouter::LANE_MARKET]);
         $this->assertSame(['depth5@500ms'], $result[BinanceFuturesStreamRouter::LANE_PUBLIC]);
+        $this->assertSame([], $result[BinanceFuturesStreamRouter::LANE_TRADE]);
     }
 
     public function test_blank_entries_are_ignored(): void
@@ -92,5 +90,6 @@ class BinanceFuturesStreamRouterTest extends TestCase
 
         $this->assertSame(['depth5@500ms'], $result[BinanceFuturesStreamRouter::LANE_PUBLIC]);
         $this->assertSame(['kline_1m'], $result[BinanceFuturesStreamRouter::LANE_MARKET]);
+        $this->assertSame([], $result[BinanceFuturesStreamRouter::LANE_TRADE]);
     }
 }

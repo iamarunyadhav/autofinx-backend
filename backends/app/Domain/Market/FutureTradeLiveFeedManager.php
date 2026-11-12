@@ -11,7 +11,7 @@ use RuntimeException;
 class FutureTradeLiveFeedManager
 {
     // 2026-09-22 transport hotfix: this manual-start fallback spawns
-    // `future-trade:live-feed`, which is now a two-lane orchestrator whose
+    // `future-trade:live-feed`, which is a multi-lane orchestrator whose
     // BinanceFuturesStreamRouter only recognizes verified stream families
     // (depth* -> public, kline_* -> market) and fails closed on anything
     // else. This constant used to include 'trade' (an unrouted family the
@@ -20,7 +20,7 @@ class FutureTradeLiveFeedManager
     // program. Aligned to the exact stream set confirmed against real
     // production evidence -- the same set Supervisor's
     // autofinx-trading:live-feed program runs.
-    private const STREAMS = 'depth5@500ms,kline_1m,kline_5m';
+    private const STREAMS = 'depth5@500ms,kline_1m,kline_5m,aggTrade';
 
     public function status(?string $workspaceId = null): array
     {

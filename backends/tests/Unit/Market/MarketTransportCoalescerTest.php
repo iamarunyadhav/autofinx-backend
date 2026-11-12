@@ -62,3 +62,14 @@ it('cannot let an older event replace a newer pending event', function () {
     expect($frames[0]['data']['b'])->toBe('105')
         ->and($buffer->stats()['older_dropped'])->toBe(1);
 });
+
+it('never coalesces additive aggregate trades', function () {
+    $buffer = new MarketTransportCoalescer(100, 1000);
+    $first = ['stream' => 'btcusdt@aggTrade', 'data' => ['e' => 'aggTrade', 's' => 'BTCUSDT', 'E' => 1010, 'a' => 1, 'p' => '100', 'q' => '2', 'm' => false]];
+    $second = ['stream' => 'btcusdt@aggTrade', 'data' => ['e' => 'aggTrade', 's' => 'BTCUSDT', 'E' => 1020, 'a' => 2, 'p' => '101', 'q' => '3', 'm' => true]];
+
+    expect($buffer->offer($first, 1010))->toBe([$first])
+        ->and($buffer->offer($second, 1020))->toBe([$second])
+        ->and($buffer->stats()['coalesced'])->toBe(0)
+        ->and($buffer->stats()['received_by_kind'])->toBe(['aggtrade' => 2]);
+});

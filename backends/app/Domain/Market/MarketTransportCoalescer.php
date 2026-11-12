@@ -38,6 +38,13 @@ class MarketTransportCoalescer
         $kind = $this->frameKind($data, $kline);
         $this->receivedByKind[$kind] = ($this->receivedByKind[$kind] ?? 0) + 1;
 
+        // Aggregate trades are additive facts. Coalescing them like quotes
+        // would corrupt executed notional and CVD, so they bypass the buffer.
+        if (strtolower((string) ($data['e'] ?? '')) === 'aggtrade') {
+            $this->emitted++;
+            return [$payload];
+        }
+
         // A close is durable market history and must never wait behind or be
         // replaced by a newer quote. Remove the corresponding open snapshot.
         if ($kline !== null && (bool) ($kline['x'] ?? false)) {
