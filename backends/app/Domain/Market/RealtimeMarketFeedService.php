@@ -96,6 +96,7 @@ class RealtimeMarketFeedService
         private ?InstrumentMapper $instruments = null,
         private ?MarketSnapshotService $snapshots = null,
         private ?LiveCandleCacheService $liveCandles = null,
+        private ?MarketPressureService $marketPressure = null,
     ) {
         $this->ratioBotState ??= app(RatioBotStateService::class);
         $this->breakers ??= app(OperationalBreakerService::class);
@@ -105,6 +106,7 @@ class RealtimeMarketFeedService
         $this->instruments ??= app(InstrumentMapper::class);
         $this->snapshots ??= app(MarketSnapshotService::class);
         $this->liveCandles ??= app(LiveCandleCacheService::class);
+        $this->marketPressure ??= app(MarketPressureService::class);
     }
 
     /**
@@ -354,6 +356,15 @@ class RealtimeMarketFeedService
         $closedKline = (bool) ($kline['x'] ?? false);
         $timeframe = strtolower((string) ($kline['i'] ?? '1m'));
         $streamType = $this->streamType($eventType, $stream);
+
+        // Every accepted aggregate trade contributes to pressure/CVD. This
+        // must run before the quote-write throttle and never gates execution.
+        if ($marketType === 'futures' && $eventType === 'aggtrade' && config('market_pressure.enabled', true)) {
+            $this->marketPressure->ingestAggregateTrade($data, $receivedAtMs);
+        }
+        if ($marketType === 'futures' && ($eventType === 'depthupdate' || str_contains($stream, '@depth')) && config('market_pressure.enabled', true)) {
+            $this->marketPressure->ingestPartialDepth($data, $receivedAtMs);
+        }
 
         // A fresh frame that was coalesced is still an accepted frame. This is
         // important: the consumer's transport watchdog must not reconnect just
@@ -1234,6 +1245,7 @@ class RealtimeMarketFeedService
             return match ($lane) {
                 BinanceFuturesStreamRouter::LANE_PUBLIC => (string) config('services.binance.futures_public_ws_url', 'wss://fstream.binance.com/public'),
                 BinanceFuturesStreamRouter::LANE_MARKET => (string) config('services.binance.futures_market_ws_url', 'wss://fstream.binance.com/market'),
+                BinanceFuturesStreamRouter::LANE_TRADE => (string) config('services.binance.futures_ws_url', 'wss://fstream.binance.com'),
                 default => (string) config('services.binance.futures_ws_url', 'wss://fstream.binance.com'),
             };
         }

@@ -12,9 +12,8 @@ use Illuminate\Support\Facades\Process;
 use Throwable;
 
 /**
- * Orchestrates the two Future Trade futures public-market-data transport
- * lanes as separate, concurrently-running `market:ws-consume` child
- * processes -- one per BinanceFuturesStreamRouter lane.
+ * Orchestrates the Future Trade futures public-market-data transport lanes as
+ * separate, concurrently-running `market:ws-consume` child processes.
  *
  * 2026-09-22 root cause (verified via raw SimpleWebSocketClient diagnostics
  * against real production Binance frames): the previous single combined
@@ -37,12 +36,12 @@ class FutureTradeLiveFeedCommand extends Command
 {
     protected $signature = 'future-trade:live-feed
         {--symbols= : Comma-separated futures symbols. Defaults to all configured Future Trade symbols}
-        {--streams=depth5@500ms,kline_1m,kline_5m : Binance streams to subscribe to, across both transport lanes}
+        {--streams=depth5@500ms,kline_1m,kline_5m,aggTrade : Binance streams to subscribe to across transport lanes}
         {--reconnect-sleep=2 : Reconnect delay in seconds, forwarded to each lane child}
         {--max-runtime=0 : Max runtime in seconds (0 = infinite)}
         {--testnet : Use Binance futures testnet websocket}';
 
-    protected $description = 'Orchestrate the Future Trade futures public-market-data transport lanes (public=depth, market=kline) as separate concurrent market:ws-consume child processes.';
+    protected $description = 'Orchestrate Futures market-data lanes (public=depth, market=kline, trade=aggTrade) as concurrent market:ws-consume processes.';
 
     /** @var array<string, InvokedProcess> */
     private array $children = [];

@@ -17,22 +17,22 @@ use InvalidArgumentException;
  *   - wss://fstream.binance.com/public/stream?streams=...  (depth)
  *   - wss://fstream.binance.com/market/stream?streams=...  (kline)
  *
- * This router only encodes the Phase-1 mapping that was actually verified
- * against production evidence: depth* -> public, kline_* -> market. Any
- * other stream family (bookTicker, trade, aggTrade, markPrice, !ticker@arr,
- * etc.) was never diagnosed on either endpoint, so it is deliberately
- * rejected rather than guessed at. Extend the mapping only after verifying
- * a new stream family's real delivery behavior the same way.
+ * The original verified mapping is depth* -> public and kline_* -> market.
+ * Aggregate trades use a separate root lane matching Binance's documented
+ * `/ws/<symbol>@aggTrade` / root combined-stream contract, so additive trade
+ * events never share the quote/candle coalescing lanes. Other stream families
+ * remain rejected rather than guessed.
  */
 class BinanceFuturesStreamRouter
 {
     public const LANE_PUBLIC = 'public';
     public const LANE_MARKET = 'market';
+    public const LANE_TRADE = 'trade';
 
     /** @return string[] */
     public static function lanes(): array
     {
-        return [self::LANE_PUBLIC, self::LANE_MARKET];
+        return [self::LANE_PUBLIC, self::LANE_MARKET, self::LANE_TRADE];
     }
 
     /**
@@ -44,7 +44,7 @@ class BinanceFuturesStreamRouter
      */
     public function classify(array $streams): array
     {
-        $result = [self::LANE_PUBLIC => [], self::LANE_MARKET => []];
+        $result = [self::LANE_PUBLIC => [], self::LANE_MARKET => [], self::LANE_TRADE => []];
 
         foreach ($streams as $stream) {
             $trimmed = trim((string) $stream);
@@ -56,7 +56,7 @@ class BinanceFuturesStreamRouter
             if ($lane === null) {
                 throw new InvalidArgumentException(sprintf(
                     'BinanceFuturesStreamRouter: unrecognized futures stream family "%s" cannot be routed. '
-                    .'Phase-1 routing only supports depth* -> public and kline_* -> market; '
+                    .'Supported routing is depth* -> public, kline_* -> market, aggTrade -> trade; '
                     .'verify the real delivery behavior of this stream family before adding it.',
                     $trimmed
                 ));
@@ -95,6 +95,10 @@ class BinanceFuturesStreamRouter
 
         if (str_starts_with($normalized, 'kline_')) {
             return self::LANE_MARKET;
+        }
+
+        if ($normalized === 'aggtrade') {
+            return self::LANE_TRADE;
         }
 
         return null;

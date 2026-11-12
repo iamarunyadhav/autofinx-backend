@@ -221,6 +221,7 @@ Route::prefix('v1')->group(function () {
         Route::get('quick-trade/candle-feed', [QuickTradeController::class, 'candleFeed']);
         Route::get('quick-trade/candle-history', \App\Http\Controllers\Api\QuickTradeCandleHistoryController::class)->middleware('throttle:15,1');
         Route::get('quick-trade/technical-summary', [QuickTradeController::class, 'technicalSummary']);
+        Route::get('workspaces/{workspace}/quick-trade/market-pressure', [\App\Http\Controllers\Api\MarketPressureController::class, 'show'])->middleware('throttle:120,1');
         Route::post('quick-trade/forecast', [QuickTradeController::class, 'forecast']);
         Route::post('quick-trade/prediction-observatory', [\App\Http\Controllers\Api\PredictionObservatoryController::class, 'observe'])->middleware('throttle:30,1');
         Route::post('quick-trade/prediction-accuracy-report', [\App\Http\Controllers\Api\PredictionObservatoryController::class, 'accuracyReport'])->middleware('throttle:30,1');
